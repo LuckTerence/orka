@@ -3,6 +3,7 @@ package supervisor
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -200,5 +201,129 @@ func TestSandboxExecSettlementCancelsTheRun(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("the cancelled call did not return")
+	}
+}
+
+// The executor, not per-session MCP slots, bounds actual guests for the Pod.
+type blockingHyperlightRunner struct {
+	calls   chan hyperlight.Request
+	release chan struct{}
+}
+
+func (r *blockingHyperlightRunner) Run(ctx context.Context, request hyperlight.Request) (hyperlight.Result, error) {
+	r.calls <- request
+	select {
+	case <-r.release:
+		return hyperlight.Result{ExitCode: 0}, nil
+	case <-ctx.Done():
+		return hyperlight.Result{ExitCode: -1}, ctx.Err()
+	}
+}
+
+func TestSandboxExecutorSerializesGuestsAcrossSessions(t *testing.T) {
+	runner := &blockingHyperlightRunner{calls: make(chan hyperlight.Request, 2), release: make(chan struct{}, 2)}
+	executor := newSandboxExecutor(&SandboxExecConfig{})
+	executor.runner = runner
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	request := acp.SandboxExecRequest{Runtime: "node", Script: "1", Timeout: time.Second}
+	done := make(chan error, 2)
+	go func() {
+		_, err := executor.run(ctx, request, sandboxWorkspace{dir: "/session-a", uid: 20001, gid: 20001})
+		done <- err
+	}()
+	select {
+	case got := <-runner.calls:
+		if got.Mounts[0].Host != "/session-a" {
+			t.Fatalf("first workspace = %s", got.Mounts[0].Host)
+		}
+	case <-ctx.Done():
+		t.Fatal("first guest did not start")
+	}
+	go func() {
+		_, err := executor.run(ctx, request, sandboxWorkspace{dir: "/session-b", uid: 20002, gid: 20002})
+		done <- err
+	}()
+	select {
+	case <-runner.calls:
+		t.Fatal("two sessions started simultaneous guests")
+	case <-time.After(50 * time.Millisecond):
+	}
+	runner.release <- struct{}{}
+	select {
+	case got := <-runner.calls:
+		if got.Mounts[0].Host != "/session-b" {
+			t.Fatalf("second workspace = %s", got.Mounts[0].Host)
+		}
+	case <-ctx.Done():
+		t.Fatal("queued guest did not start after slot release")
+	}
+	runner.release <- struct{}{}
+	for range 2 {
+		if err := <-done; err != nil {
+			t.Fatalf("guest execution: %v", err)
+		}
+	}
+}
+
+func TestSandboxExecutorQueuedCallRespectsCancellation(t *testing.T) {
+	for _, timedOut := range []bool{false, true} {
+		name := "cancelled"
+		if timedOut {
+			name = "timeout"
+		}
+		t.Run(name, func(t *testing.T) {
+			runner := &blockingHyperlightRunner{calls: make(chan hyperlight.Request, 1), release: make(chan struct{}, 1)}
+			executor := newSandboxExecutor(&SandboxExecConfig{})
+			executor.runner = runner
+			executor.slot <- struct{}{} // another session is already running
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			request := acp.SandboxExecRequest{Runtime: "node", Script: "1", Timeout: 30 * time.Millisecond}
+			if !timedOut {
+				cancel()
+			}
+			start := time.Now()
+			result, err := executor.run(ctx, request, sandboxWorkspace{dir: "/queued"})
+			if time.Since(start) > time.Second || result.ExitCode != -1 || result.TimedOut != timedOut {
+				t.Fatalf("queued call = %+v error=%v elapsed=%s", result, err, time.Since(start))
+			}
+			if timedOut && err != nil || !timedOut && !errors.Is(err, context.Canceled) {
+				t.Fatalf("queued cancellation error = %v", err)
+			}
+			select {
+			case <-runner.calls:
+				t.Fatal("cancelled queued call started a guest")
+			default:
+			}
+			<-executor.slot
+			runner.release <- struct{}{}
+			request.Timeout = time.Second
+			result, err = executor.run(t.Context(), request, sandboxWorkspace{dir: "/later"})
+			if err != nil || result.ExitCode != 0 {
+				t.Fatalf("slot reuse = %+v error=%v", result, err)
+			}
+		})
+	}
+}
+
+func TestSandboxExecutorExpiredCallDoesNotAcquireGuest(t *testing.T) {
+	runner := &blockingHyperlightRunner{calls: make(chan hyperlight.Request, 1), release: make(chan struct{}, 1)}
+	executor := newSandboxExecutor(&SandboxExecConfig{})
+	executor.runner = runner
+	ctx, cancel := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
+	defer cancel()
+	// Both the free slot and expired context can win the select; every
+	// outcome must retain timeout semantics and release any acquired slot.
+	for range 20 {
+		result, err := executor.run(ctx, acp.SandboxExecRequest{Runtime: "node", Script: "1", Timeout: time.Second}, sandboxWorkspace{dir: "/expired"})
+		if err != nil || !result.TimedOut || result.ExitCode != -1 || len(executor.slot) != 0 {
+			t.Fatalf("expired call = %+v error=%v slots=%d", result, err, len(executor.slot))
+		}
+	}
+	select {
+	case <-runner.calls:
+		t.Fatal("expired call started a guest")
+	default:
 	}
 }

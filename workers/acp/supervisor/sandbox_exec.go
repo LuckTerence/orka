@@ -58,17 +58,23 @@ type sandboxRunner interface {
 	run(ctx context.Context, request acp.SandboxExecRequest, workspace sandboxWorkspace) (acp.SandboxExecResult, error)
 }
 
-// sandboxExecutor runs sandbox_exec calls in Hyperlight micro-VMs.
+type hyperlightRunner interface {
+	Run(context.Context, hyperlight.Request) (hyperlight.Result, error)
+}
+
+// sandboxExecutor is shared by every session in the runtime Pod. Serialize
+// guests so MCP prompt concurrency cannot multiply their fixed memory sizes.
 type sandboxExecutor struct {
-	runner *hyperlight.Runner
+	runner hyperlightRunner
 	groups []uint32
+	slot   chan struct{}
 }
 
 func newSandboxExecutor(cfg *SandboxExecConfig) *sandboxExecutor {
 	if cfg == nil {
 		return nil
 	}
-	executor := &sandboxExecutor{runner: hyperlight.NewRunner(cfg.Hyperlight)}
+	executor := &sandboxExecutor{runner: hyperlight.NewRunner(cfg.Hyperlight), slot: make(chan struct{}, 1)}
 	if cfg.DeviceGID != 0 {
 		executor.groups = []uint32{cfg.DeviceGID}
 	}
@@ -87,6 +93,17 @@ type sandboxWorkspace struct {
 func (e *sandboxExecutor) run(ctx context.Context, request acp.SandboxExecRequest, workspace sandboxWorkspace) (acp.SandboxExecResult, error) {
 	ctx, cancel := context.WithTimeout(ctx, request.Timeout)
 	defer cancel()
+	select {
+	case e.slot <- struct{}{}:
+		defer func() { <-e.slot }()
+	case <-ctx.Done():
+	}
+	if err := ctx.Err(); err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return acp.SandboxExecResult{ExitCode: -1, TimedOut: true, Stderr: "execution timed out waiting for another sandbox_exec call"}, nil
+		}
+		return acp.SandboxExecResult{ExitCode: -1}, err
+	}
 	stdout := newSandboxOutput(acp.SandboxExecOutputLimitBytes)
 	stderr := newSandboxOutput(acp.SandboxExecOutputLimitBytes)
 	run, err := e.runner.Run(ctx, hyperlight.Request{

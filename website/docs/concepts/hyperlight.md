@@ -85,6 +85,8 @@ spec:
 - `hluk` runs as the session's user, which owns the workspace, and only that
   process gets the device's group: the agent's own processes never open the
   hypervisor.
+- A runtime Pod runs one `sandbox_exec` guest at a time, including across
+  sessions. Waiting calls remain subject to their timeout and prompt cancellation.
 - Arguments: `code`, `language` (`bash`, `python` or `javascript`; `bash` by
   default), and `timeout` in seconds (120 by default, at most 600). The result
   is JSON with `stdout`, `stderr` and `exit_code`, 64 KiB per stream.
