@@ -1922,6 +1922,12 @@ func (s *Server) handleWorkspaceDelta(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if err := s.protectSandboxSessionRoot(paths.Root, uid, gid); err != nil {
+		slog.Error("ACP workspace validation failed", "stage", "sandbox parent protection")
+		s.poisonSession(state, "sandbox workspace parent protection failed")
+		writeError(w, http.StatusInternalServerError, harnessv2.ErrorCodeSessionPoisoned, "sandbox workspace parent protection failed", nil, false)
+		return
+	}
 	if buildErr != nil {
 		slog.Error("ACP workspace validation failed", "stage", "delta construction")
 		if errors.Is(buildErr, workspacedelta.ErrLimitExceeded) {

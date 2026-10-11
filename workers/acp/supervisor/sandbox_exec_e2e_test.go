@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -115,6 +116,120 @@ if (require.main === module) {
 		}
 	}
 	fixture.checkCache(t)
+}
+
+// Exercise the production session layout with the same restricted supervisor
+// capabilities as the runtime, not just the fixture's already-protected parent.
+func TestHyperlightE2ESandboxSessionRootIsolation(t *testing.T) {
+	fixture := newHyperlightE2ESandboxFixture(t)
+	paths, err := acp.PrepareSessionPaths(filepath.Join(fixture.root, "sessions"), "parent-isolation")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := acp.ReclaimSessionOwnership(paths.Root); err != nil && !os.IsNotExist(err) {
+			t.Errorf("reclaim session for cleanup: %v", err)
+		}
+	})
+	outside := filepath.Join(fixture.root, "outside")
+	if err := os.Mkdir(outside, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(outside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, "host-only.txt"), []byte("host-only"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The fixture's restrictive umask must not hide the sentinel from the
+	// session. The protected parent, not file permissions, must stop the mount.
+	if err := os.Chmod(filepath.Join(outside, "host-only.txt"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runAs := func(t *testing.T, uid, gid uint32, script string, args ...string) {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+		defer cancel()
+		command := exec.CommandContext(ctx, "/bin/sh", append([]string{"-eu", "-c", script, "session-test"}, args...)...)
+		command.Dir = fixture.root
+		command.Env = []string{"PATH=/usr/bin:/bin"}
+		command.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: uid, Gid: gid, Groups: []uint32{}}}
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("session identity %d:%d: %v\n%s", uid, gid, err, output)
+		}
+	}
+	if err := acp.FinalizeSessionOwnership(paths.Root, hyperlightE2ESessionUID, hyperlightE2ESessionGID); err != nil {
+		t.Fatal(err)
+	}
+	// Prove the original attack and undo it before applying the protection.
+	runAs(t, hyperlightE2ESessionUID, hyperlightE2ESessionGID, `
+root=$1; workspace=$2; outside=$3
+mv "$workspace" "$root/saved-workspace"
+ln -s "$outside" "$workspace"
+[ "$(cat "$workspace/host-only.txt")" = host-only ]
+rm "$workspace"
+mv "$root/saved-workspace" "$workspace"
+`, paths.Root, paths.Workspace, outside)
+
+	server := &Server{cfg: Config{SandboxExec: &fixture.config}}
+	for _, stage := range []string{"creation", "after workspace delta ownership restore"} {
+		t.Run(stage, func(t *testing.T) {
+			if stage != "creation" {
+				if err := acp.ReclaimSessionOwnership(paths.Root); err != nil {
+					t.Fatal(err)
+				}
+				if err := acp.FinalizeSessionOwnership(paths.Root, hyperlightE2ESessionUID, hyperlightE2ESessionGID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := server.protectSandboxSessionRoot(paths.Root, hyperlightE2ESessionUID, hyperlightE2ESessionGID); err != nil {
+				t.Fatal(err)
+			}
+			info, err := os.Stat(paths.Root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			owner := info.Sys().(*syscall.Stat_t)
+			if info.Mode().Perm() != 0o710 || owner.Uid != uint32(os.Geteuid()) || owner.Gid != hyperlightE2ESessionGID {
+				t.Fatalf("unprotected session root: mode=%v uid=%d gid=%d", info.Mode(), owner.Uid, owner.Gid)
+			}
+			runAs(t, hyperlightE2ESessionUID, hyperlightE2ESessionGID, `
+root=$1; workspace=$2; outside=$3
+shift 3
+for directory do printf child-ok > "$directory/child.txt"; done
+if mv "$workspace" "$root/replaced-workspace"; then exit 1; fi
+if ln -s "$outside" "$root/workspace-link"; then exit 1; fi
+if mkdir "$root/provider-created"; then exit 1; fi
+if chmod 0777 "$root"; then exit 1; fi
+[ -d "$workspace" ] && [ ! -L "$workspace" ]
+`, paths.Root, paths.Workspace, outside, paths.Workspace, paths.Home, paths.Temp, paths.Config, paths.Cache, paths.Data, paths.State)
+			runAs(t, hyperlightE2ESessionUID+1, hyperlightE2ESessionGID+1, `
+[ ! -x "$1" ] && [ ! -r "$2/child.txt" ]
+`, paths.Root, paths.Workspace)
+			// A legitimate real-guest MCP call can still mount and write the
+			// workspace, including after ownership reclaim/restore.
+			session, endpoint := newSandboxTestSession(t, newSandboxExecutor(&fixture.config))
+			session.bindSandboxWorkspace(paths.Workspace, hyperlightE2ESessionUID, hyperlightE2ESessionGID)
+			result := hyperlightE2ESandboxResult(t, hyperlightE2ESandboxRPC(t, endpoint, hyperlightE2ESandboxCall(t, "python", `import os
+assert open('child.txt').read() == 'child-ok'
+assert not os.path.exists('host-only.txt')
+with open('guest.txt', 'w') as result:
+    result.write('guest-ok')
+print('workspace-ok')`, 30)))
+			if result.Stdout != "workspace-ok\n" {
+				t.Fatalf("protected workspace guest: %#v", result)
+			}
+		})
+	}
+	if err := acp.ReclaimSessionOwnership(paths.Root); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(filepath.Join(paths.Workspace, "guest.txt")); err != nil || string(data) != "guest-ok" {
+		t.Fatalf("guest workspace persistence: %q, %v", data, err)
+	}
+	if err := os.RemoveAll(paths.Root); err != nil {
+		t.Fatalf("protected session cleanup: %v", err)
+	}
 }
 
 func TestHyperlightE2ESandboxExecHostIsolation(t *testing.T) {

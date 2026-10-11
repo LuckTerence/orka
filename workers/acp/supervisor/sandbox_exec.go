@@ -53,6 +53,40 @@ func sandboxExecConfigFromEnv() (*SandboxExecConfig, error) {
 	return cfg, nil
 }
 
+// protectSandboxSessionRoot keeps the workspace entry under a parent the
+// provider child can traverse but cannot rename or populate. Call only before
+// child startup or while the session is frozen, after ownership finalization.
+func (s *Server) protectSandboxSessionRoot(root string, uid, gid int) error {
+	if s.cfg.SandboxExec == nil {
+		return nil
+	}
+	if uid == os.Geteuid() || uid <= 0 || gid <= 0 {
+		return fmt.Errorf("sandbox_exec requires a session identity distinct from the supervisor")
+	}
+	info, err := os.Lstat(root)
+	if err != nil || !info.IsDir() {
+		return fmt.Errorf("sandbox session root must be a real directory")
+	}
+	// Re-own before opening or chmod: the supervisor has CHOWN, but not
+	// DAC_OVERRIDE or FOWNER, and the child-owned root currently has mode 0700.
+	if err := os.Lchown(root, os.Geteuid(), gid); err != nil {
+		return fmt.Errorf("reclaim sandbox session parent: %w", err)
+	}
+	directory, err := os.Open(root)
+	if err != nil {
+		return fmt.Errorf("open sandbox session parent: %w", err)
+	}
+	defer directory.Close() //nolint:errcheck
+	opened, err := directory.Stat()
+	if err != nil || !opened.IsDir() || !os.SameFile(info, opened) {
+		return fmt.Errorf("sandbox session parent changed while opening")
+	}
+	if err := directory.Chmod(0o710); err != nil {
+		return fmt.Errorf("protect sandbox session parent: %w", err)
+	}
+	return nil
+}
+
 // sandboxRunner runs one authorized sandbox_exec call for a session.
 type sandboxRunner interface {
 	run(ctx context.Context, request acp.SandboxExecRequest, workspace sandboxWorkspace) (acp.SandboxExecResult, error)

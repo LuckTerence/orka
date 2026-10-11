@@ -1159,6 +1159,9 @@ func (s *Server) createSession(
 	if err := acp.FinalizeSessionOwnership(paths.Root, uid, gid); err != nil {
 		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("ownership finalization", err)
 	}
+	if err := s.protectSandboxSessionRoot(paths.Root, uid, gid); err != nil {
+		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("sandbox workspace parent", err)
+	}
 	if s.cfg.DurableWorkspaceDir != "" {
 		// The durable workspace lives outside the session root, and each cold
 		// resume allocates a fresh non-reused child identity, so the preserved

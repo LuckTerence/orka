@@ -82,6 +82,9 @@ spec:
 - The supervisor in the runtime Pod serves the tool itself, under the prompt's
   MCP grant; it never reaches the controller broker. Settling or cancelling the
   prompt kills a running micro-VM.
+- In sandbox-enabled runtimes, the supervisor owns the session root. The
+  session can traverse it and write its workspace, home, temporary and XDG
+  directories, but cannot replace the workspace entry with a symlink.
 - `hluk` runs as the session's user, which owns the workspace, and only that
   process gets the device's group: the agent's own processes never open the
   hypervisor.

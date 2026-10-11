@@ -64,7 +64,7 @@ var ErrUnavailable = errors.New("hyperlight unavailable")
 
 // Config says where hluk and the runtime images are.
 type Config struct {
-	// Binary is the hluk executable, a path or a name on PATH.
+	// Binary is the absolute path to the hluk executable.
 	Binary string
 	// RootfsDir holds one <runtime>.cpio per runtime image.
 	RootfsDir string
