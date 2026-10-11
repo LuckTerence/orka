@@ -657,3 +657,33 @@ func TestRootfsDigestStopsAfterCancellation(t *testing.T) {
 		t.Fatalf("digest copy: reads=%d error=%v, want cancellation before another read", source.reads, err)
 	}
 }
+
+func TestSharedCacheParentWritePermissions(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		mode     os.FileMode
+		wantWarm bool
+	}{
+		{"private", 0o700, true},
+		{"readable", 0o755, true},
+		{"group writable", 0o770, false},
+		{"world writable", 0o777, false},
+		{"sticky group writable", 0o770 | os.ModeSticky, true},
+		{"sticky world writable", 0o777 | os.ModeSticky, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			f.runner.cfg.SharedPod = true
+			if err := os.Chmod(filepath.Dir(f.cache), tc.mode); err != nil {
+				t.Fatal(err)
+			}
+			result, stdout, _, err := run(t, f.runner, t.Context(), Request{Script: `dirname "$script"`})
+			if err != nil || result.ExitCode != 0 || result.Warm != tc.wantWarm {
+				t.Fatalf("parent mode %v: result=%+v error=%v, want warm=%t", tc.mode, result, err, tc.wantWarm)
+			}
+			if !tc.wantWarm && strings.HasPrefix(stdout, f.cache+"/") {
+				t.Fatalf("unsafe parent kept a script in cache: %q", stdout)
+			}
+		})
+	}
+}

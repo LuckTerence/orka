@@ -340,7 +340,7 @@ func (r *Runner) privateCache() bool {
 	}
 	// Others could rename the cache away from a parent open to them.
 	parent, err := os.Lstat(filepath.Dir(r.cfg.CacheDir))
-	return err == nil && parent.IsDir() && (parent.Mode().Perm()&0o002 == 0 || parent.Mode()&os.ModeSticky != 0)
+	return err == nil && parent.IsDir() && (parent.Mode().Perm()&0o022 == 0 || parent.Mode()&os.ModeSticky != 0)
 }
 
 // DefaultOutputBudget is how much output a run may produce before its guest
