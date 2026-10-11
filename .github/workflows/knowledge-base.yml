@@ -10,7 +10,7 @@ name: Update Knowledge Base
 
 on:
   schedule:
-    - cron: "0 8 * * *"
+    - cron: "17 8 * * *"
   issues:
     types: [closed]
   workflow_dispatch: {}
@@ -26,4 +26,3 @@ jobs:
   update-knowledge-base:
     uses: github/agentic-knowledge-base/.github/workflows/knowledge-base-engine.lock.yml@main
     # Guided setup adds GH_TOKEN or GH_AW_GITHUB_TOKEN here when this repository needs them.
-    secrets: {}
