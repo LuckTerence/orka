@@ -216,15 +216,15 @@ func (r *Runner) Run(ctx context.Context, req Request) (Result, error) {
 		}
 	}
 
-	var args []string
+	args := make([]string, 0, 7)
 	snapshot, warm := "", false
 	if private {
 		snapshot, warm = r.warmSnapshot(ctx, req.Runtime, rootfs)
 	}
 	if warm {
-		args = []string{"snapshot", "run", snapshot, script}
+		args = append(args, "snapshot", "run", snapshot, script)
 	} else {
-		args = []string{"run", "--initrd", rootfs, "--scratch-mb", strconv.Itoa(r.ScratchMB(req.Runtime)), script}
+		args = append(args, "run", "--initrd", rootfs, "--scratch-mb", strconv.Itoa(r.ScratchMB(req.Runtime)), script)
 	}
 	args = append(args, capabilityArgs(req)...)
 
@@ -391,13 +391,17 @@ func (r *Runner) warmSnapshot(ctx context.Context, runtime, rootfs string) (stri
 		return "", false
 	}
 	digest := sha256.New()
-	_, readErr := io.Copy(digest, image)
+	_, readErr := io.Copy(digest, contextReader{ctx: ctx, reader: image})
 	closeErr := image.Close()
 	if readErr != nil || closeErr != nil || ctx.Err() != nil {
 		return "", false
 	}
+	key := r.snapshotKey(ctx)
+	if key == "" {
+		return "", false
+	}
 	dir := filepath.Join(r.cfg.CacheDir, "snapshots",
-		runtime+"-"+strconv.Itoa(r.ScratchMB(runtime))+"mb-"+r.snapshotKey(ctx)+"-"+fmt.Sprintf("%x", digest.Sum(nil)))
+		runtime+"-"+strconv.Itoa(r.ScratchMB(runtime))+"mb-"+key+"-"+fmt.Sprintf("%x", digest.Sum(nil)))
 	lockValue, _ := snapshotLocks.LoadOrStore(dir, make(chan struct{}, 1))
 	lock := lockValue.(chan struct{})
 	select {
@@ -470,6 +474,20 @@ func makeReadable(root string) error {
 	})
 }
 
+// contextReader checks cancellation between bounded digest reads. It does
+// not cache file metadata as identity: bytes can change without a new mtime.
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r contextReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.reader.Read(p)
+}
+
 // snapshotKeys caches each hluk binary's snapshot key.
 var snapshotKeys sync.Map
 
@@ -484,7 +502,7 @@ func (r *Runner) snapshotKey(ctx context.Context) string {
 	out, err := cmd.Output()
 	key := strings.TrimSpace(string(out))
 	if err != nil || !runtimeNamePattern.MatchString(key) {
-		return "unknown"
+		return ""
 	}
 	snapshotKeys.Store(r.cfg.Binary, key)
 	return key

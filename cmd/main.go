@@ -1716,6 +1716,10 @@ func main() {
 		DeviceResource: hyperlightDeviceResource,
 		DeviceGID:      hyperlightDeviceGID,
 	}
+	if err := hyperlightPod.Validate(); err != nil {
+		setupLog.Error(err, "invalid Hyperlight configuration")
+		os.Exit(1)
+	}
 	jobBuilder.Hyperlight = hyperlightPod
 	jobBuilder.EnforceTransactionCredentialAuth =
 		contextTokenAuthzConfig.Mode == api.ContextTokenAuthorizationModeEnforce

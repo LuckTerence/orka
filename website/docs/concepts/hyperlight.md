@@ -31,8 +31,11 @@ Two tools use it:
   Pods need no privileges. CDI is on by default in containerd 2.x; containerd
   1.7 needs `enable_cdi = true`. The plugin gives the device to `DEVICE_UID` and
   `DEVICE_GID`; pass that group to the controller with `--hyperlight-device-gid`.
-- **The Hyperlight bundle**: `make docker-build-hyperlight-bundle` builds `hluk`
-  and the `python`, `node` and `bash` guest images into one image. Pass it with
+- **The Hyperlight bundle**: this opt-in image is operator-built and is not
+  published by Orka release or development-image automation. Build it with
+  `make docker-build-hyperlight-bundle HYPERLIGHT_BUNDLE_IMG=<your-registry>/hyperlight-bundle:<tag>`,
+  then publish it with `docker push <your-registry>/hyperlight-bundle:<tag>`.
+  It contains `hluk` and the `python`, `node` and `bash` guest images. Pass it with
   `--hyperlight-bundle-image`; an init container copies it into each Pod that
   runs micro-VMs, where it is mounted read-only, next to a separate volume for
   the warm snapshots. `hluk` uses that cache only while no other user can write
@@ -104,9 +107,10 @@ programs:
 
 There is no `fork()`, so a program that forks fails, and scheduling is
 cooperative, so a busy thread holds the vCPU. Guest memory is fixed per runtime
-(`python` 256 MiB, `node` 512 MiB, `bash` 128 MiB; `ORKA_HYPERLIGHT_SCRATCH_MB`
-overrides it), and exceeding it ends the run. A run that prints more than
-64 MiB is stopped, since `hluk` keeps a copy of everything the guest prints.
+(`python` 256 MiB, `node` 512 MiB, `bash` 128 MiB), and exceeding it ends the run.
+Controller-created Pods pin these sizes. `ORKA_HYPERLIGHT_SCRATCH_MB` only
+overrides them when running the runner directly outside those Pods. A run that
+prints more than 64 MiB is stopped, since `hluk` keeps a copy of everything the guest prints.
 
 ## Continuous integration
 

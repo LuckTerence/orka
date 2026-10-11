@@ -39,7 +39,8 @@ const SandboxExecDescription = "Run a bash script, Python or JavaScript in a fre
 	"The session workspace is mounted read-write at /workspace, the working directory. " +
 	"The VM has no network and nothing else from the host, and each call starts clean: " +
 	"only files written under /workspace persist. The shell is BusyBox; Python is CPython " +
-	"with its standard library; JavaScript is Node.js. Returns stdout, stderr and the exit code."
+	"with its standard library except ssl, sqlite3 and subprocess; JavaScript is Node.js " +
+	"without child_process. Returns stdout, stderr and the exit code."
 
 // SandboxExecInputSchema is the tool's JSON Schema. Execute enforces the same
 // limits; the schema only guides the model.

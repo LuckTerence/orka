@@ -1119,8 +1119,8 @@ See [charts/orka/values.yaml](https://github.com/orka-agents/orka/blob/main/char
 | `--ai-worker-code-exec-backend` | `ORKA_AI_WORKER_CODE_EXEC_BACKEND` env or `""` | Pin the `code_exec` backend of AI workers: `kubernetes`, `in-process` or `hyperlight`. Empty leaves the worker default (`kubernetes`). A pinned backend drops any backend a Task or Agent sets. See [Hyperlight micro-VMs](../concepts/hyperlight.md) |
 | `--acp-sandbox-exec` | `ORKA_ACP_SANDBOX_EXEC_ENABLED` env or `false` | Run the `sandbox_exec` tool of built-in ACP runtimes in Hyperlight micro-VMs: standard RuntimePool Pods get the hypervisor device and the Hyperlight bundle |
 | `--hyperlight-bundle-image` | `ORKA_HYPERLIGHT_BUNDLE_IMAGE` env or `""` | Image with `hluk` and its guest images (`make docker-build-hyperlight-bundle`), copied into Pods that run Hyperlight micro-VMs and mounted read-only. Empty expects them in the Pod's own image, at `/opt/orka/hyperlight/bin/hluk` and `/opt/orka/hyperlight/rootfs/<runtime>.cpio` |
-| `--hyperlight-device-resource` | `hyperlight.dev/hypervisor` | Extended resource the Hyperlight device plugin advertises |
-| `--hyperlight-device-gid` | `0` | Group that owns the hypervisor device in Pods (the device plugin's `DEVICE_GID`); `0` adds none |
+| `--hyperlight-device-resource` | `hyperlight.dev/hypervisor` | Qualified, non-reserved extended resource the Hyperlight device plugin advertises |
+| `--hyperlight-device-gid` | `0` | Group that owns the hypervisor device in Pods (the device plugin's `DEVICE_GID`), in `0..2147483647`; `0` adds none. It must not overlap the ACP session primary-GID range |
 | `--acp-runtime-namespace` / `ORKA_ACP_RUNTIME_NAMESPACE` | `orka-runtimes` | Namespace for managed runtime Deployments, Services, Secrets, and policies. |
 | `--acp-provider-proxy-namespace` / `ORKA_ACP_PROVIDER_PROXY_NAMESPACE` | `""` | Approved provider-proxy namespace selector. The Helm chart uses its release namespace when the proxy is enabled. |
 | `--acp-provider-proxy-base-url` / `ORKA_ACP_PROVIDER_PROXY_BASE_URL` | unset | Authenticated provider-proxy URL injected into built-in RuntimePools. |

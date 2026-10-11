@@ -11,7 +11,9 @@ package hyperlight
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,7 +27,10 @@ import (
 const fakeHluk = `#!/bin/sh
 echo "$*" >> "$HOME/calls.log"
 case "$1 $2" in
-"snapshot key") echo "k0123abcd-c4"; exit 0 ;;
+"snapshot key")
+	[ -f "$HOME/fail-key" ] && exit 1
+	[ -f "$HOME/invalid-key" ] && { echo 'invalid key'; exit 0; }
+	echo "k0123abcd-c4"; exit 0 ;;
 "snapshot save")
 	[ -f "$HOME/fail-save" ] && exit 1
 	if [ -f "$HOME/block-save" ]; then
@@ -122,7 +127,7 @@ func TestRunKeepsStreamsAndExitCode(t *testing.T) {
 
 func TestRunSavesOneWarmSnapshotPerRuntime(t *testing.T) {
 	f := newFixture(t)
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		result, stdout, _, err := run(t, f.runner, context.Background(), Request{Script: "echo hi"})
 		if err != nil || stdout != "hi\n" || !result.Warm {
 			t.Fatalf("run %d: result=%+v stdout=%q err=%v, want a warm run printing hi", i, result, stdout, err)
@@ -599,5 +604,56 @@ func TestRunRefusesABinaryByName(t *testing.T) {
 	f.runner.cfg.Binary = "hluk"
 	if _, _, _, err := run(t, f.runner, context.Background(), Request{Script: "true"}); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("err = %v, want ErrUnavailable for a binary looked up on PATH", err)
+	}
+}
+
+func TestRunBootsColdWhenSnapshotKeyIsUnavailable(t *testing.T) {
+	for _, marker := range []string{"fail-key", "invalid-key"} {
+		t.Run(marker, func(t *testing.T) {
+			f := newFixture(t)
+			if err := os.WriteFile(filepath.Join(f.cache, marker), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			for range 2 {
+				result, stdout, _, err := run(t, f.runner, t.Context(), Request{Script: "echo cold"})
+				if err != nil || result.ExitCode != 0 || result.Warm || stdout != "cold\n" {
+					t.Fatalf("key failure: result=%+v stdout=%q error=%v, want cold boot", result, stdout, err)
+				}
+			}
+			for _, call := range f.calls(t) {
+				if strings.HasPrefix(call, "snapshot save") || strings.HasPrefix(call, "snapshot run") {
+					t.Fatalf("unverified key used warm snapshot: %q", call)
+				}
+			}
+			if err := os.Remove(filepath.Join(f.cache, marker)); err != nil {
+				t.Fatal(err)
+			}
+			result, _, _, err := run(t, f.runner, t.Context(), Request{Script: "true"})
+			if err != nil || !result.Warm {
+				t.Fatalf("key recovery: result=%+v error=%v", result, err)
+			}
+		})
+	}
+}
+
+type cancelAfterRead struct {
+	cancel context.CancelFunc
+	reads  int
+}
+
+func (r *cancelAfterRead) Read(p []byte) (int, error) {
+	r.reads++
+	copy(p, "data")
+	r.cancel()
+	return 4, nil
+}
+
+func TestRootfsDigestStopsAfterCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	source := &cancelAfterRead{cancel: cancel}
+	_, err := io.Copy(sha256.New(), contextReader{ctx: ctx, reader: source})
+	if !errors.Is(err, context.Canceled) || source.reads != 1 {
+		t.Fatalf("digest copy: reads=%d error=%v, want cancellation before another read", source.reads, err)
 	}
 }

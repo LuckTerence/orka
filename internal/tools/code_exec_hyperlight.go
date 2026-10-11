@@ -19,6 +19,8 @@ import (
 
 const codeExecBackendHyperlight = "hyperlight"
 
+const hyperlightNoCapability = "none"
+
 // HyperlightCodeExecutor runs each request in a fresh Hyperlight micro-VM in
 // the worker pod: no network, no host files, and no fallback to a weaker
 // backend when the pod cannot run one.
@@ -123,7 +125,7 @@ func (e *HyperlightCodeExecutor) Execute(ctx context.Context, req CodeExecutionR
 }
 
 func codeExecHyperlightResourceAuditForRequest(req CodeExecutionRequest) map[string]string {
-	audit := map[string]string{"network": "none", "host_files": "none"}
+	audit := map[string]string{"network": hyperlightNoCapability, "host_files": hyperlightNoCapability}
 	if runtime, ok := hyperlightRuntimeForLanguage(req.Language); ok {
 		audit["runtime"] = runtime
 		audit["scratch_mb"] = strconv.Itoa((&HyperlightCodeExecutor{}).hyperlightRunner().ScratchMB(runtime))

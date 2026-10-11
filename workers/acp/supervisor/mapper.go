@@ -402,7 +402,7 @@ func codexMCPPermissionToolName(marker json.RawMessage, kind string, rawInput js
 	}
 	if !mcpCall {
 		if descriptor, allowed := policy.Descriptor(name); allowed && descriptor.Source.MCPServed() {
-			return "", fmt.Errorf("codex brokered tool identity requires an MCP marker")
+			return "", fmt.Errorf("codex MCP-served tool identity requires an MCP marker")
 		}
 		return name, nil
 	}
@@ -415,7 +415,7 @@ func codexMCPPermissionToolName(marker json.RawMessage, kind string, rawInput js
 	}
 	descriptor, allowed := policy.Descriptor(input.Tool)
 	if kind != "execute" || input.Server != supervisorMCPServerName || !allowed || !descriptor.Source.MCPServed() {
-		return "", fmt.Errorf("codex MCP tool identity is outside the frozen broker policy")
+		return "", fmt.Errorf("codex MCP tool identity is outside the frozen MCP-served policy")
 	}
 	if name != "" && name != descriptor.Name {
 		return "", fmt.Errorf("codex MCP tool update has conflicting structured identities")

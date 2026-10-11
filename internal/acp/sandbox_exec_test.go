@@ -184,3 +184,11 @@ func TestSandboxExecNodePreservesSourceAndWorkspaceModules(t *testing.T) {
 		})
 	}
 }
+
+func TestSandboxExecDescriptionNamesUnavailableModules(t *testing.T) {
+	for _, module := range []string{"ssl", "sqlite3", "subprocess", "child_process"} {
+		if !strings.Contains(SandboxExecDescription, module) {
+			t.Errorf("sandbox_exec description omitted unavailable module %s", module)
+		}
+	}
+}

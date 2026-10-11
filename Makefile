@@ -20,7 +20,8 @@ AGENTKIT_RUNTIME_IMAGE ?=
 AGENTKIT_ADAPTER_DIGEST ?=
 WORKSPACE_PUBLISHER_IMG ?= ghcr.io/orka-agents/orka/workspace-publisher:latest
 # hluk and its guest images, for Pods that run Hyperlight micro-VMs (opt-in).
-HYPERLIGHT_BUNDLE_IMG ?= ghcr.io/orka-agents/orka/hyperlight-bundle:latest
+# The opt-in bundle is operator-built, not published by Orka releases.
+HYPERLIGHT_BUNDLE_IMG ?= orka-hyperlight-bundle:local
 # hluk cargo features: empty drives KVM; "mshv" for /dev/mshv-only nodes.
 HYPERLIGHT_BUNDLE_FEATURES ?=
 # Providers backing the generated docker-build-acp-<provider>-runtime and

@@ -7,11 +7,14 @@ MIT License - see LICENSE file for details.
 package controller
 
 import (
+	"fmt"
 	"slices"
 	"strconv"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/util/validation"
 
 	"github.com/orka-agents/orka/internal/hyperlight"
 )
@@ -44,6 +47,26 @@ type HyperlightPodConfig struct {
 	// DeviceGID owns the device in the Pod (the plugin's DEVICE_GID); 0 adds
 	// no group.
 	DeviceGID int64
+}
+
+// Validate rejects settings that would replace native Pod resources or fail
+// when the supervisor parses the device group.
+func (c HyperlightPodConfig) Validate() error {
+	if errs := validation.IsValidGroupID(c.DeviceGID); len(errs) != 0 {
+		return fmt.Errorf("hyperlight device GID: %s", strings.Join(errs, ", "))
+	}
+	name := c.DeviceResource
+	if name == "" {
+		name = DefaultHyperlightDeviceResource
+	}
+	// Match Kubernetes extended-resource rules, including the quota-name
+	// representation, without importing the Kubernetes server package.
+	if !strings.Contains(name, "/") || strings.Contains(name, corev1.ResourceDefaultNamespacePrefix) ||
+		strings.HasPrefix(name, corev1.DefaultResourceRequestsPrefix) ||
+		len(validation.IsQualifiedName(corev1.DefaultResourceRequestsPrefix+name)) != 0 {
+		return fmt.Errorf("hyperlight device resource %q must be a qualified extended-resource name", name)
+	}
+	return nil
 }
 
 // apply gives the Pod's main container the hypervisor device, its group,
