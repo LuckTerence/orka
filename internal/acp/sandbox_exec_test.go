@@ -52,6 +52,11 @@ func TestParseSandboxExecArgumentsRejects(t *testing.T) {
 		`{"code":"x","timeout":0}`,
 		`{"code":"x","timeout":1.5}`,
 		`{"code":"x","timeout":"soon"}`,
+		`{"code":"x","timeout":"Inf"}`,
+		`{"code":"x","timeout":"+Inf"}`,
+		`{"code":"x","timeout":"-Inf"}`,
+		`{"code":"x","timeout":"Infinity"}`,
+		`{"code":"x","timeout":"NaN"}`,
 		`{"code":"x","cwd":"/"}`,
 	} {
 		if _, err := ParseSandboxExecArguments(json.RawMessage(args)); err == nil {

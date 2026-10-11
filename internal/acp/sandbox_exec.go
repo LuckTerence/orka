@@ -160,7 +160,7 @@ func sandboxExecSeconds(value any) (int64, error) {
 	default:
 		return 0, fmt.Errorf("sandbox_exec timeout must be a number of seconds")
 	}
-	if math.IsNaN(seconds) || seconds < 1 || seconds != math.Trunc(seconds) {
+	if math.IsNaN(seconds) || math.IsInf(seconds, 0) || seconds < 1 || seconds != math.Trunc(seconds) {
 		return 0, fmt.Errorf("sandbox_exec timeout must be a whole number of seconds, at least 1")
 	}
 	return int64(min(seconds, SandboxExecMaxTimeout.Seconds())), nil
