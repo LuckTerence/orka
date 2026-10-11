@@ -37,6 +37,12 @@ func TestRuntimePoolPodTemplateAddsSandboxExecToStandardPools(t *testing.T) {
 	if got := container.Resources.Limits[DefaultHyperlightDeviceResource]; got.Cmp(resource.MustParse("1")) != 0 {
 		t.Fatalf("device limit = %v, want 1", got)
 	}
+	if got := container.Resources.Requests[corev1.ResourceMemory]; got.Cmp(resource.MustParse("1Gi")) != 0 {
+		t.Fatalf("sandbox runtime memory request = %v, want 1Gi", got)
+	}
+	if got := container.Resources.Limits[corev1.ResourceMemory]; got.Cmp(resource.MustParse("4608Mi")) != 0 {
+		t.Fatalf("sandbox runtime memory limit = %v, want 4608Mi", got)
+	}
 	if !slices.Contains(template.Spec.SecurityContext.SupplementalGroups, int64(990)) {
 		t.Fatalf("supplementalGroups = %v, want the device group", template.Spec.SecurityContext.SupplementalGroups)
 	}
@@ -55,5 +61,14 @@ func TestRuntimePoolPodTemplateAddsSandboxExecToStandardPools(t *testing.T) {
 	}
 	if _, ok := workspaceTemplate.Spec.Containers[0].Resources.Limits[DefaultHyperlightDeviceResource]; ok {
 		t.Fatal("a workspace-backed pool requested the hypervisor device")
+	}
+	for _, template := range []corev1.PodTemplateSpec{plain, workspaceTemplate} {
+		resources := template.Spec.Containers[0].Resources
+		if got := resources.Requests[corev1.ResourceMemory]; got.Cmp(resource.MustParse("512Mi")) != 0 {
+			t.Fatalf("non-Hyperlight runtime memory request changed: %v", got)
+		}
+		if got := resources.Limits[corev1.ResourceMemory]; got.Cmp(resource.MustParse("4Gi")) != 0 {
+			t.Fatalf("non-Hyperlight runtime memory limit changed: %v", got)
+		}
 	}
 }

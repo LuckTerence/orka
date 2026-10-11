@@ -87,6 +87,24 @@ func (c HyperlightPodConfig) apply(spec *corev1.PodSpec, container *corev1.Conta
 	}
 	resources.Limits[resourceName] = resource.MustParse("1")
 	resources.Requests[resourceName] = resource.MustParse("1")
+	// One guest runs at a time; Node is the largest exposed guest at 512 MiB.
+	// Keep the worker's budget and reserve the guest in the same cgroup.
+	guestMemory := resource.MustParse("512Mi")
+	workerLimit := resources.Limits[corev1.ResourceMemory]
+	workerRequest, requested := resources.Requests[corev1.ResourceMemory]
+	if !requested {
+		// Preserve Kubernetes' limit-to-request default before adding memory.
+		workerRequest = workerLimit.DeepCopy()
+	}
+	workerRequest.Add(guestMemory)
+	resources.Requests[corev1.ResourceMemory] = workerRequest
+	if !workerLimit.IsZero() {
+		workerLimit.Add(guestMemory)
+		resources.Limits[corev1.ResourceMemory] = workerLimit
+	} else {
+		// A present zero limit cannot accompany the positive guest request.
+		delete(resources.Limits, corev1.ResourceMemory)
+	}
 	container.Resources = *resources
 
 	// Explicit values also reserve these keys against Agent Secret envFrom

@@ -82,8 +82,14 @@ func TestJobBuilderPinsTheHyperlightCodeExecBackend(t *testing.T) {
 	if got := container.Resources.Requests[device]; got.Cmp(resource.MustParse("1")) != 0 {
 		t.Fatalf("device request = %v, want 1", got)
 	}
-	if got := container.Resources.Limits[corev1.ResourceMemory]; got.Cmp(resource.MustParse("1Gi")) != 0 {
-		t.Fatalf("memory limit = %v, want the Task's 1Gi", got)
+	if got := container.Resources.Limits[corev1.ResourceMemory]; got.Cmp(resource.MustParse("1536Mi")) != 0 {
+		t.Fatalf("memory limit = %v, want the Task's 1Gi plus 512Mi for the guest", got)
+	}
+	if got := container.Resources.Requests[corev1.ResourceMemory]; got.Cmp(resource.MustParse("1536Mi")) != 0 {
+		t.Fatalf("memory request = %v, want the limit-only worker budget plus guest memory", got)
+	}
+	if got := task.Spec.Resources.Limits[corev1.ResourceMemory]; got.Cmp(resource.MustParse("1Gi")) != 0 {
+		t.Fatalf("Task memory limit was mutated: %v", got)
 	}
 	if _, mutated := task.Spec.Resources.Limits[device]; mutated {
 		t.Fatal("the Task's own resource map was changed")
@@ -144,6 +150,9 @@ func TestJobBuilderCodeExecBackendLeavesOtherWorkersAlone(t *testing.T) {
 	}
 	if _, ok := container.Resources.Limits["example.com/kvm"]; ok {
 		t.Fatal("a non-hyperlight backend requested the hypervisor device")
+	}
+	if got := container.Resources.Limits[corev1.ResourceMemory]; got.Cmp(resource.MustParse("1Gi")) != 0 {
+		t.Fatalf("non-Hyperlight worker memory limit changed: %v", got)
 	}
 
 	job, err = builder.Build(context.Background(), codeExecTestTask(corev1alpha1.TaskTypeContainer), nil, nil)
@@ -218,5 +227,23 @@ func TestJobBuilderPinsHyperlightSettingsOverAgentSecretEnvFrom(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestJobBuilderHyperlightReservesMemoryForDefaultWorker(t *testing.T) {
+	builder := setupJobBuilder()
+	builder.CodeExecBackend = "hyperlight"
+	task := codeExecTestTask(corev1alpha1.TaskTypeAI)
+	task.Spec.Resources = corev1.ResourceRequirements{}
+	job, err := builder.Build(context.Background(), task, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resources := job.Spec.Template.Spec.Containers[0].Resources
+	if got := resources.Requests[corev1.ResourceMemory]; got.Cmp(resource.MustParse("1Gi")) != 0 {
+		t.Fatalf("default Hyperlight worker memory request = %v, want 1Gi", got)
+	}
+	if got := resources.Limits[corev1.ResourceMemory]; got.Cmp(resource.MustParse("2560Mi")) != 0 {
+		t.Fatalf("default Hyperlight worker memory limit = %v, want 2560Mi", got)
 	}
 }

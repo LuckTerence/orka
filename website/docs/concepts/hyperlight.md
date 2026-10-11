@@ -117,6 +117,16 @@ Controller-created Pods pin these sizes. `ORKA_HYPERLIGHT_SCRATCH_MB` only
 overrides them when running the runner directly outside those Pods. A run that
 prints more than 64 MiB is stopped, since `hluk` keeps a copy of everything the guest prints.
 
+Hyperlight-enabled Pods add 512 MiB for one guest to the worker's memory request
+and any nonzero memory limit. A limit-only worker keeps Kubernetes' matching
+request default before the addition. An absent limit stays unbounded; an
+explicit zero limit is removed so it cannot conflict with the positive request.
+The default AI Job therefore requests 1 GiB and has a 2.5 GiB limit; a standard
+ACP RuntimePool requests 1 GiB and has a 4.5 GiB limit. Task and Agent resource
+settings describe the worker budget before this addition. Size that budget for
+the provider, host-side output buffers and workload; the guest reservation is
+not a guarantee against every OOM. Non-Hyperlight Pods are unchanged.
+
 ## Continuous integration
 
 The `Hyperlight E2E` workflow builds the pinned production bundle and runs real
