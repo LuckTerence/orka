@@ -99,3 +99,22 @@ Single test: `go test ./internal/api/ -run TestHandlerName -v`
 - Live GitHub OIDC/kontxt E2E requires GitHub Actions `id-token: write` or `ORKA_GITHUB_OIDC_TOKEN`; redact JWTs, TxTokens, and request tokens in logs
 - OpenTelemetry GenAI constants are hand-rolled in `internal/tracing/genai`; telemetry is enabled with `--enable-telemetry`/`--enable-tracing`, workers honor `ORKA_ENABLE_TELEMETRY`, and prompt/completion content capture remains default-off/fail-closed
 - ACP real-world validation should include Codex, Claude, and OpenCode through Vekil, Copilot image/profile admission (plus live execution when provider auth is available), workspace clone/read, Session continuation, cancellation/timeout, unsafe workspace rejection, controller restart, pool replacement, clean-room branch publication, PR reconciliation, and cleanup.
+
+
+<!-- github-knowledge-base-start -->
+## Knowledge Base
+
+### Purpose
+
+This repository uses the Knowledge Base at [https://github.com/orka-agents/orka](https://github.com/orka-agents/orka) on branch `main`.
+
+### Required behavior
+
+1. Before changing code, read `docs/index.md` from that branch.
+2. Use the index to open only the knowledge files relevant to the task.
+3. If the index is unavailable, stop and report that the Knowledge Base could not be loaded.
+
+### Source of truth
+
+Generated knowledge tracks the code. When the knowledge and code disagree, trust the code.
+<!-- github-knowledge-base-end -->
