@@ -99,6 +99,10 @@ spec:
   sits beside the provider's shell rather than replacing it.
 - Workspace-backed RuntimePools (agent-sandbox, Substrate) run without a
   hypervisor and do not get `sandbox_exec`.
+- A runtime without sandbox execution enabled rejects session creation if
+  its frozen tool policy exposes `sandbox_exec`, before starting the provider.
+  Remove the tool from the allowlist when using a workspace-backed pool or
+  when `--acp-sandbox-exec` is disabled.
 
 ## What runs in the guest
 

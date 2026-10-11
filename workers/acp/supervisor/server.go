@@ -773,6 +773,12 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if tool, allowed := request.MCPConfiguration.ToolPolicy.Descriptor(acp.SandboxExecToolName); allowed &&
+		tool.Source == harnessv2.MCPToolSourceRuntimeLocal && s.cfg.SandboxExec == nil {
+		writeError(w, http.StatusBadRequest, harnessv2.ErrorCodeInvalidRequest, "sandbox_exec requires a runtime with --acp-sandbox-exec enabled; workspace-backed runtimes do not support it", nil, false)
+		return
+	}
+
 	s.mu.Lock()
 	if existing := s.sessions[request.RuntimeSessionID]; existing != nil {
 		classification, classifyErr := harnessv2.ClassifyOperation(expected, request.Metadata, sessionOperationPtrLocked(existing, request.Metadata.OperationID, now), true, now)

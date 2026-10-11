@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -325,5 +326,76 @@ func TestSandboxExecutorExpiredCallDoesNotAcquireGuest(t *testing.T) {
 	case <-runner.calls:
 		t.Fatal("expired call started a guest")
 	default:
+	}
+}
+
+// Admission must reject an unusable frozen policy before creating a workspace
+// or consuming a never-reused session identity, including workspace pools.
+func TestCreateSessionRejectsDisabledSandboxExec(t *testing.T) {
+	for _, workspaceBacked := range []bool{false, true} {
+		name := "disabled standard runtime"
+		if workspaceBacked {
+			name = "workspace-backed runtime"
+		}
+		t.Run(name, func(t *testing.T) {
+			cfg, profile := newTestConfigWithUpstream(t, "immediate", "http://127.0.0.1:1", strings.Repeat("p", 32))
+			if workspaceBacked {
+				cfg.DurableWorkspaceDir = t.TempDir()
+				cfg.DurableWorkspaceKey = "workspace"
+				cfg.Capabilities.Limits.MaxResidentSessions = 1
+				cfg.Capabilities.Limits.MaxConcurrentPrompts = 1
+			}
+			authorization, _ := sandboxTestAuthorization(t, cfg.Fence, time.Now().UTC())
+			policy := authorization.Configuration()
+			profile.ToolPolicyDigest = policy.ToolPolicyDigest
+			profile.ApprovalPolicyDigest = policy.ApprovalPolicyDigest
+			profile.MCPConfigurationDigest = policy.MCPConfigurationDigest
+			digest, err := harnessv2.CanonicalProfileDigest(profile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg.Fence.RuntimeProfileDigest = digest
+			cfg.Capabilities.RuntimeProfileDigest = digest
+			materialized := false
+			cfg.WorkspaceMaterializer = WorkspaceMaterializerFunc(func(context.Context, harnessv2.CreateRuntimeSessionRequest, string) error {
+				materialized = true
+				return errors.New("unexpected workspace setup")
+			})
+			server, err := New(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				defer cancel()
+				if err := server.Close(ctx); err != nil {
+					t.Error(err)
+				}
+			})
+			request := testCreateSessionRequest(t, cfg, profile)
+			request.MCPConfiguration = policy
+			request.Metadata.RequestDigest = ""
+			sealRequest(t, &request.Metadata.RequestDigest, request)
+			if err := request.ValidateAt(time.Now().UTC()); err != nil {
+				t.Fatalf("invalid admission fixture: %v", err)
+			}
+			remaining := cfg.UIDAllocator.Remaining()
+			for range 2 {
+				response := performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1", request, cfg)
+				if response.Code != http.StatusBadRequest {
+					t.Fatalf("unavailable sandbox admission status=%d body=%s", response.Code, response.Body)
+				}
+				var rejected harnessv2.ErrorResponse
+				if err := json.Unmarshal(response.Body.Bytes(), &rejected); err != nil {
+					t.Fatal(err)
+				}
+				if rejected.Code != harnessv2.ErrorCodeInvalidRequest || rejected.Retryable || !strings.Contains(rejected.Message, "sandbox_exec") {
+					t.Fatalf("unavailable sandbox admission error=%#v", rejected)
+				}
+			}
+			if materialized || cfg.UIDAllocator.Remaining() != remaining || len(server.sessions) != 0 || len(server.mcpProxy.sessions) != 0 {
+				t.Fatal("rejected sandbox policy created resources or consumed a session identity")
+			}
+		})
 	}
 }
