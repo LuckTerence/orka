@@ -283,6 +283,40 @@ func TestRemoteMCPHeadersAllowMixedCaseWithoutAuthorityOverrides(t *testing.T) {
 	}
 }
 
+func TestRemoteMCPRejectsCanonicalHeaderDuplicates(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		headers map[string]string
+		reject  bool
+	}{
+		{"different values", map[string]string{"X-Tenant": "first", "x-tenant": "second"}, true},
+		{"same values", map[string]string{"X-Tenant": "first", "x-TeNaNt": "first"}, true},
+		{"distinct names", map[string]string{"x-TeNaNt": "first", "X-Request-ID": "request"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tool := &corev1alpha1.Tool{Spec: corev1alpha1.ToolSpec{
+				Parameters: &apiextensionsv1.JSON{Raw: []byte(`{"type":"object"}`)},
+				MCP: &corev1alpha1.MCPToolServer{Remote: &corev1alpha1.RemoteMCPServer{
+					URL: "https://example.com/mcp", ToolName: "read",
+				}},
+				HTTP: &corev1alpha1.HTTPExecution{
+					AuthSecretRef:           &corev1alpha1.SecretKeySelector{Name: "auth", Key: "token"},
+					OutboundAccessPolicyRef: &corev1alpha1.LocalObjectReference{Name: "egress"},
+					Headers:                 tc.headers,
+				},
+			}}
+			err := ValidateRemoteMCPConfiguration(tool)
+			if tc.reject {
+				if err == nil || !strings.Contains(err.Error(), "duplicate custom header") {
+					t.Fatalf("header error = %v, want canonical duplicate rejection", err)
+				}
+			} else if err != nil {
+				t.Fatalf("distinct mixed-case headers rejected: %v", err)
+			}
+		})
+	}
+}
+
 func TestRemoteMCPRequiresReviewedObjectSchemaAtConsumers(t *testing.T) {
 	for _, raw := range []string{"", `null`, `true`, `[]`, `{}`, `{"type":"string"}`, `{"type":"object","properties":[]}`} {
 		t.Run(raw, func(t *testing.T) {

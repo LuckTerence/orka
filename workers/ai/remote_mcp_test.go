@@ -165,7 +165,15 @@ func newNativeRemoteFixture(t *testing.T) *nativeRemoteFixture {
 func (f *nativeRemoteFixture) prepare(t *testing.T) (context.Context, map[string]*corev1alpha1.Tool, error) {
 	t.Helper()
 	names := []string{f.tool.Name}
-	loaded := loadCustomTools(t.Context(), f.client, "team", names)
+	loaded, err := loadCustomTools(t.Context(), f.client, "team", names)
+	if err != nil {
+		return t.Context(), nil, err
+	}
+	classified, err := connectorBackedTools(t.Context(), f.client, "team", loaded)
+	if err != nil {
+		return t.Context(), loaded, err
+	}
+	markConnectorBackedTools(loaded, classified)
 	ctx, err := prepareNativeRemoteTools(t.Context(), f.client, "team", "task", names, loaded, f.executor)
 	return ctx, loaded, err
 }

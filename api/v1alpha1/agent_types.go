@@ -71,6 +71,19 @@ type AgentSpec struct {
 	TTLAfterLastTask *metav1.Duration `json:"ttlAfterLastTask,omitempty"`
 }
 
+// MarshalJSON preserves an explicitly empty native tool policy instead of
+// omitting it. Nil and nonempty lists retain their existing wire representation.
+func (in AgentSpec) MarshalJSON() ([]byte, error) {
+	type agentSpecJSON AgentSpec
+	if in.Tools == nil || len(in.Tools) > 0 {
+		return json.Marshal(agentSpecJSON(in))
+	}
+	return json.Marshal(struct {
+		agentSpecJSON
+		Tools []ToolReference `json:"tools"`
+	}{agentSpecJSON: agentSpecJSON(in), Tools: in.Tools})
+}
+
 // AgentCLIRuntime defines agent CLI runtime configuration for an Agent.
 // +kubebuilder:validation:XValidation:rule="has(self.type) != has(self.runtimeRef)",message="exactly one of type or runtimeRef is required"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.contractVersion) || (has(self.contractVersion) && self.contractVersion == oldSelf.contractVersion)",message="runtime.contractVersion is immutable once set"
@@ -80,11 +93,12 @@ type AgentCLIRuntime struct {
 	// +optional
 	Type AgentRuntimeType `json:"type,omitempty"`
 
-	// ContractVersion is the immutable harness protocol selector for built-in
-	// runtime types. There is no default: a missing selector is never
-	// interpreted as either protocol, and fail-closed admission requires an
-	// explicit value on new built-in Agents. runtime.type alone (including
-	// opencode, which exists in both protocols) is never protocol evidence.
+	// ContractVersion is the harness protocol selector for built-in runtime
+	// types. It may be omitted: the namespace is bound to exactly one
+	// execution mode, so an omitted selector means that mode. An explicit
+	// value must match the namespace mode and, once written, never changes.
+	// runtime.type alone (including opencode, which exists in both protocols)
+	// is never protocol evidence.
 	// +optional
 	ContractVersion *AgentRuntimeContractVersion `json:"contractVersion,omitempty"`
 

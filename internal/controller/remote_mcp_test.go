@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -113,6 +114,31 @@ func newRemoteMCPControllerFixture(t *testing.T, endpoint string) (*ToolReconcil
 	}).Build()
 	r := &ToolReconciler{Client: c, Scheme: scheme, SkipSSRFValidation: true}
 	return r, &tool, &statusWrites
+}
+
+func TestRemoteMCPControllerRejectsConnectionPolicy(t *testing.T) {
+	r, tool, _ := newRemoteMCPControllerFixture(t, "https://8.8.8.8")
+	policy := &corev1alpha1.OutboundAccessPolicy{}
+	if err := r.Get(t.Context(), client.ObjectKey{Namespace: "default", Name: "egress"}, policy); err != nil {
+		t.Fatal(err)
+	}
+	// Even a malformed overlap must be rejected as non-gateway remote policy.
+	policy.Spec.Connection = &corev1alpha1.ConnectionOutboundAccess{}
+	if err := r.Update(t.Context(), policy); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.validateTool(t.Context(), tool); err == nil || !strings.Contains(err.Error(), "remote MCP requires a gateway") {
+		t.Fatalf("remote policy error = %v, want gateway-only rejection", err)
+	}
+}
+
+func TestRemoteMCPControllerPrivateConnectorAllowanceDoesNotApply(t *testing.T) {
+	r, tool, _ := newRemoteMCPControllerFixture(t, "https://127.0.0.1")
+	r.SkipSSRFValidation = false
+	r.AllowPrivateConnectorEndpoints = true
+	if err := r.validateTool(t.Context(), tool); err == nil || !strings.Contains(err.Error(), "private/loopback") {
+		t.Fatalf("remote endpoint error = %v, want no connector fixture allowance", err)
+	}
 }
 
 func assertRemoteMCPStatusStable(t *testing.T, r *ToolReconciler, tool *corev1alpha1.Tool, statusWrites *int) {

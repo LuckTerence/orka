@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"path"
 	"strconv"
 	"strings"
@@ -1046,6 +1047,12 @@ type ReserveExternalEffectRequest struct {
 	RequestDigest string                 `json:"requestDigest"`
 	Fence         ControllerEpochFence   `json:"fence"`
 	CreatedAt     time.Time              `json:"createdAt"`
+	// ApprovalTaskUID is an immutable Kubernetes Task binding, with a discovery
+	// label for approval recovery, when Tasks share a RuntimeSession aggregate.
+	// Legacy records receive only the discovery label, preserving their spec.
+	// Other backends may ignore it. It does not change the canonical identity,
+	// grant execution authority, or make the record subject to Task garbage collection.
+	ApprovalTaskUID string `json:"approvalTaskUid,omitempty"`
 }
 
 // ExternalEffectTransition performs a version/state CAS.
@@ -1188,11 +1195,7 @@ func CanonicalControlID(kind string, components ...string) string {
 	return kind + ":sha256:" + hex.EncodeToString(h.Sum(nil))
 }
 
-type canonicalWriter interface {
-	Write([]byte) (int, error)
-}
-
-func writeCanonicalComponent(w canonicalWriter, value string) {
+func writeCanonicalComponent(w io.Writer, value string) {
 	_, _ = fmt.Fprintf(w, "%d:", len(value))
 	_, _ = w.Write([]byte(value))
 }

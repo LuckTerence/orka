@@ -31,7 +31,7 @@ import (
 )
 
 func TestCompatCoordinatorToolsExcludeKubernetesTools(t *testing.T) {
-	for _, api := range []string{"openai", "anthropic"} {
+	for _, api := range []string{"openai", "anthropic", "responses"} {
 		t.Run(api, func(t *testing.T) {
 			file, err := os.CreateTemp("/tmp", "orka-compat-tool-*")
 			require.NoError(t, err)
@@ -74,7 +74,11 @@ func TestCompatCoordinatorToolsExcludeKubernetesTools(t *testing.T) {
 			t.Cleanup(model.Close)
 
 			app, path := setupCompatCustomToolsApp(t, api, model.URL, endpoint.URL)
-			request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"model":"anthropic/test-model","messages":[{"role":"user","content":"read the file"}],"max_tokens":1024}`))
+			requestBody := `{"model":"anthropic/test-model","messages":[{"role":"user","content":"read the file"}],"max_tokens":1024}`
+			if api == "responses" {
+				requestBody = `{"model":"anthropic/test-model","store":false,"input":"read the file","max_output_tokens":1024}`
+			}
+			request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(requestBody))
 			request.Header.Set("Content-Type", "application/json")
 			response, err := app.Test(request, fiber.TestConfig{Timeout: 10 * time.Second})
 			require.NoError(t, err)
@@ -216,8 +220,12 @@ func setupCompatCustomToolsApp(t *testing.T, api, modelURL, toolURL string) (*fi
 			},
 		})
 	}
-	if api == "openai" {
+	if api == "openai" || api == "responses" {
 		handler, app := setupTestOpenAIHandler(objects...)
+		if api == "responses" {
+			app.Post(responsesPath, handler.HandleResponses)
+			return app, responsesPath
+		}
 		path := "/openai/v1/chat/completions"
 		app.Post(path, handler.HandleChatCompletions)
 		return app, path

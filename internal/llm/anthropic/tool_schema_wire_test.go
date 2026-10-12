@@ -12,15 +12,17 @@ import (
 )
 
 func TestToolSchemaPreservedOnProviderWire(t *testing.T) {
-	for _, schema := range []string{
+	for schemaIndex, schema := range []string{
 		`{"type":"object","properties":{"q":{"type":"string"}},"required":["q"]}`,
 		`{"type":"object","$defs":{"precise":{"type":"number","maximum":9007199254740993,"minimum":-9007199254740995,"multipleOf":0.12345678901234567890123456789}},"properties":{"value":{"$ref":"#/$defs/precise"}},"required":["value"],"additionalProperties":false}`,
 	} {
+		strict := schemaIndex == 1
 		captured := make(chan json.RawMessage, 1)
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			var request struct {
 				Tools []struct {
 					InputSchema json.RawMessage `json:"input_schema"`
+					Strict      *bool           `json:"strict"`
 				} `json:"tools"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
@@ -33,6 +35,9 @@ func TestToolSchemaPreservedOnProviderWire(t *testing.T) {
 				w.WriteHeader(http.StatusBadRequest)
 				return
 			}
+			if wireStrict := request.Tools[0].Strict; wireStrict == nil || *wireStrict != strict {
+				t.Errorf("wire strict = %v, want %v", wireStrict, strict)
+			}
 			captured <- request.Tools[0].InputSchema
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"id":"msg-test","type":"message","role":"assistant","model":"test-model","content":[{"type":"text","text":"done"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`))
@@ -43,7 +48,7 @@ func TestToolSchemaPreservedOnProviderWire(t *testing.T) {
 		}
 		_, err = provider.Complete(t.Context(), &llm.CompletionRequest{
 			Model: "test-model", Messages: []llm.Message{{Role: "user", Content: "read"}},
-			Tools: []llm.Tool{{Name: "reviewed", Description: "Reviewed description", Parameters: json.RawMessage(schema)}},
+			Tools: []llm.Tool{{Name: "reviewed", Description: "Reviewed description", Parameters: json.RawMessage(schema), Strict: &strict}},
 		})
 		server.Close()
 		if err != nil {

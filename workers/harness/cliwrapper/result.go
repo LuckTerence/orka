@@ -23,6 +23,10 @@ import (
 	"github.com/orka-agents/orka/workers/common"
 )
 
+const (
+	noProxyEnv = "NO_PROXY"
+)
+
 const wrapperSafeCommandPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 const turnMetadataSkillsFiles = "skillsFiles"
@@ -130,7 +134,7 @@ func wrapperArtifactsDir() string {
 	return "/tmp/artifacts"
 }
 
-func (s *Server) uploadTurnArtifacts(turn TurnContext, artifactDir string) error {
+func (s *Server) uploadTurnArtifacts(ctx context.Context, turn TurnContext, artifactDir string) error {
 	resolvedArtifactDir := firstNonEmpty(artifactDir, wrapperArtifactsDir())
 	if err := prepareArtifactsForWrapper(resolvedArtifactDir); err != nil {
 		return fmt.Errorf("prepare artifacts for wrapper upload: %w", err)
@@ -143,7 +147,7 @@ func (s *Server) uploadTurnArtifacts(turn TurnContext, artifactDir string) error
 	defer restoreTaskName()
 	restoreTaskNamespace := setTemporaryEnv(workerenv.TaskNamespace, turn.Namespace)
 	defer restoreTaskNamespace()
-	return common.UploadArtifactsWithRequestAuthorization(func(request *http.Request, data []byte) error {
+	return common.UploadArtifactsWithRequestAuthorizationContext(ctx, func(request *http.Request, data []byte) error {
 		bearer, err := s.currentAuthValue()
 		if err != nil {
 			return fmt.Errorf("harness artifact authority unavailable")
@@ -389,7 +393,7 @@ func temporaryEnvEntryBlocked(key string) bool {
 		return true
 	}
 	switch upper {
-	case "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT":
+	case "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", noProxyEnv, "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT":
 		return true
 	}
 	if strings.HasPrefix(upper, "DYLD_") {
@@ -494,12 +498,12 @@ func parseWrapperDiffNameStatusPaths(raw string) []string {
 func uniqueWrapperPaths(paths []string) []string {
 	seen := make(map[string]struct{}, len(paths))
 	unique := make([]string, 0, len(paths))
-	for _, path := range paths {
-		if _, exists := seen[path]; exists {
+	for _, entryPath := range paths {
+		if _, exists := seen[entryPath]; exists {
 			continue
 		}
-		seen[path] = struct{}{}
-		unique = append(unique, path)
+		seen[entryPath] = struct{}{}
+		unique = append(unique, entryPath)
 	}
 	return unique
 }
@@ -525,7 +529,7 @@ func wrapperGitCommand(ctx context.Context, dir string, args ...string) *exec.Cm
 		"GIT_CONFIG_GLOBAL=/dev/null",
 		"GIT_CONFIG_NOSYSTEM=1",
 		"GIT_CONFIG_SYSTEM=/dev/null",
-		"GIT_TERMINAL_PROMPT=0",
+		gitTerminalPromptDisabled,
 		"HOME=/tmp/orka-empty-git-home",
 		"LC_ALL=C",
 		"PATH=" + wrapperSafeCommandPath,

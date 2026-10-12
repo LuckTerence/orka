@@ -2,7 +2,7 @@
 
 # The tag documents the human-readable version; the manifest-list digest makes
 # every supported platform immutable.
-FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.27.0-bookworm@sha256:484ef6066fa69acb059fdfeda7ba2b8f7391f2ef6abc6f9b8411e669ebd56466 AS upstream-artifacts
+FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.27.2-bookworm@sha256:5cf287a799e6b94384bad13d16b14904c531f51ba65792237e122ce42b392f61 AS upstream-artifacts
 ARG TARGETARCH
 COPY workers/acp/images/artifact-tool.go /tmp/artifact-tool.go
 RUN go build -buildvcs=false -trimpath -ldflags='-s -w' -o /usr/local/bin/artifact-tool /tmp/artifact-tool.go
@@ -89,7 +89,7 @@ RUN set -eu; \
     ln -s "/opt/claude-agent-acp/node_modules/@anthropic-ai/$native_package/claude" \
       /opt/claude/bin/claude
 
-FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.27.0-bookworm@sha256:484ef6066fa69acb059fdfeda7ba2b8f7391f2ef6abc6f9b8411e669ebd56466 AS supervisor-builder
+FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.27.2-bookworm@sha256:5cf287a799e6b94384bad13d16b14904c531f51ba65792237e122ce42b392f61 AS supervisor-builder
 ARG TARGETOS
 ARG TARGETARCH
 WORKDIR /src
@@ -111,14 +111,14 @@ LABEL org.opencontainers.image.title="Orka ACP Claude runtime" \
       org.opencontainers.image.description="Orka harness v2 ACP supervisor with Claude Agent ACP 0.61.0 and Claude Agent SDK 0.3.217 / Claude Code 2.1.217" \
       org.opencontainers.image.source="https://github.com/orka-agents/orka" \
       org.opencontainers.image.licenses="MIT AND Apache-2.0 AND LicenseRef-Anthropic-Legal-Agreements" \
-      io.orka.acp.provider="claude" \
-      io.orka.acp.adapter.version="0.61.0" \
-      io.orka.acp.adapter.revision="c19bddcf7914259d6c15103a2d1580c7371e1d16" \
-      io.orka.acp.adapter.digest="sha256:bb410d53e2d13591da5ebcaf09ae055d166ffefb27b7172988650cd62ef4ebd3" \
-      io.orka.acp.provider.version="0.3.217" \
-      io.orka.acp.provider.cli.version="2.1.217" \
-      io.orka.acp.provider.digest.amd64="sha256:8d2ccffbdf63aef1436a30b0fd32ef0eac663c3465318b181138471a68f02b92" \
-      io.orka.acp.provider.digest.arm64="sha256:51080502df2942d2092c4a5b7122eda518041fbe954027a1e128ede3cb337563"
+      ai.orka.acp.provider="claude" \
+      ai.orka.acp.adapter.version="0.61.0" \
+      ai.orka.acp.adapter.revision="c19bddcf7914259d6c15103a2d1580c7371e1d16" \
+      ai.orka.acp.adapter.digest="sha256:bb410d53e2d13591da5ebcaf09ae055d166ffefb27b7172988650cd62ef4ebd3" \
+      ai.orka.acp.provider.version="0.3.217" \
+      ai.orka.acp.provider.cli.version="2.1.217" \
+      ai.orka.acp.provider.digest.amd64="sha256:8d2ccffbdf63aef1436a30b0fd32ef0eac663c3465318b181138471a68f02b92" \
+      ai.orka.acp.provider.digest.arm64="sha256:51080502df2942d2092c4a5b7122eda518041fbe954027a1e128ede3cb337563"
 ENV HOME=/root \
     NODE_ENV=production \
     ORKA_ACP_PROVIDER=claude \

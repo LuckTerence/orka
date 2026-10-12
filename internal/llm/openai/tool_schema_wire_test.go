@@ -18,17 +18,22 @@ func TestToolSchemaPreservedOnProviderWire(t *testing.T) {
 			name = "chat-completions"
 		}
 		t.Run(name, func(t *testing.T) {
-			for _, schema := range []string{
+			for schemaIndex, schema := range []string{
 				`{"type":"object","properties":{"q":{"type":"string"}},"required":["q"]}`,
 				`{"type":"object","$defs":{"precise":{"type":"number","maximum":9007199254740993,"minimum":-9007199254740995,"multipleOf":0.12345678901234567890123456789}},"properties":{"value":{"$ref":"#/$defs/precise"}},"required":["value"],"additionalProperties":false}`,
 			} {
+				strict := schemaIndex == 1
+				store := false
 				captured := make(chan json.RawMessage, 1)
 				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					var request struct {
+						Store *bool `json:"store"`
 						Tools []struct {
 							Parameters json.RawMessage `json:"parameters"`
+							Strict     *bool           `json:"strict"`
 							Function   struct {
 								Parameters json.RawMessage `json:"parameters"`
+								Strict     *bool           `json:"strict"`
 							} `json:"function"`
 						} `json:"tools"`
 					}
@@ -43,8 +48,15 @@ func TestToolSchemaPreservedOnProviderWire(t *testing.T) {
 						return
 					}
 					raw := request.Tools[0].Parameters
+					wireStrict := request.Tools[0].Strict
 					if mode == apiModeChatCompletions {
 						raw = request.Tools[0].Function.Parameters
+						wireStrict = request.Tools[0].Function.Strict
+					} else if request.Store == nil || *request.Store {
+						t.Error("Responses schema conversion lost store=false")
+					}
+					if wireStrict == nil || *wireStrict != strict {
+						t.Errorf("wire strict = %v, want %v", wireStrict, strict)
 					}
 					captured <- raw
 					w.Header().Set("Content-Type", "application/json")
@@ -60,8 +72,8 @@ func TestToolSchemaPreservedOnProviderWire(t *testing.T) {
 				}
 				provider.mode.Store(int32(mode))
 				_, err = provider.Complete(t.Context(), &llm.CompletionRequest{
-					Model: "test-model", Messages: []llm.Message{{Role: "user", Content: "read"}},
-					Tools: []llm.Tool{{Name: "reviewed", Description: "Reviewed description", Parameters: json.RawMessage(schema)}},
+					Model: "test-model", Messages: []llm.Message{{Role: "user", Content: "read"}}, Store: &store,
+					Tools: []llm.Tool{{Name: "reviewed", Description: "Reviewed description", Parameters: json.RawMessage(schema), Strict: &strict}},
 				})
 				server.Close()
 				if err != nil {

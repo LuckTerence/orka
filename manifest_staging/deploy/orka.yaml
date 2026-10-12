@@ -1143,6 +1143,7 @@ rules:
   - agentruntimes
   - agents
   - branchclaims
+  - connections
   - controllerepochs
   - externaleffects
   - promptattempts
@@ -1170,6 +1171,8 @@ rules:
   - agentruntimes/finalizers
   - agents/finalizers
   - branchclaims/finalizers
+  - connections/finalizers
+  - connectorproviders/finalizers
   - controllerepochs/finalizers
   - externaleffects/finalizers
   - outboundaccesspolicies/finalizers
@@ -1192,6 +1195,8 @@ rules:
   - agentruntimes/status
   - agents/status
   - branchclaims/status
+  - connections/status
+  - connectorproviders/status
   - controllerepochs/status
   - externaleffects/status
   - outboundaccesspolicies/status
@@ -1210,6 +1215,16 @@ rules:
   - get
   - patch
   - update
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - connectorproviders
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
 - apiGroups:
   - core.orka.ai
   resources:
@@ -3232,6 +3247,54 @@ spec:
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
+  name: orka-acp-workspace-lease-protection
+spec:
+  failurePolicy: Fail
+  matchConditions:
+  - expression: request.?name.orValue('').startsWith('acp-suspend-quota-') || request.?name.orValue('').startsWith('acp-retention-fence-')
+      || (request.operation == 'CREATE' && (object.metadata.?generateName.orValue('').startsWith('acp-suspend-quota-')
+      || object.metadata.?generateName.orValue('').startsWith('acp-retention-fence-')))
+    name: reserved-acp-workspace-lease-name
+  matchConstraints:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: orka-system
+    resourceRules:
+    - apiGroups:
+      - coordination.k8s.io
+      apiVersions:
+      - v1
+      operations:
+      - CREATE
+      - UPDATE
+      - DELETE
+      resources:
+      - leases
+  validations:
+  - expression: request.userInfo.username == variables.controllerUser || (request.operation
+      == 'DELETE' && variables.cleanupController)
+    message: only the Orka controller may create, update, or delete ACP workspace
+      coordination Leases
+  variables:
+  - expression: '''orka-system'''
+    name: controllerNamespace
+  - expression: '''orka-controller-manager'''
+    name: controllerServiceAccount
+  - expression: '''system:serviceaccount:'' + variables.controllerNamespace + '':''
+      + variables.controllerServiceAccount'
+    name: controllerUser
+  - expression: |-
+      request.userInfo.username in [
+
+        'system:serviceaccount:kube-system:generic-garbage-collector',
+        'system:serviceaccount:kube-system:garbage-collector',
+        'system:serviceaccount:kube-system:namespace-controller',
+        'system:kube-controller-manager']
+    name: cleanupController
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
   name: orka-checkpoint-source-use.orka.ai
 spec:
   failurePolicy: Fail
@@ -3386,11 +3449,9 @@ spec:
   - expression: |-
       (request.operation == 'DELETE' &&
 
-        (request.userInfo.username == 'system:serviceaccount:kube-system:generic-garbage-collector' ||
-         request.userInfo.username == 'system:serviceaccount:kube-system:garbage-collector' ||
-         request.userInfo.username == 'system:serviceaccount:kube-system:namespace-controller' ||
-         request.userInfo.username == 'system:kube-controller-manager')) ||
-      request.userInfo.username == 'system:serviceaccount:' + variables.controllerNamespace + ':' + variables.controllerServiceAccount || request.userInfo.username == 'system:serviceaccount:' + variables.gatewayNamespace + ':' + variables.aiWorkerServiceAccount || request.userInfo.username == 'system:serviceaccount:' + variables.gatewayNamespace + ':' + variables.vendorWorkerServiceAccount || request.userInfo.username == 'system:serviceaccount:' + variables.gatewayNamespace + ':' + variables.containerWorkerServiceAccount
+        (variables.garbageCollector ||
+         request.userInfo.username == 'system:serviceaccount:kube-system:namespace-controller')) ||
+      variables.foregroundFinalizerRemoval || request.userInfo.username == 'system:serviceaccount:' + variables.controllerNamespace + ':' + variables.controllerServiceAccount || request.userInfo.username == 'system:serviceaccount:' + variables.gatewayNamespace + ':' + variables.aiWorkerServiceAccount || request.userInfo.username == 'system:serviceaccount:' + variables.gatewayNamespace + ':' + variables.vendorWorkerServiceAccount || request.userInfo.username == 'system:serviceaccount:' + variables.gatewayNamespace + ':' + variables.containerWorkerServiceAccount
     message: gateway-owned Tasks may only be managed by the owning Orka controller,
       trusted workers, or Kubernetes cleanup controllers
   variables:
@@ -3409,6 +3470,73 @@ spec:
     name: vendorWorkerServiceAccount
   - expression: '''orka-container-worker'''
     name: containerWorkerServiceAccount
+  - expression: |-
+      request.userInfo.username in [
+
+        'system:serviceaccount:kube-system:generic-garbage-collector',
+        'system:serviceaccount:kube-system:garbage-collector',
+        'system:kube-controller-manager']
+    name: garbageCollector
+  - expression: |-
+      request.operation == 'UPDATE' && (!has(request.subResource) || request.subResource == '') && variables.garbageCollector && has(oldObject.metadata.deletionTimestamp) && oldObject.metadata.deletionTimestamp != null && has(oldObject.metadata.finalizers) && 'foregroundDeletion' in oldObject.metadata.finalizers && (has(object.metadata.finalizers) ? object.metadata.finalizers : []) ==
+
+        oldObject.metadata.finalizers.filter(f, f != 'foregroundDeletion') &&
+      dyn(object).all(k, k == 'metadata' ||
+
+        (k in dyn(oldObject) && dyn(object)[k] == dyn(oldObject)[k])) &&
+      dyn(oldObject).all(k, k == 'metadata' || k in dyn(object)) && dyn(object.metadata).all(k, k == 'finalizers' || k == 'managedFields' ||
+
+        (k in dyn(oldObject.metadata) && dyn(object.metadata)[k] == dyn(oldObject.metadata)[k])) &&
+      dyn(oldObject.metadata).all(k, k == 'finalizers' || k == 'managedFields' || k in dyn(object.metadata))
+    name: foregroundFinalizerRemoval
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: orka-namespace-mode-protection
+spec:
+  failurePolicy: Fail
+  matchConditions:
+  - expression: object.metadata.?labels.orValue({}).exists(k, k == 'orka.ai/controller-mode')
+      || (request.operation == 'UPDATE' && oldObject.metadata.?labels.orValue({}).exists(k,
+      k == 'orka.ai/controller-mode'))
+    name: execution-mode-claim-present
+  matchConstraints:
+    resourceRules:
+    - apiGroups:
+      - ""
+      apiVersions:
+      - v1
+      operations:
+      - CREATE
+      - UPDATE
+      resources:
+      - namespaces
+  validations:
+  - expression: variables.newClaim == '' || variables.newClaim in ['harness-v1', 'harness-v2']
+    message: orka.ai/controller-mode must be harness-v1 or harness-v2
+  - expression: variables.oldClaim == '' || variables.newClaim == variables.oldClaim
+    message: namespace execution-mode claim is immutable; recreate the installation
+      in a different namespace
+  - expression: variables.oldClaim != '' || variables.newClaim == '' || request.operation
+      == 'CREATE' || request.userInfo.username == variables.controllerUser
+    message: only the Orka controller may claim an existing namespace for an execution
+      mode; create a new namespace for another installation
+  variables:
+  - expression: '''orka.ai/controller-mode'''
+    name: label
+  - expression: '''orka-system'''
+    name: controllerNamespace
+  - expression: '''orka-controller-manager'''
+    name: controllerServiceAccount
+  - expression: '''system:serviceaccount:'' + variables.controllerNamespace + '':''
+      + variables.controllerServiceAccount'
+    name: controllerUser
+  - expression: object.metadata.?labels[variables.label].orValue('')
+    name: newClaim
+  - expression: 'request.operation == ''UPDATE'' ? oldObject.metadata.?labels[variables.label].orValue('''')
+      : '''''
+    name: oldClaim
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
@@ -3478,6 +3606,15 @@ spec:
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
 metadata:
+  name: orka-acp-workspace-lease-protection
+spec:
+  policyName: orka-acp-workspace-lease-protection
+  validationActions:
+  - Deny
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
   name: orka-checkpoint-source-use.orka.ai
 spec:
   policyName: orka-checkpoint-source-use.orka.ai
@@ -3499,6 +3636,15 @@ metadata:
   name: orka-gateway-task-protection
 spec:
   policyName: orka-gateway-task-protection
+  validationActions:
+  - Deny
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: orka-namespace-mode-protection
+spec:
+  policyName: orka-namespace-mode-protection
   validationActions:
   - Deny
 ---

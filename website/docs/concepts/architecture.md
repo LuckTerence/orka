@@ -5,33 +5,13 @@ description: "The pieces Orka is made of, the two lifecycles a Task moves throug
 
 # Architecture
 
-Orka is a Kubernetes-native task execution platform. Container and native AI Tasks run through worker Jobs; built-in coding-agent Tasks run through the ACP v2 RuntimePool and RuntimeSession control plane.
+Orka is a Kubernetes-native task execution platform. Container and native AI Tasks run through worker Jobs; built-in coding-agent Tasks run through the Orka harness v2 RuntimePool and RuntimeSession control plane.
 
 ## Overview
 
-```text
-                               Orka Controller
-  ┌──────────────────────────────────────────────────────────────────────┐
-  │ Task/API/controllers   ACP dispatcher   RuntimePool controller       │
-  │ Kubernetes control CRDs + Leases   SQLite payload/outbox/artifacts   │
-  │ prompt MCP broker   artifact/credential brokers   publisher client   │
-  └───────────────┬─────────────────────┬────────────────────────────────┘
-                  │                     │
-          native Task paths       type: agent (ACP v2)
-             │                         │
-      ┌──────┴──────┐          ┌───────┴────────┐        ┌──────────────┐
-      │ General/AI  │          │ RuntimePool    │───────▶│ authenticated│
-      │ worker Jobs │          │ 0 or 1 Pod     │        │ provider     │
-      └─────────────┘          │ many private   │        │ proxy → Vekil│
-                               │ RuntimeSessions│        └──────────────┘
-                               └───────┬────────┘
-                                       │ validated workspace delta
-                               ┌───────┴────────────┐
-                               │ Workspace/Publisher│
-                               │ clone/prepare/CAS  │
-                               │ push/verify/PR     │
-                               └────────────────────┘
-```
+[![Simplified Orka architecture showing requests, the control plane, workers and agent runtimes, durable state, and delivery to Git or users](../../static/img/architecture/overview.svg)](../../static/img/architecture/overview.svg)
+
+Select the diagram to view it at full size.
 
 The ACP runtime and Workspace/Publisher use separate network and credential identities. Runtime Pods have only the authenticated provider-proxy and prompt-scoped MCP paths; they have no Git credentials or direct SCM publication egress. The Publisher obtains exact-operation artifact and credential capabilities from controller brokers. It has no provider/MCP access, and all HTTPS SCM and forge traffic traverses the authenticated exact-host SCM egress proxy.
 
@@ -83,10 +63,8 @@ The controller is the central component that runs as a Kubernetes Deployment. It
 
 ### Custom Resource Definitions (`api/v1alpha1/`)
 
-Current source packages 26 CRDs (v0.1.3 ships 17), but you
-only ever write a handful of them by hand. The rest are
-bookkeeping the controller creates and owns — they exist so that a controller restart, a crashed
-Pod, or a lost network call cannot lose track of work in flight.
+Orka includes 27 CRDs. You create a few resource types, such as Tasks and Agents.
+The controller manages the rest to keep track of work across restarts and failures.
 
 ```mermaid
 flowchart TD
@@ -164,16 +142,10 @@ Read them when you are debugging. Do not edit them.
 These live in their own API groups.
 
 The source Helm chart (`manifest_staging/charts/orka`) and Kustomize CRD bundle
-(`config/crd`) both contain all 26 CRDs. With Kustomize, install the shared CRDs through
+(`config/crd`) both contain all 27 production CRDs. The two development-only
+`fake.workspace.orka.ai` CRDs are excluded. With Kustomize, install the shared CRDs through
 the cluster's designated CRD owner before deploying workloads. `config/acp-production`
 excludes CRDs, and `make deploy` checks that the required shared CRDs are already established.
-
-The v0.1.3 release manifest has 17 CRDs, including all four `workspace.orka.ai` kinds,
-but lacks `RuntimeProviderConfig`, `RuntimeWorkspaceProfile`, and the current ACP execution
-path. The 12-CRD inventory belongs
-to the stale v0.1.1 `charts/orka/` snapshot. See [Release status](../reference/release-status.md)
-for the install differences; installing newer CRDs alone does not add the corresponding
-controller behavior.
 
 They also differ in whether anything reconciles them once installed. Gateway reconciliation
 is **on by default** (`--gateway-enabled` defaults to true). The workspace groups are **off
@@ -197,6 +169,7 @@ Without the dispatch gate, Tasks that reference a class are still rejected.
 |-----|-------|---------|
 | **Gateway**, **GatewayClass**, **GatewayBinding** | `gateway.orka.ai` | Accept work from an external system through an adapter. See [Gateways](../operations/gateways.md) |
 | **ExecutionWorkspace**, **ExecutionWorkspaceClass**, **ExecutionWorkspacePool**, **ExecutionWorkspaceProvider** | `workspace.orka.ai` | The class-based lifecycle for running an agent inside an external sandbox. See [Configuration](../reference/configuration.md#workspace-providers) |
+| **ExecutionWorkspaceCheckpoint** | `workspace.orka.ai` | A saved copy of workspace data for export or restore. Requires the workspace provider API |
 | **RuntimeProviderConfig**, **RuntimeWorkspaceProfile** | `acp.workspace.orka.ai` | Provider settings and per-workspace profile parameters referenced by an `ExecutionWorkspaceClass` |
 
 ### Execution images

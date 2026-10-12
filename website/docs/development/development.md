@@ -9,8 +9,8 @@ description: "Building, running, and regenerating Orka locally."
 
 | Tool | Version | Notes |
 | --- | --- | --- |
-| Go | 1.26.2 or newer | `go.mod` sets `go 1.26.2` and pins `toolchain go1.27.0`, so Go downloads 1.27.0 for you. CI builds on 1.27. |
-| Bun | current | Builds the React dashboard, which is embedded into the controller binary. |
+| Go | 1.26.2 or newer | `go.mod` keeps `go 1.26.2` and prefers `toolchain go1.27.2`. With automatic toolchain selection, Go downloads 1.27.2 when needed. CI builds on 1.27. |
+| Bun | current | Builds the React dashboard, which is embedded into the controller binary. Bun 1.4.2 has a [known Windows/WSL setup issue](#windows-bsod-during-ui-dependency-installation); use 1.3.13 there. |
 | Docker | with BuildKit | The Dockerfiles use BuildKit syntax. Docker Desktop and any modern Docker Engine have it on by default. |
 | kubectl | matching your cluster | |
 | A Kubernetes cluster | | [kind](https://kind.sigs.k8s.io/) is fine for development. |
@@ -66,13 +66,24 @@ make release-manifest NEWVERSION=vX.Y.Z[-beta.N|-rc.N]
 make promote-staging-manifest
 ```
 
-The first target updates release inputs and regenerates staging. The second copies the reviewed staging installer and chart into `deploy/` and `charts/orka/`. Normally `.github/workflows/release-pr.yml` runs both and opens the release-preparation PR. A matching `v*` tag packages and publishes those committed root snapshots; tag workflows do not regenerate or promote manifests.
+The Go command in `cmd/build/release/` handles version updates, candidate
+verification, qualification dispatch, and publication. Workflows invoke it with
+`go run ./cmd/build/release`; `make release-manifest` uses its `update-version`
+subcommand before generating staging manifests.
 
-Before tagging a release containing the RuntimePool ACP path, require a successful
-[ACP publication release qualification](acp-release-gate.md) report for the exact
-candidate commit. Dispatch the protected gate from the default branch and run
-`scripts/verify-acp-release-qualification.sh FULL_CANDIDATE_SHA WORKFLOW_RUN_ID`.
-Ordinary nightly smoke and component tests do not satisfy this publication check.
+The first target updates release inputs and regenerates staging. The second
+copies staging into `deploy/` and `charts/orka/`. **Prepare Release** in
+`.github/workflows/release-prepare.yml` runs both on `release-X.Y`, commits the
+candidate, and dispatches its checks and publication workflow using
+`GITHUB_TOKEN`. It does not create a release-preparation PR or push to `main`.
+
+The workflow builds the release images, then waits for approval in
+`release-qualification` before testing the exact packaged
+chart and image digests. After qualification, a separate `release` environment
+approval permits tagging and publication of the qualified artifacts. See
+[release automation and qualification](release-qualification.md)
+for environment setup, dispatch, evidence, and retries. Ordinary nightly smoke
+and component tests do not satisfy the publication gate.
 
 CRDs are generated into `config/crd/bases/`, while `config/crd/kustomization.yaml` selects the production APIs packaged in the installer and chart. The development-only fake workspace CRDs and RBAC are kept in the separate `config/development/fake-workspace-provider` package. Helm makes production CRDs available on fresh install but does not update them during upgrades. Apply the CRDs from the exact target chart before upgrading the controller — see [Upgrading](../operations/upgrading.md).
 
@@ -96,37 +107,38 @@ See [Testing](testing.md) for full test structure and patterns.
 
 The repository has additional GitHub Actions workflows in addition to the normal test matrix:
 
-- `Live ACP Runtime E2E` — runs on trusted default-branch changes, nightly, or by manual dispatch. It builds the current controller and all four built-in runtime images, bootstraps Kind plus Vekil and the production ACP topology, and executes live Codex, OpenCode, Claude, and Copilot RuntimePools through the canonical smoke validator.
-- `Live ACP Release Gate` — is a manual, protected-environment destructive gate that adds result/fork checks, clean-room publication to a distinct fork, PR verification and cleanup, scale-to-zero recovery, and immutable-image assertions.
-- `Live Copilot Proxy E2E` — exercises native `type: ai` and compatibility API paths through an external proxy used as test infrastructure. The canonical live ACP workflow separately executes the built-in Codex, OpenCode, Claude, and Copilot RuntimePools end to end.
+- `Agent Runtime E2E` runs on trusted default-branch changes, nightly, or by manual dispatch. It builds the current controller and all four built-in runtime images, bootstraps Kind plus Vekil and the production ACP topology, and executes Codex, OpenCode, Claude, and Copilot RuntimePools against real model providers. It uses the repository's `COPILOT_GITHUB_TOKEN` secret and runs as ordinary CI without a deployment environment.
+- `Release Qualification` verifies the candidate chart, recovery, agent execution, Git publication and GitHub API fixture tests, and cleanup. The release workflow dispatches it automatically; environment approval permits model-provider access. GitHub observations use the job token, with no stored Git publication credentials.
+- `Live Copilot Proxy E2E` — exercises native `type: ai` and compatibility API paths through an external proxy used as test infrastructure. `Agent Runtime E2E` separately executes the built-in Codex, OpenCode, Claude, and Copilot RuntimePools end to end.
 - `Live Agent Sandbox E2E` — installs the pinned upstream `agent-sandbox` release in Kind, builds the PR controller, the immutable Codex ACP runtime image, and fixture/router images, then validates the direct workspace-adapter lifecycle (claim, exec, cleanup, retained reuse, token scrubbing) **and** a workspace-backed ACP Task end to end: a `Task.spec.execution.workspace` agent Task binds a dedicated `acp-ws-*` RuntimePool whose SandboxClaim hosts the real supervisor, executes a real Codex prompt against the local Responses-compatible fixture, reaches `Succeeded`, keeps Task status provider-neutral, and cleans up. It also runs the class-backed suspend/cold-resume conformance: with the workspace provider API enabled, a session-scoped `classRef` Task suspends its workspace on detach (the exact Sandbox is consensually suspended through `operatingMode: Suspended` while its durable workspace PVC stays Bound and no runtime Pod remains), a continuation Task cold-resumes the same Sandbox, and explicit workspace deletion removes the pool, claim, Sandbox, and PVC. A lifecycle/recovery conformance additionally proves Session continuation with a preserved RuntimeSession UID, explicit cancellation of a Running prompt with bounded controller-owned settlement and no replay, a controller restart during a Running prompt with no prompt replay, and physical runtime replacement that recovers the Session from zero. It requires no external model access.
 - `Live GitHub Label Trigger E2E` — builds the PR controller image, deploys it to Kind, configures a generated webhook secret and synthetic runtime Agent, then verifies signed label webhooks create scoped agent Tasks while invalid signatures and duplicate deliveries are handled correctly. This workflow is manual, model-free, and secret-free.
 - `Live GitHub OIDC E2E` — builds the PR controller image, deploys it to Kind, authenticates to Orka with a real GitHub Actions OIDC token, and verifies `spec.requestedBy` stamping plus client provenance-tampering rejection.
 - `Gateway Live E2E` — runs on relevant pushes and pull requests or by manual dispatch. It creates a fresh Kind cluster, generates disposable TLS and bearer credentials, deploys the TLS reference adapter and deterministic echo `AgentRuntime`, and verifies invalid authentication, accepted and duplicate ingress, runtime-backed Task completion, final delivery, idempotency, and correlation metadata. It is model-free and secret-free and does not use repository or provider credentials.
 - `Repository Monitor Smoke` — runs automatically on PRs and pushes touching monitor-relevant Go, CRD/config, worker, or dependency paths. It creates the UI embed stub and runs focused Go tests for monitor store/API/controller behavior, GitHub pull request event queueing, targeted single-PR inventory runs, read-only review task job construction, stdout result forwarding, `create_pr_monitor` repository URL and credential validation, GitHub tool `repo_url` scope enforcement, and PR review marker tooling.
-- `Agent Substrate E2E` builds the PR controller, immutable Codex ACP runtime, and fixture images on a gVisor Kind cluster using the unmodified official provider pin. It checks direct native workspaces, MCP Tools, and fixture-backed ACP Tasks through the atenet-router. The class-backed lane requires DataOnly suspension, an independent Tag, exact worker termination, cold continuation with rotated credentials, and checkpoint export and restore after source deletion. The native protocol does not provide atomic Suspend/Resume/Delete preconditions; ADR 0031 defines the observed identity checks and durable recovery journal. The suite requires no external model access. Clean-room publication remains covered by the live ACP release gate.
+- `Live Connectors E2E` — builds the PR controller, the native AI worker, and the connectors fixture (an OIDC issuer, a fake OAuth provider with short-lived tokens, a resource API, and a scripted model) into Kind, then proves the linked-account lifecycle end to end: a person signs in through the OIDC fixture, links the fake provider (`POST /api/v1/connections`, the consent redirect, and the fragment-carried completion), a native `type: ai` Task created by that person reads through the linked token, its write parks for approval and runs once approved, the second read is served by a refreshed token because the first one expired meanwhile, another person sees no link, and disconnecting revokes the tokens and removes the Connection. It runs the controller with the fixture-only `--connectors-allow-private-endpoints` allowance (a literal acknowledgement value that the controller accepts only together with a plain-http localhost callback base) so the provider may live in the cluster. It is model-free and secret-free.
+- `Agent Substrate E2E` builds the PR controller, immutable Codex ACP runtime, and fixture images on a gVisor Kind cluster using the unmodified official provider pin. It checks direct native workspaces, MCP Tools, and fixture-backed ACP Tasks through the atenet-router. The class-backed lane requires DataOnly suspension, an independent Tag, exact worker termination, cold continuation with rotated credentials, and checkpoint export and restore after source deletion. The native protocol does not provide atomic Suspend/Resume/Delete preconditions; ADR 0031 defines the observed identity checks and durable recovery journal. The suite requires no external model access. Clean-room publication remains covered by `Release Qualification`.
 
 Validate workflow/script edits locally before pushing:
 
 ```bash
 bash -n scripts/live-copilot-proxy-e2e.sh
-bash -n scripts/live-acp-runtime-e2e.sh scripts/live-acp-runtime-kind-e2e.sh scripts/lib/live-acp-runtime-kind-bootstrap.sh
+bash -n scripts/agent-runtime-e2e.sh scripts/agent-runtime-kind-e2e.sh scripts/lib/agent-runtime-kind-bootstrap.sh
 bash -n scripts/live-agent-sandbox-e2e.sh
-bash -n scripts/live-github-label-trigger-e2e.sh
 bash -n scripts/live-github-oidc-e2e.sh
 bash -n scripts/agent-substrate-e2e.sh
+bash -n scripts/live-connectors-e2e.sh
 go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/live-copilot-proxy-e2e.yml
-go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/live-acp-runtime-e2e.yml
-go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/live-acp-release-gate.yml
+go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/agent-runtime-e2e.yml
+go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/release-qualification.yml
 go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/live-agent-sandbox-e2e.yml
-go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/live-github-label-trigger-e2e.yml
 go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/live-github-oidc-e2e.yml
 go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/gateway-e2e.yml
 go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/repository-monitor-smoke.yml
 go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/agent-substrate-e2e.yml
+go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/live-connectors-e2e.yml
 ```
 
-The agent-sandbox and Substrate scripts validate workspace-backed ACP v2 Tasks against a local model fixture. Substrate also covers controller restart, DataOnly suspension, cold continuation, checkpoint file recovery, cancellation, timeout, and cleanup. External-provider execution, clean-room publication, pool replacement, and the broader runtime matrix remain covered by the live ACP workflows. Workspace-provider-backed dispatch is still flag-gated behind `--acp-workspace-dispatch-enabled` plus the matching provider flag (`--agent-sandbox-enabled` or `--substrate-enabled`) and fails closed otherwise.
+The agent-sandbox and Substrate scripts validate workspace-backed Orka harness v2 Tasks against a local model fixture. Substrate also covers controller restart, DataOnly suspension, cold continuation, checkpoint file recovery, cancellation, timeout, and cleanup. External-provider execution, clean-room publication, pool replacement, and the broader runtime matrix remain covered by `Agent Runtime E2E` and `Release Qualification`. Workspace-provider-backed dispatch is still flag-gated behind `--acp-workspace-dispatch-enabled` plus the matching provider flag (`--agent-sandbox-enabled` or `--substrate-enabled`) and fails closed otherwise.
 
 The GitHub OIDC live script requires GitHub Actions `id-token: write` or a manual `ORKA_GITHUB_OIDC_TOKEN`; without either, it fails fast before creating a cluster. Transaction-token provider E2E now lives in the external integration repository.
 
@@ -140,7 +152,7 @@ bash scripts/agent-substrate-e2e.sh
 
 ## Harness wrapper real-world validation
 
-When changing ACP runtime supervision or broker boundaries, validate them against a live cluster, not only unit tests. Use `scripts/live-acp-runtime-e2e.sh` for an already deployed cluster, or `scripts/live-acp-runtime-kind-e2e.sh` to create the same ephemeral Kind/Vekil topology used by CI.
+When changing ACP runtime supervision or broker boundaries, validate them against a live cluster, not only unit tests. Use `scripts/agent-runtime-e2e.sh` for an already deployed cluster, or `scripts/agent-runtime-kind-e2e.sh` to create the same ephemeral Kind/Vekil topology used by CI.
 
 ## OpenTelemetry development
 
@@ -150,8 +162,11 @@ controller flag is enabled and a worker-reachable OTLP endpoint is configured,
 AI worker Jobs receive `ORKA_ENABLE_TELEMETRY=true`, `ORKA_TRACEPARENT`, and the
 non-secret standard OTLP environment. ACP attempt, RuntimeSession, and
 publication spans run in the controller and use its exporter. Managed
-RuntimePool workloads do not currently inherit controller OTLP configuration or
-expose a supervisor telemetry opt-in. Delegated child Tasks continue the active
+RuntimePool supervisors receive non-secret trace exporter settings and continue
+W3C context carried in authenticated v2 request headers. Provider children remain
+outside this instrumentation. Collector routing is operator-owned; see the
+[observability guide](../guides/observability.md#enable-telemetry) for supported
+settings and network prerequisites. Delegated child Tasks continue the active
 parent trace through Task annotations.
 
 GenAI semantic-convention constants live in `internal/tracing/genai` rather than
@@ -254,6 +269,47 @@ make manifests
 
 See [Helm Chart Generation and Releases](#helm-chart-generation-and-releases)
 for how staging output is promoted into `deploy/` at release time.
+
+## Setup gotchas
+
+### Windows BSOD during UI dependency installation
+
+:::note[Known issue with Bun 1.4.2 on Windows/WSL]
+
+On Windows, Bun 1.4.2 may cause a BSOD while `make ui-install` runs
+`bun install`. If this happens, remove Bun 1.4.2 and install the version
+currently used by Orka CI (`1.3.13`):
+
+For native Windows Bun, run:
+
+```powershell
+& "$env:USERPROFILE\.bun\uninstall.ps1"
+iex "& {$(irm https://bun.com/install.ps1)} -Version 1.3.13"
+```
+
+For Bun installed inside WSL, run:
+
+```bash
+rm -rf "$HOME/.bun"
+curl -fsSL https://bun.com/install | bash -s "bun-v1.3.13"
+```
+
+Restart the terminal and verify the installed version:
+
+```bash
+bun --version
+```
+
+The command should report `1.3.13`. Then retry:
+
+```bash
+make ui-install
+```
+
+If Orka CI moves to a newer Bun version, check the `bun-version` in
+`.github/workflows/test.yml` before applying this workaround.
+
+:::
 
 ## Build gotchas
 

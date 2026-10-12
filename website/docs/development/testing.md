@@ -20,6 +20,9 @@ make test
 make test
 go tool cover -func=cover.out | grep total
 
+# Run release automation and workspace cleanup tests without a cluster
+go test ./cmd/build/release ./scripts/tests
+
 # Run frontend tests
 make ui-test                # or: cd ui && bun run test
 make ui-test-coverage       # or: cd ui && bun run test:coverage
@@ -67,6 +70,8 @@ Tests use **Ginkgo + Gomega** (BDD style) for controller/integration tests and s
 
 | Package | Test Files | Coverage Areas |
 |---------|-----------|----------------|
+| `cmd/build/release/` | `workflow_test.go`, `prepare_test.go`, `publish_test.go`, `version_test.go` | Release version edits, trusted tooling, branch races, artifact identity, approval evidence, chart publication, and retries. Uses local Git repositories and Helm; GitHub and registry responses are fixtures. |
+| `scripts/tests/` | `workspace_lifecycle_test.go` | Workspace cancellation, session archival, suspension, and deletion ordering using Bash and jq fixtures. |
 | `internal/api/` | `handlers_test.go`, `internal_handlers_test.go`, `auth_test.go`, `middleware_test.go`, `pagination_test.go`, `server_test.go`, `openai_compat_test.go` | REST API handlers, internal API handlers, memory/session APIs, authentication, middleware, pagination, OpenAI compatibility |
 | `internal/controller/` | `task_controller_test.go`, `agent_controller_test.go`, `tool_controller_test.go`, `session_manager_test.go`, `job_builder_test.go`, `repositoryscan_controller_test.go`, `webhook_test.go` | Reconciliation logic, session management, job building, coordination enforcement, repository scan mapper/finding/patch ingestion |
 | `internal/security/` | `security_test.go`, `contracts_test.go` | Repository security artifact contracts, v2 evidence validation, fingerprinting, bounded context manifests, prompt helpers |
@@ -111,15 +116,14 @@ End-to-end tests run against a dedicated Kind cluster:
 | `test/e2e/gateway_test.go` | Authenticated Gateway ingress through a deterministic external `AgentRuntime`, including TLS adapter readiness, invalid bearer rejection, accepted and duplicate events, Task execution, completed events, delivered replies, idempotency, and Task/delivery correlation |
 | `.github/workflows/gateway-e2e.yml` | Focused, model-free, secret-free Gateway live E2E in Kind using generated bearer tokens, an ephemeral CA, the TLS reference adapter, and the deterministic echo runtime |
 | `.github/workflows/live-agent-sandbox-e2e.yml` / `scripts/live-agent-sandbox-e2e.sh` | Live upstream `agent-sandbox` Kind validation for Orka agent workspace claim, sandbox execution, delete cleanup, retained-session reuse, and token scrubbing using a fake model-free Claude runtime |
-| `.github/workflows/live-github-label-trigger-e2e.yml` / `scripts/live-github-label-trigger-e2e.sh` | Manual model-free GitHub label trigger validation for HMAC rejection, signed webhook Task creation, scoped workspace settings, and duplicate delivery idempotency |
 | `.github/workflows/repository-monitor-smoke.yml` | Focused RepositoryMonitor smoke coverage for store CRUD, API handlers, pull request event handling, targeted single-PR inventory runs, controller queue/review flow, blocked status counts, read-only review task job building, result stdout forwarding, `create_pr_monitor` repository URL and credential validation, GitHub tool `repo_url` scope enforcement, and PR review marker tooling |
 | `.github/workflows/security-scan-e2e.yml` / `scripts/security-scan-e2e.sh` | Secret-free repository security scan Kind validation against pinned `sozercan/nodejs-goof` using the real mapper, deterministic fake Codex analyzer, v2 finding ingestion/drop diagnostics, threat-model rejection, idempotent rescan, and HITL no-auto-patch gating |
 | `test/e2e/tools_test.go` | Built-in tools (including `web_fetch`, `file_write`) and custom Tool CRD |
 | `test/e2e/scheduled_task_test.go` | Cron scheduling, suspend, `concurrencyPolicy: Forbid`, history-limit cleanup |
 | `test/e2e/task_lifecycle_test.go` | Timeout/retry/cancel plus session serialization and lock release |
-| `scripts/live-acp-runtime-e2e.sh` | Canonical deployed-cluster ACP smoke/release gate for Codex, OpenCode, Claude, and Copilot RuntimePools, exact Pod/runtime identity, workspace read/write, continuation/fork, cancellation/timeout, restart/replacement, publication/PR verification, drain/scale-to-zero, immutable images, and cleanup |
-| `.github/workflows/live-acp-runtime-e2e.yml` / `scripts/live-acp-runtime-kind-e2e.sh` | Trusted-branch/nightly/manual live ACP smoke that bootstraps an ephemeral Kind cluster, Vekil, and the production ACP topology before invoking the canonical validator |
-| `.github/workflows/live-acp-release-gate.yml` / `scripts/live-acp-runtime-kind-e2e.sh` | Manual, protected-environment release acceptance with destructive publication, independent GitHub verification, PR reconciliation, and cleanup |
+| `scripts/agent-runtime-e2e.sh` | Canonical deployed-cluster ACP smoke/release gate for Codex, OpenCode, Claude, and Copilot RuntimePools, exact Pod/runtime identity, workspace read/write, continuation/fork, cancellation/timeout, restart/replacement, publication/PR verification, drain/scale-to-zero, immutable images, and cleanup |
+| `.github/workflows/agent-runtime-e2e.yml` / `scripts/agent-runtime-kind-e2e.sh` | Trusted-branch/nightly/manual agent runtime smoke that calls real model providers, requires credentials, and bootstraps an ephemeral Kind cluster, Vekil, and the production ACP topology before invoking the canonical validator |
+| `.github/workflows/release-qualification.yml` / `scripts/agent-runtime-kind-e2e.sh` | Environment-approved chart and runtime acceptance, real local Git publication tests, GitHub API fixture tests, and cleanup; no stored Git publication credentials |
 
 The Gateway Live E2E workflow (`.github/workflows/gateway-e2e.yml`) runs on manual dispatch and on pull requests or pushes that touch Gateway-relevant source, configuration, E2E, image, or dependency paths. It creates a dedicated Kind cluster, generates disposable TLS and bearer credentials, deploys the TLS reference adapter and deterministic echo `AgentRuntime`, and verifies invalid bearer rejection, accepted and duplicate ingress, runtime-backed Task completion, final delivery, idempotency, and correlation metadata. The workflow is model-free and secret-free; it does not use repository or provider credentials.
 
@@ -132,42 +136,46 @@ missing or mismatched artifacts staying not ready.
 
 ### E2E key requirements
 
-- `scripts/live-acp-runtime-e2e.sh --context <context>` is the canonical ACP
+- `scripts/agent-runtime-e2e.sh --context <context>` is the canonical ACP
   deployed-cluster validator. Its default mode is a smoke test; set
-  `RELEASE_GATE=1` for destructive release acceptance. A smoke result explicitly
-  reports the publication, remote-verification, Task result/fork, and
-  scale-to-zero scenarios that remain release-only.
-- `scripts/live-acp-runtime-kind-e2e.sh` is the CI/local bootstrap entrypoint. It
+  `RELEASE_GATE=1` for full runtime acceptance, including Task result/fork and
+  scale-to-zero scenarios. The Kind wrapper also requires uncached publication
+  tests. A smoke result cannot qualify a release. Live GitHub publication is
+  available only through an explicit local opt-in.
+- `scripts/agent-runtime-kind-e2e.sh` is the CI/local bootstrap entrypoint. It
   creates an ephemeral Kind cluster, deploys Vekil and the production ACP
   topology with digest-pinned local images, and then calls the canonical script.
-- `.github/workflows/live-acp-runtime-e2e.yml` runs on relevant pushes to the
-  default branch, nightly, and manual dispatch. It uses the
-  `live-acp-runtime-smoke` environment and requires its
-  `COPILOT_GITHUB_TOKEN` secret so Vekil can exercise Codex, OpenCode, Claude, and Copilot
-  without mounting provider credentials into RuntimePools. Restrict that
-  environment to the default branch; do not require reviewers if scheduled runs
-  must proceed unattended.
-- `.github/workflows/live-acp-release-gate.yml` is manual-only and serialized.
-  Restrict the `live-acp-release-gate` environment to the default branch. It
-  accepts the configured canary fork, a full
-  source SHA that must equal the dispatched workflow commit and default-branch
-  head, and the default branch as the PR base. It requires these environment
-  secrets:
-  `COPILOT_GITHUB_TOKEN`, `ACP_E2E_WRITE_READ_CREDENTIAL_TOKEN`,
-  `ACP_E2E_WRITE_TARGET_READ_CREDENTIAL_TOKEN`,
-  `ACP_E2E_WRITE_CREDENTIAL_TOKEN`, and
-  `ACP_E2E_WRITE_FORGE_CREDENTIAL_TOKEN`. Configure the four publication
-  credentials as distinct, least-privilege GitHub credentials for source read,
-  target read, target write, and forge/verification cleanup respectively.
-  [ACP publication release qualification](acp-release-gate.md) documents the
-  dedicated fork, exact permissions, trusted dispatch, report verification,
-  and recovery from a moved base or preserved canary. Release qualification
-  requires that report for the exact candidate; smoke success is insufficient.
-- Neither live ACP workflow runs for `pull_request`, so PR-controlled code never
-  receives provider or publication credentials. Both check out with persisted
+- `.github/workflows/agent-runtime-e2e.yml` runs on relevant pushes to the
+  default branch, nightly, and manual dispatch. It requires the repository's
+  `COPILOT_GITHUB_TOKEN` secret so Vekil can exercise Codex, OpenCode, Claude, and
+  Copilot against real model providers without mounting provider credentials
+  into RuntimePools. The workflow rejects dispatches from other branches before
+  using the secret. It runs unattended as ordinary CI without a deployment
+  environment.
+  When migrating from `live-acp-runtime-smoke`, ensure the provider secret is
+  available at repository scope. After the renamed workflow succeeds, retire
+  the old environment and preserve its deployment history.
+- `.github/workflows/release-qualification.yml` uses `workflow_dispatch` and is
+  serialized. The release workflow dispatches it automatically. Restrict the
+  `release-qualification` environment to `main` and exact permitted release
+  branches, require a trusted reviewer, and disable administrator bypass before
+  exposing model-provider credentials. It accepts a full source SHA that must
+  equal both the dispatched workflow commit and selected branch head. GitHub
+  observations use the job's temporary `GITHUB_TOKEN` with `contents: read`.
+  `COPILOT_GITHUB_TOKEN` supplies model-provider access and can come from the
+  existing repository secret. No stored Git publication token or fork setting
+  is needed. Publication tests use real temporary Git repositories and local
+  GitHub API test servers. They do not prove the complete cluster-to-GitHub
+  publication path or live organization permissions.
+  [Release qualification](release-qualification.md) documents trusted dispatch,
+  required test evidence, report verification, and cleanup. Qualification needs
+  the report for the exact candidate; smoke success is insufficient.
+- Neither `Agent Runtime E2E` nor `Release Qualification` runs for `pull_request`, so PR-controlled code never
+  receives provider credentials. Both check out with persisted
   credentials disabled and expose secrets only to the final local script step.
-  They intentionally keep `permissions` at `contents: read` and do not request
-  `id-token: write`; GitHub OIDC validation remains isolated in
+  The release gate adds `actions: read` to `contents: read` to verify the
+  environment branch rules and download candidate artifacts using the native
+  token. Neither workflow requests `id-token: write`; GitHub OIDC validation remains isolated in
   `live-github-oidc-e2e.yml`.
 - The release gate additionally requires digest-pinned controller, Publisher,
   Codex, OpenCode, Claude, and Copilot images; a Ready central provider proxy; the
@@ -187,18 +195,18 @@ missing or mismatched artifacts staying not ready.
   `type: ai` test cases. They are not mounted into built-in ACP RuntimePools.
 - `COPILOT_GITHUB_TOKEN` also remains the credential for
   `live-copilot-proxy-e2e.yml`, which covers the external proxy as native
-  Provider test infrastructure. The canonical live ACP workflow is the
+  Provider test infrastructure. `Agent Runtime E2E` provides the
   provider-execution evidence for the built-in RuntimePool profiles.
 - Structural e2e tests for native worker Jobs run without external model keys.
 - `Live Agent Sandbox E2E` and `Agent Substrate E2E` do run workspace-backed ACP Tasks
   end to end against a local model fixture, but they are not the full release gate:
-  external-provider execution and clean-room publication stay with the live ACP workflows.
+  external-provider execution and clean-room publication stay with `Agent Runtime E2E`
+  and `Release Qualification`.
   Every Substrate run includes DataOnly suspension, cold continuation, and
   checkpoint file recovery against the unmodified upstream provider.
 - Security Scan E2E is secret-free and model-free, but requires Docker plus the
   local Go, Kind, kubectl, curl, and jq toolchain.
 
-- The live GitHub label trigger workflow is manual, model-free, and secret-free. It requires Docker, Kind, kubectl, curl, jq, and Python locally, accepts `GITHUB_LABEL_TRIGGER_TARGET_REPO_URL` and `GITHUB_LABEL_TRIGGER_TARGET_NUMBER` overrides, and sends only synthetic webhook payloads to the local Orka API.
 - Gateway Live E2E is model-free and secret-free. Its focused invocation sets `E2E_GATEWAY=true` and `E2E_EPHEMERAL_CLUSTER=true`; the last flag skips per-resource suite cleanup because the caller deletes the entire Kind cluster.
 - GitHub Actions `id-token: write` permission: required by the live GitHub OIDC workflow. For local/manual runs of `scripts/live-github-oidc-e2e.sh`, set `ORKA_GITHUB_OIDC_TOKEN` to a valid JWT instead. Provider-specific transaction-token E2E lives in the external integration repositories.
 - `E2E_LIVE_COPILOT_PROXY_BASE_URL` (or `E2E_COPILOT_PROXY_BASE_URL` / `COPILOT_PROXY_BASE_URL`): enables the focused live copilot-proxy spec against a running proxy
@@ -206,47 +214,56 @@ missing or mismatched artifacts staying not ready.
 - `E2E_LIVE_ACP_PROVIDER_PROXY_SERVICE_NAMESPACE`, `E2E_LIVE_ACP_PROVIDER_PROXY_SERVICE_NAME`, `E2E_LIVE_ACP_PROVIDER_PROXY_SERVICE_PORT`: model-discovery coordinates for the ACP RuntimePool matrix. The full live script pins these to `vekil-system`, `vekil`, and `1337` so built-in RuntimePools traverse the production provider-proxy DNS and NetworkPolicy boundary.
 
 
+Live provider/chat tests prefer `gpt-5-mini` and `claude-haiku-4.5` when available.
+The runtime smoke and release qualification scripts default to `gpt-5.4-mini`
+for Codex and OpenCode, `claude-haiku-4.5` for Claude, and `gpt-5.3-codex` for
+Copilot. Override these with `ACP_E2E_CODEX_MODEL`, `ACP_E2E_OPENCODE_MODEL`,
+`ACP_E2E_CLAUDE_MODEL`, or `ACP_E2E_COPILOT_MODEL`. Configured models must pass
+the Vekil catalog and streaming probes.
+
 Run the trusted smoke bootstrap locally with the token exported in the shell
 rather than placed on a command line:
 
 ```bash
 read -rsp 'Copilot provider token: ' COPILOT_GITHUB_TOKEN && echo
 export COPILOT_GITHUB_TOKEN
-export ACP_E2E_OPENCODE_MODEL=openai/gpt-5.4
+export ACP_E2E_OPENCODE_MODEL=openai/gpt-5.4-mini
 export ACP_E2E_OPENCODE_CONTEXT_WINDOW=32768
 export ACP_E2E_OPENCODE_MAX_TOKENS=4096
-ACP_E2E_KIND_TAG=local bash scripts/live-acp-runtime-kind-e2e.sh
+ACP_E2E_KIND_TAG=local bash scripts/agent-runtime-kind-e2e.sh
 ```
 
-For a manual release gate, also export the four role-specific credential values,
-set `ACP_E2E_WRITE_SOURCE_REPO`, `ACP_E2E_WRITE_PUBLICATION_REPO`,
-`ACP_E2E_WRITE_SOURCE_REF`, and `ACP_E2E_WRITE_PR_BASE`, then run:
+For a local qualification diagnostic, use read-only GitHub CLI access and the
+same model-provider configuration as the smoke run. GitHub's automatic job
+token is available only inside Actions. To use that token without configuring
+local GitHub access, dispatch
+[Release Qualification](release-qualification.md#standalone-qualification).
+
+The local wrapper runs the required Git and PR fixture tests before creating
+the cluster:
 
 ```bash
 export RELEASE_GATE=1
-export ACP_E2E_WRITE_CREATE_PR=1
-export ACP_E2E_WRITE_SOURCE_REPO=https://github.com/orka-agents/orka.git
-export ACP_E2E_WRITE_PUBLICATION_REPO=https://github.com/sozercan/orka-acp-release-gate.git
-export ACP_E2E_WRITE_SOURCE_REF="$(git rev-parse HEAD)"
-export ACP_E2E_WRITE_PR_BASE=main
-read -rsp 'Source-read token: ' ACP_E2E_WRITE_READ_CREDENTIAL_TOKEN && echo
-read -rsp 'Target-read token: ' ACP_E2E_WRITE_TARGET_READ_CREDENTIAL_TOKEN && echo
-read -rsp 'Target-write token: ' ACP_E2E_WRITE_CREDENTIAL_TOKEN && echo
-read -rsp 'Forge token: ' ACP_E2E_WRITE_FORGE_CREDENTIAL_TOKEN && echo
-export ACP_E2E_WRITE_READ_CREDENTIAL_TOKEN ACP_E2E_WRITE_TARGET_READ_CREDENTIAL_TOKEN
-export ACP_E2E_WRITE_CREDENTIAL_TOKEN ACP_E2E_WRITE_FORGE_CREDENTIAL_TOKEN
-export GH_TOKEN="${ACP_E2E_WRITE_FORGE_CREDENTIAL_TOKEN}"
-bash scripts/live-acp-runtime-kind-e2e.sh
+export ACP_E2E_WRITE_CREATE_PR=0
+export ACP_E2E_REPO=https://github.com/orka-agents/orka.git
+export ACP_E2E_REF="$(git rev-parse HEAD)"
+export ACP_E2E_BASE_BRANCH=main
+bash scripts/agent-runtime-kind-e2e.sh
 ```
 
-In release mode the Kind wrapper binds `ACP_E2E_REPO` and `ACP_E2E_REF` to the
-write source repository and SHA, and rejects explicitly supplied read values
-that differ. The read/runtime phases and publication phase therefore validate
-the same immutable source. The image build requires a clean checkout at that
-commit. Local reports are saved under `bin/acp-release-*/acceptance.json`, or
+The fixture tests, image build, and runtime phases use the same candidate.
+The wrapper requires a clean checkout at that commit, and the candidate must
+equal the selected branch head. Local reports are saved under
+`bin/acp-release-*/acceptance.json`, or
 `ACP_E2E_REPORT_FILE` when set. `--keep-cluster` leaves cleanup pending and cannot
 qualify a release; use the trusted workflow and report verifier above for release
 records.
+
+The existing local live GitHub diagnostic remains available with
+`ACP_E2E_WRITE_CREATE_PR=1` and separately authorized canary credentials. Its
+four-role and distinct-fork requirements are listed in the validator's `--help`.
+The hosted release workflow cannot enable it and explicitly reports live GitHub
+publication as `not_tested`.
 
 Do not enable shell xtrace for either invocation. The scripts create Kubernetes
 Secrets without printing their values and redact provider/GitHub token patterns
@@ -254,11 +271,11 @@ from failure diagnostics.
 
 
 The live agent-sandbox workflow validates both the direct workspace-adapter
-lifecycle and the initial workspace-backed ACP v2 happy path. It builds the
+lifecycle and the initial workspace-backed Orka harness v2 happy path. It builds the
 real Codex supervisor, routes a prompt through a local Responses-compatible
 fixture, waits for the Task to succeed, verifies provider-neutral status, and
-cleans up the dedicated RuntimePool. It does not replace the broader live ACP
-release gate or provide publication evidence. Its direct-adapter assertions
+cleans up the dedicated RuntimePool. It does not replace release qualification
+or provide publication evidence. Its direct-adapter assertions
 also include:
 
 - the adapter creates a v1beta1 `SandboxClaim` with the expected `warmPoolRef` and executes a command with caller-supplied env inside the sandbox
@@ -266,14 +283,7 @@ also include:
 - `cleanupPolicy: retain` plus `reusePolicy: session` reattaches to the deterministic session claim
 - retained workspace state persists across tasks
 
-The live GitHub label trigger workflow (`.github/workflows/live-github-label-trigger-e2e.yml`) runs `scripts/live-github-label-trigger-e2e.sh` from manual `workflow_dispatch`. It builds the controller from the PR, deploys it to a fresh Kind cluster, configures a generated `ORKA_GITHUB_WEBHOOK_SECRET`, creates a synthetic runtime Agent, and posts a signed `agent:implement` issue label payload to `/webhooks/github`. The script asserts:
-
-- invalid webhook signatures return `401`
-- a signed label event returns `201` and creates a `type: agent` Task
-- the created Task points at the configured GitHub repository clone URL and default branch
-- no push branch or git credential Secret is configured for the synthetic task
-- GitHub delivery annotations are recorded on the Task
-- a repeated delivery returns `202` with the original task name
+The RepositoryMonitor validation bundle covers the canonical signed `orka:implement` entrypoint, durable intake, pause controls, and replay against GitHub fixtures.
 
 The live GitHub OIDC workflow (`.github/workflows/live-github-oidc-e2e.yml`) runs `scripts/live-github-oidc-e2e.sh` in GitHub Actions with `id-token: write`. It builds the controller from the PR, deploys it to a fresh Kind cluster, configures the GitHub OIDC issuer and workflow audience, fetches a real Actions OIDC token, and validates:
 
