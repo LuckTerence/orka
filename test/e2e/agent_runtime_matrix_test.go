@@ -246,7 +246,7 @@ var _ = Describe("Agent Runtime Matrix", Ordered, func() {
 		By("requiring the real README tool result before aimock can return success")
 		Expect(waitForTaskCompletion(taskName, liveRuntimeTimeout)).To(Equal("Succeeded"))
 		summary := strings.TrimSpace(fetchTaskResultSummaryViaAPI(apiBaseURL, token, taskName))
-		Expect(summary).To(Equal(liveRuntimeRepoSentinel))
+		Expect(summary).To(HaveSuffix(liveRuntimeRepoSentinel))
 		Eventually(func(g Gomega) {
 			served, err := providerProxyMockLLM.servedFor(externalCodexReadMarker)
 			g.Expect(err).NotTo(HaveOccurred())

@@ -74,7 +74,7 @@ func waitForExternalCodexWorkspace(taskName, className, providerName string) ext
 		g.Expect(pool.Spec.Capacity.MaxRunningPrompts).To(Equal(int32(1)))
 		binding := pool.Spec.ExecutionWorkspace
 		g.Expect(binding).NotTo(BeNil())
-		g.Expect(string(binding.Provider)).To(Equal(providerName))
+		g.Expect(string(binding.Provider)).To(Equal(externalFakeWorkspaceProviderControllerName))
 		g.Expect(binding.WorkspaceRef).NotTo(BeNil())
 		g.Expect(binding.WorkspaceRef.Name).To(Equal(projection.WorkspaceRef.Name))
 		g.Expect(pool.Status.ActiveInstance).NotTo(BeNil())
