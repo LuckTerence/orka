@@ -4,8 +4,8 @@
 <meta charset="UTF-8">
 <meta name="generator" content="Docusaurus v3.10.1">
 <title data-rh="true">Release automation and qualification | Orka</title><meta data-rh="true" name="viewport" content="width=device-width,initial-scale=1"><meta data-rh="true" name="twitter:card" content="summary_large_image"><meta data-rh="true" property="og:url" content="https://orka-agents.github.io/orka/docs/development/release-qualification"><meta data-rh="true" property="og:locale" content="en"><meta data-rh="true" name="docusaurus_locale" content="en"><meta data-rh="true" name="docsearch:language" content="en"><meta data-rh="true" name="docusaurus_version" content="current"><meta data-rh="true" name="docusaurus_tag" content="docs-default-current"><meta data-rh="true" name="docsearch:version" content="current"><meta data-rh="true" name="docsearch:docusaurus_tag" content="docs-default-current"><meta data-rh="true" property="og:title" content="Release automation and qualification | Orka"><meta data-rh="true" name="description" content="Qualify a release candidate with chart installation, recovery, agent execution, and verified cleanup."><meta data-rh="true" property="og:description" content="Qualify a release candidate with chart installation, recovery, agent execution, and verified cleanup."><link data-rh="true" rel="canonical" href="https://orka-agents.github.io/orka/docs/development/release-qualification"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/development/release-qualification" hreflang="en"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/development/release-qualification" hreflang="x-default"><script data-rh="true" type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Release automation and qualification","item":"https://orka-agents.github.io/orka/docs/development/release-qualification"}]}</script><link rel="stylesheet" href="/orka/assets/css/styles.c6d2e437.css">
-<script src="/orka/assets/js/runtime~main.b3769f5f.js" defer="defer"></script>
-<script src="/orka/assets/js/main.df8d7fca.js" defer="defer"></script>
+<script src="/orka/assets/js/runtime~main.832a34e7.js" defer="defer"></script>
+<script src="/orka/assets/js/main.c90803b7.js" defer="defer"></script>
 </head>
 <body>
 <svg style="display: none;"><defs>
@@ -38,7 +38,7 @@ SBOMs, and signs the images. Trivy findings remain advisory; scanner and
 SARIF-upload failures still fail the run.</li>
 <li class="">Release dispatches <strong>Release Qualification</strong> with the exact candidate
 bundle. A <code>release-qualification</code> environment reviewer must approve the
-candidate source and workflow before the job can receive model-provider credentials.
+candidate source and workflow before the job runs.
 The gate runs Git publication and GitHub API fixture tests from that checkout,
 then installs the packaged chart using the built image digests,
 verifies durable results after controller replacement, rejects an
@@ -92,7 +92,7 @@ its job summary. Review the candidate source, workflows, generated changes, and
 build bundle before approving the waiting <code>release-qualification</code> deployment.
 After qualification succeeds, review the acceptance evidence and approve the
 <code>release</code> deployment. The per-release human actions are dispatch, approval to
-run qualification with model-provider access, and approval to publish.</p>
+run qualification, and approval to publish.</p>
 <p>Finish or cancel any existing qualification run before starting another. The
 release checks for active or approval-pending runs before dispatch. If a
 simultaneous dispatch takes the concurrency slot first, the release requests
@@ -120,11 +120,19 @@ Prepare and qualify the new head. Only the newest stable release updates
 <code>latest</code>; an older release line cannot move it backwards. Beta and RC versions
 never update <code>latest</code> or the minor-version alias.</p>
 <h2 class="anchor anchorTargetStickyNavbar_Vzrq" id="coverage-and-environment">Coverage and environment<a href="#coverage-and-environment" class="hash-link" aria-label="Direct link to Coverage and environment" title="Direct link to Coverage and environment" translate="no">​</a></h2>
-<p>Release qualification needs no stored GitHub repository token or custom GitHub
-App. GitHub observations use the job&#x27;s temporary <code>GITHUB_TOKEN</code> with read-only
+<p>Release qualification needs no stored GitHub repository token, custom GitHub
+App, or model-provider credential. Agent execution runs against aimock deployed
+as <code>vekil-system/vekil</code> behind the production provider proxy, scripted by
+<code>scripts/fixtures/agent-runtime-aimock</code> (<code>ACP_E2E_MODEL_BACKEND=aimock</code>), and the
+report records <code>coverage.modelBackend</code>. Qualification checks the shipped
+artifacts: each runtime image must start from the packaged chart and complete a
+workspace read. Runtime behavior (continuation, forks, concurrency,
+cancellation, timeout, restart, replacement, and scale to zero) runs on every PR
+in the <code>Agent runtime lifecycle</code> job of <code>test-e2e.yml</code>, and real-model drift is
+not part of qualification. GitHub observations use the job&#x27;s temporary <code>GITHUB_TOKEN</code> with read-only
 access. Runtime Tasks clone the public candidate repository without a stored
 Git credential. Qualification creates no GitHub branch or PR.</p>
-<table><thead><tr><th>Check</th><th>Required coverage</th></tr></thead><tbody><tr><td>Codex, OpenCode, Claude, and Copilot</td><td>Live workspace reads, API results, Session continuation, and Task forks</td></tr><tr><td>Runtime lifecycle</td><td>Concurrency, cancellation, timeout, controller restart, pool replacement, and scale-to-zero recovery</td></tr><tr><td>Isolation and deployment</td><td>Unsafe workspace rejection, read policy, publisher broker configuration, and exact deployed image digests</td></tr><tr><td>Branch publication</td><td>Publisher and service tests against real temporary Git repositories, including exact-head pushes, conflicts, retries, and cleanup</td></tr><tr><td>PR reconciliation</td><td>Local GitHub API test servers exercise creation, reuse, head changes, ambiguous responses, Session ownership, and credential boundaries</td></tr><tr><td>Release artifacts</td><td>The exact packaged chart and image digests, durable results after controller replacement, no Task replay, and opposite-mode rejection</td></tr></tbody></table>
+<table><thead><tr><th>Check</th><th>Required coverage</th></tr></thead><tbody><tr><td>Codex, OpenCode, Claude, and Copilot</td><td>A workspace read with a scripted model and its API result, on the digest-pinned runtime image</td></tr><tr><td>Isolation and deployment</td><td>Unsafe workspace rejection, publisher broker configuration, and exact deployed image digests</td></tr><tr><td>Branch publication</td><td>Publisher and service tests against real temporary Git repositories, including exact-head pushes, conflicts, retries, and cleanup</td></tr><tr><td>PR reconciliation</td><td>Local GitHub API test servers exercise creation, reuse, head changes, ambiguous responses, Session ownership, and credential boundaries</td></tr><tr><td>Release artifacts</td><td>The exact packaged chart and image digests, durable results after controller replacement, no Task replay, and opposite-mode rejection</td></tr></tbody></table>
 <p>Publication tests execute the publisher code with fixtures. They do not prove
 the complete cluster-to-GitHub publication path, live GitHub authentication,
 organization permissions, or a cross-repository PR round trip. The report
@@ -134,14 +142,12 @@ explicitly records <code>coverage.liveGitHub: not_tested</code>.</p>
 <li class="">Select deployment branches by name. Allow <code>main</code> and each approved release
 branch by its exact name. Do not allow tags, PR refs, or arbitrary branches.</li>
 <li class="">Require a trusted reviewer and disable administrator bypass. This approval
-protects model-provider credentials from unreviewed release-branch workflows.
+keeps unreviewed release-branch workflows from qualifying a candidate.
 Keep Prevent self-review disabled if the trusted release maintainer also
 dispatches and approves the run. Final publication has a separate approval
 in the <code>release</code> environment.</li>
-<li class="">Supply <code>COPILOT_GITHUB_TOKEN</code> for model-provider authentication through Vekil.
-The existing repository secret can supply it. Qualification does not use it
-for Git publication, and the local publication tests receive no workflow,
-provider, or canary tokens.</li>
+<li class="">Supply no model-provider secret: qualification runs on aimock, and the local
+publication tests receive no workflow, provider, or canary tokens.</li>
 </ul>
 <p>GitHub creates a <a href="https://docs.github.com/en/actions/concepts/security/github_token" target="_blank" rel="noopener noreferrer" class="">token for each job</a>
 and expires it when the job ends. Do not save it as an environment secret.</p>
