@@ -108,6 +108,30 @@ func TestHyperlightGuestEvidenceRejectsCannedOrHostResults(t *testing.T) {
 	}
 }
 
+func TestHyperlightSandboxResultAllowsOnlyClaudeBudgetReminder(t *testing.T) {
+	const result = `{"exit_code":0,"stdout":"guest\n"}`
+	for _, text := range []string{
+		result,
+		result + "\n\n<system-reminder>\n<total_tokens>15000000 tokens left</total_tokens>\n</system-reminder>",
+	} {
+		decoded, err := decodeSandboxExecResult(text)
+		if err != nil || decoded.Stdout != "guest\n" {
+			t.Fatalf("rejected %q: %+v %v", text, decoded, err)
+		}
+	}
+	for _, text := range []string{
+		"",
+		"Hyperlight workspace checks completed.",
+		result + "\nhook-marker",
+		result + "\n<system-reminder>\nPreToolUse hook output\n</system-reminder>",
+		result + "\n<system-reminder>\n<total_tokens>1 tokens left</total_tokens>\n</system-reminder>\nhook-marker",
+	} {
+		if _, err := decodeSandboxExecResult(text); err == nil {
+			t.Fatalf("accepted %q", text)
+		}
+	}
+}
+
 func TestHyperlightPodEvidenceRequiresDevicePinningAndRealBundleDelivery(t *testing.T) {
 	image := "localhost/worker@sha256:" + strings.Repeat("a", 64)
 	bundle := "localhost/bundle@sha256:" + strings.Repeat("b", 64)
@@ -422,7 +446,8 @@ func TestHyperlightNativeRejectionCorrelatesRewrittenCalls(t *testing.T) {
 		name, arguments, output string
 		want                    bool
 	}{
-		{"invalid", `{"tool":"bash"}`, "The arguments provided to the tool are invalid: Model tried to call unavailable tool bash", true},
+		{"invalid", `{"tool":"bash"}`,
+			"The arguments provided to the tool are invalid: Model tried to call unavailable tool bash", true},
 		{"bash", `{}`, "Unknown tool: bash", true},
 		{"orka_sandbox_exec", `{}`, "bash arguments provided to the tool are invalid", false},
 		{"invalid", `{"tool":"read"}`, "Unknown tool: bash", false},

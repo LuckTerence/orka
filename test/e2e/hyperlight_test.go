@@ -191,8 +191,8 @@ var _ = Describe("Hyperlight deployment with aimock", Label("hyperlight"), Order
 			}, 30*time.Second, time.Second).Should(Succeed())
 			hostKernel := hyperlightNodeKernel(pod)
 			for i, guestMarker := range []string{"hyperlight-acp-write", "hyperlight-acp-read"} {
-				var result acp.SandboxExecResult
-				Expect(json.Unmarshal([]byte(results[i]), &result)).To(Succeed(), "sandbox_exec result %d as the model saw it: %q", i, results[i])
+				result, err := decodeSandboxExecResult(results[i])
+				Expect(err).NotTo(HaveOccurred(), "sandbox_exec result %d as the model saw it: %q", i, results[i])
 				Expect(result.ExitCode).To(BeZero())
 				Expect(result.TimedOut).To(BeFalse())
 				Expect(result.StdoutTruncated).To(BeFalse())

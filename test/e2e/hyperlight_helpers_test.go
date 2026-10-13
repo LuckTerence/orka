@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -226,6 +227,25 @@ func validateHyperlightGuest(output, marker, hostKernel string, workspace bool) 
 		return fmt.Errorf("sandbox did not execute in the mounted workspace")
 	}
 	return nil
+}
+
+// claudeToolResultReminder is the context-budget reminder the pinned Claude
+// Code appends to MCP tool results. Nothing else may follow the tool's JSON:
+// hook or workspace output there would mean the exclusion failed.
+var claudeToolResultReminder = regexp.MustCompile(
+	`^<system-reminder>\n<total_tokens>\d+ tokens left</total_tokens>\n</system-reminder>$`)
+
+// decodeSandboxExecResult decodes a sandbox_exec result as the model saw it.
+func decodeSandboxExecResult(text string) (acp.SandboxExecResult, error) {
+	var result acp.SandboxExecResult
+	decoder := json.NewDecoder(strings.NewReader(text))
+	if err := decoder.Decode(&result); err != nil {
+		return result, err
+	}
+	if rest := strings.TrimSpace(text[decoder.InputOffset():]); rest != "" && !claudeToolResultReminder.MatchString(rest) {
+		return result, fmt.Errorf("unexpected text after the sandbox_exec result: %q", rest)
+	}
+	return result, nil
 }
 
 // These are the model-facing identities used by the pinned harnesses, not the
