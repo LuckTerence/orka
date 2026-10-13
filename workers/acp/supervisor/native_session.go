@@ -389,7 +389,7 @@ func (s *Server) captureNativeSession(ctx context.Context, state *sessionState, 
 }
 
 func nativeSessionDirs(paths acp.SessionPaths) nativesession.Dirs {
-	return nativesession.Dirs{Home: paths.Home, Workspace: paths.Workspace}
+	return nativesession.Dirs{Home: paths.Home, Data: paths.Data, Workspace: paths.Workspace}
 }
 
 func persistNativeSnapshot(root string, body []byte) error {

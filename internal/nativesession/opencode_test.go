@@ -1,0 +1,375 @@
+package nativesession
+
+import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
+	"context"
+	"database/sql"
+	_ "embed"
+	"errors"
+	"io"
+	"maps"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/orka-agents/orka/internal/acp"
+)
+
+// The schema and migration rows of a database OpenCode 1.19.0 created.
+//
+//go:embed testdata/opencode-1.19.0-schema.sql
+var openCodeSchema string
+
+const (
+	openCodeFixtureSession = "ses_ecc5ff852ffer0NIBWVcS4TRJl"
+	openCodeFixtureLimit   = 1 << 20
+	openCodeFixtureSpill   = "tool_e5f1b2c3d4"
+)
+
+// openCodeFixture is a stopped OpenCode session home.
+type openCodeFixture struct {
+	dirs  Dirs
+	db    *sql.DB
+	spill []byte
+}
+
+// newOpenCodeFixture builds a session home whose conversation rows exist only
+// in the write-ahead log, as they do after OpenCode is killed.
+func newOpenCodeFixture(t *testing.T) openCodeFixture {
+	t.Helper()
+	root := realDir(t)
+	dirs := Dirs{Home: filepath.Join(root, "home"), Data: filepath.Join(root, "xdg", "data"), Workspace: filepath.Join(root, "workspace")}
+	for _, dir := range []string{dirs.Home, filepath.Join(dirs.Data, "opencode", "tool-output"), dirs.Workspace} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	spill := []byte(strings.Repeat("spilled tool output\n", 64))
+	spillPath := filepath.Join(dirs.Data, "opencode", "tool-output", openCodeFixtureSpill)
+	if err := os.WriteFile(spillPath, spill, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(dirs.Data, "opencode", "opencode.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = db.Close() })
+	ctx := context.Background()
+	for _, statement := range []string{`PRAGMA journal_mode=WAL`, `PRAGMA wal_autocheckpoint=0`, openCodeSchema, `PRAGMA wal_checkpoint(TRUNCATE)`} {
+		if _, err := db.ExecContext(ctx, statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	path := strings.TrimPrefix(dirs.Workspace, "/")
+	for _, statement := range []struct {
+		query string
+		args  []any
+	}{
+		{`INSERT INTO project (id, worktree, time_created, time_updated, sandboxes) VALUES ('global', '/', 1, 1, '[]')`, nil},
+		{`INSERT INTO session (id, project_id, slug, directory, path, title, version, agent, time_created, time_updated)
+ VALUES (?, 'global', 'crisp-panda', ?, ?, 'Read LICENSE', '1.19.0', 'build', 1, 1)`, []any{openCodeFixtureSession, dirs.Workspace, path}},
+		{`INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES ('msg_user', ?, 1, 1, ?)`,
+			[]any{openCodeFixtureSession, `{"role":"user","text":"Remember nonce-fixture"}`}},
+		{`INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES ('msg_assistant', ?, 2, 2, ?)`,
+			[]any{openCodeFixtureSession, `{"role":"assistant","path":{"cwd":"` + dirs.Workspace + `","root":"/"}}`}},
+		{`INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES ('prt_tool', 'msg_assistant', ?, 2, 2, ?)`,
+			[]any{openCodeFixtureSession, `{"type":"tool","state":{"input":{"filePath":"` + dirs.Workspace + `/LICENSE"},"metadata":{"outputPath":"` + spillPath + `"},"output":"Full output saved to: ` + spillPath + `","title":"` + path + `/LICENSE"}}`}},
+		{`INSERT INTO event_sequence (aggregate_id, seq) VALUES (?, 1)`, []any{openCodeFixtureSession}},
+		{`INSERT INTO event (id, aggregate_id, seq, type, data) VALUES ('evt_1', ?, 1, 'session.updated', '{}')`, []any{openCodeFixtureSession}},
+		{`INSERT INTO permission (id, project_id, action, resource, time_created, time_updated) VALUES ('per_fixture_grant', 'global', 'allow', 'bash', 1, 1)`, nil},
+	} {
+		if _, err := db.ExecContext(ctx, statement.query, statement.args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return openCodeFixture{dirs: dirs, db: db, spill: spill}
+}
+
+func (f openCodeFixture) exec(t *testing.T, query string, args ...any) {
+	t.Helper()
+	if _, err := f.db.ExecContext(context.Background(), query, args...); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func freshOpenCodeDirs(t *testing.T) Dirs {
+	t.Helper()
+	root := realDir(t)
+	dirs := Dirs{Home: filepath.Join(root, "home"), Data: filepath.Join(root, "xdg", "data"), Workspace: filepath.Join(root, "workspace")}
+	for _, dir := range []string{dirs.Home, dirs.Data, dirs.Workspace} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dirs
+}
+
+func TestOpenCodeVersionMatchesPinnedRuntime(t *testing.T) {
+	if openCodeVersion != acp.OpenCodeVersion {
+		t.Fatalf("native OpenCode format %s does not match the pinned OpenCode %s", openCodeVersion, acp.OpenCodeVersion)
+	}
+}
+
+func TestOpenCodeFormatCarriesWALConversationIntoANewWorkspace(t *testing.T) {
+	format, ok := For("opencode")
+	if !ok {
+		t.Fatal("opencode must save and restore native sessions")
+	}
+	source := newOpenCodeFixture(t)
+	data, err := format.Capture(t.Context(), source.dirs, openCodeFixtureSession, openCodeFixtureLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, private := range []string{"per_fixture_grant", "session.updated"} {
+		if bytes.Contains(gunzipForTest(t, data), []byte(private)) {
+			t.Fatalf("capture carried %q", private)
+		}
+	}
+	summary, err := format.Inspect(t.Context(), data, openCodeFixtureLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.ProviderSessionID != openCodeFixtureSession || summary.ProviderVersion != "1.19.0" || summary.DataDigest != dataDigest(data) {
+		t.Fatalf("unexpected summary: %+v", summary)
+	}
+
+	destination := freshOpenCodeDirs(t)
+	if err := format.Install(t.Context(), data, destination, realDir(t), openCodeFixtureLimit); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := sql.Open("sqlite", "file:"+filepath.Join(destination.Data, "opencode", "opencode.db")+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = restored.Close() }()
+	var directory, path string
+	if err := restored.QueryRow(`SELECT directory, path FROM session WHERE id = ?`, openCodeFixtureSession).Scan(&directory, &path); err != nil {
+		t.Fatal(err)
+	}
+	if directory != destination.Workspace || path != strings.TrimPrefix(destination.Workspace, "/") {
+		t.Fatalf("session not moved to the new workspace: directory=%q path=%q", directory, path)
+	}
+	newSpill := filepath.Join(destination.Data, "opencode", "tool-output", openCodeFixtureSpill)
+	var assistant, tool string
+	if err := restored.QueryRow(`SELECT data FROM message WHERE id = 'msg_assistant'`).Scan(&assistant); err != nil {
+		t.Fatal(err)
+	}
+	if err := restored.QueryRow(`SELECT data FROM part WHERE id = 'prt_tool'`).Scan(&tool); err != nil {
+		t.Fatal(err)
+	}
+	previousRelative := strings.TrimPrefix(source.dirs.Workspace, "/")
+	if strings.Contains(assistant+tool, previousRelative) || strings.Contains(tool, source.dirs.Data) ||
+		!strings.Contains(tool, destination.Workspace+"/LICENSE") || strings.Count(tool, newSpill) != 2 ||
+		!strings.Contains(tool, `"title":"`+strings.TrimPrefix(destination.Workspace, "/")+`/LICENSE"`) {
+		t.Fatalf("conversation still names the previous directories: %s %s", assistant, tool)
+	}
+	var messages, parts, events, permissions int
+	if err := restored.QueryRow(`SELECT (SELECT count(*) FROM message), (SELECT count(*) FROM part), (SELECT count(*) FROM event), (SELECT count(*) FROM permission)`).
+		Scan(&messages, &parts, &events, &permissions); err != nil {
+		t.Fatal(err)
+	}
+	if messages != 2 || parts != 1 || events != 0 || permissions != 0 {
+		t.Fatalf("messages=%d parts=%d events=%d permissions=%d", messages, parts, events, permissions)
+	}
+	spill, err := os.ReadFile(newSpill)
+	if err != nil || !bytes.Equal(spill, source.spill) {
+		t.Fatalf("spilled tool output was not carried: %v", err)
+	}
+	if err := format.Install(t.Context(), data, destination, realDir(t), openCodeFixtureLimit); err == nil {
+		t.Fatal("install must not overwrite an existing OpenCode database")
+	}
+}
+
+func TestOpenCodeInstallMovesAGitProjectWorktree(t *testing.T) {
+	format, _ := For("opencode")
+	source := newOpenCodeFixture(t)
+	// A git workspace is its own project worktree, so OpenCode records an
+	// empty relative path.
+	source.exec(t, `INSERT INTO project (id, worktree, vcs, time_created, time_updated, sandboxes) VALUES ('3f1c0d', ?, 'git', 1, 1, '[]')`, source.dirs.Workspace)
+	source.exec(t, `UPDATE session SET project_id = '3f1c0d', path = ''`)
+	data, err := format.Capture(t.Context(), source.dirs, openCodeFixtureSession, openCodeFixtureLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	destination := freshOpenCodeDirs(t)
+	if err := format.Install(t.Context(), data, destination, realDir(t), openCodeFixtureLimit); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := sql.Open("sqlite", "file:"+filepath.Join(destination.Data, "opencode", "opencode.db")+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = restored.Close() }()
+	var worktree, directory string
+	var path sql.NullString
+	var projects int
+	if err := restored.QueryRow(`SELECT p.worktree, s.directory, s.path, (SELECT count(*) FROM project) FROM session s JOIN project p ON p.id = s.project_id`).
+		Scan(&worktree, &directory, &path, &projects); err != nil {
+		t.Fatal(err)
+	}
+	if worktree != destination.Workspace || directory != destination.Workspace || !path.Valid || path.String != "" || projects != 1 {
+		t.Fatalf("worktree=%q directory=%q path=%+v projects=%d", worktree, directory, path, projects)
+	}
+}
+
+func TestOpenCodeCaptureFallsBackOnStateItDoesNotCarry(t *testing.T) {
+	format, _ := For("opencode")
+	for name, mutate := range map[string]func(*testing.T, openCodeFixture){
+		"todo list": func(t *testing.T, f openCodeFixture) {
+			f.exec(t, `INSERT INTO todo (session_id, content, status, priority, position, time_created, time_updated) VALUES (?, 'x', 'pending', 'high', 0, 1, 1)`, openCodeFixtureSession)
+		},
+		"child session": func(t *testing.T, f openCodeFixture) {
+			f.exec(t, `INSERT INTO session (id, project_id, parent_id, slug, directory, title, version, time_created, time_updated)
+ VALUES ('ses_child', 'global', ?, 'child', '/', 'child', '1.19.0', 1, 1)`, openCodeFixtureSession)
+		},
+		"session permission": func(t *testing.T, f openCodeFixture) {
+			f.exec(t, `UPDATE session SET permission = '[{"permission":"bash","action":"allow"}]'`)
+		},
+		"trigger": func(t *testing.T, f openCodeFixture) {
+			f.exec(t, `CREATE TRIGGER mark AFTER INSERT ON message BEGIN SELECT 1; END`)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fixture := newOpenCodeFixture(t)
+			mutate(t, fixture)
+			if _, err := format.Capture(t.Context(), fixture.dirs, openCodeFixtureSession, openCodeFixtureLimit); !errors.Is(err, ErrUnsupported) {
+				t.Fatalf("capture must fall back to the transcript: %v", err)
+			}
+		})
+	}
+	fixture := newOpenCodeFixture(t)
+	if _, err := format.Capture(t.Context(), fixture.dirs, "ses_missing", openCodeFixtureLimit); err == nil || errors.Is(err, ErrUnsupported) {
+		t.Fatalf("a missing session is a capture failure, not an unsupported conversation: %v", err)
+	}
+	if _, err := format.Capture(t.Context(), fixture.dirs, openCodeFixtureSession, 512); !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("an oversized conversation must fall back to the transcript: %v", err)
+	}
+}
+
+func TestOpenCodeCaptureRejectsSymlinks(t *testing.T) {
+	format, _ := For("opencode")
+	outside := filepath.Join(realDir(t), "secret")
+	if err := os.WriteFile(outside, []byte("not a database"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for name, plant := range map[string]func(Dirs) string{
+		"database":    func(d Dirs) string { return filepath.Join(d.Data, "opencode", "opencode.db") },
+		"tool output": func(d Dirs) string { return filepath.Join(d.Data, "opencode", "tool-output", "tool_link") },
+	} {
+		t.Run(name, func(t *testing.T) {
+			fixture := newOpenCodeFixture(t)
+			target := plant(fixture.dirs)
+			_ = os.Remove(target)
+			if err := os.Symlink(outside, target); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := format.Capture(t.Context(), fixture.dirs, openCodeFixtureSession, openCodeFixtureLimit); err == nil {
+				t.Fatal("capture followed a symlink")
+			}
+		})
+	}
+}
+
+func TestOpenCodeInspectRejectsTamperedBundles(t *testing.T) {
+	format, _ := For("opencode")
+	fixture := newOpenCodeFixture(t)
+	data, err := format.Capture(t.Context(), fixture.dirs, openCodeFixtureSession, openCodeFixtureLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := tarEntriesForTest(t, data)
+	rebuild := func(change func(map[string][]byte)) []byte {
+		copied := map[string][]byte{}
+		maps.Copy(copied, entries)
+		change(copied)
+		return tarGzipForTest(t, copied)
+	}
+	if _, err := format.Inspect(t.Context(), rebuild(func(map[string][]byte) {}), openCodeFixtureLimit); err != nil {
+		t.Fatalf("a faithful rebuild must inspect: %v", err)
+	}
+	unsupportedVersion := rebuild(func(e map[string][]byte) {
+		e["manifest.json"] = bytes.Replace(e["manifest.json"], []byte(`"1.19.0"`), []byte(`"1.18.9"`), 1)
+	})
+	if _, err := format.Inspect(t.Context(), unsupportedVersion, openCodeFixtureLimit); !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("another OpenCode version must be unsupported: %v", err)
+	}
+	for name, tampered := range map[string][]byte{
+		"unknown entry": rebuild(func(e map[string][]byte) { e["extra"] = []byte("x") }),
+		"other session": rebuild(func(e map[string][]byte) {
+			e["manifest.json"] = bytes.Replace(e["manifest.json"], []byte(openCodeFixtureSession), []byte("ses_other"), 1)
+		}),
+		"no database":      rebuild(func(e map[string][]byte) { delete(e, "opencode.db") }),
+		"corrupt database": rebuild(func(e map[string][]byte) { e["opencode.db"] = []byte("SQLite format 3\x00 truncated") }),
+		"manifest field": rebuild(func(e map[string][]byte) {
+			e["manifest.json"] = bytes.Replace(e["manifest.json"], []byte(`{`), []byte(`{"extra":1,`), 1)
+		}),
+		"trailing data": append(append([]byte(nil), data...), data...),
+		"not gzip":      []byte("plain"),
+	} {
+		if _, err := format.Inspect(t.Context(), tampered, openCodeFixtureLimit); err == nil || errors.Is(err, ErrUnsupported) {
+			t.Errorf("%s: must be rejected as invalid: %v", name, err)
+		}
+	}
+	if _, err := format.Inspect(t.Context(), data, len(data)-1); err == nil {
+		t.Fatal("an oversized bundle must be rejected")
+	}
+}
+
+func gunzipForTest(t *testing.T, data []byte) []byte {
+	t.Helper()
+	reader, err := gzip.NewReader(bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return content
+}
+
+func tarEntriesForTest(t *testing.T, data []byte) map[string][]byte {
+	t.Helper()
+	archive := tar.NewReader(bytes.NewReader(gunzipForTest(t, data)))
+	entries := map[string][]byte{}
+	for {
+		header, err := archive.Next()
+		if errors.Is(err, io.EOF) {
+			return entries
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		content, err := io.ReadAll(archive)
+		if err != nil {
+			t.Fatal(err)
+		}
+		entries[header.Name] = content
+	}
+}
+
+func tarGzipForTest(t *testing.T, entries map[string][]byte) []byte {
+	t.Helper()
+	var out bytes.Buffer
+	compressed := gzip.NewWriter(&out)
+	archive := tar.NewWriter(compressed)
+	for name, content := range entries {
+		if err := archive.WriteHeader(&tar.Header{Name: name, Mode: 0o600, Size: int64(len(content)), Typeflag: tar.TypeReg}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := archive.Write(content); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := archive.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := compressed.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return out.Bytes()
+}

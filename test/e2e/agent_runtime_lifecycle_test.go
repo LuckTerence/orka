@@ -17,6 +17,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/test/utils"
 )
 
@@ -164,6 +165,22 @@ var _ = Describe("Agent Runtime Lifecycle", Ordered, Label("agent-runtime"), fun
 		}, time.Minute, 2*time.Second).Should(Succeed())
 	}
 
+	// expectNativeCheckpointSaved checks that task's turn saved the agent's
+	// own conversation instead of falling back to the canonical transcript.
+	expectNativeCheckpointSaved := func(task string) {
+		eventsURL := fmt.Sprintf("%s/api/v1/tasks/%s/events?namespace=%s",
+			strings.TrimRight(apiBaseURL, "/"), task, namespace)
+		body, status, err := doAuthorizedJSONRequest(http.MethodGet, eventsURL, token, "", "")
+		ExpectWithOffset(1, err).NotTo(HaveOccurred())
+		ExpectWithOffset(1, status).To(Equal(http.StatusOK), body)
+		var listed liveACPTaskEventsResponse
+		ExpectWithOffset(1, json.Unmarshal([]byte(body), &listed)).To(Succeed())
+		for _, event := range listed.Events {
+			ExpectWithOffset(1, event.Type).NotTo(Equal(events.ExecutionEventTypeNativeSessionCaptureSkipped),
+				"%s fell back to the transcript: %s", task, event.ContentText)
+		}
+	}
+
 	// expectReadReachedModel checks in mock mode that aimock answered the
 	// prompt with the fixture that requires a tool result containing the
 	// LICENSE line, so the file content came back to the model whatever the
@@ -214,6 +231,12 @@ var _ = Describe("Agent Runtime Lifecycle", Ordered, Label("agent-runtime"), fun
 		expectReadReachedModel(marker(provider.kind + "-read"))
 		firstUID, firstGeneration := taskSessionIdentity(Default, task)
 		firstExecution := getACPTask(Default, task).Status.Execution
+		if provider.kind == opencode.kind {
+			// OpenCode saves its own conversation after each turn, so the
+			// continuation restores it into a fresh RuntimeSession.
+			Expect(firstExecution.RuntimeSessionRecreationPending).To(BeTrue(), "OpenCode kept its writer after a native turn")
+			expectNativeCheckpointSaved(task)
+		}
 		expectedGeneration := firstGeneration
 		if firstExecution.RuntimeSessionRecreationPending {
 			// Checkpoint settlement retires the writer even when the first native
@@ -231,6 +254,11 @@ var _ = Describe("Agent Runtime Lifecycle", Ordered, Label("agent-runtime"), fun
 		assertTaskSucceededRead(continuation, snapshot)
 		expectTaskResult(continuation, nonce)
 		expectReplayed(marker(provider.kind+"-continue"), nonce)
+		if provider.kind == opencode.kind {
+			// The restored session runs tools in the new workspace, not the
+			// previous turn's directory that no longer exists.
+			expectReadReachedModel(marker(provider.kind + "-continue"))
+		}
 		continuedUID, continuedGeneration := taskSessionIdentity(Default, continuation)
 		Expect(continuedUID).To(Equal(firstUID))
 		Expect(continuedGeneration).To(Equal(expectedGeneration), "continuation must honor the prior turn's runtime retirement fence")
@@ -790,9 +818,8 @@ var _ = Describe("Agent Runtime Lifecycle", Ordered, Label("agent-runtime"), fun
 		removeProviderResources(codex.kind, codexAgent, codexToolAgent)
 	})
 
-	It("runs OpenCode with Session continuation, resumes an exited idle adapter, and enforces read intent", func() {
-		agent, session, pool, nonce, uid, generation := readSmoke(opencode)
-		continueAfterAdapterExit(opencode, agent, session, pool, nonce, uid, generation)
+	It("runs OpenCode with Session continuation from its native checkpoint and enforces read intent", func() {
+		agent, _, pool, _, _, _ := readSmoke(opencode)
 		parkRuntimePool(pool)
 
 		By("asking OpenCode to mutate a read-intent workspace")

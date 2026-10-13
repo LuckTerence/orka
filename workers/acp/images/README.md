@@ -154,6 +154,21 @@ The supervisor also sets `MODEL_PROVIDER` to the destination provider ID;
 [Codex session migration guide](../../../website/docs/guides/codex-session-migration.md)
 for supported history, import/export commands, and recovery limits.
 
+For native OpenCode restoration, the supervisor captures the stopped session's
+`$XDG_DATA_HOME/opencode/opencode.db` with a consistent SQLite copy, keeping
+only that session's `project`, `session`, `message` and `part` rows plus the
+`migration` tables, and carries spilled `tool-output` files. It drops the
+duplicate `event` log, persisted permission grants, and credential tables; rows
+in any other table fall back to the canonical transcript. Before starting
+OpenCode in the fresh RuntimeSession it installs that database, rewrites
+`session.directory`, `session.path` and recorded paths to the new workspace and
+data directory, because OpenCode resumes in the session's saved directory
+rather than the `cwd` given to `session/resume`, and then resumes the session.
+
+Codex and OpenCode Sessions save a native checkpoint after each turn and start
+the next turn in a fresh RuntimeSession, so the idle-adapter restart below
+applies to the other built-in runtimes.
+
 When the agent advertises `sessionCapabilities.close`, Orka sends
 `session/close` before the bounded process stop on deletion. When an adapter
 child exits while its RuntimeSession is idle and the agent advertises

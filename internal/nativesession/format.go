@@ -22,6 +22,8 @@ var ErrInstallOutcomeUnknown = errors.New("native session installation outcome i
 type Dirs struct {
 	// Home is the session's HOME directory.
 	Home string
+	// Data is the session's XDG_DATA_HOME directory.
+	Data string
 	// Workspace is the agent's working directory.
 	Workspace string
 }
@@ -48,7 +50,8 @@ type Format interface {
 }
 
 var formats = map[string]Format{
-	codexProviderKind: codexFormat{},
+	codexProviderKind:    codexFormat{},
+	openCodeProviderKind: openCodeFormat{},
 }
 
 // For returns the Format for providerKind.

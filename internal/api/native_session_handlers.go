@@ -148,6 +148,11 @@ func (h *Handlers) ExportNativeSession(c fiber.Ctx) error {
 	if err != nil {
 		return nativeSessionAPIError(err)
 	}
+	if record.Snapshot.ProviderKind != "codex" {
+		// Migration moves Codex threads to and from local Codex homes. Other
+		// providers' checkpoints stay inside Orka.
+		return fiber.NewError(fiber.StatusConflict, "native session export supports Codex Sessions only")
+	}
 	if len(record.Snapshot.Data) > h.nativeSessionMaxBytes {
 		return fiber.NewError(fiber.StatusRequestEntityTooLarge, fmt.Sprintf("native session bundle exceeds configured export limit of %d bytes", h.nativeSessionMaxBytes))
 	}

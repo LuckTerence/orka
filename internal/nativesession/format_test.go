@@ -42,11 +42,13 @@ func codexFixtureDirs(t *testing.T) (Dirs, string, []byte) {
 	return dirs, rollout, data
 }
 
-func TestForRegistersOnlyCodex(t *testing.T) {
-	if !Supported("codex") {
-		t.Fatal("codex must save and restore native sessions")
+func TestForRegistersCodexAndOpenCode(t *testing.T) {
+	for _, kind := range []string{"codex", "opencode"} {
+		if !Supported(kind) {
+			t.Fatalf("%s must save and restore native sessions", kind)
+		}
 	}
-	for _, kind := range []string{"", "claude", "copilot", "opencode", "agentkit", "Codex"} {
+	for _, kind := range []string{"", "claude", "copilot", "agentkit", "Codex"} {
 		if _, ok := For(kind); ok || Supported(kind) {
 			t.Fatalf("%q must not have a native session format", kind)
 		}
