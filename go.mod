@@ -20,7 +20,7 @@ require (
 	github.com/onsi/gomega v1.44.0
 	github.com/open-policy-agent/cert-controller v0.16.0
 	github.com/openai/openai-go/v3 v3.50.0
-	github.com/orka-agents/orka-workspace v0.1.0-alpha.2.0.20261013052026-13e42c228212
+	github.com/orka-agents/orka-workspace v0.1.0-alpha.3
 	github.com/orka-agents/sessionkit v0.0.0-20261009211105-8c7dfc5d9553
 	github.com/prometheus/client_golang v1.24.1
 	github.com/prometheus/client_model v0.6.3

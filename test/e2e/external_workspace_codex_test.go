@@ -24,7 +24,8 @@ import (
 
 const (
 	externalCodexReadMarker               = "[e2e:runtime-codex-external-workspace-read]"
-	externalFakeWorkspaceProviderRevision = "13e42c2282122c991e30e16def7d92308c4b6f28"
+	externalFakeWorkspaceProviderVersion  = "v0.1.0-alpha.3"
+	externalFakeWorkspaceProviderRevision = "3a05218464fa79a9dcedcd492cfd585017fb9e6c"
 )
 
 func externalCodexReadTaskManifest(taskName, agentName, className string) map[string]any {
@@ -190,8 +191,8 @@ func buildExternalFakeWorkspaceProvider() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if !strings.HasSuffix(strings.TrimSpace(output), "-"+externalFakeWorkspaceProviderRevision[:12]) {
-		return "", fmt.Errorf("external fake provider source revision does not match the pinned Core workspace module")
+	if strings.TrimSpace(output) != externalFakeWorkspaceProviderVersion {
+		return "", fmt.Errorf("external fake provider source version does not match the pinned Core workspace module")
 	}
 	sourceDir, err := os.MkdirTemp("", "orka-e2e-fake-provider-")
 	if err != nil {
@@ -214,6 +215,18 @@ func buildExternalFakeWorkspaceProvider() (string, error) {
 	}
 	if strings.TrimSpace(output) != externalFakeWorkspaceProviderRevision {
 		return "", fmt.Errorf("external fake provider checkout did not resolve the exact pinned revision")
+	}
+	// The module tag must name the exact commit built here.
+	if _, err := utils.Run(exec.Command("git", "-C", sourceDir, "fetch", "--quiet", "--depth=1",
+		"https://github.com/orka-agents/orka-workspace.git", "refs/tags/"+externalFakeWorkspaceProviderVersion)); err != nil {
+		return "", err
+	}
+	output, err = utils.Run(exec.Command("git", "-C", sourceDir, "rev-parse", "FETCH_HEAD^{commit}"))
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(output) != externalFakeWorkspaceProviderRevision {
+		return "", fmt.Errorf("pinned Core workspace module tag does not resolve to the external fake provider revision")
 	}
 	image := "ghcr.io/orka-agents/orka/e2e-external-fake-provider:" + externalFakeWorkspaceProviderRevision[:12]
 	if _, err := utils.Run(exec.Command("docker", "build", "-t", image,
