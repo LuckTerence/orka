@@ -40,7 +40,7 @@ type externalFakeWorkspaceProviderFixtureNames struct {
 }
 
 // externalFakeWorkspaceProviderManifests bootstraps the separately built fake
-// provider from orka-workspace revision 327a82dfdfcd. The caller installs the
+// provider from orka-workspace revision 13e42c228212. The caller installs the
 // shared and fake CRDs/admission policies and supplies an existing namespace.
 // Core's ServiceAccount is in that namespace and already has its normal RBAC.
 //
