@@ -3128,7 +3128,7 @@ func TestACPDispatcherOpensSessionTurnBeforePrePromptFailureAndReleasesLease(t *
 		testControlDigestForDispatcher("mcp-pre-prompt"),
 		harnessv2.RuntimeInstanceID("runtime-instance"), harnessv2.SupervisorBootID("boot-id"),
 		acpSessionLineageIdentity{},
-		false,
+		"",
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -3156,7 +3156,7 @@ func TestACPDispatcherOpensSessionTurnBeforePrePromptFailureAndReleasesLease(t *
 		testControlDigestForDispatcher("mcp-pre-prompt"),
 		harnessv2.RuntimeInstanceID("runtime-instance"), harnessv2.SupervisorBootID("boot-id"),
 		acpSessionLineageIdentity{},
-		false,
+		"",
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -5183,7 +5183,7 @@ func TestACPDispatcherQuiescesInterruptedSessionPreparation(t *testing.T) {
 					testControlDigestForDispatcher("mcp-"+name),
 					harnessv2.RuntimeInstanceID("runtime-instance"), harnessv2.SupervisorBootID("boot-id"),
 					acpSessionLineageIdentity{},
-					false,
+					"",
 				)
 				if err != nil {
 					t.Fatal(err)
@@ -5293,7 +5293,7 @@ func TestACPDispatcherAbortsLeaseWhenSessionTurnOpenFails(t *testing.T) {
 		ctx, task, fence, harnessv2.ProfileDigest(testControlDigestForDispatcher("profile-open-failure")),
 		testControlDigestForDispatcher("mcp-open-failure"), "runtime", "boot",
 		acpSessionLineageIdentity{},
-		false,
+		"",
 	); err == nil {
 		t.Fatal("prepareTaskSession unexpectedly succeeded")
 	}
@@ -5417,7 +5417,7 @@ func TestACPDispatcherGatewaySessionUsesTranscriptBackedPrompt(t *testing.T) {
 		testControlDigestForDispatcher("mcp-gateway-transcript"),
 		harnessv2.RuntimeInstanceID("runtime-instance"), harnessv2.SupervisorBootID("boot-id"),
 		acpSessionLineageIdentity{},
-		false,
+		"",
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -5632,7 +5632,7 @@ func TestACPDispatcherPromptIncludedSessionAppendsAssistantOnly(t *testing.T) {
 		ctx, task, fence, harnessv2.ProfileDigest(testControlDigestForDispatcher("profile-prompt-included-append")),
 		testControlDigestForDispatcher("mcp-prompt-included-append"), "runtime", "boot",
 		acpSessionLineageIdentity{},
-		false,
+		"",
 	)
 	if err != nil {
 		t.Fatal(err)
