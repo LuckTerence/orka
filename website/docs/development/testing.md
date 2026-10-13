@@ -46,6 +46,12 @@ make lint-fix
 make ui-lint
 ```
 
+The E2E runner uses separate Go and Ginkgo deadlines. Local defaults are
+`E2E_GO_TEST_TIMEOUT=50m`, `E2E_GINKGO_TIMEOUT=45m`, and
+`E2E_GINKGO_GRACE_PERIOD=2m`; the heavy CI lanes use `75m`, `70m`, and `2m`.
+When overriding these values, leave room inside the Go deadline for both an
+interrupted spec and suite cleanup to finish their grace periods.
+
 ### Native Codex handoff gate
 
 The `Native Codex handoff` job in `.github/workflows/test.yml` compiles the
