@@ -73,11 +73,11 @@ var expectedOpenCodeSchema = sync.OnceValues(func() (openCodeSchema, error) {
 	return readOpenCodeSchema(context.Background(), db)
 })
 
-// readOpenCodeSchema reads sqlite_schema, which evaluates nothing the
-// schema defines.
+// readOpenCodeSchema reads every sqlite_schema entry, SQLite's own included,
+// since a crafted file can give any object a reserved name. Reading it
+// evaluates nothing the schema defines.
 func readOpenCodeSchema(ctx context.Context, db *sql.DB) (openCodeSchema, error) {
-	rows, err := db.QueryContext(ctx, `SELECT type, name, tbl_name, COALESCE(sql, '') FROM sqlite_schema
- WHERE name NOT LIKE 'sqlite\_%' ESCAPE '\' ORDER BY type, name`)
+	rows, err := db.QueryContext(ctx, `SELECT type, name, tbl_name, COALESCE(sql, '') FROM sqlite_schema ORDER BY type, name`)
 	if err != nil {
 		return openCodeSchema{}, err
 	}
@@ -131,6 +131,9 @@ type openCodeManifest struct {
 	Format    string `json:"format"`
 	Version   string `json:"version"`
 	SessionID string `json:"sessionID"`
+	// Workspace is the captured RuntimeSession's working directory, which
+	// OpenCode recorded as the session's directory.
+	Workspace string `json:"workspace"`
 	// ToolOutputDir is where the captured session spilled truncated tool
 	// output. Parts reference those files by absolute path.
 	ToolOutputDir string `json:"toolOutputDir"`
@@ -188,7 +191,7 @@ func (openCodeFormat) Capture(ctx context.Context, dirs Dirs, providerSessionID 
 	if err := copyOpenCodeDatabase(ctx, source, copied); err != nil {
 		return nil, err
 	}
-	if err := pruneOpenCodeDatabase(ctx, copied, providerSessionID); err != nil {
+	if err := pruneOpenCodeDatabase(ctx, copied, providerSessionID, dirs.Workspace); err != nil {
 		return nil, err
 	}
 	toolOutputBytes := 0
@@ -202,7 +205,7 @@ func (openCodeFormat) Capture(ctx context.Context, dirs Dirs, providerSessionID 
 	data, err := encodeOpenCodeBundle(limit, openCodeBundle{
 		manifest: openCodeManifest{
 			Format: openCodeBundleFormat, Version: openCodeVersion, SessionID: providerSessionID,
-			ToolOutputDir: filepath.Join(root, openCodeToolOutputDir),
+			Workspace: dirs.Workspace, ToolOutputDir: filepath.Join(root, openCodeToolOutputDir),
 		},
 		database: database, toolOutput: toolOutput,
 	})
@@ -229,7 +232,7 @@ func (openCodeFormat) Inspect(ctx context.Context, data []byte, maxBytes int) (S
 	if err := writeNewFile(database, bundle.database); err != nil {
 		return Summary{}, err
 	}
-	if err := verifyOpenCodeDatabase(ctx, database, bundle.manifest.SessionID); err != nil {
+	if err := verifyOpenCodeDatabase(ctx, database, bundle.manifest); err != nil {
 		return Summary{}, err
 	}
 	return Summary{ProviderSessionID: bundle.manifest.SessionID, ProviderVersion: bundle.manifest.Version, DataDigest: dataDigest(data)}, nil
@@ -241,7 +244,11 @@ func (openCodeFormat) Inspect(ctx context.Context, data []byte, maxBytes int) (S
 // created new, so a failed install leaves nothing a retry could mistake for
 // its own; journalDir is unused.
 func (openCodeFormat) Install(ctx context.Context, data []byte, dirs Dirs, _ string, maxBytes int) error {
-	bundle, err := decodeOpenCodeBundle(data, maxBytes)
+	limit, err := normalizeLimit(maxBytes)
+	if err != nil {
+		return err
+	}
+	bundle, err := decodeOpenCodeBundle(data, limit)
 	if err != nil {
 		return err
 	}
@@ -276,10 +283,10 @@ func (openCodeFormat) Install(ctx context.Context, data []byte, dirs Dirs, _ str
 	if err := writeNewFile(staged, bundle.database); err != nil {
 		return err
 	}
-	if err := verifyOpenCodeDatabase(ctx, staged, bundle.manifest.SessionID); err != nil {
+	if err := verifyOpenCodeDatabase(ctx, staged, bundle.manifest); err != nil {
 		return err
 	}
-	if err := relocateOpenCodeSession(ctx, staged, bundle.manifest, dirs.Workspace, toolOutputDir); err != nil {
+	if err := relocateOpenCodeSession(ctx, staged, bundle.manifest, dirs.Workspace, toolOutputDir, expandedLimit(limit)); err != nil {
 		return err
 	}
 	if err := os.Rename(staged, destination); err != nil {
@@ -308,7 +315,7 @@ func copyOpenCodeDatabase(ctx context.Context, source, target string) error {
 
 // pruneOpenCodeDatabase leaves only providerSessionID's conversation in a
 // private copy of the database.
-func pruneOpenCodeDatabase(ctx context.Context, path, providerSessionID string) error {
+func pruneOpenCodeDatabase(ctx context.Context, path, providerSessionID, workspace string) error {
 	db, err := openSQLite(path, "")
 	if err != nil {
 		return err
@@ -342,6 +349,9 @@ func pruneOpenCodeDatabase(ctx context.Context, path, providerSessionID string) 
 	if err != nil {
 		return err
 	}
+	if session.directory != workspace {
+		return fmt.Errorf("%w: OpenCode session runs outside its RuntimeSession workspace", ErrUnsupported)
+	}
 	if _, err := db.ExecContext(ctx, `DELETE FROM project WHERE id != ?`, session.projectID); err != nil {
 		return err
 	}
@@ -352,8 +362,8 @@ func pruneOpenCodeDatabase(ctx context.Context, path, providerSessionID string) 
 }
 
 // verifyOpenCodeDatabase checks that path is an intact OpenCode database
-// holding exactly providerSessionID's conversation and nothing else.
-func verifyOpenCodeDatabase(ctx context.Context, path, providerSessionID string) error {
+// holding exactly the manifest's conversation and nothing else.
+func verifyOpenCodeDatabase(ctx context.Context, path string, manifest openCodeManifest) error {
 	db, err := openSQLite(path, "mode=ro&immutable=1")
 	if err != nil {
 		return err
@@ -383,13 +393,16 @@ func verifyOpenCodeDatabase(ctx context.Context, path, providerSessionID string)
 			return fmt.Errorf("OpenCode database carries rows in %s", table)
 		}
 	}
-	session, err := readOpenCodeSession(ctx, db, providerSessionID)
+	session, err := readOpenCodeSession(ctx, db, manifest.SessionID)
 	if errors.Is(err, ErrUnsupported) {
 		// Capture never produces this, so the bundle is invalid, not merely unsupported.
 		return errors.New("OpenCode database carries state outside the captured session")
 	}
 	if err != nil {
 		return err
+	}
+	if session.directory != manifest.Workspace {
+		return errors.New("OpenCode session directory differs from the captured workspace")
 	}
 	foreign, err := sqliteExists(ctx, db, `SELECT EXISTS(SELECT 1 FROM project WHERE id != ?)`, session.projectID)
 	if err != nil || foreign {
@@ -454,7 +467,9 @@ func readOpenCodeSession(ctx context.Context, db *sql.DB, providerSessionID stri
 // relocateOpenCodeSession points the restored session at workspace. OpenCode
 // runs tools in session.directory and ignores the cwd passed to
 // session/resume, and the previous turn's directories no longer exist.
-func relocateOpenCodeSession(ctx context.Context, path string, manifest openCodeManifest, workspace, toolOutputDir string) error {
+// Every string it replaces is a path Orka chose, and the growth the
+// replacements add stays within budget.
+func relocateOpenCodeSession(ctx context.Context, path string, manifest openCodeManifest, workspace, toolOutputDir string, budget int) error {
 	db, err := openSQLite(path, "")
 	if err != nil {
 		return err
@@ -465,13 +480,21 @@ func relocateOpenCodeSession(ctx context.Context, path string, manifest openCode
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	var projectID, directory, worktree string
+	var projectID, worktree string
 	var sessionPath sql.NullString
-	var previousPath string
-	if err := tx.QueryRowContext(ctx, `SELECT s.project_id, s.directory, s.path, p.worktree
+	if err := tx.QueryRowContext(ctx, `SELECT s.project_id, s.path, p.worktree
  FROM session s JOIN project p ON p.id = s.project_id WHERE s.id = ?`, manifest.SessionID).
-		Scan(&projectID, &directory, &sessionPath, &worktree); err != nil {
+		Scan(&projectID, &sessionPath, &worktree); err != nil {
 		return fmt.Errorf("read OpenCode session location: %w", err)
+	}
+	// verifyOpenCodeDatabase proved session.directory is the captured workspace.
+	directory := manifest.Workspace
+	// The global project's worktree is "/", and OpenCode titles tools with
+	// the worktree-relative path, which is then the workspace without its
+	// leading slash. Other worktree-relative forms are left alone.
+	previousPath := ""
+	if worktree == "/" && sessionPath.Valid && sessionPath.String == strings.TrimPrefix(directory, "/") {
+		previousPath = sessionPath.String
 	}
 	// A git project's worktree is the workspace itself; the global project's
 	// is the filesystem root and stays.
@@ -480,7 +503,6 @@ func relocateOpenCodeSession(ctx context.Context, path string, manifest openCode
 		newWorktree = workspace
 	}
 	if sessionPath.Valid {
-		previousPath = sessionPath.String
 		relative, err := filepath.Rel(newWorktree, workspace)
 		if err != nil {
 			return fmt.Errorf("relocate OpenCode session path: %w", err)
@@ -501,16 +523,28 @@ func relocateOpenCodeSession(ctx context.Context, path string, manifest openCode
 	}
 	// Absolute paths move first, so the worktree-relative form OpenCode uses
 	// in tool titles only matches where no absolute path remains.
+	growth := int64(0)
 	for _, move := range [][2]string{{directory, workspace}, {manifest.ToolOutputDir, toolOutputDir}, {previousPath, sessionPath.String}} {
 		if move[0] == "" || move[0] == move[1] {
 			continue
 		}
 		for _, table := range []string{openCodeMessageTable, openCodePartTable} {
+			if len(move[1]) > len(move[0]) {
+				var occurrences int64
+				if err := tx.QueryRowContext(ctx, `SELECT COALESCE(sum((length(CAST(data AS BLOB)) - length(CAST(replace(data, ?, '') AS BLOB))) / ?), 0)
+ FROM `+table+` WHERE instr(data, ?) > 0`, move[0], len(move[0]), move[0]).Scan(&occurrences); err != nil {
+					return err
+				}
+				growth += occurrences * int64(len(move[1])-len(move[0]))
+			}
 			statements = append(statements, struct {
 				query string
 				args  []any
 			}{`UPDATE ` + table + ` SET data = replace(data, ?, ?) WHERE instr(data, ?) > 0`, []any{move[0], move[1], move[0]}})
 		}
+	}
+	if growth > int64(budget) {
+		return errors.New("relocating the OpenCode session would exceed its expanded budget")
 	}
 	for _, statement := range statements {
 		if _, err := tx.ExecContext(ctx, statement.query, statement.args...); err != nil {
@@ -550,8 +584,13 @@ func readOpenCodeToolOutput(dir string, limit int) (map[string][]byte, error) {
 	if err := requireRealPath(dir, true); err != nil {
 		return nil, err
 	}
-	entries, err := os.ReadDir(dir)
+	handle, err := os.Open(dir)
 	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = handle.Close() }()
+	entries, err := handle.ReadDir(maxOpenCodeToolOutputs + 1)
+	if err != nil && !errors.Is(err, io.EOF) {
 		return nil, err
 	}
 	if len(entries) > maxOpenCodeToolOutputs {
@@ -707,7 +746,7 @@ func parseOpenCodeManifest(content []byte) (openCodeManifest, error) {
 		return openCodeManifest{}, errors.New("OpenCode bundle manifest is invalid")
 	}
 	if manifest.Format != openCodeBundleFormat || !openCodeSessionIDPattern.MatchString(manifest.SessionID) ||
-		!filepath.IsAbs(manifest.ToolOutputDir) || filepath.Clean(manifest.ToolOutputDir) != manifest.ToolOutputDir {
+		!absoluteCleanPath(manifest.Workspace) || !absoluteCleanPath(manifest.ToolOutputDir) {
 		return openCodeManifest{}, errors.New("OpenCode bundle manifest is invalid")
 	}
 	if manifest.Version != openCodeVersion {

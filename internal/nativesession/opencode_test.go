@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"io"
 	"maps"
 	"os"
@@ -212,29 +213,50 @@ func TestOpenCodeInstallMovesAGitProjectWorktree(t *testing.T) {
 
 func TestOpenCodeCaptureFallsBackOnStateItDoesNotCarry(t *testing.T) {
 	format, _ := For("opencode")
-	for name, mutate := range map[string]func(*testing.T, openCodeFixture){
-		"todo list": func(t *testing.T, f openCodeFixture) {
+	for name, test := range map[string]struct {
+		mutate func(*testing.T, openCodeFixture)
+		reason string
+	}{
+		"todo list": {reason: "table todo", mutate: func(t *testing.T, f openCodeFixture) {
 			f.exec(t, `INSERT INTO todo (session_id, content, status, priority, position, time_created, time_updated) VALUES (?, 'x', 'pending', 'high', 0, 1, 1)`, openCodeFixtureSession)
-		},
-		"child session": func(t *testing.T, f openCodeFixture) {
+		}},
+		"child session": {reason: "more than the captured session", mutate: func(t *testing.T, f openCodeFixture) {
 			f.exec(t, `INSERT INTO session (id, project_id, parent_id, slug, directory, title, version, time_created, time_updated)
  VALUES ('ses_child', 'global', ?, 'child', '/', 'child', '1.19.0', 1, 1)`, openCodeFixtureSession)
-		},
-		"session permission": func(t *testing.T, f openCodeFixture) {
+		}},
+		"session permission": {reason: "permission state", mutate: func(t *testing.T, f openCodeFixture) {
 			f.exec(t, `UPDATE session SET permission = '[{"permission":"bash","action":"allow"}]'`)
-		},
-		"trigger": func(t *testing.T, f openCodeFixture) {
+		}},
+		"trigger": {reason: "schema differs", mutate: func(t *testing.T, f openCodeFixture) {
 			f.exec(t, `CREATE TRIGGER mark AFTER INSERT ON message BEGIN SELECT 1; END`)
-		},
-		"expression index": func(t *testing.T, f openCodeFixture) {
+		}},
+		"expression index": {reason: "schema differs", mutate: func(t *testing.T, f openCodeFixture) {
 			f.exec(t, `CREATE INDEX costly ON message(length(hex(zeroblob(1000))))`)
-		},
+		}},
+		"reserved-name trigger": {reason: "schema differs", mutate: func(t *testing.T, f openCodeFixture) {
+			f.exec(t, `PRAGMA writable_schema=ON`)
+			f.exec(t, `INSERT INTO sqlite_schema (type, name, tbl_name, rootpage, sql)
+ VALUES ('trigger', 'sqlite_costly', 'event', 0, 'CREATE TRIGGER sqlite_costly AFTER DELETE ON event BEGIN SELECT 1; END')`)
+			f.exec(t, `PRAGMA writable_schema=OFF`)
+		}},
+		"directory outside the workspace": {reason: "outside its RuntimeSession workspace", mutate: func(t *testing.T, f openCodeFixture) {
+			f.exec(t, `UPDATE session SET directory = '/'`)
+		}},
+		"too many spilled outputs": {reason: "more than 256 tool outputs", mutate: func(t *testing.T, f openCodeFixture) {
+			for i := range maxOpenCodeToolOutputs {
+				name := filepath.Join(f.dirs.Data, "opencode", "tool-output", fmt.Sprintf("tool_extra%03d", i))
+				if err := os.WriteFile(name, nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			fixture := newOpenCodeFixture(t)
-			mutate(t, fixture)
-			if _, err := format.Capture(t.Context(), fixture.dirs, openCodeFixtureSession, openCodeFixtureLimit); !errors.Is(err, ErrUnsupported) {
-				t.Fatalf("capture must fall back to the transcript: %v", err)
+			test.mutate(t, fixture)
+			_, err := format.Capture(t.Context(), fixture.dirs, openCodeFixtureSession, openCodeFixtureLimit)
+			if !errors.Is(err, ErrUnsupported) || !strings.Contains(err.Error(), test.reason) {
+				t.Fatalf("capture must fall back to the transcript because of %q: %v", test.reason, err)
 			}
 		})
 	}
@@ -253,6 +275,30 @@ func TestOpenCodeCaptureFallsBackOnStateItDoesNotCarry(t *testing.T) {
 	}
 	if _, err := format.Capture(t.Context(), fixture.dirs, openCodeFixtureSession, 256<<10); !errors.Is(err, ErrUnsupported) {
 		t.Fatalf("a conversation over the expanded budget must fall back to the transcript: %v", err)
+	}
+}
+
+func TestOpenCodeInstallBoundsRelocationGrowth(t *testing.T) {
+	format, _ := For("opencode")
+	source := newOpenCodeFixture(t)
+	// Many references to the old workspace, each of which grows when the
+	// new workspace path is much longer.
+	source.exec(t, `UPDATE part SET data = ?`, strings.Repeat(source.dirs.Workspace+" ", 6000))
+	const limit = 128 << 10
+	data, err := format.Capture(t.Context(), source.dirs, openCodeFixtureSession, limit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	destination := freshOpenCodeDirs(t)
+	destination.Workspace = filepath.Join(destination.Workspace, strings.Repeat("w", 200))
+	if err := os.Mkdir(destination.Workspace, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := format.Install(t.Context(), data, destination, realDir(t), limit); err == nil || !strings.Contains(err.Error(), "expanded budget") {
+		t.Fatalf("install must refuse to grow the conversation past its expanded budget: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(destination.Data, "opencode", "opencode.db")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a failed install published a database: %v", err)
 	}
 }
 

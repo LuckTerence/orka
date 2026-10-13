@@ -25,12 +25,16 @@ func dataDigest(data []byte) string {
 	return "sha256:" + hex.EncodeToString(digest[:])
 }
 
+func absoluteCleanPath(path string) bool {
+	return filepath.IsAbs(path) && filepath.Clean(path) == path
+}
+
 // requireRealPath rejects a path with a symlink in any component, or whose
 // final component is not a directory (dir) or regular file (!dir). Agent
 // session trees are writable by the agent until it stops, so a stopped tree
 // must not redirect a privileged reader elsewhere.
 func requireRealPath(path string, dir bool) error {
-	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+	if !absoluteCleanPath(path) {
 		return errors.New("native session paths must be absolute and clean")
 	}
 	for current := path; ; current = filepath.Dir(current) {
