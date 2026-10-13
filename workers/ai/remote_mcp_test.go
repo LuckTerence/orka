@@ -339,6 +339,72 @@ func (c nativeRemoteBlockingClient) Get(
 	return ctx.Err()
 }
 
+type nativeRemoteStartupBlockingClient struct {
+	client.Client
+	kind string
+	read int
+	seen int
+}
+
+func (c *nativeRemoteStartupBlockingClient) Get(
+	ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption,
+) error {
+	kind := ""
+	switch obj.(type) {
+	case *corev1alpha1.OutboundAccessPolicy:
+		kind = "policy"
+	case *corev1.Secret:
+		kind = "secret"
+	case *corev1.Service:
+		kind = "service"
+	case *corev1alpha1.Tool:
+		kind = "tool"
+	}
+	if kind == c.kind {
+		c.seen++
+		if c.seen == c.read {
+			<-ctx.Done()
+			return ctx.Err()
+		}
+	}
+	return c.Client.Get(ctx, key, obj, opts...)
+}
+
+func TestNativeRemoteMCPStartupDeadlineIncludesDependencies(t *testing.T) {
+	for _, tc := range []struct {
+		name, kind string
+		read       int
+	}{
+		{"policy binding", "policy", 1},
+		{"credential binding", "secret", 1},
+		{"gateway binding", "service", 1},
+		{"final revalidation", "tool", 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newNativeRemoteFixture(t)
+			f.tool.Spec.HTTP.Timeout = &metav1.Duration{Duration: 100 * time.Millisecond}
+			if err := f.client.Update(t.Context(), f.tool); err != nil {
+				t.Fatal(err)
+			}
+			names := []string{f.tool.Name}
+			loaded := loadCustomTools(t.Context(), f.client, "team", names)
+			reader := &nativeRemoteStartupBlockingClient{Client: f.client, kind: tc.kind, read: tc.read}
+			outer, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+			defer cancel()
+			_, err := prepareNativeRemoteTools(outer, reader, "team", "task", names, loaded, f.executor)
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("startup did not preserve its deadline: %v", err)
+			}
+			if outer.Err() != nil {
+				t.Fatal("startup waited for the outer deadline instead of the Tool timeout")
+			}
+			if tc.kind != "tool" && f.requests.Load() != 0 {
+				t.Fatal("timed-out dependency binding reached the remote server")
+			}
+		})
+	}
+}
+
 func TestNativeRemoteMCPDeadlineIncludesRevalidation(t *testing.T) {
 	for _, phase := range []string{"execution", "approval refresh"} {
 		t.Run(phase, func(t *testing.T) {

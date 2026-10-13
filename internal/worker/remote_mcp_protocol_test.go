@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/orka-agents/orka/internal/outboundaccess"
@@ -394,62 +396,219 @@ func TestRemoteMCPRejectsMissingReviewedParametersBeforeNetwork(t *testing.T) {
 }
 
 func TestRemoteMCPSSEMetadata(t *testing.T) {
-	for _, field := range []string{
-		"id: event-1", "id:event-1", "id:", "id",
-		"retry: 1000", "retry:1000", "retry:", "retry", "retry: invalid",
-	} {
-		t.Run(field, func(t *testing.T) {
-			f := &remoteProtocolFixture{intercept: func(w http.ResponseWriter, _ *http.Request, method string) bool {
-				var response string
-				switch method {
-				case "tools/list":
-					response = `{"jsonrpc":"2.0","id":"list-0","result":{"tools":[{"name":"service_health","inputSchema":{"type":"object","properties":{"nested":{"type":"object"}}}}]}}`
-				case "tools/call":
-					response = `{"jsonrpc":"2.0","id":"1","result":{"content":[{"type":"text","text":"ok"}]}}`
-				default:
-					return false
-				}
-				w.Header().Set("Content-Type", "text/event-stream")
-				_, _ = fmt.Fprintf(w, "%s\nevent: message\ndata: %s\n\n", field, response)
-				return true
-			}}
-			e := remoteTestExecutor(t, f.serve(t))
-			tool := remoteTestTool(t)
-			if err := e.VerifyRemoteMCPTool(t.Context(), tool); err != nil {
-				t.Fatalf("discovery rejected SSE metadata: %v", err)
-			}
-			result, err := e.Execute(t.Context(), tool, json.RawMessage(`{}`))
-			var reply struct {
-				Content []struct{ Text string }
-			}
-			if err != nil || json.Unmarshal([]byte(result), &reply) != nil || len(reply.Content) != 1 || reply.Content[0].Text != "ok" {
-				t.Fatalf("call with SSE metadata returned %q, %v", result, err)
-			}
-			if f.calls.Load() != 1 || f.cleanup.Load() != 2 {
-				t.Fatal("SSE metadata changed the call count or session cleanup")
+	for _, ending := range []string{"\n", "\r", "\r\n"} {
+		t.Run(fmt.Sprintf("ending=%q", ending), func(t *testing.T) {
+			for _, field := range []string{
+				"id: event-1", "id:event-1", "id:", "id",
+				"retry: 1000", "retry:1000", "retry:", "retry", "retry: invalid",
+			} {
+				t.Run(field, func(t *testing.T) {
+					f := &remoteProtocolFixture{intercept: func(w http.ResponseWriter, _ *http.Request, method string) bool {
+						var response string
+						switch method {
+						case "tools/list":
+							response = `{"jsonrpc":"2.0","id":"list-0","result":{"tools":[{"name":"service_health","inputSchema":{"type":"object","properties":{"nested":{"type":"object"}}}}]}}`
+						case "tools/call":
+							response = `{"jsonrpc":"2.0","id":"1","result":{"content":[{"type":"text","text":"ok"}]}}`
+						default:
+							return false
+						}
+						w.Header().Set("Content-Type", "text/event-stream")
+						_, _ = fmt.Fprint(w, strings.Join([]string{field, "event: message", "data: " + response, "", ""}, ending))
+						return true
+					}}
+					e := remoteTestExecutor(t, f.serve(t))
+					tool := remoteTestTool(t)
+					if err := e.VerifyRemoteMCPTool(t.Context(), tool); err != nil {
+						t.Fatalf("discovery rejected SSE metadata: %v", err)
+					}
+					result, err := e.Execute(t.Context(), tool, json.RawMessage(`{}`))
+					var reply struct {
+						Content []struct{ Text string }
+					}
+					if err != nil || json.Unmarshal([]byte(result), &reply) != nil || len(reply.Content) != 1 || reply.Content[0].Text != "ok" {
+						t.Fatalf("call with SSE metadata returned %q, %v", result, err)
+					}
+					if f.calls.Load() != 1 || f.cleanup.Load() != 2 {
+						t.Fatal("SSE metadata changed the call count or session cleanup")
+					}
+				})
 			}
 		})
 	}
 }
 
 func TestRemoteMCPSSERejectsInteractions(t *testing.T) {
-	for _, interaction := range []bool{false, true} {
-		t.Run(fmt.Sprint(interaction), func(t *testing.T) {
-			f := &remoteProtocolFixture{intercept: func(w http.ResponseWriter, r *http.Request, method string) bool {
-				if method != "tools/list" {
-					return false
+	for _, ending := range []string{"\n", "\r", "\r\n"} {
+		t.Run(fmt.Sprintf("ending=%q", ending), func(t *testing.T) {
+			for _, interaction := range []bool{false, true} {
+				t.Run(fmt.Sprint(interaction), func(t *testing.T) {
+					f := &remoteProtocolFixture{intercept: func(w http.ResponseWriter, r *http.Request, method string) bool {
+						if method != "tools/list" {
+							return false
+						}
+						w.Header().Set("Content-Type", "text/event-stream")
+						if interaction {
+							_, _ = w.Write([]byte("data: {\"jsonrpc\":\"2.0\",\"id\":\"interactive\",\"method\":\"elicitation/create\",\"params\":{}}" + ending + ending))
+						}
+						_, _ = w.Write([]byte("data: {\"jsonrpc\":\"2.0\",\"id\":\"list-0\",\"result\":{\"tools\":[{\"name\":\"service_health\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"nested\":{\"type\":\"object\"}}}}]}}" + ending + ending))
+						return true
+					}}
+					e := remoteTestExecutor(t, f.serve(t))
+					err := e.VerifyRemoteMCPTool(t.Context(), remoteTestTool(t))
+					if (err != nil) != interaction {
+						t.Fatalf("SSE verification error: %v", err)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestRemoteMCPSSELineEndings(t *testing.T) {
+	lines := []string{
+		"", ": comment", "id: event-1", "retry: 1000", "event: message",
+		`data: {"jsonrpc":"2.0",`, `data: "id":"1","result":{"ok":true}}`, "",
+	}
+	want := "{\"jsonrpc\":\"2.0\",\n\"id\":\"1\",\"result\":{\"ok\":true}}"
+	for _, tc := range []struct {
+		name    string
+		endings []string
+	}{
+		{"LF", []string{"\n"}},
+		{"CR", []string{"\r"}},
+		{"CRLF", []string{"\r\n"}},
+		{"mixed", []string{"\r", "\n", "\r\n"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stream strings.Builder
+			for i, line := range lines {
+				stream.WriteString(line)
+				stream.WriteString(tc.endings[i%len(tc.endings)])
+			}
+			wire := stream.String()
+			check := func(r io.Reader, split int) {
+				t.Helper()
+				got, err := readRemoteMCPEvent(r)
+				if err != nil || string(got) != want {
+					t.Fatalf("split=%d: response = %q, %v; want %q", split, got, err, want)
 				}
+			}
+			check(iotest.OneByteReader(strings.NewReader(wire)), -1)
+			for split := 0; split <= len(wire); split++ {
+				check(io.MultiReader(strings.NewReader(wire[:split]), strings.NewReader(wire[split:])), split)
+			}
+		})
+	}
+}
+
+func TestRemoteMCPSSETerminalResponseLineEndings(t *testing.T) {
+	response := `data: {"jsonrpc":"2.0","id":"1","result":{"ok":true}}`
+	interaction := `data: {"jsonrpc":"2.0","id":"interactive","method":"elicitation/create","params":{}}`
+	for _, tc := range []struct {
+		name, ending, terminator string
+	}{
+		{"LF", "\n", "\n\n"},
+		{"CR", "\r", "\r\r"},
+		{"CRLF", "\r\n", "\r\n\r\n"},
+		// A CR is a complete line ending even when its optional LF never arrives.
+		{"CRLF terminal CR", "\r\n", "\r\n\r"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, mode := range []string{"open after response", "interaction before response", "interaction after response"} {
+				t.Run(mode, func(t *testing.T) {
+					server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						w.Header().Set("Content-Type", "text/event-stream")
+						if mode == "interaction before response" {
+							_, _ = fmt.Fprint(w, interaction+tc.ending+tc.ending)
+						}
+						_, _ = fmt.Fprint(w, response+tc.terminator)
+						if mode == "interaction after response" {
+							_, _ = fmt.Fprint(w, interaction+tc.ending+tc.ending)
+						}
+						w.(http.Flusher).Flush()
+						<-r.Context().Done()
+					}))
+					defer server.Close()
+					ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+					defer cancel()
+					req, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL, nil)
+					if err != nil {
+						t.Fatal(err)
+					}
+					got, _, err := remoteMCPExchange(server.Client(), req, "1")
+					if mode == "interaction before response" {
+						if err == nil || errors.Is(err, context.DeadlineExceeded) {
+							t.Fatalf("preceding interaction was not rejected promptly: %v", err)
+						}
+					} else if err != nil || string(got) != `{"ok":true}` {
+						t.Fatalf("terminal response required EOF or consumed a later interaction: %q, %v", got, err)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestRemoteMCPSSECancellation(t *testing.T) {
+	for _, ending := range []string{"\n", "\r", "\r\n"} {
+		t.Run(fmt.Sprintf("ending=%q", ending), func(t *testing.T) {
+			started := make(chan struct{})
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "text/event-stream")
-				if interaction {
-					_, _ = w.Write([]byte("data: {\"jsonrpc\":\"2.0\",\"id\":\"interactive\",\"method\":\"elicitation/create\",\"params\":{}}\n\n"))
-				}
-				_, _ = w.Write([]byte("data: {\"jsonrpc\":\"2.0\",\"id\":\"list-0\",\"result\":{\"tools\":[{\"name\":\"service_health\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"nested\":{\"type\":\"object\"}}}}]}}\n\n"))
-				return true
-			}}
-			e := remoteTestExecutor(t, f.serve(t))
-			err := e.VerifyRemoteMCPTool(t.Context(), remoteTestTool(t))
-			if (err != nil) != interaction {
-				t.Fatalf("SSE verification error: %v", err)
+				_, _ = fmt.Fprint(w, "data: {"+ending)
+				w.(http.Flusher).Flush()
+				close(started)
+				<-r.Context().Done()
+			}))
+			defer server.Close()
+			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+			defer cancel()
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			done := make(chan error, 1)
+			go func() {
+				_, _, err := remoteMCPExchange(server.Client(), req, "1")
+				done <- err
+			}()
+			select {
+			case <-started:
+			case <-ctx.Done():
+				t.Fatal("SSE response did not start")
+			}
+			cancel()
+			if err := <-done; !errors.Is(err, context.Canceled) {
+				t.Fatalf("stream cancellation was not preserved: %v", err)
+			}
+		})
+	}
+}
+
+func TestRemoteMCPSSEBounds(t *testing.T) {
+	for _, ending := range []string{"\n", "\r", "\r\n"} {
+		t.Run(fmt.Sprintf("ending=%q", ending), func(t *testing.T) {
+			payload := strings.Repeat("x", remoteMCPResponseLimit-len("data: ")-2*len(ending))
+			for _, tc := range []struct {
+				name, wire, want string
+				valid            bool
+			}{
+				{"at wire limit", "data: " + payload + ending + ending, payload, true},
+				{"oversized line", "data: " + strings.Repeat("x", remoteMCPResponseLimit) + ending + ending, "", false},
+				{"oversized metadata", ":" + strings.Repeat("x", remoteMCPResponseLimit) + ending + "data: {}" + ending + ending, "", false},
+				{"many small lines", strings.Repeat(":x"+ending, remoteMCPResponseLimit/3+1) + "data: {}" + ending + ending, "", false},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					reader := &io.LimitedReader{R: strings.NewReader(tc.wire), N: int64(len(tc.wire))}
+					got, err := readRemoteMCPEvent(reader)
+					if (err == nil) != tc.valid || (tc.valid && string(got) != tc.want) {
+						t.Fatalf("response bytes = %d, error = %v; want valid=%t, bytes=%d", len(got), err, tc.valid, len(tc.want))
+					}
+					if read := int64(len(tc.wire)) - reader.N; read > remoteMCPResponseLimit+1 {
+						t.Fatalf("read %d bytes beyond response bound", read)
+					}
+				})
 			}
 		})
 	}

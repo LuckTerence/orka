@@ -16,6 +16,7 @@ import (
 	"errors"
 	"io"
 	"log"
+	"mime"
 	"net/http"
 	"net/url"
 	"os"
@@ -23,6 +24,8 @@ import (
 	"sync"
 	"time"
 )
+
+const maxResponseBytes = 4 << 20
 
 type gateway struct {
 	key        *rsa.PublicKey
@@ -142,10 +145,19 @@ func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer resp.Body.Close() //nolint:errcheck
-	result, err := io.ReadAll(io.LimitReader(resp.Body, (4<<20)+1))
-	if err != nil || len(result) > 4<<20 {
+	if resp.ContentLength > maxResponseBytes {
 		http.Error(w, "upstream response too large", http.StatusBadGateway)
 		return
+	}
+	mediaType, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	eventStream := mediaType == "text/event-stream"
+	var result []byte
+	if !eventStream {
+		result, err = io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
+		if err != nil || len(result) > maxResponseBytes {
+			http.Error(w, "upstream response too large", http.StatusBadGateway)
+			return
+		}
 	}
 	// Only bounded protocol categories and outcomes belong in proof logs. Neither
 	// application bodies nor arbitrary caller claims are safe, even in a fixture.
@@ -162,7 +174,53 @@ func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	w.WriteHeader(resp.StatusCode)
+	if eventStream {
+		if err := forwardEventStream(w, resp.Body); err != nil {
+			// The status and some event bytes may already be on the wire. Abort
+			// rather than append an HTTP error or turn a truncated stream into EOF.
+			panic(http.ErrAbortHandler)
+		}
+		return
+	}
 	_, _ = w.Write(result)
+}
+
+func forwardEventStream(w http.ResponseWriter, body io.Reader) error {
+	controller := http.NewResponseController(w)
+	if err := controller.Flush(); err != nil {
+		return err
+	}
+	remaining := maxResponseBytes
+	buffer := make([]byte, 32<<10)
+	for {
+		// Read at most one byte past the bound, but never forward that byte.
+		n, readErr := body.Read(buffer[:min(len(buffer), remaining+1)])
+		if n > 0 {
+			allowed := min(n, remaining)
+			if allowed > 0 {
+				written, err := w.Write(buffer[:allowed])
+				if err != nil {
+					return err
+				}
+				if written != allowed {
+					return io.ErrShortWrite
+				}
+				remaining -= written
+				if err := controller.Flush(); err != nil {
+					return err
+				}
+			}
+			if n > allowed {
+				return errors.New("upstream response too large")
+			}
+		}
+		if readErr == io.EOF {
+			return nil
+		}
+		if readErr != nil {
+			return readErr
+		}
+	}
 }
 
 func main() {

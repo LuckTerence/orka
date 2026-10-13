@@ -25,6 +25,18 @@ var _ = Describe("Remote MCP admission", func() {
 			{name: "missing-secret", mutate: func(tool *corev1alpha1.Tool) { tool.Spec.HTTP.AuthSecretRef = nil }, reject: true},
 			{name: "missing-policy", mutate: func(tool *corev1alpha1.Tool) { tool.Spec.HTTP.OutboundAccessPolicyRef = nil }, reject: true},
 			{name: "missing-name", mutate: func(tool *corev1alpha1.Tool) { tool.Spec.MCP.Remote.ToolName = "" }, reject: true},
+			{name: "url-userinfo", mutate: func(tool *corev1alpha1.Tool) {
+				tool.Spec.MCP.Remote.URL = "https://fixture:fixture-placeholder@example.com/mcp"
+			}, reject: true},
+			{name: "url-encoded-credential", mutate: func(tool *corev1alpha1.Tool) {
+				tool.Spec.MCP.Remote.URL = "https://example.com/mcp?%61ccess%5Ftoken=fixture-placeholder"
+			}, reject: true},
+			{name: "url-signed-query", mutate: func(tool *corev1alpha1.Tool) {
+				tool.Spec.MCP.Remote.URL = "https://example.com/mcp?X_Amz_Signature=fixture-placeholder"
+			}, reject: true},
+			{name: "url-benign-routing", mutate: func(tool *corev1alpha1.Tool) {
+				tool.Spec.MCP.Remote.URL = "https://example.com/@tenant?r%6Fute=summary&signature-version=v1"
+			}},
 			{name: "actor-conflict", mutate: func(tool *corev1alpha1.Tool) {
 				tool.Spec.MCP.SubstrateActor = &corev1alpha1.SubstrateMCPActor{TemplateRef: corev1alpha1.WorkspaceTemplateReference{Name: "host"}}
 			}, reject: true},

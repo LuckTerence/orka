@@ -452,6 +452,27 @@ func remoteMCPExchange(httpClient *http.Client, req *http.Request, id string) (j
 func readRemoteMCPEvent(body io.Reader) ([]byte, error) {
 	scanner := bufio.NewScanner(io.LimitReader(body, remoteMCPResponseLimit+1))
 	scanner.Buffer(make([]byte, 4096), remoteMCPResponseLimit)
+	// A CR completes the line immediately. Swallow its optional LF on the next
+	// scan, including across reads, without waiting for more data or EOF.
+	skipLF := false
+	scanner.Split(func(data []byte, atEOF bool) (int, []byte, error) {
+		advance := 0
+		if skipLF && len(data) > 0 {
+			skipLF = false
+			if data[0] == '\n' {
+				data = data[1:]
+				advance = 1
+			}
+		}
+		if i := bytes.IndexAny(data, "\r\n"); i >= 0 {
+			skipLF = data[i] == '\r'
+			return advance + i + 1, data[:i], nil
+		}
+		if atEOF && len(data) > 0 {
+			return advance + len(data), data, nil
+		}
+		return advance, nil, nil
+	})
 	var data []string
 	total := 0
 	for scanner.Scan() {

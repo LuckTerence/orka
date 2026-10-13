@@ -155,13 +155,13 @@ func ResolveRemoteMCPParameters(parameters *apiextensionsv1.JSON) (*jsonschema.S
 	if json.Unmarshal(parameters.Raw, &representation) != nil {
 		return nil, errors.New("remote MCP parameters are not a valid bounded JSON schema")
 	}
-	if _, err := representation.Resolve(nil); err != nil {
+	const location = "https://orka.invalid/remote-mcp-parameters"
+	if _, err := representation.Resolve(&googlejsonschema.ResolveOptions{BaseURI: location}); err != nil {
 		return nil, errors.New("remote MCP parameters contain invalid or unresolved schema references")
 	}
 	compiler := jsonschema.NewCompiler()
 	compiler.DefaultDraft(jsonschema.Draft2020)
 	compiler.UseLoader(remoteMCPSchemaLoader{})
-	const location = "https://orka.invalid/remote-mcp-parameters"
 	if err := compiler.AddResource(location, document); err != nil {
 		return nil, errors.New("remote MCP parameters cannot be compiled")
 	}

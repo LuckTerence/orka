@@ -1,7 +1,10 @@
 package v1alpha1
 
 import (
+	"fmt"
+	"net/url"
 	"os"
+	"strings"
 	"testing"
 
 	"k8s.io/apiextensions-apiserver/pkg/apis/apiextensions"
@@ -120,6 +123,91 @@ func TestRemoteMCPAdmission(t *testing.T) {
 				},
 			})
 		}
+	}
+	urlCases := []struct {
+		name, endpoint string
+		reject         bool
+	}{
+		{"userinfo", "https://fixture:fixture-placeholder@example.com/mcp", true},
+		{"empty userinfo", "https://@example.com/mcp", true},
+		{"missing hostname", "https:///mcp", true},
+		{"invalid hostname escape", "https://example%2ecom/mcp", true},
+		{"invalid path escape", "https://example.com/%zz", true},
+		{"invalid query key escape", "https://example.com/mcp?%zz=value", true},
+		{"invalid query value escape", "https://example.com/mcp?route=%zz", true},
+		{"raw query semicolon", "https://example.com/mcp?route=a;token=fixture", true},
+		{"benign routing", "https://example.com/mcp?route=summary&tenant=fixture", false},
+		{"benign encoded key", "https://example.com/mcp?r%6Fute=summary", false},
+		{"escape boundary api", "https://example.com/mcp?%6Api_key=summary", false},
+		{"escape boundary credential", "https://example.com/mcp?%6Credential=summary", false},
+		{"escape boundary authorization", "https://example.com/mcp?%4Authorization=summary", false},
+		{"encoded values", "https://example.com/mcp?route=a%3Bb%26c%3Dd%3Fe", false},
+		{"value is not a key", "https://example.com/mcp?route=access_token%3Dfixture?signature=value", false},
+		{"at in path and query", "https://example.com/@tenant?route=user@example.com", false},
+		{"benign signed-name suffix", "https://example.com/mcp?signature-version=v1&subscription-id=fixture", false},
+		{"duplicates and bare keys", "https://example.com/mcp?route=a&route=b&bare&&", false},
+		{"empty query", "https://example.com/mcp?", false},
+		{"path semicolon", "https://example.com/mcp;route?view=summary", false},
+		{"IPv6 and port", "http://[::1]:8080/mcp?route=summary", false},
+		{"one-level decoding", "https://example.com/mcp?%2574oken=fixture", false},
+		{"encoded equals in key", "https://example.com/mcp?%3Dsig=fixture", false},
+		{"encoded ampersand in key", "https://example.com/mcp?%26sig=fixture", false},
+		{"long s is not ASCII s", "https://example.com/mcp?ſig=fixture", false},
+	}
+	credentialNames := []string{
+		"token", "next_token", "secret", "password", "credential", "authorization",
+		"api_key", "api-key", "apikey", "subscription_key", "subscription-key", "subscriptionkey",
+		"AWSAccessKeyId", "aws-access-key-id", "GoogleAccessId", "google-access-id", "key-pair-id",
+		"sig", "signature", "x-amz-credential", "x-amz-security-token", "x-amz-signature",
+		"x-goog-credential", "x-goog-signature", "x-ms-signature",
+	}
+	for _, name := range credentialNames {
+		encoded := strings.Builder{}
+		for _, b := range []byte(name) {
+			_, _ = fmt.Fprintf(&encoded, "%%%02X", b)
+		}
+		for i, b := range []byte(name) {
+			key := name[:i] + fmt.Sprintf("%%%02X", b) + name[i+1:]
+			urlCases = append(urlCases, struct {
+				name, endpoint string
+				reject         bool
+			}{fmt.Sprintf("%s encoded byte %d", name, i), "https://example.com/mcp?" + key + "=fixture-placeholder", true})
+		}
+		for variant, key := range map[string]string{
+			"literal":                   name,
+			"case and separators":       strings.ToUpper(strings.ReplaceAll(name, "-", "_")),
+			"fully encoded":             encoded.String(),
+			"Unicode lowercase aliases": strings.NewReplacer("i", "İ", "I", "İ", "k", "K", "K", "K").Replace(name),
+			"encoded Unicode aliases":   url.QueryEscape(strings.NewReplacer("i", "İ", "I", "İ", "k", "K", "K", "K").Replace(name)),
+			"padded":                    url.QueryEscape("\u00a0\t" + name + "\u3000"),
+			"padded literal":            "\u00a0" + name + "\u3000",
+		} {
+			urlCases = append(urlCases, struct {
+				name, endpoint string
+				reject         bool
+			}{name + " " + variant, "https://example.com/mcp?route=summary&" + key + "=fixture-placeholder", true})
+		}
+	}
+	for _, tc := range urlCases {
+		cases = append(cases, admissionCase{
+			name: "remote URL " + tc.name, reject: tc.reject,
+			patch: func(s map[string]any) {
+				s["mcp"].(map[string]any)["remote"].(map[string]any)["url"] = tc.endpoint
+			},
+		})
+	}
+	for _, backend := range []string{"HTTP", "managed MCP"} {
+		cases = append(cases, admissionCase{
+			name: backend + " legacy credential URL admission",
+			patch: func(s map[string]any) {
+				s["http"].(map[string]any)["url"] = "https://fixture:fixture-placeholder@example.com/mcp?access_token=fixture-placeholder"
+				if backend == "HTTP" {
+					delete(s, "mcp")
+				} else {
+					s["mcp"] = map[string]any{"workspace": map[string]any{"classRef": map[string]any{"name": "host"}, "port": int64(80)}}
+				}
+			},
+		})
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

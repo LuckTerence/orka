@@ -111,11 +111,18 @@ func prepareNativeRemoteTools(
 		return state.validate(ctx, reader, tool)
 	})
 	for name, tool := range state.tools {
-		if err := bindNativeRemoteDependencies(ctx, reader, tool, task.Spec.Transaction.Context["secret"], nil); err != nil {
-			return ctx, err
+		// Dependency reads and discovery share the same per-Tool budget.
+		toolCtx, cancel := context.WithTimeout(ctx, worker.RemoteMCPTimeout(tool))
+		err := bindNativeRemoteDependencies(toolCtx, reader, tool, task.Spec.Transaction.Context["secret"], nil)
+		if err == nil {
+			state.tools[name] = tool.DeepCopy()
+			err = executor.VerifyRemoteMCPTool(toolCtx, tool)
 		}
-		state.tools[name] = tool.DeepCopy()
-		if err := executor.VerifyRemoteMCPTool(ctx, tool); err != nil {
+		if ctxErr := toolCtx.Err(); ctxErr != nil {
+			err = ctxErr
+		}
+		cancel()
+		if err != nil {
 			return ctx, fmt.Errorf("verify remote MCP Tool %q before exposure: %w", name, err)
 		}
 	}
@@ -123,7 +130,13 @@ func prepareNativeRemoteTools(
 	// Recheck after network discovery: a concurrent edit must not become the
 	// meaning of the already prepared model definition.
 	for _, tool := range state.tools {
-		if err := state.validate(ctx, reader, tool); err != nil {
+		toolCtx, cancel := context.WithTimeout(ctx, worker.RemoteMCPTimeout(tool))
+		err := state.validate(toolCtx, reader, tool)
+		if ctxErr := toolCtx.Err(); ctxErr != nil {
+			err = ctxErr
+		}
+		cancel()
+		if err != nil {
 			return ctx, err
 		}
 	}

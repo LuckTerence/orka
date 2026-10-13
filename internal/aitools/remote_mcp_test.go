@@ -163,6 +163,25 @@ func TestRemoteMCPParametersReferencesPreserveTypedSchemaLocations(t *testing.T)
 	}
 }
 
+func TestRemoteMCPParametersRelativeIdentifiers(t *testing.T) {
+	for name, raw := range map[string]string{
+		"no identifier":                `{"type":"object","properties":{"name":{"type":"string"}}}`,
+		"absolute identifier":          `{"type":"object","$id":"https://orka.invalid/parameters.json","properties":{"name":{"type":"string"}}}`,
+		"relative root identifier":     `{"type":"object","$id":"parameters.json","$defs":{"name":{"type":"string"}},"properties":{"name":{"$ref":"#/$defs/name"}}}`,
+		"relative embedded identifier": `{"type":"object","$defs":{"name":{"$id":"name.json","type":"string"}},"properties":{"name":{"$ref":"name.json"}}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			schema, err := ResolveRemoteMCPParameters(&apiextensionsv1.JSON{Raw: []byte(raw)})
+			if err != nil {
+				t.Fatalf("self-contained schema did not compile: %v", err)
+			}
+			if schema.Validate(map[string]any{"name": "fixture"}) != nil || schema.Validate(map[string]any{"name": false}) == nil {
+				t.Fatal("identifier changed local schema validation")
+			}
+		})
+	}
+}
+
 func TestRemoteMCPParametersNeverLoadExternalResources(t *testing.T) {
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -176,10 +195,12 @@ func TestRemoteMCPParametersNeverLoadExternalResources(t *testing.T) {
 	}
 	fileURL := (&url.URL{Scheme: "file", Path: path}).String()
 	for name, raw := range map[string]string{
-		"HTTP ref":             `{"type":"object","$ref":"` + server.URL + `/schema"}`,
-		"file ref":             `{"type":"object","$ref":"` + fileURL + `"}`,
-		"HTTP metaschema":      `{"type":"object","$schema":"` + server.URL + `/schema"}`,
-		"unresolved local ref": `{"type":"object","$ref":"#/$defs/missing"}`,
+		"HTTP ref":                 `{"type":"object","$ref":"` + server.URL + `/schema"}`,
+		"relative ID external ref": `{"type":"object","$id":"parameters.json","$ref":"` + server.URL + `/schema"}`,
+		"relative external ref":    `{"type":"object","$id":"parameters.json","$ref":"external.json"}`,
+		"file ref":                 `{"type":"object","$ref":"` + fileURL + `"}`,
+		"HTTP metaschema":          `{"type":"object","$schema":"` + server.URL + `/schema"}`,
+		"unresolved local ref":     `{"type":"object","$ref":"#/$defs/missing"}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := ResolveRemoteMCPParameters(&apiextensionsv1.JSON{Raw: []byte(raw)}); err == nil {
