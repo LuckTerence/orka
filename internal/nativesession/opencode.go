@@ -286,7 +286,13 @@ func (openCodeFormat) Install(ctx context.Context, data []byte, dirs Dirs, _ str
 	if err := verifyOpenCodeDatabase(ctx, staged, bundle.manifest); err != nil {
 		return err
 	}
-	if err := relocateOpenCodeSession(ctx, staged, bundle.manifest, dirs.Workspace, toolOutputDir, expandedLimit(limit)); err != nil {
+	// Relocation may grow the conversation only into the budget the carried
+	// state leaves.
+	carried := len(bundle.database)
+	for _, content := range bundle.toolOutput {
+		carried += len(content)
+	}
+	if err := relocateOpenCodeSession(ctx, staged, bundle.manifest, dirs.Workspace, toolOutputDir, expandedLimit(limit)-carried); err != nil {
 		return err
 	}
 	if err := os.Rename(staged, destination); err != nil {
@@ -304,8 +310,18 @@ func copyOpenCodeDatabase(ctx context.Context, source, target string) error {
 		return err
 	}
 	defer func() { _ = db.Close() }()
+	// A source Orka cannot read or verify will not become readable on retry,
+	// so it falls back to the transcript. A structurally sound database holds
+	// no page twice, so its copy is no larger than the bounded source; the
+	// check reads each page once.
 	if _, err := requireOpenCodeSchema(ctx, db); err != nil {
-		return err
+		if errors.Is(err, ErrUnsupported) {
+			return err
+		}
+		return fmt.Errorf("%w: OpenCode database is unreadable or corrupt: %w", ErrUnsupported, err)
+	}
+	if err := requireIntactSQLite(ctx, db); err != nil {
+		return fmt.Errorf("%w: OpenCode database is unreadable or corrupt: %w", ErrUnsupported, err)
 	}
 	if _, err := db.ExecContext(ctx, `VACUUM INTO ?`, target); err != nil {
 		return fmt.Errorf("copy OpenCode database: %w", err)
@@ -377,9 +393,8 @@ func verifyOpenCodeDatabase(ctx context.Context, path string, manifest openCodeM
 	if err != nil {
 		return err
 	}
-	var check string
-	if err := db.QueryRowContext(ctx, `PRAGMA quick_check`).Scan(&check); err != nil || check != "ok" {
-		return errors.New("OpenCode database failed its integrity check")
+	if err := requireIntactSQLite(ctx, db); err != nil {
+		return err
 	}
 	for _, table := range tables {
 		if slices.Contains(openCodeCarriedTables, table) {
@@ -552,6 +567,14 @@ func relocateOpenCodeSession(ctx context.Context, path string, manifest openCode
 		}
 	}
 	return tx.Commit()
+}
+
+func requireIntactSQLite(ctx context.Context, db *sql.DB) error {
+	var check string
+	if err := db.QueryRowContext(ctx, `PRAGMA quick_check(1)`).Scan(&check); err != nil || check != "ok" {
+		return errors.New("OpenCode database failed its integrity check")
+	}
+	return nil
 }
 
 func sqliteExists(ctx context.Context, db *sql.DB, query string, args ...any) (bool, error) {

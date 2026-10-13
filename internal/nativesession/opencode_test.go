@@ -239,6 +239,22 @@ func TestOpenCodeCaptureFallsBackOnStateItDoesNotCarry(t *testing.T) {
  VALUES ('trigger', 'sqlite_costly', 'event', 0, 'CREATE TRIGGER sqlite_costly AFTER DELETE ON event BEGIN SELECT 1; END')`)
 			f.exec(t, `PRAGMA writable_schema=OFF`)
 		}},
+		"corrupt pages": {reason: "unreadable or corrupt", mutate: func(t *testing.T, f openCodeFixture) {
+			// Garble every page after the schema page that the write-ahead
+			// log does not supersede.
+			path := filepath.Join(f.dirs.Data, "opencode", "opencode.db")
+			database, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pageSize := int(database[16])<<8 | int(database[17])
+			for offset := 2 * pageSize; offset+64 <= len(database); offset += pageSize {
+				copy(database[offset:offset+64], bytes.Repeat([]byte{0xff}, 64))
+			}
+			if err := os.WriteFile(path, database, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
 		"directory outside the workspace": {reason: "outside its RuntimeSession workspace", mutate: func(t *testing.T, f openCodeFixture) {
 			f.exec(t, `UPDATE session SET directory = '/'`)
 		}},
