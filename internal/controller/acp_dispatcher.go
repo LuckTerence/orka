@@ -1059,8 +1059,8 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	}
 	profile = bound.plan.Profile
 	if nativeErr := d.validateTaskNativeSessionRuntime(runtimeCtx, task, nativeSessionsSupported); nativeErr != nil {
-		if errors.Is(nativeErr, errNativeSessionRuntimeUnsupported) {
-			return d.rejectNativeSessionRuntime(ctx, task, attemptID, fence)
+		if errors.Is(nativeErr, errNativeSessionRuntimeUnsupported) || errors.Is(nativeErr, errNativeSessionHistoryBoundary) {
+			return d.rejectNativeSessionRuntime(ctx, task, attemptID, fence, nativeErr)
 		}
 		return d.requeueReservedTask(ctx, task, acpReservedRetrySessionPreparation, nativeErr)
 	}
@@ -1112,8 +1112,8 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	)
 	if err != nil {
 		endSessionTrace(err)
-		if errors.Is(err, errNativeSessionRuntimeUnsupported) {
-			return d.rejectNativeSessionRuntime(ctx, task, attemptID, fence)
+		if errors.Is(err, errNativeSessionRuntimeUnsupported) || errors.Is(err, errNativeSessionHistoryBoundary) {
+			return d.rejectNativeSessionRuntime(ctx, task, attemptID, fence, err)
 		}
 		if errors.Is(runtimeContextError(runtimeCtx), context.DeadlineExceeded) {
 			recoveredSession, cleanupErr := d.quiesceInterruptedTaskSessionPreparation(ctx, task, attemptID, fence)
@@ -6383,6 +6383,22 @@ func (d *ACPDispatcher) handlePromptStreamError(
 		)
 		return d.handlePromptUpdatePersistenceFailure(
 			ctx, runtimeClient, sessionID, task, attemptID, fence, runtimeFence, journalState, accepted, persistenceErr, cancellation,
+		)
+	}
+	if rejection, ok := errors.AsType[*harnessv2.ClientError](err); !accepted && ok &&
+		rejection.Kind == harnessv2.ClientErrorHTTP && rejection.Operation == "start_prompt" &&
+		rejection.StatusCode == http.StatusConflict && rejection.Code == harnessv2.ErrorCodePromptNotAccepted &&
+		!rejection.Retryable && rejection.Classification == nil {
+		// The HTTP body was written, but the supervisor proved idle recovery
+		// failed before submitting an ACP prompt. Record a terminal failure;
+		// this does not turn transport evidence into permission to replay.
+		const message = "ACP adapter could not resume while idle; prompt was not accepted"
+		if transitionErr := d.transitionAttemptToFailed(ctx, attemptID, fence, "prompt-not-accepted", "RuntimeLost", message); transitionErr != nil {
+			return transitionErr
+		}
+		return recordACPPromptOutcomeIfSettled(
+			ctx, promptTrace, acpPromptOutcomeFailed,
+			d.failTask(ctx, task, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed, "RuntimeLost", message),
 		)
 	}
 	if runtimeContextErr != nil {
