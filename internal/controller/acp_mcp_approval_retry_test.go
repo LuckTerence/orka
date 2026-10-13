@@ -158,6 +158,10 @@ func TestMCPApprovalReadRetriesKeepOriginalExpiry(t *testing.T) {
 			done := f.start(f.request)
 			pending := f.pending()
 			fault.active.Store(true)
+			if source != "secret" {
+				// Observe the pending read outage before approval can skip the polling read.
+				requireApprovalReadRetrying(t, f, pending.ID, approvals.StatusPending, done, fault.reads)
+			}
 			f.decide(pending.ID, events.ExecutionEventTypeApprovalApproved)
 			requireApprovalReadRetrying(t, f, pending.ID, approvals.StatusApproved, done, fault.reads)
 			if source == "receipt" || source == "decision" {
