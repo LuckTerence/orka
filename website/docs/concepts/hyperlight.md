@@ -29,8 +29,8 @@ Two tools use it:
 - **The Hyperlight device plugin**: [hyperlight-on-kubernetes](https://github.com/hyperlight-dev/hyperlight-on-kubernetes)
   advertises `hyperlight.dev/hypervisor` and injects the device with CDI, so
   Pods need no privileges. CDI is on by default in containerd 2.x; containerd
-  1.7 needs `enable_cdi = true`. The plugin gives the device to `DEVICE_UID` and
-  `DEVICE_GID`; pass that group to the controller with `--hyperlight-device-gid`.
+  1.7 needs `enable_cdi = true`. Orka does not install it; see
+  [Installing the device plugin](#installing-the-device-plugin).
 - **The Hyperlight bundle**: this opt-in image is operator-built and is not
   published by Orka release or development-image automation. Build it with
   `make docker-build-hyperlight-bundle HYPERLIGHT_BUNDLE_IMG=<your-registry>/hyperlight-bundle:<tag>`,
@@ -40,6 +40,47 @@ Two tools use it:
   runs micro-VMs, where it is mounted read-only, next to a separate volume for
   the warm snapshots. `hluk` uses that cache only while no other user can write
   to it; otherwise every run boots cold.
+
+### Installing the device plugin
+
+The device plugin is node infrastructure, like a GPU device plugin, and the
+cluster operator installs it. Upstream has no versioned releases; its images
+are tagged by commit. Orka's Hyperlight E2E lane tests commit `fc71b45`:
+
+```bash
+REV=fc71b4501d23977fcc54f7be144d884fc8210667
+kubectl label node <node> hyperlight.dev/enabled=true
+curl -fsSL "https://raw.githubusercontent.com/hyperlight-dev/hyperlight-on-kubernetes/$REV/deploy/manifests/device-plugin.yaml" |
+  IMAGE=ghcr.io/hyperlight-dev/hyperlight-device-plugin@sha256:8e8b788c2327e272317c456c85c8296922ccb8b9b70e5b866451bec11ed02472 \
+  DEVICE_COUNT=16 DEVICE_UID=0 DEVICE_GID=<gid> \
+  envsubst '${IMAGE} ${DEVICE_COUNT} ${DEVICE_UID} ${DEVICE_GID}' | kubectl apply -f -
+kubectl -n hyperlight-system rollout status daemonset/hyperlight-device-plugin
+```
+
+- The DaemonSet runs only on nodes labeled `hyperlight.dev/enabled=true`. Label
+  the nodes that have the hypervisor device.
+- `DEVICE_GID` is the group that owns the device in Pods. Use a nonzero group
+  and pass the same value to `--hyperlight-device-gid`. With `DEVICE_UID=0`,
+  workload users reach the device only through that group, which Orka adds only
+  to `hluk`.
+- `DEVICE_COUNT` is how many Pods on a node can hold the device at once, not a
+  count of physical devices. Each Hyperlight-enabled AI worker Pod and
+  RuntimePool Pod holds one while it runs, so set it above the number of those
+  Pods a node can run.
+- The published image is `linux/amd64` only.
+
+The plugin is ready when each labeled node advertises the resource:
+
+```bash
+kubectl get nodes -l hyperlight.dev/enabled=true \
+  -o custom-columns='NODE:.metadata.name,HYPERVISOR:.status.allocatable.hyperlight\.dev/hypervisor'
+```
+
+On kind, the plugin container fails to start: its read-only host `/dev` mount
+leaves the container runtime no place for `/dev/termination-log`. Set the
+container's `terminationMessagePath` to a path under `/tmp`.
+`scripts/hyperlight-kind-e2e.sh` shows the full kind setup; it builds the image
+from the same commit.
 
 ## `code_exec` for AI Tasks
 
