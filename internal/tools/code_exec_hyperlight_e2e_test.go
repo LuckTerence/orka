@@ -108,7 +108,7 @@ func TestHyperlightE2ECodeExec(t *testing.T) {
 
 func hyperlightE2ECodeExec(t *testing.T, tool *CodeExecTool, language, code string, timeout int) CodeExecResult {
 	t.Helper()
-	args, err := json.Marshal(CodeExecArgs{Language: language, Code: code, Timeout: timeout})
+	args, err := json.Marshal(CodeExecArgs{Language: language, Code: code, Timeout: &timeout})
 	if err != nil {
 		t.Fatal(err)
 	}
