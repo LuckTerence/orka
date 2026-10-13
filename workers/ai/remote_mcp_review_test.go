@@ -38,7 +38,10 @@ func TestNativeRemoteMCPPreservesLegacyStartupOnLookupFailure(t *testing.T) {
 			t.Run(name+"/"+failure.Error(), func(t *testing.T) {
 				f := newNativeRemoteFixture(t)
 				reader := unavailableToolReader{Client: f.client, err: failure}
-				loaded := loadCustomTools(t.Context(), reader, "team", []string{name})
+				loaded, err := loadCustomTools(t.Context(), reader, "team", []string{name})
+				if err != nil {
+					t.Fatal(err)
+				}
 				if _, err := prepareNativeRemoteTools(
 					t.Context(), reader, "team", "task", []string{name}, loaded, f.executor,
 				); err != nil {
@@ -62,7 +65,10 @@ func TestNativeRemoteMCPUnresolvedAliasIsNeitherAdvertisedNorCallable(t *testing
 	f := newNativeRemoteFixture(t)
 	reader := unavailableToolReader{Client: f.client, err: errors.New("temporarily unavailable")}
 	enabled := []string{f.tool.Name}
-	loaded := loadCustomTools(t.Context(), reader, "team", enabled)
+	loaded, err := loadCustomTools(t.Context(), reader, "team", enabled)
+	if err != nil {
+		t.Fatal(err)
+	}
 	ctx, err := prepareNativeRemoteTools(t.Context(), reader, "team", "task", enabled, loaded, f.executor)
 	if err != nil {
 		t.Fatal("unknown backend lookup changed legacy best-effort startup")

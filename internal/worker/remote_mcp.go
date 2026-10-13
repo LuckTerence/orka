@@ -51,9 +51,14 @@ func (e *ToolExecutor) VerifyRemoteMCPTool(ctx context.Context, tool *corev1alph
 	if err != nil {
 		return err
 	}
-	httpClient, err := toolHTTPClient(e.client, prepared.httpConfig.Timeout, prepared.gatewayTLS, true)
+	httpClient, err := toolHTTPClient(e.client, prepared.httpConfig.Timeout, prepared.gatewayTLS, true, false)
 	if err != nil {
 		return err
+	}
+	if e.sendGate != nil {
+		if err := e.sendGate(ctx); err != nil {
+			return err
+		}
 	}
 	if _, err = e.executeRemoteMCPSession(ctx, httpClient, prepared, true); err != nil {
 		return err
@@ -115,10 +120,10 @@ func (e *ToolExecutor) prepareRemoteMCPRequest(ctx context.Context, tool *corev1
 	req.Header.Set("Accept", "application/json, text/event-stream")
 	req.Header.Set(mcpProtocolVersionHeader, mcpProtocolVersion)
 	prepared := preparedToolRequest{httpConfig: h, request: req, authToken: token, redactionSecrets: []string{token, e.transactionToken}, mcp: true, remote: tool}
-	if err := e.applyOutboundAccessPolicy(ctx, tool, &prepared); err != nil {
+	if err := e.applyOutboundAccessPolicy(ctx, tool, args, &prepared); err != nil {
 		return preparedToolRequest{}, gatewayMCPError{Err: err}
 	}
-	if !prepared.gateway || prepared.direct || strings.TrimSpace(prepared.transactionToken) == "" || strings.TrimSpace(req.Header.Get(transactiontoken.HeaderName)) == "" {
+	if !prepared.gateway || prepared.direct || prepared.connection || strings.TrimSpace(prepared.transactionToken) == "" || strings.TrimSpace(req.Header.Get(transactiontoken.HeaderName)) == "" {
 		return preparedToolRequest{}, errors.New("remote MCP requires a gateway with Task transaction authority")
 	}
 	// Validate only after the final resolution. The request and TLS material below

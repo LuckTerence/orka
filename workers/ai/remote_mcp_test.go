@@ -165,7 +165,15 @@ func newNativeRemoteFixture(t *testing.T) *nativeRemoteFixture {
 func (f *nativeRemoteFixture) prepare(t *testing.T) (context.Context, map[string]*corev1alpha1.Tool, error) {
 	t.Helper()
 	names := []string{f.tool.Name}
-	loaded := loadCustomTools(t.Context(), f.client, "team", names)
+	loaded, err := loadCustomTools(t.Context(), f.client, "team", names)
+	if err != nil {
+		return t.Context(), nil, err
+	}
+	classified, err := connectorBackedTools(t.Context(), f.client, "team", loaded)
+	if err != nil {
+		return t.Context(), loaded, err
+	}
+	markConnectorBackedTools(loaded, classified)
 	ctx, err := prepareNativeRemoteTools(t.Context(), f.client, "team", "task", names, loaded, f.executor)
 	return ctx, loaded, err
 }
@@ -387,11 +395,14 @@ func TestNativeRemoteMCPStartupDeadlineIncludesDependencies(t *testing.T) {
 				t.Fatal(err)
 			}
 			names := []string{f.tool.Name}
-			loaded := loadCustomTools(t.Context(), f.client, "team", names)
+			loaded, err := loadCustomTools(t.Context(), f.client, "team", names)
+			if err != nil {
+				t.Fatal(err)
+			}
 			reader := &nativeRemoteStartupBlockingClient{Client: f.client, kind: tc.kind, read: tc.read}
 			outer, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 			defer cancel()
-			_, err := prepareNativeRemoteTools(outer, reader, "team", "task", names, loaded, f.executor)
+			_, err = prepareNativeRemoteTools(outer, reader, "team", "task", names, loaded, f.executor)
 			if !errors.Is(err, context.DeadlineExceeded) {
 				t.Fatalf("startup did not preserve its deadline: %v", err)
 			}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"net/url"
 	"regexp"
 	"strings"
@@ -241,7 +242,15 @@ func validateRemoteMCPHTTP(h *corev1alpha1.HTTPExecution) error {
 	if h.Timeout != nil && h.Timeout.Duration <= 0 {
 		return errors.New("remote MCP timeout must be positive")
 	}
+	seenHeaders := make(map[string]struct{}, len(h.Headers))
 	for key := range h.Headers {
+		// Header.Set canonicalizes names; case-variant map keys would overwrite
+		// one another nondeterministically and change the prepared binding.
+		canonical := http.CanonicalHeaderKey(key)
+		if _, duplicate := seenHeaders[canonical]; duplicate {
+			return errors.New("remote MCP forbids duplicate custom header names")
+		}
+		seenHeaders[canonical] = struct{}{}
 		if remoteMCPCredentialName(key) {
 			return errors.New("remote MCP credentials must use authSecretRef, not custom headers")
 		}

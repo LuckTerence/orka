@@ -2,7 +2,7 @@
 
 # The tag documents the human-readable version; every base image and downloaded
 # provider artifact is selected by an immutable digest.
-FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.27.0-bookworm@sha256:484ef6066fa69acb059fdfeda7ba2b8f7391f2ef6abc6f9b8411e669ebd56466 AS upstream-artifacts
+FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.27.2-bookworm@sha256:5cf287a799e6b94384bad13d16b14904c531f51ba65792237e122ce42b392f61 AS upstream-artifacts
 ARG TARGETARCH
 COPY workers/acp/images/artifact-tool.go /tmp/artifact-tool.go
 COPY LICENSE /artifacts/orka-LICENSE
@@ -30,7 +30,7 @@ RUN set -eu; \
       "1fbd0dcc55c66738b1b591632132c927de20c8443dff1d55b4851e378883e402" \
       /artifacts/copilot-LICENSE.md 65536
 
-FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.27.0-bookworm@sha256:484ef6066fa69acb059fdfeda7ba2b8f7391f2ef6abc6f9b8411e669ebd56466 AS supervisor-builder
+FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.27.2-bookworm@sha256:5cf287a799e6b94384bad13d16b14904c531f51ba65792237e122ce42b392f61 AS supervisor-builder
 ARG TARGETOS
 ARG TARGETARCH
 WORKDIR /src
@@ -54,11 +54,11 @@ LABEL org.opencontainers.image.title="Orka ACP GitHub Copilot runtime" \
       org.opencontainers.image.description="Orka harness v2 ACP supervisor with GitHub Copilot CLI 1.0.77" \
       org.opencontainers.image.source="https://github.com/orka-agents/orka" \
       org.opencontainers.image.licenses="MIT AND LicenseRef-GitHub-Copilot-CLI" \
-      io.orka.acp.provider="copilot" \
-      io.orka.acp.adapter.version="1.0.77" \
-      io.orka.acp.adapter.revision="aee1edd29ef0f2058425bf399bcc9e5002a2b8f2" \
-      io.orka.acp.adapter.digest.amd64="sha256:c6414f99c5b29b049a3b0929ba824f0ff0ae88b85eb52559be45631b96b00f4c" \
-      io.orka.acp.adapter.digest.arm64="sha256:5bcf01b30bd74ce415cc93acb404885e0bc396cde037ca68efe2b8ec84f91e5a"
+      ai.orka.acp.provider="copilot" \
+      ai.orka.acp.adapter.version="1.0.77" \
+      ai.orka.acp.adapter.revision="aee1edd29ef0f2058425bf399bcc9e5002a2b8f2" \
+      ai.orka.acp.adapter.digest.amd64="sha256:c6414f99c5b29b049a3b0929ba824f0ff0ae88b85eb52559be45631b96b00f4c" \
+      ai.orka.acp.adapter.digest.arm64="sha256:5bcf01b30bd74ce415cc93acb404885e0bc396cde037ca68efe2b8ec84f91e5a"
 ENV HOME=/root \
     ORKA_ACP_PROVIDER=copilot \
     SSL_CERT_DIR=/etc/ssl/certs \

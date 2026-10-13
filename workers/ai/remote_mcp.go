@@ -38,6 +38,9 @@ func prepareNativeRemoteTools(
 	loaded map[string]*corev1alpha1.Tool,
 	executor *worker.ToolExecutor,
 ) (context.Context, error) {
+	if err := validateNativeRemoteConnectorOverlap(enabled, loaded); err != nil {
+		return ctx, err
+	}
 	state := &nativeRemoteTools{executor: executor, tools: map[string]*corev1alpha1.Tool{}}
 	for _, name := range enabled {
 		knownRemote := aitools.IsRemoteMCP(loaded[name])
@@ -143,6 +146,19 @@ func prepareNativeRemoteTools(
 	return ctx, nil
 }
 
+// A frozen connector must not escape controller custody if its live Tool
+// drifts to remote. Reject the whole selection before any discovery sends.
+func validateNativeRemoteConnectorOverlap(enabled []string, loaded map[string]*corev1alpha1.Tool) error {
+	frozenConnector := frozenConnectorToolDigests(os.Getenv(workerenv.ConnectorToolDigests))
+	for _, name := range enabled {
+		_, frozen := frozenConnector[name]
+		if aitools.IsRemoteMCP(loaded[name]) && (frozen || isConnectorBackedTool(loaded[name])) {
+			return fmt.Errorf("remote MCP Tool %q cannot be connector-backed", name)
+		}
+	}
+	return nil
+}
+
 func loadNativeRemoteLaunchTask(
 	ctx context.Context, reader client.Client, namespace, taskName string,
 ) (*corev1alpha1.Task, error) {
@@ -206,7 +222,8 @@ func bindNativeRemoteDependencies(
 		policy.ResourceVersion != frozen.Annotations[approvalOutboundPolicyResourceVersionAnnotation]) {
 		return errors.New("remote MCP outbound policy changed after exposure")
 	}
-	if policy.Spec.Gateway == nil || policy.Spec.Direct != nil || !policy.DeletionTimestamp.IsZero() {
+	if policy.Spec.Gateway == nil || policy.Spec.Direct != nil || policy.Spec.Connection != nil ||
+		!policy.DeletionTimestamp.IsZero() {
 		return errors.New("remote MCP requires a live gateway policy")
 	}
 	secrets := []string{tool.Spec.HTTP.AuthSecretRef.Name}
