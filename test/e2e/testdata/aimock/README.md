@@ -62,16 +62,16 @@ Hyperlight guests are real. It covers:
 - OpenCode `orka_sandbox_exec` workspace persistence across fresh guests, with
   native Bash absent from the actual model-facing catalog and a forced Bash
   call returning a real rejection without creating a host marker.
-- Claude `mcp__orka__sandbox_exec` over Anthropic Messages and Copilot
-  `orka-sandbox_exec` over Responses. Each policy allows native `Read` and
-  `sandbox_exec`, but disables native shell. The fixtures force an excluded
-  `Bash`/`bash` call, require its real rejection result, execute a guest write,
-  read the file with the allowed native tool, and execute another guest that
-  verifies persistence and removes the probe files. The journal must omit
-  native command tools (including all five Copilot shell-session aliases).
+- Claude `mcp__orka__sandbox_exec` over Anthropic Messages. The policy allows
+  native `Read` and `sandbox_exec`, but disables native shell. The fixture
+  forces an excluded `Bash` call, requires its real rejection result, executes
+  a guest write, reads the file with the allowed native tool, and executes
+  another guest that verifies persistence and removes the probe files. The
+  journal must omit native command tools.
+- Copilot exclusive command mode is rejected before dispatch (see below).
 
 Claude guests also plant bounded workspace hook and unmanaged MCP
-configs before the allowed native read. Both guests check that neither the
+configs before the allowed native read. The guests check that neither the
 forced native command nor the hook/MCP probe created a host-side marker, and
 that no unmanaged tool appeared in the model catalog. **This is an in-session
 configuration-loading probe, not proof about config installed before harness
