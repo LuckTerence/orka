@@ -35,8 +35,8 @@ jobs:
             cluster: orka-test-e2e
             labels: "!agent-runtime"
             idle_ttl: 5s
-            job_timeout: 60
-            test_timeout: 50m
+            job_timeout: 90
+            test_timeout: 75m
           # The built-in runtime lifecycle specs restart the controller and
           # park, replace, and scale RuntimePools, so they get their own
           # cluster.

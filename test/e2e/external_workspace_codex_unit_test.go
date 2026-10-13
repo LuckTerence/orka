@@ -5,7 +5,10 @@ package e2e
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"testing"
+
+	"github.com/orka-agents/orka/test/utils"
 )
 
 func TestExternalCodexReadTaskUsesClassBackedExecution(t *testing.T) {
@@ -27,7 +30,13 @@ func TestExternalCodexReadTaskUsesClassBackedExecution(t *testing.T) {
 }
 
 func TestExternalCodexReadFixtureRequiresRealToolResult(t *testing.T) {
-	data, err := os.ReadFile("testdata/aimock/agent_runtime_matrix.json")
+	projectDir, err := utils.GetProjectDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// E2E command helpers change the working directory to the project root.
+	t.Chdir(projectDir)
+	data, err := os.ReadFile(filepath.Join(projectDir, mockLLMFixtureDir, "agent_runtime_matrix.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
