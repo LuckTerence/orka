@@ -644,7 +644,7 @@ func TestAdjustInputsForConnectorToolsSkipsSandboxExec(t *testing.T) {
 	shadow.Name = acp.SandboxExecToolName
 	task := f.task.DeepCopy()
 	task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{
-		AllowedTools: []string{acp.SandboxExecToolName}, AllowBash: new(false),
+		AllowedTools: []string{acp.SandboxExecToolName}, AllowBash: new(true),
 	}
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: "agent", Namespace: "tenant", UID: "agent-uid", Generation: 1},

@@ -914,6 +914,10 @@ func testProviderProjectionRequest(
 		}
 		if _, ok := canonicalProviderNativeToolName(name); !ok {
 			switch name {
+			case acp.SandboxExecToolName:
+				descriptor.Source = harnessv2.MCPToolSourceRuntimeLocal
+				descriptor.InputSchema = json.RawMessage(acp.SandboxExecInputSchema)
+				descriptor.Effect = harnessv2.MCPToolEffectConsequential
 			case "send_message", "check_messages":
 				descriptor.Source = harnessv2.MCPToolSourceBrokeredBuiltin
 				descriptor.InputSchema = json.RawMessage(`{"type":"object"}`)
@@ -1001,5 +1005,53 @@ func TestPrepareCodexHomeDisablesResponsesWebSockets(t *testing.T) {
 	config := string(data)
 	if !strings.Contains(config, "check_for_update_on_startup = false") {
 		t.Fatalf("config.toml lacks the update opt-out:\n%s", config)
+	}
+}
+
+func TestCodexHyperlightCommandPolicyProjection(t *testing.T) {
+	allowed := append(acp.BuiltInRuntimeNativeToolNames(providerKindCodex), acp.SandboxExecToolName)
+	request := testProviderProjectionRequest(t, providerKindCodex, "gpt-test", "", "", allowed, nil, false)
+	projection, err := codexSessionProjection(request, acp.SessionPaths{}, ProviderProxyBinding{}, "gpt-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if projection.Environment["ORKA_CODEX_HYPERLIGHT_ONLY"] != "1" {
+		t.Fatal("strict command mode was not projected")
+	}
+	var config map[string]any
+	if err := json.Unmarshal([]byte(projection.Environment["CODEX_CONFIG"]), &config); err != nil {
+		t.Fatal(err)
+	}
+	if notify, ok := config["notify"].([]any); !ok || len(notify) != 0 {
+		t.Fatal("legacy notification commands were not pinned off")
+	}
+	features := config["features"].(map[string]any)
+	for _, name := range []string{"shell_tool", "hooks", "plugins", "multi_agent", "multi_agent_v2", "code_mode", "code_mode_host"} {
+		if enabled, present := features[name]; !present || enabled != false {
+			t.Fatalf("feature %s was not pinned off", name)
+		}
+	}
+
+	// Merely offering Hyperlight does not disable native commands.
+	request = testProviderProjectionRequest(t, providerKindCodex, "gpt-test", "", "", allowed, nil, true)
+	projection, err = codexSessionProjection(request, acp.SessionPaths{}, ProviderProxyBinding{}, "gpt-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if projection.Environment["ORKA_CODEX_HYPERLIGHT_ONLY"] != "" {
+		t.Fatal("ordinary native command mode changed")
+	}
+	config = nil
+	if err := json.Unmarshal([]byte(projection.Environment["CODEX_CONFIG"]), &config); err != nil {
+		t.Fatal(err)
+	}
+	if _, present := config["features"]; present {
+		t.Fatal("ordinary Codex configuration acquired strict feature overrides")
+	}
+	for _, names := range [][]string{{acp.SandboxExecToolName}, {providerToolRead, acp.SandboxExecToolName}} {
+		request = testProviderProjectionRequest(t, providerKindCodex, "gpt-test", "", "", names, nil, false)
+		if _, err := codexSessionProjection(request, acp.SessionPaths{}, ProviderProxyBinding{}, "gpt-test"); err == nil {
+			t.Fatalf("arbitrary native restrictions accepted: %v", names)
+		}
 	}
 }

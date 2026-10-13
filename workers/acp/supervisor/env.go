@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -450,10 +451,21 @@ func codexSessionProjection(
 	if err != nil {
 		return ProviderSessionProjection{}, err
 	}
-	if !policy.unrestricted && !codexReadOnlySessionPolicy(request, policy) {
+	strict := hyperlightOnlyCommandPolicy(request)
+	toolPolicy := request.MCPConfiguration.ToolPolicy
+	if !policy.unrestricted && !codexReadOnlySessionPolicy(request, policy) &&
+		(!strict || !acp.CodexHyperlightNativePolicy(toolPolicy.AllowedToolNames, toolPolicy.DisallowedToolNames, toolPolicy.AllowBash)) {
 		return ProviderSessionProjection{}, fmt.Errorf("codex ACP runtime cannot exactly enforce provider-native tool restrictions")
 	}
 	config := codexBaseConfig(model, proxy.BaseURL)
+	if strict {
+		config["notify"] = []string{}
+		config["features"] = map[string]any{
+			"shell_tool": false, "hooks": false, "plugins": false,
+			"multi_agent": false, "multi_agent_v2": false,
+			"code_mode": false, "code_mode_host": false,
+		}
+	}
 	if systemPrompt := request.AgentConfiguration.SystemPrompt; systemPrompt != "" {
 		config["developer_instructions"] = systemPrompt
 	}
@@ -475,7 +487,11 @@ func codexSessionProjection(
 	// unconditionally by the controller, file writes are mediated by the
 	// supervisor, and the read-intent workspace delta classification fails
 	// any turn that modifies the workspace.
-	return ProviderSessionProjection{Environment: map[string]string{"CODEX_CONFIG": string(encoded)}}, nil
+	environment := map[string]string{"CODEX_CONFIG": string(encoded)}
+	if strict {
+		environment["ORKA_CODEX_HYPERLIGHT_ONLY"] = "1"
+	}
+	return ProviderSessionProjection{Environment: environment}, nil
 }
 
 // codexBaseConfig is the Codex configuration every session starts from. The
@@ -553,6 +569,7 @@ func claudeSessionProjection(
 		options["tools"] = allowed
 		options["disallowedTools"] = disallowed
 	}
+	maps.Copy(options, claudeHyperlightCommandOptions(request))
 	meta := acp.Meta{"claudeCode": map[string]any{"options": options}}
 	if systemPrompt := request.AgentConfiguration.SystemPrompt; systemPrompt != "" {
 		meta["systemPrompt"] = systemPrompt
@@ -592,6 +609,9 @@ func copilotSessionProjection(
 ) (ProviderSessionProjection, error) {
 	policy, err := providerSessionPolicy(request, providerKindCopilot, model)
 	if err != nil {
+		return ProviderSessionProjection{}, err
+	}
+	if err := validateCopilotHyperlightCommandPolicy(request); err != nil {
 		return ProviderSessionProjection{}, err
 	}
 	if request.AgentConfiguration.SystemPrompt != "" {
