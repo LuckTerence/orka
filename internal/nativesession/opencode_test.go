@@ -6,7 +6,6 @@ import (
 	"compress/gzip"
 	"context"
 	"database/sql"
-	_ "embed"
 	"errors"
 	"io"
 	"maps"
@@ -17,11 +16,6 @@ import (
 
 	"github.com/orka-agents/orka/internal/acp"
 )
-
-// The schema and migration rows of a database OpenCode 1.19.0 created.
-//
-//go:embed testdata/opencode-1.19.0-schema.sql
-var openCodeSchema string
 
 const (
 	openCodeFixtureSession = "ses_ecc5ff852ffer0NIBWVcS4TRJl"
@@ -59,7 +53,7 @@ func newOpenCodeFixture(t *testing.T) openCodeFixture {
 	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { _ = db.Close() })
 	ctx := context.Background()
-	for _, statement := range []string{`PRAGMA journal_mode=WAL`, `PRAGMA wal_autocheckpoint=0`, openCodeSchema, `PRAGMA wal_checkpoint(TRUNCATE)`} {
+	for _, statement := range []string{`PRAGMA journal_mode=WAL`, `PRAGMA wal_autocheckpoint=0`, openCodeSchemaSQL, `PRAGMA wal_checkpoint(TRUNCATE)`} {
 		if _, err := db.ExecContext(ctx, statement); err != nil {
 			t.Fatal(err)
 		}
@@ -232,6 +226,9 @@ func TestOpenCodeCaptureFallsBackOnStateItDoesNotCarry(t *testing.T) {
 		"trigger": func(t *testing.T, f openCodeFixture) {
 			f.exec(t, `CREATE TRIGGER mark AFTER INSERT ON message BEGIN SELECT 1; END`)
 		},
+		"expression index": func(t *testing.T, f openCodeFixture) {
+			f.exec(t, `CREATE INDEX costly ON message(length(hex(zeroblob(1000))))`)
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			fixture := newOpenCodeFixture(t)
@@ -247,6 +244,15 @@ func TestOpenCodeCaptureFallsBackOnStateItDoesNotCarry(t *testing.T) {
 	}
 	if _, err := format.Capture(t.Context(), fixture.dirs, openCodeFixtureSession, 512); !errors.Is(err, ErrUnsupported) {
 		t.Fatalf("an oversized conversation must fall back to the transcript: %v", err)
+	}
+	// Spilled output compresses well, but it shares the expanded budget that
+	// Inspect enforces with the database.
+	spill := filepath.Join(fixture.dirs.Data, "opencode", "tool-output", openCodeFixtureSpill)
+	if err := os.WriteFile(spill, bytes.Repeat([]byte("a"), 2<<20-64<<10), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := format.Capture(t.Context(), fixture.dirs, openCodeFixtureSession, 256<<10); !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("a conversation over the expanded budget must fall back to the transcript: %v", err)
 	}
 }
 
@@ -308,7 +314,10 @@ func TestOpenCodeInspectRejectsTamperedBundles(t *testing.T) {
 			e["manifest.json"] = bytes.Replace(e["manifest.json"], []byte(`{`), []byte(`{"extra":1,`), 1)
 		}),
 		"trailing data": append(append([]byte(nil), data...), data...),
-		"not gzip":      []byte("plain"),
+		"changed schema": rebuild(func(e map[string][]byte) {
+			e["opencode.db"] = alterDatabaseForTest(t, e["opencode.db"], `CREATE INDEX costly ON part(length(hex(zeroblob(1000))))`)
+		}),
+		"not gzip": []byte("plain"),
 	} {
 		if _, err := format.Inspect(t.Context(), tampered, openCodeFixtureLimit); err == nil || errors.Is(err, ErrUnsupported) {
 			t.Errorf("%s: must be rejected as invalid: %v", name, err)
@@ -317,6 +326,30 @@ func TestOpenCodeInspectRejectsTamperedBundles(t *testing.T) {
 	if _, err := format.Inspect(t.Context(), data, len(data)-1); err == nil {
 		t.Fatal("an oversized bundle must be rejected")
 	}
+}
+
+// alterDatabaseForTest runs statement against a copy of database.
+func alterDatabaseForTest(t *testing.T, database []byte, statement string) []byte {
+	t.Helper()
+	path := filepath.Join(realDir(t), "altered.db")
+	if err := os.WriteFile(path, database, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(statement); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	altered, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return altered
 }
 
 func gunzipForTest(t *testing.T, data []byte) []byte {

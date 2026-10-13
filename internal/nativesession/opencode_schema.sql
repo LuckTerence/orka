@@ -1,4 +1,4 @@
--- OpenCode 1.19.0 database schema, dumped from a database the pinned binary created.
+-- The schema and migration rows of a database OpenCode 1.19.0 created. Capture and Inspect require an exact schema match before evaluating anything in a captured database.
 CREATE TABLE `account` (
           `id` text PRIMARY KEY,
           `email` text NOT NULL,

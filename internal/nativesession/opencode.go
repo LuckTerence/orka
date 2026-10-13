@@ -15,7 +15,10 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"time"
+
+	_ "embed"
 
 	// Registers the "sqlite" database/sql driver.
 	_ "modernc.org/sqlite"
@@ -41,8 +44,74 @@ const (
 var (
 	openCodeSessionIDPattern  = regexp.MustCompile(`^ses_[A-Za-z0-9]{1,64}$`)
 	openCodeToolOutputPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
-	sqliteIdentifierPattern   = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 )
+
+// openCodeSchemaSQL is the schema of a database OpenCode 1.19.0 created. A
+// captured database is agent-written, so it must match this schema exactly
+// before anything that evaluates its expressions runs, in the supervisor or
+// in the controller.
+//
+//go:embed opencode_schema.sql
+var openCodeSchemaSQL string
+
+type openCodeSchema struct {
+	entries []string
+	tables  []string
+}
+
+// expectedOpenCodeSchema returns the pinned schema's sqlite_schema entries.
+var expectedOpenCodeSchema = sync.OnceValues(func() (openCodeSchema, error) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		return openCodeSchema{}, err
+	}
+	defer func() { _ = db.Close() }()
+	db.SetMaxOpenConns(1)
+	if _, err := db.Exec(openCodeSchemaSQL); err != nil {
+		return openCodeSchema{}, fmt.Errorf("load the pinned OpenCode schema: %w", err)
+	}
+	return readOpenCodeSchema(context.Background(), db)
+})
+
+// readOpenCodeSchema reads sqlite_schema, which evaluates nothing the
+// schema defines.
+func readOpenCodeSchema(ctx context.Context, db *sql.DB) (openCodeSchema, error) {
+	rows, err := db.QueryContext(ctx, `SELECT type, name, tbl_name, COALESCE(sql, '') FROM sqlite_schema
+ WHERE name NOT LIKE 'sqlite\_%' ESCAPE '\' ORDER BY type, name`)
+	if err != nil {
+		return openCodeSchema{}, err
+	}
+	defer func() { _ = rows.Close() }()
+	var schema openCodeSchema
+	for rows.Next() {
+		var kind, name, table, statement string
+		if err := rows.Scan(&kind, &name, &table, &statement); err != nil {
+			return openCodeSchema{}, err
+		}
+		schema.entries = append(schema.entries, kind+"\x00"+name+"\x00"+table+"\x00"+statement)
+		if kind == "table" {
+			schema.tables = append(schema.tables, name)
+		}
+	}
+	return schema, rows.Err()
+}
+
+// requireOpenCodeSchema returns the tables of db, whose schema must equal
+// the pinned OpenCode schema.
+func requireOpenCodeSchema(ctx context.Context, db *sql.DB) ([]string, error) {
+	expected, err := expectedOpenCodeSchema()
+	if err != nil {
+		return nil, err
+	}
+	actual, err := readOpenCodeSchema(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	if !slices.Equal(actual.entries, expected.entries) {
+		return nil, fmt.Errorf("%w: OpenCode database schema differs from OpenCode %s", ErrUnsupported, openCodeVersion)
+	}
+	return expected.tables, nil
+}
 
 // openCodeCarriedTables hold the conversation. Capture keeps only the
 // session's rows; the migration tables tell OpenCode its schema is current.
@@ -92,10 +161,19 @@ func (openCodeFormat) Capture(ctx context.Context, dirs Dirs, providerSessionID 
 	if err := requireRealPath(source, false); err != nil {
 		return nil, err
 	}
-	for _, suffix := range []string{"-wal", "-shm", "-journal"} {
-		if err := requireRealPathIfPresent(source+suffix, false); err != nil {
+	// The live database also holds the duplicate event log, so it may be
+	// larger than what Capture keeps, but not unboundedly so.
+	stored := int64(0)
+	for _, name := range []string{source, source + "-wal", source + "-shm", source + "-journal"} {
+		if err := requireRealPathIfPresent(name, false); err != nil {
 			return nil, err
 		}
+		if info, err := os.Lstat(name); err == nil {
+			stored += info.Size()
+		}
+	}
+	if stored > 2*int64(expandedLimit(limit)) {
+		return nil, fmt.Errorf("%w: OpenCode database exceeds the capture budget", ErrUnsupported)
 	}
 	toolOutput, err := readOpenCodeToolOutput(filepath.Join(root, openCodeToolOutputDir), limit)
 	if err != nil {
@@ -113,11 +191,15 @@ func (openCodeFormat) Capture(ctx context.Context, dirs Dirs, providerSessionID 
 	if err := pruneOpenCodeDatabase(ctx, copied, providerSessionID); err != nil {
 		return nil, err
 	}
-	database, err := readBoundedFile(copied, expandedLimit(limit))
+	toolOutputBytes := 0
+	for _, content := range toolOutput {
+		toolOutputBytes += len(content)
+	}
+	database, err := readBoundedFile(copied, max(0, expandedLimit(limit)-toolOutputBytes))
 	if err != nil {
 		return nil, err
 	}
-	data, err := encodeOpenCodeBundle(openCodeBundle{
+	data, err := encodeOpenCodeBundle(limit, openCodeBundle{
 		manifest: openCodeManifest{
 			Format: openCodeBundleFormat, Version: openCodeVersion, SessionID: providerSessionID,
 			ToolOutputDir: filepath.Join(root, openCodeToolOutputDir),
@@ -215,6 +297,9 @@ func copyOpenCodeDatabase(ctx context.Context, source, target string) error {
 		return err
 	}
 	defer func() { _ = db.Close() }()
+	if _, err := requireOpenCodeSchema(ctx, db); err != nil {
+		return err
+	}
 	if _, err := db.ExecContext(ctx, `VACUUM INTO ?`, target); err != nil {
 		return fmt.Errorf("copy OpenCode database: %w", err)
 	}
@@ -229,11 +314,11 @@ func pruneOpenCodeDatabase(ctx context.Context, path, providerSessionID string) 
 		return err
 	}
 	defer func() { _ = db.Close() }()
-	if _, err := db.ExecContext(ctx, `PRAGMA journal_mode=DELETE`); err != nil {
+	tables, err := requireOpenCodeSchema(ctx, db)
+	if err != nil {
 		return err
 	}
-	tables, err := openCodeTables(ctx, db)
-	if err != nil {
+	if _, err := db.ExecContext(ctx, `PRAGMA journal_mode=DELETE`); err != nil {
 		return err
 	}
 	for _, table := range tables {
@@ -274,13 +359,17 @@ func verifyOpenCodeDatabase(ctx context.Context, path, providerSessionID string)
 		return err
 	}
 	defer func() { _ = db.Close() }()
+	tables, err := requireOpenCodeSchema(ctx, db)
+	if errors.Is(err, ErrUnsupported) {
+		// Capture checked the same schema, so this bundle is invalid.
+		return errors.New("OpenCode database schema differs from the captured version")
+	}
+	if err != nil {
+		return err
+	}
 	var check string
 	if err := db.QueryRowContext(ctx, `PRAGMA quick_check`).Scan(&check); err != nil || check != "ok" {
 		return errors.New("OpenCode database failed its integrity check")
-	}
-	tables, err := openCodeTables(ctx, db)
-	if err != nil {
-		return err
 	}
 	for _, table := range tables {
 		if slices.Contains(openCodeCarriedTables, table) {
@@ -431,41 +520,6 @@ func relocateOpenCodeSession(ctx context.Context, path string, manifest openCode
 	return tx.Commit()
 }
 
-func openCodeTables(ctx context.Context, db *sql.DB) ([]string, error) {
-	var views int
-	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_schema WHERE type IN ('view', 'trigger')`).Scan(&views); err != nil {
-		return nil, err
-	}
-	if views != 0 {
-		return nil, fmt.Errorf("%w: OpenCode database defines views or triggers", ErrUnsupported)
-	}
-	rows, err := db.QueryContext(ctx, `SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite\_%' ESCAPE '\'`)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-	var tables []string
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			return nil, err
-		}
-		if !sqliteIdentifierPattern.MatchString(name) {
-			return nil, fmt.Errorf("%w: OpenCode database has an unexpected table name", ErrUnsupported)
-		}
-		tables = append(tables, name)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	for _, required := range []string{"project", "session", openCodeMessageTable, openCodePartTable, "migration"} {
-		if !slices.Contains(tables, required) {
-			return nil, fmt.Errorf("%w: OpenCode database lacks the %s table", ErrUnsupported, required)
-		}
-	}
-	return tables, nil
-}
-
 func sqliteExists(ctx context.Context, db *sql.DB, query string, args ...any) (bool, error) {
 	var exists bool
 	err := db.QueryRowContext(ctx, query, args...).Scan(&exists)
@@ -524,14 +578,15 @@ func readOpenCodeToolOutput(dir string, limit int) (map[string][]byte, error) {
 	return files, nil
 }
 
-func encodeOpenCodeBundle(bundle openCodeBundle) ([]byte, error) {
+// encodeOpenCodeBundle fails with ErrUnsupported when the archive exceeds
+// the expanded budget decodeOpenCodeBundle enforces.
+func encodeOpenCodeBundle(limit int, bundle openCodeBundle) ([]byte, error) {
 	manifest, err := json.Marshal(bundle.manifest)
 	if err != nil {
 		return nil, err
 	}
-	var out bytes.Buffer
-	compressed := gzip.NewWriter(&out)
-	archive := tar.NewWriter(compressed)
+	var tarred bytes.Buffer
+	archive := tar.NewWriter(&tarred)
 	write := func(name string, content []byte) error {
 		header := &tar.Header{Name: name, Mode: 0o600, Size: int64(len(content)), Typeflag: tar.TypeReg, Format: tar.FormatPAX, ModTime: time.Unix(0, 0)}
 		if err := archive.WriteHeader(header); err != nil {
@@ -557,6 +612,14 @@ func encodeOpenCodeBundle(bundle openCodeBundle) ([]byte, error) {
 		}
 	}
 	if err := archive.Close(); err != nil {
+		return nil, err
+	}
+	if tarred.Len() > expandedLimit(limit) {
+		return nil, fmt.Errorf("%w: OpenCode conversation exceeds the expanded budget", ErrUnsupported)
+	}
+	var out bytes.Buffer
+	compressed := gzip.NewWriter(&out)
+	if _, err := compressed.Write(tarred.Bytes()); err != nil {
 		return nil, err
 	}
 	if err := compressed.Close(); err != nil {
