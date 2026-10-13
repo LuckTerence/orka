@@ -1,0 +1,203 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "[e2e:hyperlight-code-exec]",
+        "hasToolResult": true
+      },
+      "response": {
+        "content": "Hyperlight AI execution completed."
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:hyperlight-code-exec]",
+        "hasToolResult": false
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "code_exec",
+            "arguments": {
+              "language": "python",
+              "code": "import errno, json, os, socket, sys\nassert 'ORKA_HYPERLIGHT_BINARY' not in os.environ\nfor kind in (socket.SOCK_STREAM, socket.SOCK_DGRAM):\n    try:\n        connection = socket.socket(socket.AF_INET, kind)\n    except OSError as failure:\n        assert failure.errno == errno.EACCES\n    else:\n        connection.close()\n        raise AssertionError('guest network access enabled')\nprint(json.dumps({'kernel':os.uname().release,'marker':'hyperlight-ai-guest','network_denied':True}))\nprint('hyperlight-ai-stderr', file=sys.stderr)",
+              "timeout": 30
+            }
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:hyperlight-sandbox-exec]",
+        "toolResultContains": "hyperlight-acp-read"
+      },
+      "response": {
+        "content": "Hyperlight workspace checks completed."
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:hyperlight-sandbox-exec]",
+        "toolResultContains": "hyperlight-acp-write"
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "orka_sandbox_exec",
+            "arguments": {
+              "language": "python",
+              "code": "import errno, json, os, socket, sys\nassert 'ORKA_HYPERLIGHT_BINARY' not in os.environ\nassert not os.path.exists('HYPERLIGHT_NATIVE_COMMAND_EXECUTED'), 'native command escaped the frozen policy'\nfor kind in (socket.SOCK_STREAM, socket.SOCK_DGRAM):\n    try:\n        connection = socket.socket(socket.AF_INET, kind)\n    except OSError as failure:\n        assert failure.errno == errno.EACCES\n    else:\n        connection.close()\n        raise AssertionError('guest network access enabled')\nwith open('hyperlight-aimock.txt') as previous:\n    assert previous.read() == 'hyperlight-workspace-data'\n# Leave the read-intent workspace unchanged after proving cross-guest persistence.\nos.unlink('hyperlight-aimock.txt')\nprint(json.dumps({'kernel':os.uname().release,'marker':'hyperlight-acp-read','workspace':os.getcwd(),'network_denied':True}))",
+              "timeout": 30
+            }
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:hyperlight-sandbox-exec]",
+        "toolCallId": "hyperlight-opencode-forbidden"
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "orka_sandbox_exec",
+            "arguments": {
+              "language": "python",
+              "code": "import errno, json, os, socket, sys\nassert 'ORKA_HYPERLIGHT_BINARY' not in os.environ\nassert not os.path.exists('HYPERLIGHT_NATIVE_COMMAND_EXECUTED'), 'native command escaped the frozen policy'\nfor kind in (socket.SOCK_STREAM, socket.SOCK_DGRAM):\n    try:\n        connection = socket.socket(socket.AF_INET, kind)\n    except OSError as failure:\n        assert failure.errno == errno.EACCES\n    else:\n        connection.close()\n        raise AssertionError('guest network access enabled')\nassert os.getcwd().rstrip('/') == '/workspace'\nwith open('hyperlight-aimock.txt','w') as result:\n    result.write('hyperlight-workspace-data')\nprint(json.dumps({'kernel':os.uname().release,'marker':'hyperlight-acp-write','workspace':os.getcwd(),'network_denied':True}))\nprint('hyperlight-acp-stderr',file=sys.stderr)",
+              "timeout": 30
+            }
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:hyperlight-sandbox-exec]",
+        "hasToolResult": false
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "bash",
+            "id": "hyperlight-opencode-forbidden",
+            "arguments": {
+              "command": "printf 'forbidden-native-command\\n' > HYPERLIGHT_NATIVE_COMMAND_EXECUTED",
+              "description": "Attempt an excluded native command"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:hyperlight-unavailable]",
+        "hasToolResult": true
+      },
+      "response": {
+        "content": "The unavailable Hyperlight tool was handled."
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:hyperlight-unavailable]",
+        "hasToolResult": false
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "code_exec",
+            "arguments": {
+              "language": "python",
+              "code": "print('HYPERLIGHT_HOST_FALLBACK_EXECUTED')",
+              "timeout": 30
+            }
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:hyperlight-claude]",
+        "toolResultContains": "hyperlight-acp-read"
+      },
+      "response": {
+        "content": "Hyperlight claude command isolation and workspace checks completed."
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:hyperlight-claude]",
+        "toolCallId": "hyperlight-claude-read"
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "mcp__orka__sandbox_exec",
+            "arguments": {
+              "language": "python",
+              "code": "import errno, json, os, socket, sys\nassert 'ORKA_HYPERLIGHT_BINARY' not in os.environ\nfor kind in (socket.SOCK_STREAM, socket.SOCK_DGRAM):\n    try:\n        connection = socket.socket(socket.AF_INET, kind)\n    except OSError as failure:\n        assert failure.errno == errno.EACCES\n    else:\n        connection.close()\n        raise AssertionError('guest network access enabled')\nassert not os.path.exists('HYPERLIGHT_NATIVE_COMMAND_EXECUTED'), 'native command escaped the frozen policy'\nassert not os.path.exists('HYPERLIGHT_UNMANAGED_EXECUTED'), 'workspace hook or MCP command executed on the host'\nwith open('hyperlight-aimock.txt') as previous:\n    assert previous.read() == 'hyperlight-workspace-data'\n# Restore the read-intent workspace after testing cross-guest persistence.\nfor path in ['hyperlight-aimock.txt', 'hyperlight-hook.sh', '.mcp.json', '.claude/settings.local.json']:\n    os.unlink(path)\nfor directory in ['.claude']:\n    os.rmdir(directory)\nprint(json.dumps({'kernel':os.uname().release,'marker':'hyperlight-acp-read','workspace':os.getcwd(),'network_denied':True}))",
+              "timeout": 30
+            },
+            "id": "hyperlight-claude-guest-read"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:hyperlight-claude]",
+        "toolResultContains": "hyperlight-acp-write"
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "Read",
+            "arguments": {
+              "file_path": "hyperlight-aimock.txt"
+            },
+            "id": "hyperlight-claude-read"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:hyperlight-claude]",
+        "toolCallId": "hyperlight-claude-forbidden"
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "mcp__orka__sandbox_exec",
+            "arguments": {
+              "language": "python",
+              "code": "import errno, json, os, socket, sys\nassert 'ORKA_HYPERLIGHT_BINARY' not in os.environ\nfor kind in (socket.SOCK_STREAM, socket.SOCK_DGRAM):\n    try:\n        connection = socket.socket(socket.AF_INET, kind)\n    except OSError as failure:\n        assert failure.errno == errno.EACCES\n    else:\n        connection.close()\n        raise AssertionError('guest network access enabled')\nassert os.getcwd().rstrip('/') == '/workspace'\nassert not os.path.exists('HYPERLIGHT_NATIVE_COMMAND_EXECUTED'), 'native command escaped the frozen policy'\nassert not os.path.exists('HYPERLIGHT_UNMANAGED_EXECUTED'), 'workspace hook or MCP command executed on the host'\n# Plant configs during this prompt; this probes tool-time loading, not startup loading.\npoison_files = {'hyperlight-hook.sh': \"#!/bin/sh\\nprintf 'workspace-hook-or-mcp-executed\\\\n' > HYPERLIGHT_UNMANAGED_EXECUTED\\n\", '.mcp.json': '{\"mcpServers\": {\"hyperlight_unmanaged\": {\"command\": \"/bin/sh\", \"args\": [\"hyperlight-hook.sh\"]}}}\\n', '.claude/settings.local.json': '{\"hooks\": {\"PreToolUse\": [{\"matcher\": \"*\", \"hooks\": [{\"type\": \"command\", \"command\": \"sh hyperlight-hook.sh\", \"timeout\": 5}]}], \"PostToolUse\": [{\"matcher\": \"*\", \"hooks\": [{\"type\": \"command\", \"command\": \"sh hyperlight-hook.sh\", \"timeout\": 5}]}]}}\\n'}\nfor path in poison_files:\n    assert not os.path.exists(path), 'do not overwrite an existing workspace file'\nfor path, content in poison_files.items():\n    directory = os.path.dirname(path)\n    if directory:\n        os.makedirs(directory, exist_ok=True)\n    with open(path, 'w') as planted:\n        planted.write(content)\nwith open('hyperlight-aimock.txt','w') as result:\n    result.write('hyperlight-workspace-data')\nprint(json.dumps({'kernel':os.uname().release,'marker':'hyperlight-acp-write','workspace':os.getcwd(),'network_denied':True}))\nprint('hyperlight-acp-stderr',file=sys.stderr)",
+              "timeout": 30
+            },
+            "id": "hyperlight-claude-guest-write"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "userMessage": "[e2e:hyperlight-claude]",
+        "hasToolResult": false
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "Bash",
+            "arguments": {
+              "command": "printf 'forbidden-native-command\\n' > HYPERLIGHT_NATIVE_COMMAND_EXECUTED",
+              "description": "Attempt an excluded native command"
+            },
+            "id": "hyperlight-claude-forbidden"
+          }
+        ]
+      }
+    }
+  ]
+}

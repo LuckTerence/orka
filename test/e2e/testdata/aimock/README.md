@@ -30,7 +30,7 @@ Conventions:
 The fake forge publication, agent runtime matrix, and agent runtime lifecycle
 specs deploy a second aimock with these same fixtures as `vekil-system/vekil`,
 the upstream of the ACP provider proxy, so the built-in Codex, OpenCode,
-Claude, and Copilot runtimes follow the scripts too (`fake_forge.json`,
+Claude runtimes follow the scripts too (`fake_forge.json`,
 `agent_runtime_matrix.json`, `agent_runtime_lifecycle.json`). A fixture's
 `latency` (milliseconds) holds a prompt in flight, which the timeout, cancel,
 and controller restart checks use instead of a real `sleep`.
@@ -38,3 +38,50 @@ Read its requests with `providerProxyMockLLM.requestsFor`.
 
 The fixture format is documented in aimock's
 [write-fixtures skill](https://github.com/CopilotKit/aimock/blob/v1.43.0/skills/write-fixtures/SKILL.md).
+
+`hyperlight.json` drives the KVM-only deployment lane
+(`scripts/hyperlight-kind-e2e.sh`, Ginkgo label `hyperlight`). Only the model
+is mocked; the production workers, ACP harnesses, provider proxy, MCP tool and
+Hyperlight guests are real. It covers:
+
+- AI `code_exec` guest identity, stdout/stderr, denied sockets and the existing
+  missing-bundle fail-closed control (no host fallback).
+- OpenCode `orka_sandbox_exec` workspace persistence across fresh guests, with
+  native Bash absent from the actual model-facing catalog and a forced Bash
+  call returning a real rejection without creating a host marker.
+- Claude `mcp__orka__sandbox_exec` over Anthropic Messages and Copilot
+  `orka-sandbox_exec` over Responses. Each policy allows native `Read` and
+  `sandbox_exec`, but disables native shell. The fixtures force an excluded
+  `Bash`/`bash` call, require its real rejection result, execute a guest write,
+  read the file with the allowed native tool, and execute another guest that
+  verifies persistence and removes the probe files. The journal must omit
+  native command tools (including all five Copilot shell-session aliases).
+
+Claude guests also plant bounded workspace hook and unmanaged MCP
+configs before the allowed native read. Both guests check that neither the
+forced native command nor the hook/MCP probe created a host-side marker, and
+that no unmanaged tool appeared in the model catalog. **This is an in-session
+configuration-loading probe, not proof about config installed before harness
+startup.** The final guest removes all planted files/directories so read-intent
+workspace delivery remains unchanged. Native read/edit capabilities are not
+claimed to run in the micro-VM.
+
+Fixtures use deterministic call IDs and stateless last-result matchers, never
+server-side sequence counters. aimock 1.43.0 normalizes both Anthropic and
+Responses requests into the chat-shaped journal used by the assertions.
+Final canned replies are not evidence of execution. The lane requires
+`/dev/kvm`, real device-plugin allocation, and no live provider credentials.
+
+Codex's pinned Responses protocol uses a `mcp__orka` namespace for
+`sandbox_exec`. Pinned aimock 1.43.0 does not emit that namespace on scripted
+function calls and omits namespace catalog entries from its normalized
+journal. Codex is therefore not represented as a passing or permanently
+skipped deployment spec here. A separate pinned-runtime conformance probe can
+exercise the actual namespace and Hyperlight callback without changing aimock;
+that is **runtime conformance**, not full Orka/Kubernetes E2E.
+
+Copilot exclusive command mode is rejected before provider dispatch because the
+pinned CLI lacks verified immutable hook/unmanaged-MCP controls. There is no
+Copilot guest-success fixture or skipped success spec. Ordinary Copilot behavior
+is covered elsewhere. The separate Codex runtime conformance lane uses real KVM
+and private namespace-aware fixture responses without upgrading aimock.

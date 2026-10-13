@@ -94,9 +94,26 @@ spec:
   default), and `timeout` in seconds (120 by default, at most 600). The result
   is JSON with `stdout`, `stderr` and `exit_code`, 64 KiB per stream.
 - `sandbox_exec` cannot require an Orka approval, which only the broker grants.
-- Codex has no way to turn its own shell off (see
-  [Troubleshooting](../operations/troubleshooting.md)), so there `sandbox_exec`
-  sits beside the provider's shell rather than replacing it.
+- With native Bash allowed, `sandbox_exec` is supplemental; enabling Hyperlight
+  never silently removes native commands. With `defaultAllowBash: false` and
+  `sandbox_exec` granted, Claude and OpenCode enforce the command-tool exclusion.
+  Claude also disables filesystem command hooks and ignores unmanaged MCP
+  configuration while retaining `CLAUDE.md` and trusted adapter callbacks.
+- Codex supports a narrow command-isolated policy: grant its full non-Bash native
+  surface (`Read`, `Write`, `Edit`, `Glob`, `Grep`, `WebSearch`, `WebFetch`) plus
+  `sandbox_exec`, and set `defaultAllowBash: false`. Existing read-intent policy
+  remains supported. Other arbitrary Codex native-tool restrictions still fail
+  closed. The supervisor pins native command execution, filesystem hooks,
+  plugins, subagents and host code mode off at startup and per thread; project
+  configuration is untrusted and unmanaged user MCP servers are disabled.
+  Current-workspace `AGENTS.override.md`/`AGENTS.md` instructions are bounded to
+  32 KiB and snapshotted into the private Codex home on creation/resume. The
+  snapshot rejects symlink files and remains visible without loading
+  command-bearing project configuration.
+- Copilot 1.0.77 cannot enforce this exclusive mode with verified immutable hook
+  and unmanaged-MCP controls. Orka rejects `sandbox_exec` plus native-Bash denial
+  before dispatch. Ordinary Copilot policies and supplemental sandbox execution
+  with native Bash allowed are unchanged.
 - Workspace-backed RuntimePools (agent-sandbox, Substrate) run without a
   hypervisor and do not get `sandbox_exec`.
 - A runtime without sandbox execution enabled rejects session creation if
@@ -140,7 +157,43 @@ path with distinct session identities. Checks cover workspace persistence,
 host-file and environment isolation, output limits, timeouts, cancellation,
 and Python and JavaScript script compatibility.
 
-These are tool-path tests, not a Kubernetes deployment E2E. Run them with the
-`hyperlight_e2e` Go build tag on Linux with the bundle at
-`/opt/orka/hyperlight` and access to `/dev/kvm`. The workflow fails if KVM is
-missing; it does not turn an unavailable hypervisor into a passing skip.
+The guest-only job uses the `hyperlight_e2e` Go build tag on Linux with the
+bundle at `/opt/orka/hyperlight` and access to `/dev/kvm`.
+
+A second job runs the `hyperlight`-labeled Kubernetes E2E specs with aimock.
+Only the model is mocked: the controller, AI worker, OpenCode runtime, device
+plugin, bundle init container and KVM guests are real. It checks that:
+
+- an AI Task's `code_exec` guest identity, stdout/stderr and network-policy
+  evidence reach aimock's request journal;
+- an OpenCode Task with native Bash disabled uses `sandbox_exec`, and a second
+  guest reads the first guest's workspace write, then removes the temporary
+  probe file so the read-intent workspace remains unchanged;
+- withholding the bundle returns an unavailable-tool result to the model,
+  without changing the pinned backend or executing a host fallback. The model
+  acknowledges this error, so Task success alone is not execution evidence.
+
+The specs also inspect the actual worker/runtime Pods for device allocation,
+image digests, a successfully completed bundle init container, and separate
+read-only bundle and writable cache mounts. Run this lane on a Linux KVM host
+with `scripts/hyperlight-kind-e2e.sh` (use the VM for local runs). It creates
+and tears down a fresh repo-scoped kindctl cluster and requires aimock with no
+live credentials. Both jobs fail if KVM is missing; unavailable virtualization
+never becomes a passing skip in the dedicated lane.
+
+### Harness command-isolation verification
+
+The KVM/aimock deployment lane checks AI `code_exec`, OpenCode and Claude
+`sandbox_exec`, unavailable-backend rejection without host fallback, and
+fail-closed admission of unsupported Copilot exclusive mode. It verifies actual
+model-facing command catalogs and guest results, not canned final replies.
+Workspace hook/MCP fixtures in the deployment lane are planted during a prompt;
+they test in-session loading, not pre-start configuration loading.
+
+`scripts/hyperlight-codex-e2e.sh` separately exercises the pinned Codex/ACP
+runtime against a private Responses namespace fixture and real Hyperlight guests.
+It checks native-command rejection, unmanaged project/user MCP exclusion,
+`AGENTS.md` visibility, fresh-guest isolation, workspace persistence, and delivery
+of real guest results back to the model. Pinned aimock does not emit these
+namespace calls, so this is runtime conformance, not a claimed Codex
+Orka/Kubernetes deployment E2E. Neither lane needs live provider credentials.
