@@ -153,6 +153,12 @@ func TestSandboxExecRunsInThePodForTheSession(t *testing.T) {
 	if !isError || !strings.Contains(text, "ruby") {
 		t.Fatalf("invalid arguments = %q (isError %t)", text, isError)
 	}
+
+	oversized := `{"code":"` + strings.Repeat("x", harnessv2.MaxMCPArgumentsBytes) + `"}`
+	text, isError = sandboxToolResult(t, decodeMCPResponse(t, doMCPRequest(t, server, "credential", sandboxCall("big", oversized))))
+	if !isError || !strings.Contains(text, "no larger than") {
+		t.Fatalf("oversized arguments = %q (isError %t)", text, isError)
+	}
 	select {
 	case got := <-runner.calls:
 		t.Fatalf("invalid arguments reached the runner: %+v", got)

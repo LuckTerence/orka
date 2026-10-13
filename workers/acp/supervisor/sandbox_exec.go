@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/orka-agents/orka/internal/acp"
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/hyperlight"
 )
 
@@ -169,6 +170,12 @@ func (e *sandboxExecutor) run(ctx context.Context, request acp.SandboxExecReques
 func (s *mcpProxySession) handleRuntimeLocalCall(w http.ResponseWriter, r *http.Request, rpc mcpJSONRPCRequest, gate context.Context, params mcpToolsCallParams) {
 	if params.Name != acp.SandboxExecToolName {
 		writeMCPRPCError(w, rpc.ID, -32002, "runtime-local MCP tool is not supported")
+		return
+	}
+	// Brokered calls get this bound from MCPToolCall validation; local ones
+	// never build that call.
+	if len(params.Arguments) > harnessv2.MaxMCPArgumentsBytes {
+		writeMCPToolText(w, rpc.ID, fmt.Sprintf("sandbox_exec arguments must be no larger than %d bytes", harnessv2.MaxMCPArgumentsBytes), true)
 		return
 	}
 	request, err := acp.ParseSandboxExecArguments(params.Arguments)
