@@ -110,12 +110,14 @@ spec:
   32 KiB and snapshotted into the private Codex home on creation/resume. The
   snapshot rejects symlink files and remains visible without loading
   command-bearing project configuration.
-- Copilot 1.0.77 cannot enforce this exclusive mode with verified immutable hook
-  and unmanaged-MCP controls. Orka rejects `sandbox_exec` plus native-Bash denial
+- The pinned Copilot CLI cannot enforce this exclusive mode with verified
+  immutable hook and unmanaged-MCP controls. Orka rejects `sandbox_exec` plus native-Bash denial
   before dispatch. Ordinary Copilot policies and supplemental sandbox execution
   with native Bash allowed are unchanged.
 - Workspace-backed RuntimePools (agent-sandbox, Substrate) run without a
   hypervisor and do not get `sandbox_exec`.
+- External `AgentRuntime` registrations cannot grant `sandbox_exec`; Orka
+  rejects the MCP policy at registration and dispatch.
 - A runtime without sandbox execution enabled rejects session creation if
   its frozen tool policy exposes `sandbox_exec`, before starting the provider.
   Remove the tool from the allowlist when using a workspace-backed pool or

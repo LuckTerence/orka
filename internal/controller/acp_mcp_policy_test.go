@@ -36,6 +36,25 @@ func TestDeterministicProfileMatchesExplicitEmptyExternalMCPPolicy(t *testing.T)
 	}
 }
 
+func TestExternalMCPPolicyCannotGrantSandboxExec(t *testing.T) {
+	profile, err := conformancetest.DeterministicProfile("fixture-runtime")
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := &corev1alpha1.AgentRuntimeMCPPolicySpec{
+		AllowedTools:          []string{acp.SandboxExecToolName},
+		DisallowedTools:       []string{},
+		ApprovalRequiredTools: []string{},
+	}
+	if err := validateAgentRuntimeMCPPolicyClaims(policy, profile); err == nil || !strings.Contains(err.Error(), acp.SandboxExecToolName) {
+		t.Fatalf("external sandbox_exec grant error = %v, want rejection", err)
+	}
+	policy.DisallowedTools = []string{acp.SandboxExecToolName}
+	if err := validateAgentRuntimeMCPPolicyClaims(policy, profile); err != nil && strings.Contains(err.Error(), acp.SandboxExecToolName) {
+		t.Fatalf("denied sandbox_exec was treated as granted: %v", err)
+	}
+}
+
 func TestBuildRuntimeSessionMCPConfigurationInjectsJournaledChildMessagingTools(t *testing.T) {
 	registry := tools.NewRegistry()
 	registry.Register(tools.NewSendMessageTool())

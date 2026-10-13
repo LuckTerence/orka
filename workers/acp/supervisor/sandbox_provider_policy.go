@@ -26,9 +26,12 @@ func hyperlightOnlyCommandPolicy(request harnessv2.CreateRuntimeSessionRequest) 
 
 // claudeHyperlightCommandOptions is an overlay for _meta.claudeCode.options,
 // not for _meta.claudeCode. In the pinned ACP
-// 0.61.0 adapter these fields survive its userProvidedOptions spread; the
-// adapter still supplies its own canUseTool and SDK hook callbacks afterward.
-// SDK 0.3.217 loads settings in the highest-priority user-controlled flag layer.
+// adapter (verified on 0.61.0, re-read on 0.89.1) these fields survive its
+// userProvidedOptions spread, and provider routing merges into, rather than
+// replaces, settings; the adapter still supplies its own canUseTool and SDK
+// hook callbacks afterward. The SDK loads settings in the highest-priority
+// user-controlled flag layer. Prewarmed claim() overlays refuse hook keys, but
+// the adapter starts every session with query().
 // disableAllHooks is a Settings field: it suppresses filesystem command hooks
 // and statusLine, while trusted SDK hook callbacks remain active.
 //
@@ -48,7 +51,7 @@ func claudeHyperlightCommandOptions(request harnessv2.CreateRuntimeSessionReques
 }
 
 // validateCopilotHyperlightCommandPolicy fails closed only for strict sessions.
-// Copilot 1.0.77 exposes disableAllHooks in its filesystem configuration, but
+// Copilot (probed on 1.0.77) exposes disableAllHooks in its filesystem configuration, but
 // has no verified immutable hook or strict-MCP control in this integration.
 // --disable-builtin-mcps does not exclude configured MCP servers: an offline
 // ACP probe started a planted COPILOT_HOME/mcp-config.json command even with
