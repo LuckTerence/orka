@@ -175,19 +175,19 @@ func (s *mcpProxySession) handleRuntimeLocalCall(w http.ResponseWriter, r *http.
 	// Brokered calls get this bound from MCPToolCall validation; local ones
 	// never build that call.
 	if len(params.Arguments) > harnessv2.MaxMCPArgumentsBytes {
-		writeMCPToolText(w, rpc.ID, fmt.Sprintf("sandbox_exec arguments must be no larger than %d bytes", harnessv2.MaxMCPArgumentsBytes), true)
+		writeMCPToolError(w, rpc.ID, fmt.Sprintf("sandbox_exec arguments must be no larger than %d bytes", harnessv2.MaxMCPArgumentsBytes))
 		return
 	}
 	request, err := acp.ParseSandboxExecArguments(params.Arguments)
 	if err != nil {
-		writeMCPToolText(w, rpc.ID, err.Error(), true)
+		writeMCPToolError(w, rpc.ID, err.Error())
 		return
 	}
 	s.mu.Lock()
 	workspace := s.sandbox
 	s.mu.Unlock()
 	if s.proxy.sandbox == nil || workspace.dir == "" {
-		writeMCPToolText(w, rpc.ID, "sandbox_exec is not enabled in this runtime: the controller runs it with --acp-sandbox-exec", true)
+		writeMCPToolError(w, rpc.ID, "sandbox_exec is not enabled in this runtime: the controller runs it with --acp-sandbox-exec")
 		return
 	}
 
@@ -214,7 +214,7 @@ func (s *mcpProxySession) handleRuntimeLocalCall(w http.ResponseWriter, r *http.
 		if errors.Is(err, hyperlight.ErrUnavailable) {
 			message = "sandbox_exec is unavailable in this runtime: " + err.Error()
 		}
-		writeMCPToolText(w, rpc.ID, message, true)
+		writeMCPToolError(w, rpc.ID, message)
 		return
 	}
 	encoded, err := json.Marshal(result)
@@ -237,8 +237,8 @@ func (s *mcpProxySession) bindSandboxWorkspace(dir string, uid, gid int) {
 	s.sandbox = sandboxWorkspace{dir: dir, uid: uint32(uid), gid: uint32(gid)} //nolint:gosec // session IDs come from the bounded UID allocator
 }
 
-func writeMCPToolText(w http.ResponseWriter, id json.RawMessage, text string, isError bool) {
-	writeMCPRPCResult(w, id, mcpToolTextResult(text, isError))
+func writeMCPToolError(w http.ResponseWriter, id json.RawMessage, text string) {
+	writeMCPRPCResult(w, id, mcpToolTextResult(text, true))
 }
 
 // mcpToolTextResult is an MCP tools/call result with one text content item.
