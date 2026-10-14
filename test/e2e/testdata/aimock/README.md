@@ -59,25 +59,26 @@ Hyperlight guests are real. It covers:
 
 - AI `code_exec` guest identity, stdout/stderr, denied sockets and the existing
   missing-bundle fail-closed control (no host fallback).
-- OpenCode `orka_sandbox_exec` workspace persistence across fresh guests, with
-  native Bash absent from the actual model-facing catalog and a forced Bash
-  call returning a real rejection without creating a host marker.
+- OpenCode `orka_sandbox_exec` on a read-intent workspace (the pinned
+  `octocat/Hello-World` clone): the first guest reads it and sees each write
+  refused with `EROFS`, and a second guest finds it unchanged. Native Bash is
+  absent from the actual model-facing catalog, and a forced Bash call returns
+  a real rejection without creating a host marker.
 - Claude `mcp__orka__sandbox_exec` over Anthropic Messages. The policy allows
   native `Read` and `sandbox_exec`, but disables native shell. The fixture
   forces an excluded `Bash` call, requires its real rejection result, executes
-  a guest write, reads the file with the allowed native tool, and executes
-  another guest that verifies persistence and removes the probe files. The
-  journal must omit native command tools.
+  a guest whose writes to the read-intent workspace are refused, reads the
+  repository's README with the allowed native tool, and executes another guest
+  that finds no probe files. The journal must omit native command tools.
 - Copilot exclusive command mode is rejected before dispatch (see below).
 
-Claude guests also plant bounded workspace hook and unmanaged MCP
-configs before the allowed native read. The guests check that neither the
-forced native command nor the hook/MCP probe created a host-side marker, and
-that no unmanaged tool appeared in the model catalog. **This is an in-session
-configuration-loading probe, not proof about config installed before harness
-startup.** The final guest removes all planted files/directories so read-intent
-workspace delivery remains unchanged. Native read/edit capabilities are not
-claimed to run in the micro-VM.
+The first Claude guest also tries to plant bounded workspace hook and
+unmanaged MCP configs before the allowed native read; the read-only mount must
+refuse each file. The guests check that the forced native command created no
+host-side marker and that no unmanaged tool appeared in the model catalog.
+Cross-guest workspace persistence is covered by the KVM `hyperlight_e2e` tests
+in `workers/acp/supervisor`. Native read/edit capabilities are not claimed to
+run in the micro-VM.
 
 Fixtures use deterministic call IDs and stateless last-result matchers, never
 server-side sequence counters. aimock 1.43.0 normalizes both Anthropic and

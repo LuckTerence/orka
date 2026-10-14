@@ -36,7 +36,7 @@ const (
 
 // SandboxExecDescription is the tool description the agent sees.
 const SandboxExecDescription = "Run a bash script, Python or JavaScript in a fresh, isolated micro-VM. " +
-	"The session workspace is mounted read-write at /workspace, the working directory. " +
+	"The session workspace is mounted at /workspace, the working directory, read-only when the session may not change it. " +
 	"The VM has no network and nothing else from the host, and each call starts clean: " +
 	"only files written under /workspace persist. The shell is BusyBox; Python is CPython " +
 	"with its standard library except ssl, sqlite3 and subprocess; JavaScript is Node.js " +

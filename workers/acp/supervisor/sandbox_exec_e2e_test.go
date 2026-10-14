@@ -91,7 +91,7 @@ if (require.main === module) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, endpoint := fixture.session(t, fixture.config)
+			_, endpoint := fixture.session(t, fixture.config, harnessv2.WorkspaceIntentWrite)
 			listed := hyperlightE2ESandboxRPC(t, endpoint, `{"jsonrpc":"2.0","id":"list","method":"tools/list"}`)
 			if listed.Error != nil || responseToolCount(listed.Result) != 1 || !strings.Contains(fmt.Sprint(listed.Result), acp.SandboxExecToolName) {
 				t.Fatalf("public tools/list did not expose sandbox_exec: %#v", listed)
@@ -116,6 +116,81 @@ if (require.main === module) {
 		}
 	}
 	fixture.checkCache(t)
+}
+
+// A session that may not change its workspace mounts it read-only: every
+// language reads it, and the host refuses each write the guest attempts.
+func TestHyperlightE2ESandboxExecReadOnlyWorkspace(t *testing.T) {
+	fixture := newHyperlightE2ESandboxFixture(t)
+	for _, tc := range []struct {
+		name, language, code, output string
+	}{
+		{
+			name: "bash", language: "bash", output: "bash-read-only\n",
+			code: `[ "$(cat package.json)" = '{"name":"workspace-package"}' ] || exit 1
+if printf x > created.txt; then exit 2; fi
+if printf x >> package.json; then exit 3; fi
+if mkdir made; then exit 4; fi
+if rm -f package.json; then exit 5; fi
+printf 'bash-read-only\n'`,
+		},
+		{
+			name: "python", language: "python", output: "python-read-only\n",
+			code: `import errno, os
+assert open('package.json').read() == '{"name":"workspace-package"}'
+def create():
+    with open('created.txt', 'w') as created:
+        created.write('x')
+def append():
+    with open('package.json', 'a') as existing:
+        existing.write('x')
+for attempt in (create, append, lambda: os.mkdir('made'), lambda: os.unlink('package.json'),
+                lambda: os.rename('package.json', 'moved.json')):
+    try:
+        attempt()
+    except OSError as failure:
+        assert failure.errno == errno.EROFS, failure
+    else:
+        raise AssertionError('a write reached the read-only workspace')
+print('python-read-only')`,
+		},
+		{
+			name: "javascript", language: "javascript", output: "javascript-read-only\n",
+			code: `const assert = require('assert');
+const fs = require('fs');
+assert.strictEqual(fs.readFileSync('package.json', 'utf8'), '{"name":"workspace-package"}');
+for (const attempt of [() => fs.writeFileSync('created.txt', 'x'), () => fs.appendFileSync('package.json', 'x'),
+    () => fs.mkdirSync('made'), () => fs.unlinkSync('package.json')]) {
+    assert.throws(attempt, (failure) => failure.code === 'EROFS');
+}
+console.log('javascript-read-only');`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, endpoint := fixture.session(t, fixture.config, harnessv2.WorkspaceIntentRead)
+			result := hyperlightE2ESandboxResult(t, hyperlightE2ESandboxRPC(t, endpoint, hyperlightE2ESandboxCall(t, tc.language, tc.code, 30)))
+			if result.Stdout != tc.output {
+				t.Fatalf("real %s guest output = %q, want %q; stderr = %q", tc.language, result.Stdout, tc.output, result.Stderr)
+			}
+		})
+	}
+
+	fixture.reclaim(t)
+	var names []string
+	err := filepath.WalkDir(fixture.workspace, func(path string, _ os.DirEntry, err error) error {
+		if err == nil && path != fixture.workspace {
+			relative, _ := filepath.Rel(fixture.workspace, path)
+			names = append(names, relative)
+		}
+		return err
+	})
+	want := []string{"node_modules", "node_modules/workspace-dependency", "node_modules/workspace-dependency/index.js", "package.json"}
+	if err != nil || strings.Join(names, ",") != strings.Join(want, ",") {
+		t.Fatalf("read-only workspace now holds %v, error = %v, want %v", names, err, want)
+	}
+	if data, err := os.ReadFile(filepath.Join(fixture.workspace, "package.json")); err != nil || string(data) != `{"name":"workspace-package"}` {
+		t.Fatalf("read-only workspace package.json = %q, error = %v", data, err)
+	}
 }
 
 // Exercise the production session layout with the same restricted supervisor
@@ -209,7 +284,7 @@ if chmod 0777 "$root"; then exit 1; fi
 			// A legitimate real-guest MCP call can still mount and write the
 			// workspace, including after ownership reclaim/restore.
 			session, endpoint := newSandboxTestSession(t, newSandboxExecutor(&fixture.config))
-			session.bindSandboxWorkspace(paths.Workspace, hyperlightE2ESessionUID, hyperlightE2ESessionGID)
+			session.bindSandboxWorkspace(paths.Workspace, hyperlightE2ESessionUID, hyperlightE2ESessionGID, harnessv2.WorkspaceIntentWrite)
 			result := hyperlightE2ESandboxResult(t, hyperlightE2ESandboxRPC(t, endpoint, hyperlightE2ESandboxCall(t, "python", `import os
 assert open('child.txt').read() == 'child-ok'
 assert not os.path.exists('host-only.txt')
@@ -245,7 +320,7 @@ func TestHyperlightE2ESandboxExecHostIsolation(t *testing.T) {
 	if err := os.Chmod(hostPath, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	_, endpoint := fixture.session(t, fixture.config)
+	_, endpoint := fixture.session(t, fixture.config, harnessv2.WorkspaceIntentWrite)
 	code := `import errno, os, socket
 assert 'ORKA_HYPERLIGHT_E2E_HOST_ONLY' not in os.environ
 for path in (` + strconv.Quote(hostPath) + `, '/workspace/../host-sentinel.txt'):
@@ -292,7 +367,7 @@ func TestHyperlightE2ESandboxExecMissingPrerequisitesFailClosed(t *testing.T) {
 			case "device":
 				config.Hyperlight.DevicePaths = []string{missing}
 			}
-			_, endpoint := fixture.session(t, config)
+			_, endpoint := fixture.session(t, config, harnessv2.WorkspaceIntentWrite)
 			response := hyperlightE2ESandboxRPC(t, endpoint, hyperlightE2ESandboxCall(t, "bash", "echo fallback > must-not-run.txt", 30))
 			text, isError := sandboxToolResult(t, response)
 			if !isError || !strings.Contains(text, "sandbox_exec is unavailable") {
@@ -336,7 +411,7 @@ func TestHyperlightE2ESandboxExecSettlementCancelsRunningVM(t *testing.T) {
 	if err := acp.FinalizeSessionOwnership(fixture.workspace, hyperlightE2ESessionUID, hyperlightE2ESessionGID); err != nil {
 		t.Fatal(err)
 	}
-	session, endpoint := fixture.session(t, fixture.config)
+	session, endpoint := fixture.session(t, fixture.config, harnessv2.WorkspaceIntentWrite)
 	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Second)
 	defer cancel()
 	defer session.deactivate(testPromptOneID, harnessv2.RuntimeSessionStateValidating)
@@ -508,10 +583,10 @@ func newHyperlightE2ESandboxFixture(t *testing.T) *hyperlightE2ESandboxFixture {
 	return fixture
 }
 
-func (f *hyperlightE2ESandboxFixture) session(t *testing.T, config SandboxExecConfig) (*mcpProxySession, string) {
+func (f *hyperlightE2ESandboxFixture) session(t *testing.T, config SandboxExecConfig, intent harnessv2.WorkspaceIntent) (*mcpProxySession, string) {
 	t.Helper()
 	session, endpoint := newSandboxTestSession(t, newSandboxExecutor(&config))
-	session.bindSandboxWorkspace(f.workspace, hyperlightE2ESessionUID, hyperlightE2ESessionGID)
+	session.bindSandboxWorkspace(f.workspace, hyperlightE2ESessionUID, hyperlightE2ESessionGID, intent)
 	return session, endpoint
 }
 

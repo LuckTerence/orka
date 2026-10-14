@@ -295,6 +295,17 @@ func hyperlightHarnessAllowedTools() []string {
 	return []string{"Read", acp.SandboxExecToolName}
 }
 
+// hyperlightReadWorkspace gives a sandbox_exec session the pinned repository
+// with read intent, which mounts it read-only in every guest. Its README holds
+// liveRuntimeRepoSentinel for the guests and the native Read to find.
+func hyperlightReadWorkspace() *runtimeWorkspaceConfig {
+	return &runtimeWorkspaceConfig{GitRepo: liveRuntimeRepoURL, Ref: liveRuntimeRepoRef}
+}
+
+func hyperlightReadWorkspaceExpectation() *acpWorkspaceExpectation {
+	return &acpWorkspaceExpectation{Intent: "read", GitRepo: liveRuntimeRepoURL, Ref: liveRuntimeRepoRef}
+}
+
 func hyperlightHarnessAgentManifest(name, provider string) map[string]any {
 	agent := runtimeAgentManifest(name, provider, hyperlightHarness(provider).model, 8, new(false))
 	agent["spec"].(map[string]any)["runtime"].(map[string]any)["defaultAllowedTools"] = hyperlightHarnessAllowedTools()
@@ -324,7 +335,7 @@ func validateHyperlightHarnessJournal(requests []mockLLMRequest, h hyperlightHar
 		}
 		rejectedCommand = rejectedCommand || hyperlightNativeCommandRejected(request, h.commandTools[0])
 		for _, output := range request.ToolResults(h.readTool) {
-			nativeRead = nativeRead || strings.Contains(output, "hyperlight-workspace-data")
+			nativeRead = nativeRead || strings.Contains(output, liveRuntimeRepoSentinel)
 		}
 	}
 	if !offeredSandbox || !offeredRead || !rejectedCommand || !nativeRead {

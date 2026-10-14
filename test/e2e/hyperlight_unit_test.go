@@ -238,9 +238,15 @@ func TestHyperlightAimockFixturesRequireRealToolCallsAndStatelessWorkspaceSequen
 			if call.Arguments.Code == "" {
 				continue // Native command rejection and allowed read probes.
 			}
-			if marker == "[e2e:hyperlight-sandbox-exec]" && strings.Contains(call.Arguments.Code, "hyperlight-acp-read") &&
-				!strings.Contains(call.Arguments.Code, "os.unlink('hyperlight-aimock.txt')") {
-				t.Fatal("the workspace probe must leave read-intent delivery unchanged")
+			if marker == "[e2e:hyperlight-sandbox-exec]" {
+				code := call.Arguments.Code
+				switch {
+				case strings.Contains(code, "hyperlight-acp-write-refused") && !strings.Contains(code, "errno.EROFS"):
+					t.Fatal("the first guest must see every workspace write refused")
+				case strings.Contains(code, "'hyperlight-acp-read'") &&
+					!strings.Contains(code, "assert not os.path.exists('hyperlight-aimock.txt')"):
+					t.Fatal("the second guest must find that the refused write left nothing")
+				}
 			}
 			if call.Arguments.Language != "python" || call.Arguments.Timeout != 30 {
 				t.Fatalf("unexpected guest arguments: %+v", call.Arguments)
@@ -262,7 +268,7 @@ func TestHyperlightAimockFixturesRequireRealToolCallsAndStatelessWorkspaceSequen
 	}
 	if len(document.Fixtures) != 13 ||
 		document.Fixtures[2].Match["toolResultContains"] != "hyperlight-acp-read" ||
-		document.Fixtures[3].Match["toolResultContains"] != "hyperlight-acp-write" {
+		document.Fixtures[3].Match["toolResultContains"] != "hyperlight-acp-write-refused" {
 		t.Fatal("workspace final/read fixtures must precede the initial write fixture")
 	}
 }
@@ -301,7 +307,7 @@ func TestHyperlightHarnessJournalRequiresActualCatalogRejectionAndNativeRead(t *
 						map[string]string{"role": "tool", "tool_call_id": "denied", "content": "Error: tool is not available"},
 						map[string]any{"role": "assistant", "tool_calls": []any{
 							map[string]any{"id": "read", "function": map[string]string{"name": harness.readTool}}}},
-						map[string]string{"role": "tool", "tool_call_id": "read", "content": "hyperlight-workspace-data"},
+						map[string]string{"role": "tool", "tool_call_id": "read", "content": "1\t" + liveRuntimeRepoSentinel},
 					},
 				},
 			})
@@ -404,8 +410,8 @@ func TestHyperlightHarnessFixturesForceExcludedCommandsAndBoundWorkspacePoison(t
 							t.Fatal("fixture does not force an excluded native command with an observable side effect")
 						}
 					case prefix + "-read":
-						if call.Name != harness.readTool || fixture.Match.ToolResultContains != "hyperlight-acp-write" {
-							t.Fatal("native read must follow the real guest write")
+						if call.Name != harness.readTool || fixture.Match.ToolResultContains != "hyperlight-acp-write-refused" {
+							t.Fatal("native read must follow the refused guest writes")
 						}
 					case prefix + "-guest-write", prefix + "-guest-read":
 						code, _ := call.Arguments["code"].(string)
@@ -421,13 +427,13 @@ func TestHyperlightHarnessFixturesForceExcludedCommandsAndBoundWorkspacePoison(t
 							t.Fatal("guest probe used a different MCP tool identity")
 						}
 						if call.ID == prefix+"-guest-write" {
-							if fixture.Match.ToolCallID != prefix+"-forbidden" ||
+							if fixture.Match.ToolCallID != prefix+"-forbidden" || !strings.Contains(code, "errno.EROFS") ||
 								!strings.Contains(code, "hyperlight_unmanaged") || !strings.Contains(code, "hyperlight-hook.sh") {
-								t.Fatal("guest must follow command rejection and plant bounded hook/MCP configs")
+								t.Fatal("guest must follow command rejection and find bounded hook/MCP configs refused")
 							}
 						} else if fixture.Match.ToolCallID != prefix+"-read" ||
-							!strings.Contains(code, "os.unlink(path)") || !strings.Contains(code, "os.rmdir(directory)") {
-							t.Fatal("guest must follow native read and remove poison files/directories before read-intent delivery")
+							!strings.Contains(code, "assert not os.path.exists(path), path") {
+							t.Fatal("guest must follow native read and find no poison files in the read-only workspace")
 						}
 					default:
 						t.Fatalf("unexpected harness fixture call %s", call.ID)

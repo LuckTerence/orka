@@ -88,7 +88,7 @@ func newSandboxTestSession(t *testing.T, runner sandboxRunner) (*mcpProxySession
 	session.mu.Lock()
 	session.credential = []byte("credential")
 	session.mu.Unlock()
-	session.bindSandboxWorkspace("/sessions/session-a/workspace", 20001, 20002)
+	session.bindSandboxWorkspace("/sessions/session-a/workspace", 20001, 20002, harnessv2.WorkspaceIntentWrite)
 
 	idle := decodeMCPResponse(t, doMCPRequest(t, binding.URL, "credential", sandboxCall("idle", `{"code":"true"}`)))
 	if idle.Error == nil {
@@ -343,16 +343,18 @@ func TestSandboxExecutorExpiredCallDoesNotAcquireGuest(t *testing.T) {
 // session's guest still gets its whole timeout once it has the slot.
 type deadlineHyperlightRunner struct {
 	remaining chan time.Duration
+	mounts    chan []hyperlight.Mount
 }
 
 func (r *deadlineHyperlightRunner) Run(ctx context.Context, request hyperlight.Request) (hyperlight.Result, error) {
 	deadline, _ := ctx.Deadline()
 	r.remaining <- time.Until(deadline)
+	r.mounts <- request.Mounts
 	return hyperlight.Result{ExitCode: 0}, nil
 }
 
 func TestSandboxExecutorTimeoutStartsWhenTheGuestDoes(t *testing.T) {
-	runner := &deadlineHyperlightRunner{remaining: make(chan time.Duration, 1)}
+	runner := &deadlineHyperlightRunner{remaining: make(chan time.Duration, 1), mounts: make(chan []hyperlight.Mount, 1)}
 	executor := newSandboxExecutor(&SandboxExecConfig{})
 	executor.runner = runner
 	executor.slot <- struct{}{} // another session's guest is running
@@ -368,6 +370,46 @@ func TestSandboxExecutorTimeoutStartsWhenTheGuestDoes(t *testing.T) {
 	}
 	if remaining := <-runner.remaining; remaining < 900*time.Millisecond {
 		t.Fatalf("the guest started with %s of its 1s timeout left; the wait was charged to the run", remaining)
+	}
+	<-runner.mounts
+}
+
+// Only a write-intent session's guests may change the workspace; any other
+// intent, including an unset one, mounts it read-only.
+func TestSandboxExecMountsTheWorkspaceReadOnlyUnlessTheSessionWrites(t *testing.T) {
+	for _, tc := range []struct {
+		intent   harnessv2.WorkspaceIntent
+		readOnly bool
+	}{
+		{harnessv2.WorkspaceIntentWrite, false},
+		{harnessv2.WorkspaceIntentRead, true},
+		{"", true},
+	} {
+		name := string(tc.intent)
+		if name == "" {
+			name = "unset"
+		}
+		t.Run(name, func(t *testing.T) {
+			runner := &fakeSandboxRunner{calls: make(chan fakeSandboxCall, 1)}
+			session, server := newSandboxTestSession(t, runner)
+			session.bindSandboxWorkspace("/sessions/session-a/workspace", 20001, 20002, tc.intent)
+			sandboxToolResult(t, decodeMCPResponse(t, doMCPRequest(t, server, "credential", sandboxCall("run", `{"code":"print(1)"}`))))
+			if call := <-runner.calls; call.workspace.readOnly != tc.readOnly {
+				t.Fatalf("intent %q bound workspace %+v, want readOnly %t", tc.intent, call.workspace, tc.readOnly)
+			}
+
+			guest := &deadlineHyperlightRunner{remaining: make(chan time.Duration, 1), mounts: make(chan []hyperlight.Mount, 1)}
+			executor := newSandboxExecutor(&SandboxExecConfig{})
+			executor.runner = guest
+			if _, _, err := executor.run(t.Context(), acp.SandboxExecRequest{Runtime: "python", Script: "1", Timeout: time.Second},
+				sandboxWorkspace{dir: "/workspace-host", readOnly: tc.readOnly}); err != nil {
+				t.Fatal(err)
+			}
+			<-guest.remaining
+			if mounts := <-guest.mounts; len(mounts) != 1 || mounts[0].ReadOnly != tc.readOnly || mounts[0].Host != "/workspace-host" {
+				t.Fatalf("guest mounts = %+v, want only the workspace with readOnly %t", mounts, tc.readOnly)
+			}
+		})
 	}
 }
 

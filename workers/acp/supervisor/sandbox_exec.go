@@ -118,11 +118,13 @@ func newSandboxExecutor(cfg *SandboxExecConfig) *sandboxExecutor {
 }
 
 // sandboxWorkspace is the session a sandbox_exec call runs for: its
-// workspace, mounted in the micro-VM, and the user that owns it.
+// workspace, mounted in the micro-VM, and the user that owns it. A session
+// that may not change its workspace gets it read-only.
 type sandboxWorkspace struct {
-	dir string
-	uid uint32
-	gid uint32
+	dir      string
+	uid      uint32
+	gid      uint32
+	readOnly bool
 }
 
 // run executes one call as the session's user, with only its workspace. The
@@ -155,7 +157,7 @@ func (e *sandboxExecutor) run(ctx context.Context, request acp.SandboxExecReques
 	run, err := e.runner.Run(ctx, hyperlight.Request{
 		Runtime: request.Runtime,
 		Script:  request.Script,
-		Mounts:  []hyperlight.Mount{{Host: workspace.dir, Guest: acp.SandboxExecWorkspacePath}},
+		Mounts:  []hyperlight.Mount{{Host: workspace.dir, Guest: acp.SandboxExecWorkspacePath, ReadOnly: workspace.readOnly}},
 		Stdout:  stdout,
 		Stderr:  stderr,
 		Credential: &hyperlight.Credential{
@@ -214,7 +216,7 @@ func (s *mcpProxySession) handleRuntimeLocalCall(w http.ResponseWriter, r *http.
 	slog.Info("sandbox_exec audit",
 		"runtime", request.Runtime, "code_sha256", hex.EncodeToString(codeSum[:]), "code_bytes", len(request.Script),
 		"exit_code", result.ExitCode, "timed_out", result.TimedOut, "duration_ms", time.Since(start).Milliseconds(),
-		"queue_ms", queued.Milliseconds(),
+		"queue_ms", queued.Milliseconds(), "read_only", workspace.readOnly,
 		"stdout_bytes", len(result.Stdout), "stderr_bytes", len(result.Stderr), "uid", workspace.uid, "error", err)
 	if gate.Err() != nil {
 		waitForPromptGateCancellation(r.Context(), gate)
@@ -242,11 +244,15 @@ func (s *mcpProxySession) handleRuntimeLocalCall(w http.ResponseWriter, r *http.
 }
 
 // bindSandboxWorkspace records the session's workspace and user for
-// sandbox_exec once the supervisor has prepared them.
-func (s *mcpProxySession) bindSandboxWorkspace(dir string, uid, gid int) {
+// sandbox_exec once the supervisor has prepared them. Only a write-intent
+// session's guests may change the workspace.
+func (s *mcpProxySession) bindSandboxWorkspace(dir string, uid, gid int, intent harnessv2.WorkspaceIntent) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.sandbox = sandboxWorkspace{dir: dir, uid: uint32(uid), gid: uint32(gid)} //nolint:gosec // session IDs come from the bounded UID allocator
+	s.sandbox = sandboxWorkspace{
+		dir: dir, uid: uint32(uid), gid: uint32(gid), //nolint:gosec // session IDs come from the bounded UID allocator
+		readOnly: intent != harnessv2.WorkspaceIntentWrite,
+	}
 }
 
 func writeMCPToolError(w http.ResponseWriter, id json.RawMessage, text string) {

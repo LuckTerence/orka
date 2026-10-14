@@ -101,24 +101,26 @@ var _ = Describe("Hyperlight deployment with aimock", Label("hyperlight"), Order
 		verifyResultAvailable(aiTask)
 	})
 
-	It("should execute only sandbox_exec in OpenCode and persist its workspace across guests", func() {
+	It("should execute only sandbox_exec in OpenCode and keep a read-intent workspace read-only across guests", func() {
 		agent := runtimeAgentManifest(agentName, "opencode", runtimeMatrixMockOpenCodeModel, 4, new(false))
 		agent["spec"].(map[string]any)["runtime"].(map[string]any)["defaultAllowedTools"] = []string{acp.SandboxExecToolName}
 		Expect(applyManifestJSON(agent)).To(Succeed())
 		createdAgents = append(createdAgents, agentName)
 		Expect(applyManifestJSON(runtimeAgentTaskManifest(acpTask, agentName,
 			"Execute the scripted workspace checks with sandbox_exec. [e2e:hyperlight-sandbox-exec]",
-			4, new(false), nil, "", nil, nil))).To(Succeed())
+			4, new(false), hyperlightReadWorkspace(), "", nil, nil))).To(Succeed())
 		createdTasks = append(createdTasks, acpTask)
 		verifyACPTaskRuntimeForTask(acpTask, acpTaskExpectation{
 			ProviderKind: "opencode", Model: runtimeMatrixMockOpenCodeModel, MaxTurns: acpInt32(4), AllowBash: new(false),
-			AllowedTools: []string{acp.SandboxExecToolName},
+			AllowedTools:    []string{acp.SandboxExecToolName},
+			WorkspaceIntent: "read", Workspace: hyperlightReadWorkspaceExpectation(),
 		}, 2*time.Minute)
 		Expect(waitForTaskCompletion(acpTask, 3*time.Minute)).To(Equal("Succeeded"))
 		pod := waitHyperlightTaskPod(acpTask, true)
 		Expect(validateHyperlightPod(pod, acpOpencodeRuntimeRef, hyperlightBundleRef, gid, true)).To(Succeed())
 
-		By("verifying real MCP tool results, including a second guest reading the first guest's workspace write")
+		By("verifying real MCP tool results: the first guest's writes were refused, " +
+			"and a second guest found the repository unchanged")
 		var results []string
 		Eventually(func(g Gomega) {
 			requests, err := providerProxyMockLLM.requestsFor("[e2e:hyperlight-sandbox-exec]")
@@ -140,7 +142,7 @@ var _ = Describe("Hyperlight deployment with aimock", Label("hyperlight"), Order
 			g.Expect(rejected).To(BeTrue(), "the forced native Bash call must return a real rejection")
 			g.Expect(results).To(HaveLen(2), "both guest results must reach the provider proxy's aimock")
 		}, 30*time.Second, time.Second).Should(Succeed())
-		for i, marker := range []string{"hyperlight-acp-write", "hyperlight-acp-read"} {
+		for i, marker := range []string{"hyperlight-acp-write-refused", "hyperlight-acp-read"} {
 			var result acp.SandboxExecResult
 			Expect(json.Unmarshal([]byte(results[i]), &result)).To(Succeed())
 			Expect(result.ExitCode).To(BeZero())
@@ -166,11 +168,11 @@ var _ = Describe("Hyperlight deployment with aimock", Label("hyperlight"), Order
 			createdAgents = append(createdAgents, name)
 			Expect(applyManifestJSON(runtimeAgentTaskManifest(name, name,
 				"Run the scripted no-native-command and sandbox workspace checks. "+marker,
-				8, new(false), nil, "", nil, nil))).To(Succeed())
+				8, new(false), hyperlightReadWorkspace(), "", nil, nil))).To(Succeed())
 			createdTasks = append(createdTasks, name)
 			verifyACPTaskRuntimeForTask(name, acpTaskExpectation{
 				ProviderKind: provider, Model: harness.model, MaxTurns: acpInt32(8), AllowBash: new(false),
-				AllowedTools: allowed,
+				AllowedTools: allowed, WorkspaceIntent: "read", Workspace: hyperlightReadWorkspaceExpectation(),
 			}, 2*time.Minute)
 			Expect(waitForTaskCompletion(name, 4*time.Minute)).To(Equal("Succeeded"))
 			pod := waitHyperlightTaskPod(name, true)
@@ -190,7 +192,7 @@ var _ = Describe("Hyperlight deployment with aimock", Label("hyperlight"), Order
 				g.Expect(results).To(HaveLen(2), "both guest results must reach aimock through the production provider proxy")
 			}, 30*time.Second, time.Second).Should(Succeed())
 			hostKernel := hyperlightNodeKernel(pod)
-			for i, guestMarker := range []string{"hyperlight-acp-write", "hyperlight-acp-read"} {
+			for i, guestMarker := range []string{"hyperlight-acp-write-refused", "hyperlight-acp-read"} {
 				result, err := decodeSandboxExecResult(results[i])
 				Expect(err).NotTo(HaveOccurred(), "sandbox_exec result %d as the model saw it: %q", i, results[i])
 				Expect(result.ExitCode).To(BeZero())
@@ -202,9 +204,9 @@ var _ = Describe("Hyperlight deployment with aimock", Label("hyperlight"), Order
 					Expect(result.Stderr).To(ContainSubstring("hyperlight-acp-stderr"))
 				}
 			}
-			// Both guest scripts also assert that the forced native command and
-			// workspace-sourced hook/MCP probes produced no host-side marker.
-			// Configs are planted during the prompt, not before harness startup.
+			// Both guest scripts also assert that the forced native command left
+			// no host-side marker. The first tries to plant hook/MCP configs
+			// during the prompt and must see each refused; the second finds none.
 			verifyResultAvailable(name)
 		})
 	}

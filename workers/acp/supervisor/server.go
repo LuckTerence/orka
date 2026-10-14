@@ -1199,7 +1199,7 @@ func (s *Server) createSession(
 	if err != nil {
 		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("MCP proxy setup", err)
 	}
-	mcpProxy.bindSandboxWorkspace(paths.Workspace, uid, gid)
+	mcpProxy.bindSandboxWorkspace(paths.Workspace, uid, gid, request.Workspace.Intent)
 	cleanupMCPProxy := true
 	defer func() {
 		if cleanupMCPProxy {

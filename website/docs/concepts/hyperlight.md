@@ -18,7 +18,7 @@ Two tools use it:
 | Tool | Task type | Enabled by | The guest gets |
 |------|-----------|------------|----------------|
 | `code_exec` | `ai` | `--ai-worker-code-exec-backend=hyperlight` | The code. No network, no host files. |
-| `sandbox_exec` | `agent` (built-in ACP runtimes) | `--acp-sandbox-exec` and the tool in the Agent's or Task's allowed tools | The session workspace, read-write at `/workspace`. No network. |
+| `sandbox_exec` | `agent` (built-in ACP runtimes) | `--acp-sandbox-exec` and the tool in the Agent's or Task's allowed tools | The session workspace at `/workspace`, read-only unless the session has write intent. No network. |
 
 ## Requirements
 
@@ -129,6 +129,9 @@ spec:
 - `hluk` runs as the session's user, which owns the workspace, and only that
   process gets the device's group: the agent's own processes never open the
   hypervisor.
+- Only a write-intent session's guests can change the workspace. Any other
+  session gets it read-only, so a guest's write fails at once with a read-only
+  file system error rather than at the workspace check after the turn.
 - A runtime Pod runs one `sandbox_exec` guest at a time, including across
   sessions. A call waits for the guest before it starts, at most as long as its
   timeout and never past prompt cancellation; the timeout then bounds its own
@@ -199,8 +202,8 @@ The `Hyperlight E2E` workflow builds the pinned production bundle and runs real
 KVM guests without LLM credentials. It tests cold boot and warm snapshots,
 `code_exec` in a non-root read-only container, and the ACP `sandbox_exec` MCP
 path with distinct session identities. Checks cover workspace persistence,
-host-file and environment isolation, output limits, timeouts, cancellation,
-and Python and JavaScript script compatibility.
+read-only workspaces, host-file and environment isolation, output limits,
+timeouts, cancellation, and Python and JavaScript script compatibility.
 
 The guest-only job uses the `hyperlight_e2e` Go build tag on Linux with the
 bundle at `/opt/orka/hyperlight` and access to `/dev/kvm`.
@@ -211,9 +214,9 @@ plugin, bundle init container and KVM guests are real. It checks that:
 
 - an AI Task's `code_exec` guest identity, stdout/stderr and network-policy
   evidence reach aimock's request journal;
-- an OpenCode Task with native Bash disabled uses `sandbox_exec`, and a second
-  guest reads the first guest's workspace write, then removes the temporary
-  probe file so the read-intent workspace remains unchanged;
+- an OpenCode Task with native Bash disabled and a read-intent workspace uses
+  `sandbox_exec`: the first guest reads the cloned repository and each of its
+  writes fails with `EROFS`, and a second guest finds the repository unchanged;
 - withholding the bundle returns an unavailable-tool result to the model,
   without changing the pinned backend or executing a host fallback. The model
   acknowledges this error, so Task success alone is not execution evidence.
@@ -232,8 +235,8 @@ The KVM/aimock deployment lane checks AI `code_exec`, OpenCode and Claude
 `sandbox_exec`, unavailable-backend rejection without host fallback, and
 fail-closed admission of unsupported Copilot exclusive mode. It verifies actual
 model-facing command catalogs and guest results, not canned final replies.
-Workspace hook/MCP fixtures in the deployment lane are planted during a prompt;
-they test in-session loading, not pre-start configuration loading.
+The Claude spec's guest tries to plant workspace hook and MCP configuration
+during a read-intent prompt, and the read-only mount must refuse each file.
 
 `scripts/hyperlight-codex-e2e.sh` separately exercises the pinned Codex/ACP
 runtime against a private Responses namespace fixture and real Hyperlight guests.
