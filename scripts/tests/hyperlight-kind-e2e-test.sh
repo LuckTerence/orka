@@ -141,6 +141,14 @@ run_case() {
     cd "$1"; kindctl_derive hyperlight-aimock; echo "$KINDCTL_NAME"
   ' _ "${mirror}")"
   if [[ "${scenario}" == env-file ]]; then printf 'OPENAI_API_KEY=DO_NOT_LEAK\n' > "${mirror}/test/e2e/.env"; fi
+  # Another run of the same tag holds its lock, as if it had just passed the
+  # preflight and not yet created its cluster.
+  local held=''
+  if [[ "${scenario}" == locked ]]; then
+    mkdir -p "${case_dir}/home/.kube/kind"
+    exec {held}>>"${case_dir}/home/.kube/kind/${cluster}.e2e.lock"
+    flock -n "${held}"
+  fi
   # shellcheck disable=SC2016 # The child shell expands its own variables.
   HOME="${case_dir}/home" KINDCTL_STORE="${case_dir}/home/.kube/kind" \
     PATH="${scratch}/mock-bin:${PATH}" \
@@ -158,6 +166,7 @@ run_case() {
         hyperlight_main
       ' _ "${mirror}" >"${case_dir}/output" 2>&1 || status=$?
   rm -f "${mirror}/test/e2e/.env"
+  if [[ -n "${held}" ]]; then exec {held}>&-; fi
   if [[ "${status}" != "${expected}" ]]; then
     echo "${scenario}: expected ${expected}, got ${status}" >&2
     cat "${case_dir}/output" >&2; exit 1
@@ -167,8 +176,11 @@ run_case() {
     echo 'diagnostics exposed unallowlisted data' >&2; exit 1
   fi
   case "${scenario}" in
-    credential|env-file|preexisting)
+    credential|env-file|preexisting|locked)
       [[ ! -e "${case_dir}/artifacts" ]]
+      if [[ "${scenario}" == locked ]] && ! grep -Fq 'another run holds this tag' "${case_dir}/output"; then
+        echo 'a held tag did not stop the run' >&2; exit 1
+      fi
       if grep -Eq 'kind (create|delete)' "${case_dir}/calls" 2>/dev/null; then
         echo 'preflight failure mutated a cluster' >&2; exit 1
       fi
@@ -216,6 +228,7 @@ run_case build-fail 17
 run_case rollout-fail 16
 run_case allocatable-fail 1
 run_case preexisting 1
+run_case locked 1
 run_case credential 1
 run_case env-file 1
 

@@ -164,7 +164,7 @@ hyperlight_main() {
   hyperlight_require_host
   hyperlight_require_aimock
   local command
-  for command in curl tar docker kubectl python3 jq go; do
+  for command in curl tar docker kubectl python3 jq go flock; do
     command -v "${command}" >/dev/null || hyperlight_die "missing required command: ${command}"
   done
   kind_binary="${KIND:-}"
@@ -189,6 +189,13 @@ hyperlight_main() {
   kind_tag="${E2E_HYPERLIGHT_KIND_TAG:-hyperlight-aimock}"
   kindctl_derive "${kind_tag}"
   export KIND_CLUSTER="${KINDCTL_NAME}" KUBECONFIG="${KINDCTL_KUBECONFIG}"
+  # Two runs of one tag could both pass the check below, and the one whose
+  # create then failed would tear down the other's cluster. Hold the tag from
+  # the check until teardown ends; the lock goes with the process.
+  kindctl_ensure_store_dir
+  exec {run_lock}>>"${KINDCTL_STORE_DIR}/${KIND_CLUSTER}.e2e.lock"
+  flock -n "${run_lock}" ||
+    hyperlight_die 'another run holds this tag; choose a fresh tag (nothing deleted)'
   local clusters
   clusters="$("${kind_binary}" get clusters)"
   if grep -Fxq -- "${KIND_CLUSTER}" <<<"${clusters}" || kindctl_registry_is_owned "${KIND_CLUSTER}"; then
