@@ -905,3 +905,57 @@ func TestExternalRuntimePoolQuarantineAuthorizesStopForSuspendCapableClass(t *te
 		t.Fatalf("provider Stop validation rejects the quarantine authorization: %v", err)
 	}
 }
+
+func TestExternalRuntimePoolReportsCurrentProviderOperationFailure(t *testing.T) {
+	const cause = `runtime labels select unadmitted egress permissions in NetworkPolicy "widen"`
+	for _, tc := range []struct {
+		name               string
+		status             metav1.ConditionStatus
+		reason             string
+		staleCondition     bool
+		staleObservation   bool
+		wantProviderReport bool
+	}{
+		{name: "current operation failure", status: metav1.ConditionUnknown, reason: externalProviderOperationFailedReason, wantProviderReport: true},
+		{name: "ordinary progress", status: metav1.ConditionFalse, reason: string(workspacev1alpha1.ReasonProgressing)},
+		{name: "other unknown reason", status: metav1.ConditionUnknown, reason: string(workspacev1alpha1.ReasonProgressing)},
+		{name: "condition for an older generation", status: metav1.ConditionUnknown, reason: externalProviderOperationFailedReason, staleCondition: true},
+		{name: "unobserved generation", status: metav1.ConditionUnknown, reason: externalProviderOperationFailedReason, staleObservation: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newExternalRuntimePoolFixture(t)
+			w := f.publish(t)
+			conditionGeneration, observedGeneration := w.Generation, w.Generation
+			if tc.staleCondition {
+				conditionGeneration--
+			}
+			if tc.staleObservation {
+				observedGeneration--
+			}
+			w.Status.ObservedGeneration = observedGeneration
+			workspaceprovider.SetCondition(&w.Status.Conditions, metav1.Condition{Type: string(workspacev1alpha1.ConditionWorkspaceProvisioned), Status: tc.status, Reason: tc.reason,
+				Message: "provider allocation could not be verified: " + cause, ObservedGeneration: conditionGeneration})
+			if err := f.r.Status().Update(context.Background(), w); err != nil {
+				t.Fatal(err)
+			}
+			runtimePoolReconcile(t, f.r, f.pool)
+			pool := runtimePoolTestGetPool(t, f.r, f.pool)
+			if !strings.HasPrefix(pool.Status.Message, "waiting for current exact-instance startup evidence") {
+				t.Fatalf("unexpected pool progress: %q", pool.Status.Message)
+			}
+			if strings.Contains(pool.Status.Message, cause) != tc.wantProviderReport {
+				t.Fatalf("provider report presence = %v, want %v: %q", !tc.wantProviderReport, tc.wantProviderReport, pool.Status.Message)
+			}
+			if tc.wantProviderReport && pool.Status.Message != "waiting for current exact-instance startup evidence; provider reports: provider allocation could not be verified: "+cause {
+				t.Fatalf("unexpected provider report: %q", pool.Status.Message)
+			}
+		})
+	}
+	w := &workspacev1alpha1.ExecutionWorkspace{}
+	w.Generation, w.Status.ObservedGeneration = 1, 1
+	w.Status.Conditions = []metav1.Condition{{Type: string(workspacev1alpha1.ConditionWorkspaceProvisioned), Status: metav1.ConditionUnknown, Reason: externalProviderOperationFailedReason,
+		Message: strings.Repeat("x", 4096), ObservedGeneration: 1}}
+	if report := externalProviderOperationReport(w); len(report) > 512 || report == "" {
+		t.Fatalf("provider report is not bounded: %d bytes", len(report))
+	}
+}

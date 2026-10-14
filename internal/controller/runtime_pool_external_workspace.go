@@ -92,7 +92,7 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 		return r.reconcileExternalWorkspaceRetirement(ctx, pool, w, deleting)
 	}
 	if r.CleanupOnly || r.WorkspaceCleanupOnly {
-		return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDegraded, "workspace dispatch is disabled")
+		return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleDegraded, "workspace dispatch is disabled")
 	}
 	if r.Epochs != nil {
 		if current, ready := r.Epochs.Current(); !ready || current.Epoch <= 0 {
@@ -104,10 +104,10 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 	}
 	provider := &workspacev1alpha1.ExecutionWorkspaceProvider{}
 	if err := uncachedReader(r.APIReader, r.Client).Get(ctx, types.NamespacedName{Name: w.Spec.ProviderBinding.Name}, provider); err != nil {
-		return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDegraded, "workspace provider is unavailable")
+		return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleDegraded, "workspace provider is unavailable")
 	}
 	if provider.UID != w.Spec.ProviderBinding.UID || provider.Spec.LifecycleState == workspacev1alpha1.ExecutionWorkspaceProviderDisabled || !externalProviderUsable(provider) {
-		return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDegraded, "workspace provider is not usable")
+		return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleDegraded, "workspace provider is not usable")
 	}
 	cfg, err := r.runtimePoolConfig(pool)
 	if err != nil && acpRuntimePoolImageRequiresHistoricalRecovery(pool, r.AllowedImages) {
@@ -122,15 +122,15 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 		}
 	}
 	if err != nil {
-		return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDegraded, "runtime configuration is not admitted")
+		return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleDegraded, "runtime configuration is not admitted")
 	}
 	if w.Spec.Workload != nil && (w.Status.Allocation == nil || w.Status.Allocation.State != workspacev1alpha1.AllocationStopped) {
 		if err := workspaceprovider.ValidateWorkspaceWorkload(w); err != nil || w.Spec.Workload.Runtime == nil {
-			return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDegraded, "persisted workload failed its immutable binding")
+			return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleDegraded, "persisted workload failed its immutable binding")
 		}
 		frozenPool, frozen, err := runtimePoolPodTemplateValidationTarget(pool, w.Spec.Workload.Runtime.Template)
 		if err != nil {
-			return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDegraded, "persisted runtime fence is invalid")
+			return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleDegraded, "persisted runtime fence is invalid")
 		}
 		if frozen.controllerEpoch != cfg.controllerEpoch || frozen.providerProxy.tokenGeneration != cfg.providerProxy.tokenGeneration || frozenPool.Generation != pool.Generation || frozenPool.Spec.Runtime.Profile.Digest != pool.Spec.Runtime.Profile.Digest {
 			before := pool.DeepCopy()
@@ -149,7 +149,7 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 	}
 	auth, providerSecret, err := r.ensureRuntimePoolSecrets(ctx, pool, cfg)
 	if err != nil {
-		return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDegraded, "private runtime credentials are unavailable")
+		return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleDegraded, "private runtime credentials are unavailable")
 	}
 	if err := r.ensureRuntimePoolAncillaryResources(ctx, pool, cfg); err != nil {
 		return ctrl.Result{}, err
@@ -174,24 +174,24 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 		return r.publishExternalWorkspaceWorkload(ctx, pool, cfg, w, auth, providerSecret)
 	}
 	if err := workspaceprovider.ValidateWorkspaceWorkload(w); err != nil {
-		return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDegraded, "persisted workload failed its immutable binding")
+		return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleDegraded, "persisted workload failed its immutable binding")
 	}
 	request := w.Spec.Workload
 	if request.Runtime == nil || request.Runtime.PoolBinding.UID != pool.UID || request.Runtime.PoolBinding.Name != pool.Name {
-		return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDegraded, "workload refers to a different RuntimePool")
+		return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleDegraded, "workload refers to a different RuntimePool")
 	}
 	if w.Spec.Retirement != nil {
 		return r.reconcileExternalWorkspaceRetirement(ctx, pool, w, false)
 	}
 	if slices.Contains(request.Runtime.RequiredFeatures, workspacev1alpha1.WorkspaceFeatureNativeProcess) && !externalNativeRuntimeHasOpaqueIdentity(request) {
-		return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDegraded, "native workload requires retirement before opaque runtime identity admission")
+		return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleDegraded, "native workload requires retirement before opaque runtime identity admission")
 	}
 	if err := workspacev1alpha1.ValidateStartup(*request, allocationOrEmpty(w)); err != nil || w.Status.ObservedGeneration != w.Generation {
-		return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleStarting, "waiting for current exact-instance startup evidence")
+		return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleStarting, "waiting for current exact-instance startup evidence")
 	}
 	pod, err := r.attestExternalWorkspaceStartup(ctx, request, w.Status.Allocation.Startup)
 	if err != nil {
-		return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDegraded, "external workload failed independent materialization verification")
+		return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleDegraded, "external workload failed independent materialization verification")
 	}
 	if w.Status.Allocation.Startup.Process != nil {
 		if err := r.ensureExternalProcessIngress(ctx, pool, cfg, w); err != nil {
@@ -199,10 +199,10 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 		}
 	}
 	if err := r.bindExternalRuntimeInstanceEvidence(ctx, pool, w); err != nil {
-		return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDegraded, "startup conflicts with the independently observed instance fence")
+		return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleDegraded, "startup conflicts with the independently observed instance fence")
 	}
 	if err := r.bindWorkspaceRuntimePoolBootstrapInstance(ctx, pool, auth, pod.UID); err != nil {
-		return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDegraded, "runtime instance conflicts with the private credential binding")
+		return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleDegraded, "runtime instance conflicts with the private credential binding")
 	}
 	nonce := string(auth.Data[runtimePoolBootstrapNonceKey])
 	if w.Status.Allocation.Startup.Process != nil {
@@ -233,6 +233,29 @@ func allocationOrEmpty(w *workspacev1alpha1.ExecutionWorkspace) workspacev1alpha
 		return workspacev1alpha1.AllocationObservation{}
 	}
 	return *w.Status.Allocation
+}
+
+// externalProviderOperationFailedReason marks a workspace Provisioned condition
+// whose message carries the provider's last operation error.
+const externalProviderOperationFailedReason = "ProviderOperationFailed"
+
+// externalPoolWorkspaceProgress adds the provider's current operation error to
+// startup and degraded progress. The workspace shares the pool's namespace and
+// already carries that message; Task status never receives provider text.
+func (r *RuntimePoolReconciler) externalPoolWorkspaceProgress(ctx context.Context, pool *corev1alpha1.RuntimePool, w *workspacev1alpha1.ExecutionWorkspace, lifecycle corev1alpha1.RuntimePoolLifecycle, message string) (ctrl.Result, error) {
+	if report := externalProviderOperationReport(w); report != "" {
+		message += "; provider reports: " + report
+	}
+	return r.externalPoolProgress(ctx, pool, lifecycle, message)
+}
+
+func externalProviderOperationReport(w *workspacev1alpha1.ExecutionWorkspace) string {
+	condition := workspaceprovider.FindCondition(w.Status.Conditions, string(workspacev1alpha1.ConditionWorkspaceProvisioned))
+	if condition == nil || condition.Status != metav1.ConditionUnknown || condition.Reason != externalProviderOperationFailedReason ||
+		condition.ObservedGeneration != w.Generation || w.Status.ObservedGeneration != w.Generation {
+		return ""
+	}
+	return sanitizeStatusValue(condition.Message, 512)
 }
 
 func (r *RuntimePoolReconciler) externalPoolProgress(ctx context.Context, pool *corev1alpha1.RuntimePool, lifecycle corev1alpha1.RuntimePoolLifecycle, message string) (ctrl.Result, error) {
