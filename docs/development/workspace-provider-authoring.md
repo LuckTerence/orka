@@ -24,6 +24,10 @@ the workspace. The provider reports exact instance and request-revision evidence
 core independently checks accessible compute/storage, performs the sealed
 bootstrap exchange, and opens admission only after the authenticated v2 probe.
 Generation acknowledgement is asynchronous and does not authorize prompt dispatch.
+When a provider operation fails, the provider keeps `Provisioned` Unknown with
+reason `ProviderOperationFailed` and a bounded one-line cause. Core appends that
+cause to the RuntimePool status message; it never copies provider text into Task
+status.
 
 `runtime.native-process` declares a fresh writable container filesystem, exact
 process startup evidence, and operator-managed infrastructure/router ingress.
