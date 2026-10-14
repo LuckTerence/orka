@@ -28,7 +28,9 @@ Generation acknowledgement is asynchronous and does not authorize prompt dispatc
 `runtime.native-process` declares a fresh writable container filesystem, exact
 process startup evidence, and operator-managed infrastructure/router ingress.
 Core freezes that capability before hashing the request, omits Kubernetes scratch
-mounts and ephemeral-storage quotas, and publishes only runtime Egress policy. The native supervisor intent
+mounts and resource requirements, and publishes only runtime Egress policy. The
+Actor inherits the infrastructure template's CPU and memory sizing, which the
+operator matches to the WorkerPool. The native supervisor intent
 declares UID/GID 0 and its exact capability set. The pinned gVisor backend does not
 support Kubernetes seccomp profiles or allowPrivilegeEscalation controls, so Core
 omits those fields and its Pod node selector from fresh native requests. Native

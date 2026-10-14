@@ -657,7 +657,7 @@ func TestExternalRuntimePoolPublicResourceDefaultsAndFrozenRevalidation(t *testi
 
 	// Revalidation never rewrites a persisted request, even one whose quotas
 	// differ from the current defaults.
-	request.Resources = externalRuntimePoolResourceRequirements(runtimePoolResourceClassStandard)
+	request.Resources = corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2"), corev1.ResourceMemory: resource.MustParse("4Gi")}}
 	request.Runtime.Template.Spec.Containers[0].Resources = request.Resources
 	for i := range request.Runtime.Template.Spec.Volumes {
 		if volume := request.Runtime.Template.Spec.Volumes[i].EmptyDir; volume != nil {

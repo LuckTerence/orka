@@ -19,7 +19,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/types"
 )
 
@@ -518,16 +517,3 @@ func validateRuntimePoolExecutionWorkspace(pool *corev1alpha1.RuntimePool) error
 }
 
 const runtimePoolWorkspaceResumeLostAnnotation = "orka.ai/workspace-resume-lost"
-
-// External allocation defaults cover resources represented by the lifecycle
-// contract. Kubernetes ephemeral-storage quotas cannot bound native processes;
-// the ordinary Deployment defaults retain their separate storage quotas.
-func externalRuntimePoolResourceRequirements(resourceClass string) corev1.ResourceRequirements {
-	if resourceClass != runtimePoolResourceClassStandard {
-		return corev1.ResourceRequirements{}
-	}
-	return corev1.ResourceRequirements{
-		Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("250m"), corev1.ResourceMemory: resource.MustParse("512Mi")},
-		Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2"), corev1.ResourceMemory: resource.MustParse("4Gi")},
-	}
-}

@@ -165,7 +165,7 @@ func assertExternalRuntimePoolMaterializationLayout(t *testing.T, request *works
 	}
 	wantResources := runtimePoolResourceRequirements(runtimePoolResourceClassStandard)
 	if native {
-		wantResources = externalRuntimePoolResourceRequirements(runtimePoolResourceClassStandard)
+		wantResources = corev1.ResourceRequirements{}
 	}
 	if !reflect.DeepEqual(request.Resources, wantResources) || !reflect.DeepEqual(container.Resources, wantResources) {
 		t.Fatalf("public resources do not match provider materialization: %#v", request.Resources)

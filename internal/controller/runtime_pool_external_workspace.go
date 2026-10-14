@@ -266,10 +266,11 @@ func (r *RuntimePoolReconciler) publishExternalWorkspaceWorkload(ctx context.Con
 	}
 	template := r.runtimePoolPodTemplate(pool, cfg, cfg.labels, auth.Name, provider.Name)
 	if nativeProcess {
-		// Native Actors enforce only CPU and memory limits; the native template
-		// below also drops Pod scratch volumes. Pod-backed requests keep the
-		// ephemeral-storage and scratch size quotas of an in-cluster pool.
-		template.Spec.Containers[0].Resources = externalRuntimePoolResourceRequirements(pool.Spec.Runtime.Profile.ResourceClass)
+		// A native Actor inherits its infrastructure template's sizing, which
+		// the operator matches to the WorkerPool; the native template below
+		// also drops Pod scratch volumes. Pod-backed requests keep the
+		// resource and scratch size quotas of an in-cluster pool.
+		template.Spec.Containers[0].Resources = corev1.ResourceRequirements{}
 	}
 	template.Spec.Containers[0].Command = []string{"/usr/local/bin/orka-acp-runtime"}
 	template.Spec.RestartPolicy = corev1.RestartPolicyNever
