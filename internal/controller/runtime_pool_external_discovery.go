@@ -5,7 +5,9 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"maps"
 	"reflect"
 	"slices"
 
@@ -18,6 +20,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/validation"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -84,21 +87,55 @@ func externalDiscoveryIntents(pool *corev1alpha1.RuntimePool) ([]externalDiscove
 	return intents, nil
 }
 
+// saveExternalDiscoveryIntents compares the receipt itself, not the whole pool.
+// After a conflict or lost response it re-reads the pool: an unchanged receipt
+// is rewritten and an already-written one is accepted. Otherwise an unrelated
+// pool write could drop an acknowledged create's UID, which no read recovers.
 func (r *RuntimePoolReconciler) saveExternalDiscoveryIntents(ctx context.Context, pool *corev1alpha1.RuntimePool, intents []externalDiscoveryIntent) error {
-	encoded, err := json.Marshal(intents)
-	if err != nil {
-		return err
+	desired := ""
+	if len(intents) != 0 {
+		encoded, err := json.Marshal(intents)
+		if err != nil {
+			return err
+		}
+		desired = string(encoded)
 	}
-	before := pool.DeepCopy()
-	if pool.Annotations == nil {
-		pool.Annotations = map[string]string{}
-	}
-	if len(intents) == 0 {
-		delete(pool.Annotations, externalDiscoveryIntentsAnnotation)
-	} else {
-		pool.Annotations[externalDiscoveryIntentsAnnotation] = string(encoded)
-	}
-	return r.Patch(ctx, pool, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{}))
+	previous := pool.Annotations[externalDiscoveryIntentsAnnotation]
+	return retry.OnError(retry.DefaultRetry, func(err error) bool { return !errors.Is(err, workspaceprovider.ErrStaleIdentity) }, func() error {
+		before := pool.DeepCopy()
+		if pool.Annotations == nil {
+			pool.Annotations = map[string]string{}
+		}
+		if desired == "" {
+			delete(pool.Annotations, externalDiscoveryIntentsAnnotation)
+		} else {
+			pool.Annotations[externalDiscoveryIntentsAnnotation] = desired
+		}
+		err := r.Patch(ctx, pool, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{}))
+		if err == nil {
+			return nil
+		}
+		*pool = *before
+		current := &corev1alpha1.RuntimePool{}
+		if getErr := uncachedReader(r.APIReader, r.Client).Get(ctx, client.ObjectKeyFromObject(pool), current); getErr != nil {
+			return err
+		}
+		if current.UID != pool.UID {
+			return workspaceprovider.ErrStaleIdentity
+		}
+		switch current.Annotations[externalDiscoveryIntentsAnnotation] {
+		case desired:
+			*pool = *current
+			return nil
+		case previous:
+			// The retry patch must diff only the receipt key against current
+			// annotations; a stale map could null out a concurrent annotation.
+			pool.ResourceVersion, pool.Annotations = current.ResourceVersion, maps.Clone(current.Annotations)
+			return err
+		default:
+			return fmt.Errorf("discovery receipt changed concurrently: %w", workspaceprovider.ErrStaleIdentity)
+		}
+	})
 }
 
 func externalDiscoveryIntentMatches(pool *corev1alpha1.RuntimePool, cfg runtimePoolConfig, intent externalDiscoveryIntent, object client.Object) bool {
