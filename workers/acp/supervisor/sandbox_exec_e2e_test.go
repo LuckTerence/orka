@@ -45,6 +45,7 @@ func TestHyperlightE2ESandboxExecPublicMCPLanguages(t *testing.T) {
 			code: `set -eu
 [ "$PWD" = /workspace ]
 printf 'bash-workspace' > bash.txt
+printf 'VALUE = "workspace-module"\n' > workspace_module.py
 printf 'bash-ok\n'`,
 		},
 		{
@@ -60,6 +61,9 @@ def annotated(value: NotDefinedYet) -> NotDefinedYet:
 assert annotated.__annotations__['value'] == 'NotDefinedYet'
 with open('bash.txt') as previous:
     assert previous.read() == 'bash-workspace'
+# The guest's embedded interpreter imports from the workspace, like a script.
+import workspace_module
+assert workspace_module.VALUE == 'workspace-module'
 with open('python.txt', 'w') as result:
     result.write('python-workspace')
 print('python-ok')`,

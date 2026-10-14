@@ -17,6 +17,8 @@ import (
 )
 
 func TestParseSandboxExecArguments(t *testing.T) {
+	const pythonPrefix = "import os as _orka_os, sys as _orka_sys; _orka_os.chdir(\"/workspace\"); " +
+		"_orka_sys.path.insert(0, \"/workspace\"); del _orka_os, _orka_sys\nexec(compile("
 	cases := []struct {
 		name        string
 		args        string
@@ -24,10 +26,10 @@ func TestParseSandboxExecArguments(t *testing.T) {
 		wantPrefix  string
 		wantTimeout time.Duration
 	}{
-		{"python by default", `{"code":"print(1)"}`, "python", "import os as _orka_os; _orka_os.chdir(\"/workspace\"); del _orka_os\nexec(compile(", SandboxExecDefaultTimeout},
+		{"python by default", `{"code":"print(1)"}`, "python", pythonPrefix, SandboxExecDefaultTimeout},
 		{"bash", `{"language":"bash","code":"ls"}`, "bash", "cd /workspace || exit 125\nls", SandboxExecDefaultTimeout},
 		{"sh is the shell", `{"language":"sh","code":"ls"}`, "bash", "cd /workspace || exit 125\nls", SandboxExecDefaultTimeout},
-		{"python", `{"language":"Python","code":"print(1)","timeout":5}`, "python", "import os as _orka_os; _orka_os.chdir(\"/workspace\"); del _orka_os\nexec(compile(", 5 * time.Second},
+		{"python", `{"language":"Python","code":"print(1)","timeout":5}`, "python", pythonPrefix, 5 * time.Second},
 		{"javascript, timeout as a string", `{"language":"javascript","code":"1","timeout":"30"}`, "node", "(() => {\nconst Module = require('module');", 30 * time.Second},
 		{"timeout clamped", `{"language":"bash","code":"true","timeout":3600}`, "bash", "cd /workspace", SandboxExecMaxTimeout},
 	}
@@ -96,11 +98,15 @@ func TestSandboxExecPythonPreservesSource(t *testing.T) {
 		{"docstring", "\"module documentation\"\nprint(__doc__)", "module documentation\n", false},
 		{"quoted source", "print('single \" double \\\\ 雪')", "single \" double \\ 雪\n", false},
 		{"workspace", "import os; open('result.txt', 'w').write('saved'); print(os.path.basename(os.getcwd()))", "workspace\n", false},
+		{"workspace module", "import workspace_module; print(workspace_module.VALUE)", "workspace-module\n", false},
 		{"syntax error", "if:", "SyntaxError", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			workspace := filepath.Join(t.TempDir(), "workspace")
 			if err := os.Mkdir(workspace, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(workspace, "workspace_module.py"), []byte("VALUE = 'workspace-module'\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			args, err := json.Marshal(map[string]any{"language": "python", "code": tc.code})
@@ -112,7 +118,9 @@ func TestSandboxExecPythonPreservesSource(t *testing.T) {
 				t.Fatal(err)
 			}
 			script := strings.ReplaceAll(request.Script, SandboxExecWorkspacePath, workspace)
-			output, runErr := exec.CommandContext(t.Context(), python, "-c", script).CombinedOutput()
+			// -I leaves the current directory off sys.path, as the guest's
+			// embedded interpreter does.
+			output, runErr := exec.CommandContext(t.Context(), python, "-I", "-c", script).CombinedOutput()
 			if (runErr != nil) != tc.fails || !strings.Contains(string(output), tc.want) {
 				t.Fatalf("output = %q, error = %v, want %q, fails=%t", output, runErr, tc.want, tc.fails)
 			}

@@ -119,9 +119,13 @@ func ParseSandboxExecArguments(raw json.RawMessage) (SandboxExecRequest, error) 
 		request.Script = "cd " + SandboxExecWorkspacePath + " || exit 125\n" + code
 	case "python", "python3":
 		request.Runtime = "python"
-		// Compile the unchanged source separately so future imports and the
-		// module docstring keep their meaning.
-		request.Script = "import os as _orka_os; _orka_os.chdir(" + strconv.Quote(SandboxExecWorkspacePath) + "); del _orka_os\n" +
+		// The guest's embedded interpreter puts no script directory on
+		// sys.path, so add the workspace as `python script.py` would. Compile
+		// the unchanged source separately so future imports and the module
+		// docstring keep their meaning.
+		workspace := strconv.Quote(SandboxExecWorkspacePath)
+		request.Script = "import os as _orka_os, sys as _orka_sys; _orka_os.chdir(" + workspace + "); " +
+			"_orka_sys.path.insert(0, " + workspace + "); del _orka_os, _orka_sys\n" +
 			"exec(compile(" + strconv.Quote(code) + ", '<sandbox_exec>', 'exec', dont_inherit=True), globals())"
 	case "javascript", "node", "js":
 		request.Runtime = "node"
