@@ -12,7 +12,7 @@ the agent, and `--state-dir` names the directory the agent keeps its state in:
 | `--agent` | Supported release | `--state-dir` | Bundle |
 | --- | --- | --- | --- |
 | `codex` | Codex 0.160.0 `codex/paginated` threads | `CODEX_HOME` | The verified SessionKit manifest and the thread's original rollout bytes |
-| `opencode` | OpenCode 1.19.0 | `XDG_DATA_HOME` (`~/.local/share` by default) | A copy of `opencode/opencode.db` holding only the session's rows, plus the spilled tool output the conversation refers to |
+| `opencode` | OpenCode 1.19.0 | `XDG_DATA_HOME` (`~/.local/share` by default) | A copy of `opencode/opencode.db` holding only the session's rows, plus the output its own tool calls spilled to files |
 
 Both run on Linux and macOS. A bundle never contains authentication files,
 provider configuration, or process memory. A Codex bundle excludes Codex's
@@ -79,16 +79,16 @@ migration support for reasoning-enabled Codex sessions.
 ## OpenCode
 
 OpenCode keeps every session in one SQLite database. Import copies it with
-SQLite and keeps only the named session, its project, and the spilled tool
-output files the conversation names. The source must be a database OpenCode
+SQLite and keeps only the named session, its project, and the files its own
+tool calls spilled their output to. The source must be a database OpenCode
 1.19.0 wrote: any other schema is rejected. Import reads the database without
 changing it.
 
 Import rejects a session that holds state Orka does not carry: a todo list,
 subagent (child) sessions, per-session permission rules, or OpenCode
 workspaces. It also rejects a source database larger than twice the expanded
-budget (16 times the bundle limit) and a conversation that refers to more than
-256 spilled tool outputs.
+budget (16 times the bundle limit) and a session whose tool calls spilled more
+than 256 outputs.
 
 OpenCode resumes a session in the directory it recorded, not the directory it
 starts in. Import therefore needs `--cwd`, the directory the session ran in.

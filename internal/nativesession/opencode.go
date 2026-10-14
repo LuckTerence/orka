@@ -477,37 +477,45 @@ func deleteOtherOpenCodeState(ctx context.Context, db *sql.DB, schema openCodeSc
 }
 
 // openCodeToolOutputReferences returns the names of the files in dir that the
-// conversation's messages and parts refer to. OpenCode names a spilled tool
-// output by its absolute path.
+// session's own tool calls spilled their output to. OpenCode records each in
+// its tool part's metadata.outputPath. A developer's tool-output directory
+// holds every session's spills, so a path that only appears in conversation
+// text never selects a file.
 func openCodeToolOutputReferences(ctx context.Context, db *sql.DB, dir string) ([]string, error) {
 	prefix := dir + string(filepath.Separator)
-	reference := regexp.MustCompile(regexp.QuoteMeta(prefix) + `([A-Za-z0-9][A-Za-z0-9_.-]{0,127})`)
+	rows, err := db.QueryContext(ctx, `SELECT data FROM part WHERE instr(data, ?) > 0`, prefix)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
 	names := map[string]bool{}
-	for _, table := range []string{openCodeMessageTable, openCodePartTable} {
-		rows, err := db.QueryContext(ctx, `SELECT data FROM `+table+` WHERE instr(data, ?) > 0`, prefix)
-		if err != nil {
+	for rows.Next() {
+		var data string
+		if err := rows.Scan(&data); err != nil {
 			return nil, err
 		}
-		for rows.Next() {
-			var data string
-			if err := rows.Scan(&data); err != nil {
-				_ = rows.Close()
-				return nil, err
-			}
-			for _, match := range reference.FindAllStringSubmatch(data, -1) {
-				// A reference can end a sentence.
-				if name := strings.TrimRight(match[1], "."); name != "" {
-					names[name] = true
-				}
-			}
-			if len(names) > maxOpenCodeToolOutputs {
-				_ = rows.Close()
-				return nil, fmt.Errorf("%w: OpenCode conversation refers to more than %d spilled tool outputs", ErrUnsupported, maxOpenCodeToolOutputs)
-			}
+		var part struct {
+			Type  string `json:"type"`
+			State struct {
+				Metadata struct {
+					OutputPath string `json:"outputPath"`
+				} `json:"metadata"`
+			} `json:"state"`
 		}
-		if err := errors.Join(rows.Err(), rows.Close()); err != nil {
-			return nil, err
+		if json.Unmarshal([]byte(data), &part) != nil || part.Type != "tool" {
+			continue
 		}
+		name, ok := strings.CutPrefix(part.State.Metadata.OutputPath, prefix)
+		if !ok || !openCodeToolOutputPattern.MatchString(name) {
+			continue
+		}
+		names[name] = true
+		if len(names) > maxOpenCodeToolOutputs {
+			return nil, fmt.Errorf("%w: OpenCode conversation spilled more than %d tool outputs", ErrUnsupported, maxOpenCodeToolOutputs)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	sorted := make([]string, 0, len(names))
 	for name := range names {

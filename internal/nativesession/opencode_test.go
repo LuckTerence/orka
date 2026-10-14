@@ -192,12 +192,11 @@ func TestOpenCodeCaptureKeepsOnlyTheSessionFromADeveloperDatabase(t *testing.T) 
 			t.Fatal(err)
 		}
 	}
-	// A reference can end a sentence, and OpenCode may have deleted the file.
-	if err := os.WriteFile(filepath.Join(toolOutput, "tool_sentence"), []byte("the session's output"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	source.exec(t, `UPDATE message SET data = ? WHERE id = 'msg_user'`,
-		`{"role":"user","text":"Saved to `+filepath.Join(toolOutput, "tool_sentence")+`. Also `+filepath.Join(toolOutput, "tool_gone")+`"}`)
+	// Only a tool part's own metadata selects a spill: a path the conversation
+	// merely mentions does not, and a spill OpenCode deleted is skipped.
+	source.exec(t, `UPDATE message SET data = ? WHERE id = 'msg_user'`, `{"role":"user","text":"Compare `+otherSpill+`"}`)
+	source.exec(t, `INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES ('prt_gone', 'msg_assistant', ?, 3, 3, ?)`,
+		openCodeFixtureSession, `{"type":"tool","state":{"metadata":{"truncated":true,"outputPath":"`+filepath.Join(toolOutput, "tool_gone")+`"}}}`)
 	source.exec(t, `INSERT INTO project (id, worktree, vcs, time_created, time_updated, sandboxes) VALUES ('a1b2c3', '/src/other', 'git', 1, 1, '[]')`)
 	for _, session := range [][]any{{"ses_sibling", "global", nil}, {"ses_siblingchild", "global", "ses_sibling"}, {"ses_otherproject", "a1b2c3", nil}} {
 		source.exec(t, `INSERT INTO session (id, project_id, parent_id, slug, directory, title, version, time_created, time_updated)
@@ -205,7 +204,7 @@ func TestOpenCodeCaptureKeepsOnlyTheSessionFromADeveloperDatabase(t *testing.T) 
 		source.exec(t, `INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?, ?, 1, 1, ?)`,
 			"msg_"+session[0].(string), session[0], `{"role":"user","text":"other-private"}`)
 		source.exec(t, `INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, 1, 1, ?)`,
-			"prt_"+session[0].(string), "msg_"+session[0].(string), session[0], `{"output":"saved to `+otherSpill+`"}`)
+			"prt_"+session[0].(string), "msg_"+session[0].(string), session[0], `{"type":"tool","state":{"metadata":{"truncated":true,"outputPath":"`+otherSpill+`"}}}`)
 		source.exec(t, `INSERT INTO todo (session_id, content, status, priority, position, time_created, time_updated) VALUES (?, 'other-private', 'pending', 'high', 0, 1, 1)`, session[0])
 	}
 	source.exec(t, `INSERT INTO workspace (id, type, project_id, time_used) VALUES ('wrk_other', 'worktree', 'a1b2c3', 1)`)
@@ -216,7 +215,7 @@ func TestOpenCodeCaptureKeepsOnlyTheSessionFromADeveloperDatabase(t *testing.T) 
 		t.Fatal(err)
 	}
 	entries := tarEntriesForTest(t, data)
-	if len(entries) != 4 || entries["tool-output/"+openCodeFixtureSpill] == nil || entries["tool-output/tool_sentence"] == nil {
+	if len(entries) != 3 || entries["tool-output/"+openCodeFixtureSpill] == nil {
 		t.Fatalf("capture must carry only the session's spilled output: %v", slices.Collect(maps.Keys(entries)))
 	}
 	database := filepath.Join(realDir(t), "captured.db")
@@ -234,7 +233,7 @@ func TestOpenCodeCaptureKeepsOnlyTheSessionFromADeveloperDatabase(t *testing.T) 
 		Scan(&sessions, &projects, &messages, &parts, &rest); err != nil {
 		t.Fatal(err)
 	}
-	if sessions != 1 || projects != 1 || messages != 2 || parts != 1 || rest != 0 {
+	if sessions != 1 || projects != 1 || messages != 2 || parts != 2 || rest != 0 {
 		t.Fatalf("sessions=%d projects=%d messages=%d parts=%d other rows=%d", sessions, projects, messages, parts, rest)
 	}
 	if bytes.Contains(gunzipForTest(t, data), []byte("other-private")) {
@@ -324,12 +323,12 @@ func TestOpenCodeCaptureFallsBackOnStateItDoesNotCarry(t *testing.T) {
 		"directory outside the workspace": {reason: "outside the given workspace", mutate: func(t *testing.T, f openCodeFixture) {
 			f.exec(t, `UPDATE session SET directory = '/'`)
 		}},
-		"too many spilled outputs": {reason: "more than 256 spilled tool outputs", mutate: func(t *testing.T, f openCodeFixture) {
-			var references strings.Builder
+		"too many spilled outputs": {reason: "spilled more than 256 tool outputs", mutate: func(t *testing.T, f openCodeFixture) {
 			for i := range maxOpenCodeToolOutputs {
-				fmt.Fprintf(&references, "saved to %s\\n", filepath.Join(f.dirs.State, "opencode", "tool-output", fmt.Sprintf("tool_extra%03d", i)))
+				spill := filepath.Join(f.dirs.State, "opencode", "tool-output", fmt.Sprintf("tool_extra%03d", i))
+				f.exec(t, `INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?, 'msg_assistant', ?, 3, 3, ?)`,
+					fmt.Sprintf("prt_extra%03d", i), openCodeFixtureSession, `{"type":"tool","state":{"metadata":{"truncated":true,"outputPath":"`+spill+`"}}}`)
 			}
-			f.exec(t, `UPDATE message SET data = ? WHERE id = 'msg_user'`, references.String())
 		}},
 	} {
 		t.Run(name, func(t *testing.T) {

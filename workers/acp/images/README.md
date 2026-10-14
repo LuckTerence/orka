@@ -157,7 +157,7 @@ for supported history, import/export commands, and recovery limits.
 For native OpenCode restoration, the supervisor captures the stopped session's
 `$XDG_DATA_HOME/opencode/opencode.db` with a consistent SQLite copy, keeping
 only that session's `project`, `session`, `message` and `part` rows plus the
-`migration` tables, and carries the spilled `tool-output` files they refer to.
+`migration` tables, and carries the `tool-output` files its tool calls spilled.
 It drops the duplicate `event` log, persisted permission grants, and credential
 tables; rows in any other table fall back to the canonical transcript. Before starting
 OpenCode in the fresh RuntimeSession it installs that database, rewrites
