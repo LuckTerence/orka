@@ -194,8 +194,9 @@ console.log('javascript-read-only');`,
 }
 
 // The shell's child processes: xargs and find -exec wait for a cat that
-// fills the 64 KiB pipe, and a command that fails to execute must leave the
-// shell running. Each stopped the guest before the pinned hluk's kernel fixes.
+// fills the 64 KiB pipe, a command that fails to execute must leave the shell
+// running, and the shell's wait for background jobs still running sleeps until
+// their SIGCHLD. Each stopped the guest before the pinned hluk's kernel fixes.
 func TestHyperlightE2ESandboxExecBashChildProcesses(t *testing.T) {
 	fixture := newHyperlightE2ESandboxFixture(t)
 	_, endpoint := fixture.session(t, fixture.config, harnessv2.WorkspaceIntentWrite)
@@ -208,9 +209,12 @@ n=$(find . -name 'big-*.txt' -exec cat {} + | wc -c)
 echo "find=$((n))"
 missing-command 2>/dev/null || echo missing
 missing-command 2>/dev/null || echo missing
+sleep 0.1 & sleep 0.2 & wait
+sh -c 'sleep 0.1; exit 3' & wait $!
+echo "background=$?"
 echo after`
 	result := hyperlightE2ESandboxResult(t, hyperlightE2ESandboxRPC(t, endpoint, hyperlightE2ESandboxCall(t, "bash", code, 60)))
-	if want := "xargs=164000\nfind=164000\nmissing\nmissing\nafter\n"; result.Stdout != want {
+	if want := "xargs=164000\nfind=164000\nmissing\nmissing\nbackground=3\nafter\n"; result.Stdout != want {
 		t.Fatalf("bash child processes: stdout = %q, want %q; stderr = %q", result.Stdout, want, result.Stderr)
 	}
 	fixture.reclaim(t)

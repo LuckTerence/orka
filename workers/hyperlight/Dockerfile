@@ -6,11 +6,13 @@
 # worker and ACP runtime base. The pinned commit carries the guest fixes Orka
 # depends on: standard error kept apart, writes over 4 KiB whole, newlines as
 # written, pipes and $(...) in the shell, a command that fails to execute
-# leaving the shell running, and a parent waiting for its child's pid waking
-# when the child exits (xargs or find -exec into a full pipe deadlocked).
+# leaving the shell running, a parent waiting for its child's pid waking when
+# the child exits (xargs or find -exec into a full pipe deadlocked), and a
+# paused process waking for a child's SIGCHLD (the shell's wait for a running
+# background job deadlocked).
 FROM rust:1-bookworm@sha256:114c7a4425406451c2866b6aafe69fe29b1b298832db1277d411ac73c82d04d6 AS hluk
 ARG HLUK_REPO=https://github.com/sozercan/hyperlight-unikraft.git
-ARG HLUK_COMMIT=271fac8d4d5e9012b419d09e46499474a8a30a10
+ARG HLUK_COMMIT=ec52b512f5cf4c180dc68b2573e425f92999b76a
 # The default build drives KVM (/dev/kvm). Nodes with only the Microsoft
 # Hypervisor (/dev/mshv) need HLUK_FEATURES=mshv, which hluk leaves off by
 # default because it gives up KVM's fast snapshot restore.

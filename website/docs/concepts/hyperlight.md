@@ -178,9 +178,7 @@ programs:
   `sqlite3` or `subprocess` support.
 - **javascript**: Node.js, without `child_process`.
 - **bash**: the BusyBox `hush` shell, not GNU bash, which needs `fork()`. It
-  has pipes, `$(...)` and redirects, but its loops are slow. Waiting for a
-  background job that is still running (`cmd & wait`) deadlocks the guest,
-  which `hluk` detects and reports as a failed run.
+  has pipes, `$(...)`, redirects and background jobs, but its loops are slow.
 
 There is no `fork()`, so a program that forks fails, and scheduling is
 cooperative, so a busy thread holds the vCPU. Every file operation in a guest
