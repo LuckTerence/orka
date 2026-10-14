@@ -242,6 +242,16 @@ func TestOpenCodeCaptureKeepsOnlyTheSessionFromADeveloperDatabase(t *testing.T) 
 	if _, err := format.Inspect(t.Context(), data, openCodeFixtureLimit); err != nil {
 		t.Fatal(err)
 	}
+
+	// Without a workspace, capture takes the directory the session recorded.
+	data, err = format.Capture(t.Context(), Dirs{State: source.dirs.State}, openCodeFixtureSession, openCodeFixtureLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := decodeOpenCodeBundle(data, openCodeFixtureLimit)
+	if err != nil || bundle.manifest.Workspace != source.dirs.Workspace {
+		t.Fatalf("capture without a workspace must record the session's directory: %+v %v", bundle.manifest, err)
+	}
 }
 
 func TestOpenCodeInstallMovesAGitProjectWorktree(t *testing.T) {

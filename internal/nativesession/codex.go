@@ -22,7 +22,7 @@ const (
 type codexFormat struct{}
 
 func (codexFormat) Local() Local {
-	return Local{Binary: "codex", Version: "codex-cli " + codexVersion, StateVar: "CODEX_HOME"}
+	return Local{Binary: "codex", Version: "codex-cli " + codexVersion, StateVar: "CODEX_HOME", HomeState: ".codex"}
 }
 
 // The runtime supervisor sets CODEX_HOME to HOME/.codex.

@@ -178,7 +178,7 @@ type openCodeBundle struct {
 type openCodeFormat struct{}
 
 func (openCodeFormat) Local() Local {
-	return Local{Binary: "opencode", Version: openCodeVersion, StateVar: "XDG_DATA_HOME"}
+	return Local{Binary: "opencode", Version: openCodeVersion, StateVar: "XDG_DATA_HOME", HomeState: filepath.Join(".local", "share")}
 }
 
 func (openCodeFormat) runtimeState(_, data string) string { return data }
@@ -193,8 +193,8 @@ func (openCodeFormat) Capture(ctx context.Context, dirs Dirs, providerSessionID 
 	if !openCodeSessionIDPattern.MatchString(providerSessionID) {
 		return nil, errors.New("OpenCode session ID is invalid")
 	}
-	if !absoluteCleanPath(dirs.Workspace) {
-		return nil, errors.New("OpenCode capture requires the session's absolute working directory")
+	if dirs.Workspace != "" && !absoluteCleanPath(dirs.Workspace) {
+		return nil, errors.New("OpenCode workspace must be an absolute, clean path")
 	}
 	root := openCodeRoot(dirs)
 	source := filepath.Join(root, openCodeDatabaseEntry)
@@ -225,7 +225,7 @@ func (openCodeFormat) Capture(ctx context.Context, dirs Dirs, providerSessionID 
 		return nil, err
 	}
 	toolOutputDir := filepath.Join(root, openCodeToolOutputDir)
-	spilled, err := pruneOpenCodeDatabase(ctx, copied, providerSessionID, dirs.Workspace, toolOutputDir)
+	workspace, spilled, err := pruneOpenCodeDatabase(ctx, copied, providerSessionID, dirs.Workspace, toolOutputDir)
 	if err != nil {
 		return nil, err
 	}
@@ -244,7 +244,7 @@ func (openCodeFormat) Capture(ctx context.Context, dirs Dirs, providerSessionID 
 	data, err := encodeOpenCodeBundle(limit, openCodeBundle{
 		manifest: openCodeManifest{
 			Format: openCodeBundleFormat, Version: openCodeVersion, SessionID: providerSessionID,
-			Workspace: dirs.Workspace, ToolOutputDir: toolOutputDir,
+			Workspace: workspace, ToolOutputDir: toolOutputDir,
 		},
 		database: database, toolOutput: toolOutput,
 	})
@@ -386,32 +386,33 @@ func copyOpenCodeDatabase(ctx context.Context, source, target string) error {
 }
 
 // pruneOpenCodeDatabase leaves only providerSessionID's conversation in a
-// private copy of the database, and returns the names of the spilled tool
-// outputs in toolOutputDir that it refers to. A developer's database holds
-// every session they ran in every project; a RuntimeSession's holds one.
-func pruneOpenCodeDatabase(ctx context.Context, path, providerSessionID, workspace, toolOutputDir string) ([]string, error) {
+// private copy of the database, and returns the session's recorded directory,
+// which must be workspace unless that is empty, and the names of the spilled
+// tool outputs in toolOutputDir that it refers to. A developer's database
+// holds every session they ran in every project; a RuntimeSession's holds one.
+func pruneOpenCodeDatabase(ctx context.Context, path, providerSessionID, workspace, toolOutputDir string) (string, []string, error) {
 	db, err := openSQLite(path, "")
 	if err != nil {
-		return nil, err
+		return "", nil, err
 	}
 	defer func() { _ = db.Close() }()
 	schema, err := requireOpenCodeSchema(ctx, db)
 	if err != nil {
-		return nil, err
+		return "", nil, err
 	}
 	if _, err := db.ExecContext(ctx, `PRAGMA journal_mode=DELETE`); err != nil {
-		return nil, err
+		return "", nil, err
 	}
 	var projectID string
 	err = db.QueryRowContext(ctx, `SELECT project_id FROM session WHERE id = ?`, providerSessionID).Scan(&projectID)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, errors.New("OpenCode database does not hold the session")
+		return "", nil, errors.New("OpenCode database does not hold the session")
 	}
 	if err != nil {
-		return nil, err
+		return "", nil, err
 	}
 	if err := deleteOtherOpenCodeState(ctx, db, schema, providerSessionID, projectID); err != nil {
-		return nil, err
+		return "", nil, err
 	}
 	for _, table := range schema.tables {
 		if slices.Contains(openCodeCarriedTables, table) || slices.Contains(openCodeDroppedTables, table) {
@@ -419,27 +420,30 @@ func pruneOpenCodeDatabase(ctx context.Context, path, providerSessionID, workspa
 		}
 		populated, err := sqliteExists(ctx, db, `SELECT EXISTS(SELECT 1 FROM "`+table+`")`)
 		if err != nil {
-			return nil, err
+			return "", nil, err
 		}
 		if populated {
-			return nil, fmt.Errorf("%w: OpenCode table %s holds state Orka does not carry", ErrUnsupported, table)
+			return "", nil, fmt.Errorf("%w: OpenCode table %s holds state Orka does not carry", ErrUnsupported, table)
 		}
 	}
 	session, err := readOpenCodeSession(ctx, db, providerSessionID)
 	if err != nil {
-		return nil, err
+		return "", nil, err
 	}
-	if session.directory != workspace {
-		return nil, fmt.Errorf("%w: OpenCode session runs outside the given workspace", ErrUnsupported)
+	switch {
+	case workspace != "" && session.directory != workspace:
+		return "", nil, fmt.Errorf("%w: OpenCode session runs outside the given workspace", ErrUnsupported)
+	case !absoluteCleanPath(session.directory):
+		return "", nil, fmt.Errorf("%w: OpenCode session's recorded directory is not an absolute path", ErrUnsupported)
 	}
 	spilled, err := openCodeToolOutputReferences(ctx, db, toolOutputDir)
 	if err != nil {
-		return nil, err
+		return "", nil, err
 	}
 	if _, err := db.ExecContext(ctx, `VACUUM`); err != nil {
-		return nil, err
+		return "", nil, err
 	}
-	return spilled, nil
+	return session.directory, spilled, nil
 }
 
 // deleteOtherOpenCodeState deletes the rows of every other session and

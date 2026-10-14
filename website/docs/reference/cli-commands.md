@@ -4138,10 +4138,10 @@ Usage:
 Flags:
       --agent string         Local agent: codex or opencode
       --agent-bin string     Local agent executable, which must report the release Orka carries (default: the agent's name)
-      --cwd string           Existing destination working directory
+      --cwd string           Existing destination working directory (default: the current directory)
   -h, --help                 help for export
-      --journal-dir string   Private directory outside the state directory, retained for retries
-      --state-dir string     Fresh private destination agent state directory: CODEX_HOME for codex, XDG_DATA_HOME for opencode
+      --journal-dir string   Private directory outside the state directory, retained for retries (default: under ~/.orka/migrations, removed once the export completes)
+      --state-dir string     Fresh private destination agent state directory: CODEX_HOME for codex, XDG_DATA_HOME for opencode (default: ~/.orka/sessions/<namespace>/<session>/<agent>)
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
@@ -4163,12 +4163,12 @@ Usage:
 
 Flags:
       --agent string         Local agent: codex or opencode
-      --cwd string           Directory the source session ran in (required for opencode)
+      --cwd string           Directory the source session ran in (default: the directory the agent recorded)
   -h, --help                 help for import
-      --journal-dir string   Private directory retained for exact retries
+      --journal-dir string   Private directory retained for exact retries (default: under ~/.orka/migrations, removed once the import completes)
       --session-id string    The agent's own session ID: a Codex thread UUID or an OpenCode ses_ ID
       --source-stopped       Confirm every local agent process using the state directory has stopped
-      --state-dir string     Source agent state directory: CODEX_HOME for codex, XDG_DATA_HOME for opencode
+      --state-dir string     Source agent state directory: CODEX_HOME for codex, XDG_DATA_HOME for opencode (default: the agent's own, from that variable or under HOME)
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file

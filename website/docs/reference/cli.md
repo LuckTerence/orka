@@ -411,7 +411,7 @@ Sessions and durable memory are store-backed workflows rather than Kubernetes CR
 
 `orka session migrate import` stages a stopped local Codex or OpenCode session
 for a fresh Orka Session. `orka session migrate export` installs a saved
-checkpoint in a fresh local state directory. Both require a private journal for
+checkpoint in a fresh local state directory. Both keep a private journal for
 retries and support Codex 0.160.0 paginated sessions and OpenCode 1.19.0
 sessions on Linux and macOS. See
 [Native session migration](../guides/native-session-migration.md).

@@ -25,7 +25,8 @@ type Dirs struct {
 	// State is the directory the agent's state variable (Local.StateVar)
 	// names: CODEX_HOME for Codex, XDG_DATA_HOME for OpenCode.
 	State string
-	// Workspace is the agent's working directory.
+	// Workspace is the agent's working directory. Capture accepts an empty
+	// Workspace to mean the directory the conversation recorded.
 	Workspace string
 }
 
@@ -38,6 +39,8 @@ type Local struct {
 	Version string
 	// StateVar names the environment variable whose value is Dirs.State.
 	StateVar string
+	// HomeState is Dirs.State relative to HOME when StateVar is unset.
+	HomeState string
 }
 
 // Summary describes a verified saved conversation.

@@ -22,6 +22,7 @@ import (
 	"github.com/orka-agents/orka/internal/nativesession"
 	"github.com/spf13/cobra"
 	"golang.org/x/sys/unix"
+	"k8s.io/apimachinery/pkg/util/validation"
 )
 
 type migrationState struct {
@@ -35,6 +36,45 @@ type migrationState struct {
 	CWD               string `json:"cwd,omitempty"`
 	OperationID       string `json:"operationID"`
 	Data              []byte `json:"data"`
+}
+
+// A journal lets a plain re-run of the same command resume an uncertain
+// migration.
+const migrationRetryHint = "retry the same command"
+
+// localStateDir returns where a developer's agent keeps its state: the
+// absolute value of its state variable, or its default under HOME.
+func localStateDir(local nativesession.Local) (string, error) {
+	if dir := os.Getenv(local.StateVar); filepath.IsAbs(dir) {
+		return dir, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, local.HomeState), nil
+}
+
+// migrationDefaultPath returns ~/.orka/<area>/<namespace>/<session>/<leaf>.
+// Kubernetes names cannot leave that directory.
+func migrationDefaultPath(namespace, session, area, leaf string) (string, error) {
+	if len(validation.IsDNS1123Label(namespace)) != 0 || len(validation.IsDNS1123Subdomain(session)) != 0 {
+		return "", errors.New("default migration paths need a valid namespace and Session name")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, configDir, area, namespace, session, leaf), nil
+}
+
+// removeMigrationJournal removes a default journal once its migration
+// completes, so its private copy of the conversation does not linger and the
+// next migration of the Session starts anew.
+func removeMigrationJournal(cmd *cobra.Command, journal string) {
+	if err := os.RemoveAll(journal); err != nil {
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Warning: remove %s before migrating this Session again: %v\n", journal, err)
+	}
 }
 
 // migrationFormat returns the native session format of a local agent.
@@ -260,6 +300,11 @@ func newSessionMigrateImportCmd() *cobra.Command {
 			if !stopped {
 				return fmt.Errorf("stop every local %s process using the state directory, then pass --source-stopped", agent)
 			}
+			if stateDir == "" {
+				if stateDir, err = localStateDir(format.Local()); err != nil {
+					return err
+				}
+			}
 			resolvedState, err := migrationDir(stateDir, false)
 			if err != nil {
 				return err
@@ -270,16 +315,22 @@ func newSessionMigrateImportCmd() *cobra.Command {
 					return err
 				}
 			}
-			resolvedJournal, err := privateMigrationJournal(journal, resolvedState)
-			if err != nil {
-				return err
-			}
 			c, target, cleanup, err := newMigrationClient(cmd)
 			if err != nil {
 				return err
 			}
 			defer cleanup()
 			c.NativeSessionMaxBytes = limit
+			defaultJournal := journal == ""
+			if defaultJournal {
+				if journal, err = migrationDefaultPath(c.Namespace, args[0], "migrations", "import"); err != nil {
+					return err
+				}
+			}
+			resolvedJournal, err := privateMigrationJournal(journal, resolvedState)
+			if err != nil {
+				return err
+			}
 			expected := migrationState{
 				Direction: "import", Server: target, Namespace: c.Namespace, Session: args[0],
 				Agent: agent, StateDir: resolvedState, ProviderSessionID: providerSessionID, CWD: resolvedCWD,
@@ -308,27 +359,30 @@ func newSessionMigrateImportCmd() *cobra.Command {
 			}
 			receipt, err := c.ImportNativeSession(cmd.Context(), args[0], saved.OperationID, agent, saved.Data)
 			if err != nil {
-				return fmt.Errorf("%w; retry using the same --journal-dir", err)
+				return fmt.Errorf("%w; %s", err, migrationRetryHint)
 			}
 			if receipt.OperationID != saved.OperationID || receipt.DataDigest != summary.DataDigest || receipt.ProviderSessionID != providerSessionID ||
 				receipt.SessionName != args[0] || receipt.Namespace != c.Namespace {
 				return errors.New("native import receipt does not match the saved request")
 			}
 			if err := publishMigrationJSON(resolvedJournal, "import-receipt.json", receipt); err != nil {
-				return fmt.Errorf("save import receipt: %w; retry using the same --journal-dir", err)
+				return fmt.Errorf("save import receipt: %w; %s", err, migrationRetryHint)
 			}
 			_, err = fmt.Fprintf(cmd.OutOrStdout(), "Staged %s session %s in Session %s. Submit a Task with this Session to continue; its agent must run %s.\n", agent, providerSessionID, args[0], agent)
+			if defaultJournal {
+				removeMigrationJournal(cmd, resolvedJournal)
+			}
 			return err
 		},
 	}
 	agentHelp, stateDirHelp := migrationFlagHelp()
 	cmd.Flags().StringVar(&agent, "agent", "", agentHelp)
-	cmd.Flags().StringVar(&stateDir, "state-dir", "", "Source "+stateDirHelp)
+	cmd.Flags().StringVar(&stateDir, "state-dir", "", "Source "+stateDirHelp+" (default: the agent's own, from that variable or under HOME)")
 	cmd.Flags().StringVar(&providerSessionID, "session-id", "", "The agent's own session ID: a Codex thread UUID or an OpenCode ses_ ID")
-	cmd.Flags().StringVar(&cwd, "cwd", "", "Directory the source session ran in (required for opencode)")
-	cmd.Flags().StringVar(&journal, "journal-dir", "", "Private directory retained for exact retries")
+	cmd.Flags().StringVar(&cwd, "cwd", "", "Directory the source session ran in (default: the directory the agent recorded)")
+	cmd.Flags().StringVar(&journal, "journal-dir", "", "Private directory retained for exact retries (default: under ~/.orka/migrations, removed once the import completes)")
 	cmd.Flags().BoolVar(&stopped, "source-stopped", false, "Confirm every local agent process using the state directory has stopped")
-	for _, flag := range []string{"agent", "state-dir", "session-id", "journal-dir"} {
+	for _, flag := range []string{"agent", "session-id"} {
 		_ = cmd.MarkFlagRequired(flag)
 	}
 	return cmd
@@ -355,6 +409,28 @@ func newSessionMigrateExportCmd() *cobra.Command {
 			if err != nil || strings.TrimSpace(string(version)) != local.Version {
 				return fmt.Errorf("destination requires %s reporting version %q (--agent-bin)", local.Binary, local.Version)
 			}
+			c, target, cleanup, err := newMigrationClient(cmd)
+			if err != nil {
+				return err
+			}
+			defer cleanup()
+			c.NativeSessionMaxBytes = limit
+			defaultState, defaultJournal := stateDir == "", journal == ""
+			if defaultState {
+				if stateDir, err = migrationDefaultPath(c.Namespace, args[0], "sessions", agent); err != nil {
+					return err
+				}
+			}
+			if defaultJournal {
+				if journal, err = migrationDefaultPath(c.Namespace, args[0], "migrations", "export"); err != nil {
+					return err
+				}
+			}
+			if cwd == "" {
+				if cwd, err = os.Getwd(); err != nil {
+					return err
+				}
+			}
 			resolvedState, err := migrationDir(stateDir, true)
 			if err != nil {
 				return err
@@ -375,12 +451,6 @@ func newSessionMigrateExportCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			c, target, cleanup, err := newMigrationClient(cmd)
-			if err != nil {
-				return err
-			}
-			defer cleanup()
-			c.NativeSessionMaxBytes = limit
 			expected := migrationState{
 				Direction: "export", Server: target, Namespace: c.Namespace, Session: args[0],
 				Agent: agent, StateDir: resolvedState, CWD: resolvedCWD,
@@ -388,6 +458,15 @@ func newSessionMigrateExportCmd() *cobra.Command {
 			saved, err := readMigrationState(resolvedJournal, expected, limit)
 			if err != nil {
 				return err
+			}
+			if saved == nil && defaultState {
+				entries, err := os.ReadDir(resolvedState)
+				if err != nil {
+					return err
+				}
+				if len(entries) > 0 {
+					return fmt.Errorf("%s holds an earlier export; remove it or pass --state-dir", resolvedState)
+				}
 			}
 			if saved == nil {
 				response, err := c.ExportNativeSession(cmd.Context(), args[0])
@@ -422,27 +501,30 @@ func newSessionMigrateExportCmd() *cobra.Command {
 			// not recognize their own earlier installation.
 			if _, err := os.Lstat(filepath.Join(resolvedJournal, "export-receipt.json")); errors.Is(err, os.ErrNotExist) {
 				if err := format.Install(cmd.Context(), saved.Data, nativesession.Dirs{State: resolvedState, Workspace: resolvedCWD}, resolvedJournal, limit); err != nil {
-					return fmt.Errorf("install: %w; retain the journal and retry it", err)
+					return fmt.Errorf("install: %w; %s", err, migrationRetryHint)
 				}
 				if err := publishMigrationJSON(resolvedJournal, "export-receipt.json", summary); err != nil {
-					return fmt.Errorf("save export receipt: %w; retry using the same --journal-dir", err)
+					return fmt.Errorf("save export receipt: %w; %s", err, migrationRetryHint)
 				}
 			} else if err != nil {
 				return err
 			}
 			_, err = fmt.Fprintf(cmd.OutOrStdout(), "Installed %s session %s in %s. Set %s to that directory, authenticate with current local credentials, then resume the session from %s.\n",
 				agent, summary.ProviderSessionID, resolvedState, local.StateVar, resolvedCWD)
+			if defaultJournal {
+				removeMigrationJournal(cmd, resolvedJournal)
+			}
 			return err
 		},
 	}
 	agentHelp, stateDirHelp := migrationFlagHelp()
 	cmd.Flags().StringVar(&agent, "agent", "", agentHelp)
-	cmd.Flags().StringVar(&stateDir, "state-dir", "", "Fresh private destination "+stateDirHelp)
-	cmd.Flags().StringVar(&cwd, "cwd", "", "Existing destination working directory")
-	cmd.Flags().StringVar(&journal, "journal-dir", "", "Private directory outside the state directory, retained for retries")
+	cmd.Flags().StringVar(&stateDir, "state-dir", "", "Fresh private destination "+stateDirHelp+
+		" (default: ~/.orka/sessions/<namespace>/<session>/<agent>)")
+	cmd.Flags().StringVar(&cwd, "cwd", "", "Existing destination working directory (default: the current directory)")
+	cmd.Flags().StringVar(&journal, "journal-dir", "", "Private directory outside the state directory, retained for retries "+
+		"(default: under ~/.orka/migrations, removed once the export completes)")
 	cmd.Flags().StringVar(&binary, "agent-bin", "", "Local agent executable, which must report the release Orka carries (default: the agent's name)")
-	for _, flag := range []string{"agent", "state-dir", "cwd", "journal-dir"} {
-		_ = cmd.MarkFlagRequired(flag)
-	}
+	_ = cmd.MarkFlagRequired("agent")
 	return cmd
 }

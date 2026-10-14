@@ -91,9 +91,9 @@ budget (16 times the bundle limit) and a session whose tool calls spilled more
 than 256 outputs.
 
 OpenCode resumes a session in the directory it recorded, not the directory it
-starts in. Import therefore needs `--cwd`, the directory the session ran in.
-Export and Orka's runtime restore move the session to the new working
-directory and rewrite the paths the conversation recorded.
+starts in. Import takes that directory from the database; a `--cwd` you pass
+must match it. Export and Orka's runtime restore move the session to the new
+working directory and rewrite the paths the conversation recorded.
 
 Export installs into a state directory without an OpenCode database. Use a
 fresh directory: OpenCode also keeps provider credentials there, so
@@ -161,30 +161,34 @@ before running the commands below.
 
 Stop every local agent process using the source state directory before capture.
 `--source-stopped` records that assertion; it does not terminate a local
-client. Use a new Session name and a journal directory outside the state
-directory:
+client. Use a new Session name:
 
 ```bash
-orka session migrate import migrated-review \
-  --agent codex \
-  --state-dir /absolute/source/codex-home \
-  --session-id 01a10020-1222-76e3-977d-d5165792ae72 \
-  --journal-dir /absolute/private/import-journal \
-  --source-stopped
+orka session migrate import migrated-review --agent codex \
+  --session-id 01a10020-1222-76e3-977d-d5165792ae72 --source-stopped
 ```
 
 For OpenCode, `--session-id` is the `ses_` ID that `opencode session list`
-shows, and `--cwd` is the directory the session ran in:
+shows:
 
 ```bash
-orka session migrate import migrated-review \
-  --agent opencode \
-  --state-dir "$HOME/.local/share" \
-  --session-id ses_ec7cc3c6cffejC2X3k579awtpZ \
-  --cwd /absolute/local/project \
-  --journal-dir /absolute/private/import-journal \
-  --source-stopped
+orka session migrate import migrated-review --agent opencode \
+  --session-id ses_ec7cc3c6cffejC2X3k579awtpZ --source-stopped
 ```
+
+Every path has a default:
+
+| Flag | Import default | Export default |
+| --- | --- | --- |
+| `--state-dir` | The agent's own: `$CODEX_HOME` or `~/.codex`; an absolute `$XDG_DATA_HOME` or `~/.local/share` | A fresh `~/.orka/sessions/<namespace>/<session>/<agent>` |
+| `--cwd` | OpenCode: the directory the session recorded. Codex does not use it | The current directory |
+| `--journal-dir` | `~/.orka/migrations/<namespace>/<session>/import` | `~/.orka/migrations/<namespace>/<session>/export` |
+| `--agent-bin` | Not used | `codex` or `opencode` on `PATH` |
+
+A default journal is removed once its migration completes, so its private copy
+of the conversation does not linger and the next migration of that Session
+starts anew. A journal you name with `--journal-dir` is kept. Every directory
+the CLI creates has mode `0700`.
 
 Import reserves a fresh non-Gateway Session. It allocates no runtime or Task
 lease. An existing Session, including an empty one, cannot be overwritten.
@@ -214,37 +218,35 @@ Export uses the last committed checkpoint. It does not force an active Task to
 stop. The checkpoint must still match the exact Session owner and canonical
 transcript boundary.
 
-```bash
-orka session migrate export migrated-review \
-  --agent codex \
-  --state-dir /absolute/fresh/codex-home \
-  --cwd /absolute/local/workspace \
-  --journal-dir /absolute/private/export-journal \
-  --agent-bin /absolute/codex-0.160.0
-```
-
-`--agent` must match the agent that saved the checkpoint. `--agent-bin` names
-the local agent executable, `codex` or `opencode` on `PATH` by default, and
-must report the supported release. The destination must be a fresh private
-state directory with directory mode `0700`. The journal must be outside it and
-private, also with directory mode `0700`. Authenticate the destination with
-current local credentials and configure its provider before resuming the
-session. Migration does not copy source authentication or source policy into
-authority.
-
-Point the agent's state variable at the destination and resume the session ID
-from `--cwd`:
+Run export from the directory to resume in:
 
 ```bash
 cd /absolute/local/workspace
-CODEX_HOME=/absolute/fresh/codex-home codex resume 01a10020-1222-76e3-977d-d5165792ae72
-XDG_DATA_HOME=/absolute/fresh/data opencode --session ses_ec7cc3c6cffejC2X3k579awtpZ
+orka session migrate export migrated-review --agent codex
+```
+
+`--agent` must match the agent that saved the checkpoint. The local agent
+executable must report the supported release. The destination must be a fresh
+private state directory with directory mode `0700`. A default destination that
+already holds an earlier export is rejected; remove it or pass `--state-dir`.
+The journal must be outside the destination and private, also with directory
+mode `0700`. Authenticate the destination with current local credentials and
+configure its provider before resuming the session. Migration does not copy
+source authentication or source policy into authority.
+
+Point the agent's state variable at the destination the command printed, and
+resume the session ID from the same directory:
+
+```bash
+CODEX_HOME=~/.orka/sessions/default/migrated-review/codex codex resume 01a10020-1222-76e3-977d-d5165792ae72
+XDG_DATA_HOME=~/.orka/sessions/default/migrated-review/opencode opencode --session ses_ec7cc3c6cffejC2X3k579awtpZ
 ```
 
 ## Retry and failure handling
 
-Retain the journal and repeat the same command after an uncertain response. The
-CLI reuses its saved bundle and operation ID. A Codex export also reuses the
+Retain the journal and repeat the same command after an uncertain response;
+a default journal stays until the migration completes. The CLI reuses its saved
+bundle and operation ID. A Codex export also reuses the
 same frozen SessionKit install plan and receipt. A failed OpenCode install
 removes the files it created. Once an export installs its session, a retry with
 the same journal reports it again without reinstalling. Changing the agent,
