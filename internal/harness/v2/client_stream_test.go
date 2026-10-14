@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httptrace"
 	"strings"
 	"testing"
 	"time"
@@ -225,6 +226,34 @@ func clientTestSmallStreamLimits() ProtocolLimits {
 	limits.MaxEventLineBytes = 128
 	limits.MaxTerminalResultBytes = 64
 	return limits
+}
+
+// net/http can return a response before its write loop reports the request
+// write it already finished, so evidence waits briefly for that report.
+func TestRequestTraceWaitsForALateWriteReport(t *testing.T) {
+	trace := newRequestTrace(true)
+	hooks := trace.clientTrace()
+	hooks.WroteHeaders()
+	trace.bodyBytesRead.Store(64)
+	hooks.GotFirstResponseByte()
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		hooks.WroteRequest(httptrace.WroteRequestInfo{})
+	}()
+	if evidence := trace.evidence(); evidence.State != RequestWriteComplete {
+		t.Fatalf("late write report: evidence = %#v, want %s", evidence, RequestWriteComplete)
+	}
+
+	unreported := newRequestTrace(true)
+	unreported.clientTrace().GotFirstResponseByte()
+	unreported.bodyBytesRead.Store(64)
+	started := time.Now()
+	if evidence := unreported.evidence(); evidence.State != RequestWriteAmbiguous {
+		t.Fatalf("unreported write: evidence = %#v, want %s", evidence, RequestWriteAmbiguous)
+	}
+	if waited := time.Since(started); waited < writeReportGrace || waited > 10*writeReportGrace {
+		t.Fatalf("unreported write waited %s, want about %s", waited, writeReportGrace)
+	}
 }
 
 func TestClientPromptNotAcceptedPreservesRequestWriteEvidence(t *testing.T) {
