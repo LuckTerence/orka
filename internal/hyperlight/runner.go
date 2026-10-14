@@ -228,8 +228,8 @@ func (r *Runner) Run(ctx context.Context, req Request) (Result, error) {
 	}
 	args = append(args, capabilityArgs(req)...)
 
-	// hluk keeps a copy of everything the guest prints: past the budget, the
-	// guest is stopped rather than allowed to grow it.
+	// A guest that prints without end is stopped past the budget rather than
+	// left printing until its timeout.
 	runCtx, stopRun := context.WithCancel(ctx)
 	defer stopRun()
 	budget := &outputBudget{limit: req.OutputBudget, stop: stopRun}
@@ -344,7 +344,7 @@ func (r *Runner) privateCache() bool {
 }
 
 // DefaultOutputBudget is how much output a run may produce before its guest
-// is stopped: hluk keeps a copy of all of it in memory.
+// is stopped.
 const DefaultOutputBudget = 64 << 20
 
 type outputBudget struct {

@@ -188,7 +188,7 @@ Use `sandbox_exec` to compute, and native read tools to search a repository. Gue
 (`python` 256 MiB, `node` 512 MiB, `bash` 128 MiB), and exceeding it ends the run.
 Controller-created Pods pin these sizes. `ORKA_HYPERLIGHT_SCRATCH_MB` only
 overrides them when running the runner directly outside those Pods. A run that
-prints more than 64 MiB is stopped, since `hluk` keeps a copy of everything the guest prints.
+prints more than 64 MiB is stopped.
 
 Hyperlight-enabled Pods add 512 MiB for one guest to the worker's memory request
 and any nonzero memory limit. A limit-only worker keeps Kubernetes' matching
