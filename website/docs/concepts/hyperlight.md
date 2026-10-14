@@ -136,7 +136,7 @@ spec:
   sessions. A call waits for the guest before it starts, at most as long as its
   timeout and never past prompt cancellation; the timeout then bounds its own
   run. A call that never got the guest reports that nothing ran.
-- Arguments: `code`, `language` (`bash`, `python` or `javascript`; `bash` by
+- Arguments: `code`, `language` (`python`, `javascript` or `bash`; `python` by
   default), and `timeout` in seconds (120 by default, at most 600). The result
   is JSON with `stdout`, `stderr` and `exit_code`, 64 KiB per stream.
 - `sandbox_exec` cannot require an Orka approval, which only the broker grants.
@@ -177,10 +177,16 @@ programs:
 - **python**: CPython 3.12 with its standard library. The image has no `ssl`,
   `sqlite3` or `subprocess` support.
 - **javascript**: Node.js, without `child_process`.
-- **bash**: BusyBox, with pipes, `$(...)` and redirects.
+- **bash**: the BusyBox `hush` shell, not GNU bash, which needs `fork()`. It
+  has pipes, `$(...)` and redirects, but its loops are slow. A pipeline stage
+  that starts another process, such as `xargs cat` or `find -exec cat {} +`,
+  can deadlock the guest, which `hluk` detects and reports as a failed run.
 
 There is no `fork()`, so a program that forks fails, and scheduling is
-cooperative, so a busy thread holds the vCPU. Guest memory is fixed per runtime
+cooperative, so a busy thread holds the vCPU. Every file operation in a guest
+goes through the host, so reading many files is much slower than on the host:
+a scan of a few thousand files takes seconds, ten or more times its native time.
+Use `sandbox_exec` to compute, and native read tools to search a repository. Guest memory is fixed per runtime
 (`python` 256 MiB, `node` 512 MiB, `bash` 128 MiB), and exceeding it ends the run.
 Controller-created Pods pin these sizes. `ORKA_HYPERLIGHT_SCRATCH_MB` only
 overrides them when running the runner directly outside those Pods. A run that

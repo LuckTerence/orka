@@ -24,10 +24,12 @@ func TestParseSandboxExecArguments(t *testing.T) {
 		wantPrefix  string
 		wantTimeout time.Duration
 	}{
-		{"bash by default", `{"code":"ls"}`, "bash", "cd /workspace || exit 125\nls", SandboxExecDefaultTimeout},
+		{"python by default", `{"code":"print(1)"}`, "python", "import os as _orka_os; _orka_os.chdir(\"/workspace\"); del _orka_os\nexec(compile(", SandboxExecDefaultTimeout},
+		{"bash", `{"language":"bash","code":"ls"}`, "bash", "cd /workspace || exit 125\nls", SandboxExecDefaultTimeout},
+		{"sh is the shell", `{"language":"sh","code":"ls"}`, "bash", "cd /workspace || exit 125\nls", SandboxExecDefaultTimeout},
 		{"python", `{"language":"Python","code":"print(1)","timeout":5}`, "python", "import os as _orka_os; _orka_os.chdir(\"/workspace\"); del _orka_os\nexec(compile(", 5 * time.Second},
 		{"javascript, timeout as a string", `{"language":"javascript","code":"1","timeout":"30"}`, "node", "(() => {\nconst Module = require('module');", 30 * time.Second},
-		{"timeout clamped", `{"code":"true","timeout":3600}`, "bash", "cd /workspace", SandboxExecMaxTimeout},
+		{"timeout clamped", `{"language":"bash","code":"true","timeout":3600}`, "bash", "cd /workspace", SandboxExecMaxTimeout},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -69,6 +71,11 @@ func TestSandboxExecInputSchemaIsJSON(t *testing.T) {
 	var schema map[string]any
 	if err := json.Unmarshal([]byte(SandboxExecInputSchema), &schema); err != nil || schema["type"] != "object" {
 		t.Fatalf("schema = %v, err = %v", schema, err)
+	}
+	// The default the model reads must be the one the parser applies.
+	language := schema["properties"].(map[string]any)["language"].(map[string]any)
+	if language["default"] != sandboxExecDefaultLanguage {
+		t.Fatalf("schema language default = %v, parser default = %s", language["default"], sandboxExecDefaultLanguage)
 	}
 }
 

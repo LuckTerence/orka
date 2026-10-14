@@ -25,8 +25,13 @@ const SandboxExecToolName = "sandbox_exec"
 // micro-VM; scripts start there.
 const SandboxExecWorkspacePath = "/workspace"
 
-// sandboxExecShell is the default language and the shell's micro-VM image.
+// sandboxExecShell is the shell's language and micro-VM image. The image is
+// BusyBox hush, not GNU bash: Unikraft has no fork(), which bash needs.
 const sandboxExecShell = "bash"
+
+// sandboxExecDefaultLanguage is the language of a call that names none.
+// Python outruns the BusyBox shell at loops and at reading workspace files.
+const sandboxExecDefaultLanguage = "python"
 
 const (
 	SandboxExecDefaultTimeout   = 120 * time.Second
@@ -35,18 +40,20 @@ const (
 )
 
 // SandboxExecDescription is the tool description the agent sees.
-const SandboxExecDescription = "Run a bash script, Python or JavaScript in a fresh, isolated micro-VM. " +
+const SandboxExecDescription = "Run Python, JavaScript or a shell script in a fresh, isolated micro-VM. " +
 	"The session workspace is mounted at /workspace, the working directory, read-only when the session may not change it. " +
 	"The VM has no network and nothing else from the host, and each call starts clean: " +
-	"only files written under /workspace persist. The shell is BusyBox; Python is CPython " +
-	"with its standard library except ssl, sqlite3 and subprocess; JavaScript is Node.js " +
-	"without child_process. A call may wait for other calls to finish before it starts; " +
-	"its timeout counts only its own run. Returns stdout, stderr and the exit code."
+	"only files written under /workspace persist. Python is CPython with its standard library " +
+	"except ssl, sqlite3 and subprocess; JavaScript is Node.js without child_process; the bash " +
+	"language is the BusyBox hush shell, not GNU bash. Reading many files is much slower in the " +
+	"micro-VM than on the host, so search and read the workspace with your file tools when you have them. " +
+	"A call may wait for other calls to finish before it starts; its timeout counts only its own run. " +
+	"Returns stdout, stderr and the exit code."
 
 // SandboxExecInputSchema is the tool's JSON Schema. Execute enforces the same
 // limits; the schema only guides the model.
 const SandboxExecInputSchema = `{"type":"object","properties":{` +
-	`"language":{"type":"string","enum":["bash","python","javascript"],"default":"bash","description":"Interpreter for the code"},` +
+	`"language":{"type":"string","enum":["python","javascript","bash"],"default":"python","description":"Interpreter for the code; bash is BusyBox hush"},` +
 	`"code":{"type":"string","minLength":1,"description":"The script to run, starting in /workspace"},` +
 	`"timeout":{"type":"integer","minimum":1,"maximum":600,"default":120,"description":"Seconds the code may run, not counting any wait for other calls"}},` +
 	`"required":["code"],"additionalProperties":false}`
@@ -88,7 +95,7 @@ func ParseSandboxExecArguments(raw json.RawMessage) (SandboxExecRequest, error) 
 	if strings.TrimSpace(code) == "" {
 		return SandboxExecRequest{}, fmt.Errorf("sandbox_exec requires code")
 	}
-	language := sandboxExecShell
+	language := sandboxExecDefaultLanguage
 	if value, present := args["language"]; present {
 		text, ok := value.(string)
 		if !ok {
@@ -142,7 +149,7 @@ func ParseSandboxExecArguments(raw json.RawMessage) (SandboxExecRequest, error) 
 			"return (0, eval)(" + string(quoted) + ");\n" +
 			"})()"
 	default:
-		return SandboxExecRequest{}, fmt.Errorf("sandbox_exec language must be bash, python or javascript, not %q", language)
+		return SandboxExecRequest{}, fmt.Errorf("sandbox_exec language must be python, javascript or bash, not %q", language)
 	}
 	return request, nil
 }
