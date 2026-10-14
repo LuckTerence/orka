@@ -265,13 +265,11 @@ func (r *RuntimePoolReconciler) publishExternalWorkspaceWorkload(ctx context.Con
 		return ctrl.Result{}, err
 	}
 	template := r.runtimePoolPodTemplate(pool, cfg, cfg.labels, auth.Name, provider.Name)
-	template.Spec.Containers[0].Resources = externalRuntimePoolResourceRequirements(pool.Spec.Runtime.Profile.ResourceClass)
-	// Scratch volume size caps are Kubernetes quotas, not a native storage
-	// contract. Select unbounded scratch defaults before publishing admission.
-	for i := range template.Spec.Volumes {
-		if scratch := template.Spec.Volumes[i].EmptyDir; scratch != nil {
-			scratch.SizeLimit = nil
-		}
+	if nativeProcess {
+		// Native Actors enforce only CPU and memory limits; the native template
+		// below also drops Pod scratch volumes. Pod-backed requests keep the
+		// ephemeral-storage and scratch size quotas of an in-cluster pool.
+		template.Spec.Containers[0].Resources = externalRuntimePoolResourceRequirements(pool.Spec.Runtime.Profile.ResourceClass)
 	}
 	template.Spec.Containers[0].Command = []string{"/usr/local/bin/orka-acp-runtime"}
 	template.Spec.RestartPolicy = corev1.RestartPolicyNever

@@ -622,48 +622,46 @@ func TestExternalRuntimePoolPublicResourceDefaultsAndFrozenRevalidation(t *testi
 	f := newExternalRuntimePoolFixture(t)
 	w := f.publish(t)
 	request := w.Spec.Workload
-	if len(request.Resources.Requests) != 2 || len(request.Resources.Limits) != 2 ||
-		!reflect.DeepEqual(request.Resources, externalRuntimePoolResourceRequirements(runtimePoolResourceClassStandard)) ||
-		!reflect.DeepEqual(request.Resources, request.Runtime.Template.Spec.Containers[0].Resources) {
-		t.Fatalf("external public resources differ from CPU/memory admission: %#v", request.Resources)
+	plain := runtimePoolResourceRequirements(runtimePoolResourceClassStandard)
+	if plain.Requests.StorageEphemeral().Cmp(resource.MustParse("1Gi")) != 0 || plain.Limits.StorageEphemeral().Cmp(resource.MustParse("5Gi")) != 0 {
+		t.Fatal("plain Deployment storage quotas changed")
+	}
+	if !reflect.DeepEqual(request.Resources, plain) || !reflect.DeepEqual(request.Resources, request.Runtime.Template.Spec.Containers[0].Resources) {
+		t.Fatalf("Pod-backed public resources differ from in-cluster pool quotas: %#v", request.Resources)
 	}
 	if err := workspaceprovider.ValidateWorkspaceWorkload(w); err != nil {
 		t.Fatal(err)
+	}
+	cfg, err := f.r.runtimePoolConfig(f.pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	limits := map[string]*resource.Quantity{}
+	for _, volume := range f.r.runtimePoolPodTemplate(f.pool, cfg, cfg.labels, "auth", "provider").Spec.Volumes {
+		if volume.EmptyDir != nil {
+			limits[volume.Name] = volume.EmptyDir.SizeLimit
+		}
 	}
 	scratchVolumes := 0
 	for _, volume := range request.Runtime.Template.Spec.Volumes {
 		if volume.EmptyDir != nil {
 			scratchVolumes++
-			if volume.EmptyDir.SizeLimit != nil {
-				t.Fatal("external request carries a Kubernetes scratch storage quota")
+			if volume.EmptyDir.SizeLimit == nil || limits[volume.Name] == nil || volume.EmptyDir.SizeLimit.Cmp(*limits[volume.Name]) != 0 {
+				t.Fatalf("Pod-backed scratch volume %s lost its in-cluster size quota", volume.Name)
 			}
 		}
 	}
 	if scratchVolumes == 0 {
 		t.Fatal("external workload has no isolated scratch volumes")
 	}
-	cfg, err := f.r.runtimePoolConfig(f.pool)
-	if err != nil {
-		t.Fatal(err)
-	}
-	plainTemplate := f.r.runtimePoolPodTemplate(f.pool, cfg, cfg.labels, "auth", "provider")
-	for _, volume := range plainTemplate.Spec.Volumes {
-		if volume.EmptyDir != nil && volume.EmptyDir.SizeLimit == nil {
-			t.Fatal("plain Deployment lost its scratch quota")
-		}
-	}
-	plain := runtimePoolResourceRequirements(runtimePoolResourceClassStandard)
-	if plain.Requests.StorageEphemeral().Cmp(resource.MustParse("1Gi")) != 0 || plain.Limits.StorageEphemeral().Cmp(resource.MustParse("5Gi")) != 0 {
-		t.Fatal("plain Deployment storage quotas changed")
-	}
 
-	// A persisted request made by an earlier release retains every positively
-	// admitted quota. New defaults must never rewrite or weaken that request.
-	request.Resources = plain
-	request.Runtime.Template.Spec.Containers[0].Resources = plain
+	// Revalidation never rewrites a persisted request, even one whose quotas
+	// differ from the current defaults.
+	request.Resources = externalRuntimePoolResourceRequirements(runtimePoolResourceClassStandard)
+	request.Runtime.Template.Spec.Containers[0].Resources = request.Resources
 	for i := range request.Runtime.Template.Spec.Volumes {
 		if volume := request.Runtime.Template.Spec.Volumes[i].EmptyDir; volume != nil {
-			volume.SizeLimit = new(resource.MustParse("1Gi"))
+			volume.SizeLimit = nil
 		}
 	}
 	request.Revision, err = workspacev1alpha1.WorkloadRevision(*request)
@@ -680,7 +678,7 @@ func TestExternalRuntimePoolPublicResourceDefaultsAndFrozenRevalidation(t *testi
 	runtimePoolReconcile(t, f.r, f.pool)
 	got := f.currentWorkspace(t).Spec.Workload
 	if !reflect.DeepEqual(got, request) {
-		t.Fatal("revalidation weakened a persisted resource request")
+		t.Fatal("revalidation rewrote a persisted resource request")
 	}
 }
 

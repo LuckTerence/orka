@@ -28,7 +28,7 @@ Generation acknowledgement is asynchronous and does not authorize prompt dispatc
 `runtime.native-process` declares a fresh writable container filesystem, exact
 process startup evidence, and operator-managed infrastructure/router ingress.
 Core freezes that capability before hashing the request, omits Kubernetes scratch
-mounts, and publishes only runtime Egress policy. The native supervisor intent
+mounts and ephemeral-storage quotas, and publishes only runtime Egress policy. The native supervisor intent
 declares UID/GID 0 and its exact capability set. The pinned gVisor backend does not
 support Kubernetes seccomp profiles or allowPrivilegeEscalation controls, so Core
 omits those fields and its Pod node selector from fresh native requests. Native
@@ -38,7 +38,7 @@ termination grace periods; the provider owns Actor readiness and exact retiremen
 Native requests use supervisor session-directory defaults and SystemInfo identity,
 and omit the Pod namespace and configured Core MCP broker environment overrides.
 Pod-backed requests retain their health and shutdown settings,
-scratch mounts and Ingress/Egress policy. Existing admitted requests keep their
+size-limited scratch mounts, ephemeral-storage quotas and Ingress/Egress policy. Existing admitted requests keep their
 original layout and cannot switch startup evidence kinds. Native operators must
 confine worker and router ingress while permitting Orka's authenticated routes.
 

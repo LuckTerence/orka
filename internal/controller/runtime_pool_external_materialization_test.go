@@ -142,9 +142,16 @@ func assertExternalRuntimePoolMaterializationLayout(t *testing.T, request *works
 	if slices.Contains(request.Runtime.RequiredFeatures, workspacev1alpha1.WorkspaceFeatureNativeProcess) != native {
 		t.Fatal("request did not freeze native-process materialization capability")
 	}
+	wantResources := runtimePoolResourceRequirements(runtimePoolResourceClassStandard)
+	if native {
+		wantResources = externalRuntimePoolResourceRequirements(runtimePoolResourceClassStandard)
+	}
+	if !reflect.DeepEqual(request.Resources, wantResources) || !reflect.DeepEqual(container.Resources, wantResources) {
+		t.Fatalf("public resources do not match provider materialization: %#v", request.Resources)
+	}
 	volumes := map[string]bool{}
 	for _, volume := range request.Runtime.Template.Spec.Volumes {
-		if volume.EmptyDir == nil || volume.EmptyDir.SizeLimit != nil || native {
+		if volume.EmptyDir == nil || volume.EmptyDir.SizeLimit == nil || volume.EmptyDir.SizeLimit.IsZero() || native {
 			t.Fatalf("unexpected public volume: %s", volume.Name)
 		}
 		volumes[volume.Name] = true
