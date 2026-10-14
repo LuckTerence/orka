@@ -127,6 +127,8 @@ func staticChartDefaultArgs() []string {
 		"--set-string", "webhooks.tls.existingSecret=controller-webhook-tls",
 		"--set-string", "webhooks.caBundle=Y2E=",
 		"--set-string", "publisher.image.digest=" + digest,
+		"--set-string", "workers.ai.image.digest=" + digest,
+		"--set-string", "workers.general.image.digest=" + digest,
 		"--set", "providerProxy.enabled=true",
 	}
 }
@@ -228,7 +230,7 @@ func TestStaticChartGrantsSessionAuthorizationRBAC(t *testing.T) {
 		clientRole = clientRole[:end]
 	}
 	const wantClient = "apiGroups: [\"core.orka.ai\"]\n    resources: [\"sessions\"]\n" +
-		"    verbs: [\"get\", \"list\", \"update\", \"delete\"]"
+		"    verbs: [\"get\", \"list\", \"create\", \"update\", \"delete\"]"
 	if !strings.Contains(clientRole, wantClient) {
 		t.Fatalf("client Role is missing the Session API rule %q:\n%s", wantClient, clientRole)
 	}
@@ -271,7 +273,7 @@ func TestStaticChartClientVirtualAPIPermissions(t *testing.T) {
 			for resource, verbs := range map[string][]string{
 				"tasks":                           {"get", "list", "create", "delete", "patch"},
 				"tasks/approvals":                 {"update"},
-				"sessions":                        {"get", "list", "update", "delete"},
+				"sessions":                        {"get", "list", "create", "update", "delete"},
 				"chats":                           {"create"},
 				"chats/config":                    {"get"},
 				"memories":                        {"get", "list"},
@@ -749,6 +751,8 @@ func TestStaticChartProviderProxyUsesOperatorGateway(t *testing.T) {
 		"--set", "store.persistence.enabled=true",
 		"--set-string", "controller.image.digest=" + digest,
 		"--set-string", "publisher.image.digest=" + digest,
+		"--set-string", "workers.ai.image.digest=" + digest,
+		"--set-string", "workers.general.image.digest=" + digest,
 		"--set-string", "controller.agentExecutionSnapshot.existingSecret=snapshot-key",
 		"--set-string", "controller.agentExecutionSnapshot.key=encryption-key",
 		"--set-string", "controller.acpRuntime.providerProxyNamespace=orka-test",
