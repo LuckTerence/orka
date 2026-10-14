@@ -103,6 +103,11 @@ func waitHyperlightControllerReady(deploymentName string) {
 	_, err := utils.Run(exec.Command("kubectl", "rollout", "status", "deployment/"+deploymentName,
 		"-n", namespace, "--timeout=5m"))
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Hyperlight controller configuration did not roll out")
+	// A worker started now could still be refused by the API Service; probe it
+	// from the suite's aimock Pod, which the Hyperlight lane always deploys.
+	waitForControllerAPIServiceReady("deployment/"+mockLLMName, "-n", namespace, "-c", "aimock", "--",
+		"node", "-e", "fetch(process.argv[1], {signal: AbortSignal.timeout(2000)})"+
+			".then(response => response.text()).then(body => console.log(body))")
 }
 
 func waitHyperlightTaskPod(taskName string, agent bool) corev1.Pod {
