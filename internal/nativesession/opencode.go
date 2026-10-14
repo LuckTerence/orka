@@ -478,9 +478,12 @@ func deleteOtherOpenCodeState(ctx context.Context, db *sql.DB, schema openCodeSc
 
 // openCodeToolOutputReferences returns the names of the files in dir that the
 // session's own tool calls spilled their output to. OpenCode records each in
-// its tool part's metadata.outputPath. A developer's tool-output directory
-// holds every session's spills, so a path that only appears in conversation
-// text never selects a file.
+// its tool part's metadata.outputPath, its only link from a spill to a session.
+// A developer's tool-output directory holds every session's spills, so a path
+// that only appears in conversation text never selects a file. Whatever can
+// write the database runs as the developer or as the session's agent, and can
+// already read any file in dir into the conversation, so a forged reference
+// discloses nothing more.
 func openCodeToolOutputReferences(ctx context.Context, db *sql.DB, dir string) ([]string, error) {
 	prefix := dir + string(filepath.Separator)
 	rows, err := db.QueryContext(ctx, `SELECT data FROM part WHERE instr(data, ?) > 0`, prefix)
