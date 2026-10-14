@@ -87,7 +87,9 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 		return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDegraded, "external workspace binding is unavailable")
 	}
 	deleting := !pool.DeletionTimestamp.IsZero() || !w.DeletionTimestamp.IsZero() || w.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredDeleted
-	stopping := deleting || pool.Spec.DesiredReplicas == 0 || w.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady || pool.Annotations["orka.ai/external-runtime-retirement-requested"] == "true"
+	// A provider-reported Failed instance is terminal: retire it, never replace it.
+	stopping := deleting || pool.Spec.DesiredReplicas == 0 || w.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady ||
+		pool.Annotations["orka.ai/external-runtime-retirement-requested"] == "true" || w.Status.State == workspacev1alpha1.ExecutionWorkspaceStateFailed
 	if stopping {
 		return r.reconcileExternalWorkspaceRetirement(ctx, pool, w, deleting)
 	}
@@ -715,6 +717,13 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRetirement(ctx context
 			if err != nil {
 				return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDraining, "independent runtime termination observation is unavailable")
 			}
+			if !terminated && externalNativeInstanceFailed(pool, w) {
+				// A lost native process cannot answer an authenticated drain.
+				// Its Task already settled without replay, and the provider can
+				// stop that exact Actor on its own, so its terminal Failed report
+				// may authorize the Stop below. Credentials stay until it confirms.
+				terminated = true
+			}
 			if !terminated {
 				if a.Startup == nil {
 					return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDraining, "provider is unavailable; exact runtime drain remains unverified")
@@ -759,10 +768,13 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRetirement(ctx context
 	// Suspend authorization that a Suspend-capable class otherwise receives. Providers
 	// act on quarantine only through a Stop (or Delete) authorization.
 	quarantined := w.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredQuarantined
+	// A failed instance has no new data to capture; its last verified
+	// checkpoint stays with the provider for explicit recovery.
+	failed := w.Status.State == workspacev1alpha1.ExecutionWorkspaceStateFailed
 	action := workspacev1alpha1.WorkloadRetirementStop
 	if deleting {
 		action = workspacev1alpha1.WorkloadRetirementDelete
-	} else if !quarantined && (w.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended || slices.Contains(w.Spec.Lifecycle.AllowedOnDetach, workspacev1alpha1.WorkspaceOnDetachSuspend)) {
+	} else if !quarantined && !failed && (w.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended || slices.Contains(w.Spec.Lifecycle.AllowedOnDetach, workspacev1alpha1.WorkspaceOnDetachSuspend)) {
 		action = workspacev1alpha1.WorkloadRetirementSuspend
 	}
 	retirement := &workspacev1alpha1.WorkloadRetirement{Sequence: w.Spec.Workload.Sequence, Identity: a.Identity, Action: action}
@@ -1084,6 +1096,17 @@ func runtimePoolWorkspaceCleanupEndpoint(ctx context.Context, reader client.Read
 // impossible. Its exact UID's absence can release retirement intent only after
 // controller work is quiescent. Provider assertions and infrastructure worker
 // Pods cannot establish this exception for a native process.
+// externalNativeInstanceFailed reports a provider's terminal Failed claim for
+// the exact native instance Core bound and admitted, with startup withdrawn.
+func externalNativeInstanceFailed(pool *corev1alpha1.RuntimePool, w *workspacev1alpha1.ExecutionWorkspace) bool {
+	evidence, err := externalRuntimeEvidence(pool)
+	a := w.Status.Allocation
+	return err == nil && evidence != nil && evidence.NativeProcess && a != nil && a.Startup == nil &&
+		w.Status.State == workspacev1alpha1.ExecutionWorkspaceStateFailed && w.Status.ObservedGeneration == w.Generation &&
+		evidence.WorkspaceUID == w.UID && evidence.Sequence == a.Sequence && evidence.Identity == a.Identity &&
+		w.Spec.Workload != nil && a.Sequence == w.Spec.Workload.Sequence && a.Key == w.Spec.Workload.Key
+}
+
 func (r *RuntimePoolReconciler) externalActivePodTerminationProven(ctx context.Context, pool *corev1alpha1.RuntimePool, w *workspacev1alpha1.ExecutionWorkspace) (bool, error) {
 	evidence, err := externalRuntimeEvidence(pool)
 	if err != nil {

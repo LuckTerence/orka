@@ -72,7 +72,13 @@ retire those instances before continuing with a fresh opaque identity.
 Private runtime credentials stay core-owned. Retirement closes admission and
 drains the authenticated instance before the provider receives exact sequence
 and instance authorization. A missing provider response retains both ownership
-fences and finalizers. Independent checkpoint restore additionally binds the
+fences and finalizers. A lost native process cannot answer that drain. When the
+provider reports the exact bound native instance `Failed` with startup withdrawn,
+Core treats the instance as terminal: it never publishes a replacement, writes an
+exact `Stop` retirement, and releases credentials only after the provider reports
+that instance `Stopped`. Task settlement keeps a failed incarnation that was
+cold-resumed from verified retained data, so `recoverLastCheckpoint` can export
+its checkpoint; idle and maximum-lifetime retention still bound it. Independent checkpoint restore additionally binds the
 checkpoint UID, digest, class, and provider revision; the provider must acquire
 durable artifact ownership before native creation.
 

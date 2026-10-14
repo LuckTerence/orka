@@ -431,6 +431,22 @@ func validateACPClassWorkspaceAttachmentAttempt(
 	return err
 }
 
+// failedACPWorkspaceRetainsCheckpoint reports whether a failed incarnation
+// still has a verified checkpoint to recover. The provider owns that
+// checkpoint, but Core cold-resumes an incarnation only from verified retained
+// data, so the immutable request proves one exists. Deleting the workspace
+// would release it.
+func failedACPWorkspaceRetainsCheckpoint(workspace *workspacev1alpha1.ExecutionWorkspace, now time.Time) bool {
+	if workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredDeleted {
+		return false
+	}
+	if remaining, bounded := acpWorkspaceMaxLifetimeRemaining(workspace, now); bounded && remaining <= 0 {
+		return false
+	}
+	request := workspace.Spec.Workload
+	return request != nil && request.RetainedData != nil && request.RetainedData.Valid()
+}
+
 // recordACPWorkspaceDetachAction records the attached Task's frozen effective
 // detach action on the workspace so settlement applies exactly that choice.
 func (r *TaskReconciler) recordACPWorkspaceDetachAction(
@@ -1197,6 +1213,13 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 	// changed after this read, and a Task that attached in between settles at
 	// its own settle time anyway.
 	terminallyFailed := workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateFailed
+	if terminallyFailed && workspace.Annotations[acpWorkspaceDetachActionAnnotation] == string(workspacev1alpha1.WorkspaceOnDetachSuspend) &&
+		failedACPWorkspaceRetainsCheckpoint(workspace, time.Now()) {
+		// The provider stops the failed attempt without capturing or replaying
+		// it. Keep the source Failed for explicit recovery export; existing
+		// idle/maxLifetime retention still owns its deadline.
+		return true, r.markACPTaskWorkspaceSettled(ctx, task)
+	}
 
 	if workspace.Annotations[acpWorkspaceDetachActionAnnotation] == string(workspacev1alpha1.WorkspaceOnDetachSuspend) &&
 		!terminallyFailed {
