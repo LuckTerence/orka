@@ -1092,10 +1092,6 @@ func runtimePoolWorkspaceCleanupEndpoint(ctx context.Context, reader client.Read
 	return endpoint, nil
 }
 
-// Loss of an independently observed runtime Pod makes authenticated drain
-// impossible. Its exact UID's absence can release retirement intent only after
-// controller work is quiescent. Provider assertions and infrastructure worker
-// Pods cannot establish this exception for a native process.
 // externalNativeInstanceFailed reports a provider's terminal Failed claim for
 // the exact native instance Core bound and admitted, with startup withdrawn.
 func externalNativeInstanceFailed(pool *corev1alpha1.RuntimePool, w *workspacev1alpha1.ExecutionWorkspace) bool {
@@ -1107,6 +1103,10 @@ func externalNativeInstanceFailed(pool *corev1alpha1.RuntimePool, w *workspacev1
 		w.Spec.Workload != nil && a.Sequence == w.Spec.Workload.Sequence && a.Key == w.Spec.Workload.Key
 }
 
+// Loss of an independently observed runtime Pod makes authenticated drain
+// impossible. Its exact UID's absence can release retirement intent only after
+// controller work is quiescent. Infrastructure worker Pods cannot establish
+// this exception for a native process; see externalNativeInstanceFailed.
 func (r *RuntimePoolReconciler) externalActivePodTerminationProven(ctx context.Context, pool *corev1alpha1.RuntimePool, w *workspacev1alpha1.ExecutionWorkspace) (bool, error) {
 	evidence, err := externalRuntimeEvidence(pool)
 	if err != nil {
