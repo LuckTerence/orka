@@ -2006,6 +2006,7 @@ func (s *Server) handleWorkspaceDelta(w http.ResponseWriter, r *http.Request) {
 		descriptor.State = harnessv2.WorkspaceDeltaNoChange
 		descriptor.PublicationSafe = true
 		if err := runtimeSession.Thaw(); err != nil {
+			slog.Error("ACP workspace validation failed", "stage", "thaw", "error", err)
 			s.poisonSession(state, "workspace thaw failed")
 			writeError(w, http.StatusInternalServerError, harnessv2.ErrorCodeSessionPoisoned, "workspace thaw failed", nil, false)
 			return
