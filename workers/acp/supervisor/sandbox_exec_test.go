@@ -28,13 +28,13 @@ type fakeSandboxCall struct {
 	ctx       context.Context
 }
 
-func (f *fakeSandboxRunner) run(ctx context.Context, request acp.SandboxExecRequest, workspace sandboxWorkspace) (acp.SandboxExecResult, error) {
+func (f *fakeSandboxRunner) run(ctx context.Context, request acp.SandboxExecRequest, workspace sandboxWorkspace) (acp.SandboxExecResult, time.Duration, error) {
 	f.calls <- fakeSandboxCall{request: request, workspace: workspace, ctx: ctx}
 	if f.blockOn {
 		<-ctx.Done()
-		return acp.SandboxExecResult{ExitCode: -1}, ctx.Err()
+		return acp.SandboxExecResult{ExitCode: -1}, 0, ctx.Err()
 	}
-	return f.result, f.err
+	return f.result, 0, f.err
 }
 
 func sandboxTestAuthorization(t *testing.T, fence harnessv2.Fence, now time.Time) (harnessv2.PromptMCPAuthorization, harnessv2.PromptLease) {
@@ -236,7 +236,7 @@ func TestSandboxExecutorSerializesGuestsAcrossSessions(t *testing.T) {
 	request := acp.SandboxExecRequest{Runtime: "node", Script: "1", Timeout: time.Second}
 	done := make(chan error, 2)
 	go func() {
-		_, err := executor.run(ctx, request, sandboxWorkspace{dir: "/session-a", uid: 20001, gid: 20001})
+		_, _, err := executor.run(ctx, request, sandboxWorkspace{dir: "/session-a", uid: 20001, gid: 20001})
 		done <- err
 	}()
 	select {
@@ -248,7 +248,7 @@ func TestSandboxExecutorSerializesGuestsAcrossSessions(t *testing.T) {
 		t.Fatal("first guest did not start")
 	}
 	go func() {
-		_, err := executor.run(ctx, request, sandboxWorkspace{dir: "/session-b", uid: 20002, gid: 20002})
+		_, _, err := executor.run(ctx, request, sandboxWorkspace{dir: "/session-b", uid: 20002, gid: 20002})
 		done <- err
 	}()
 	select {
@@ -291,9 +291,13 @@ func TestSandboxExecutorQueuedCallRespectsCancellation(t *testing.T) {
 				cancel()
 			}
 			start := time.Now()
-			result, err := executor.run(ctx, request, sandboxWorkspace{dir: "/queued"})
+			result, _, err := executor.run(ctx, request, sandboxWorkspace{dir: "/queued"})
 			if time.Since(start) > time.Second || result.ExitCode != -1 || result.TimedOut != timedOut {
 				t.Fatalf("queued call = %+v error=%v elapsed=%s", result, err, time.Since(start))
+			}
+			// A call that never got the guest must not read as code that ran too long.
+			if timedOut && (!strings.Contains(result.Stderr, "did not start") || !strings.Contains(result.Stderr, "nothing ran")) {
+				t.Fatalf("queued timeout stderr = %q, want it to say nothing ran", result.Stderr)
 			}
 			if timedOut && err != nil || !timedOut && !errors.Is(err, context.Canceled) {
 				t.Fatalf("queued cancellation error = %v", err)
@@ -306,7 +310,7 @@ func TestSandboxExecutorQueuedCallRespectsCancellation(t *testing.T) {
 			<-executor.slot
 			runner.release <- struct{}{}
 			request.Timeout = time.Second
-			result, err = executor.run(t.Context(), request, sandboxWorkspace{dir: "/later"})
+			result, _, err = executor.run(t.Context(), request, sandboxWorkspace{dir: "/later"})
 			if err != nil || result.ExitCode != 0 {
 				t.Fatalf("slot reuse = %+v error=%v", result, err)
 			}
@@ -323,7 +327,7 @@ func TestSandboxExecutorExpiredCallDoesNotAcquireGuest(t *testing.T) {
 	// Both the free slot and expired context can win the select; every
 	// outcome must retain timeout semantics and release any acquired slot.
 	for range 20 {
-		result, err := executor.run(ctx, acp.SandboxExecRequest{Runtime: "node", Script: "1", Timeout: time.Second}, sandboxWorkspace{dir: "/expired"})
+		result, _, err := executor.run(ctx, acp.SandboxExecRequest{Runtime: "node", Script: "1", Timeout: time.Second}, sandboxWorkspace{dir: "/expired"})
 		if err != nil || !result.TimedOut || result.ExitCode != -1 || len(executor.slot) != 0 {
 			t.Fatalf("expired call = %+v error=%v slots=%d", result, err, len(executor.slot))
 		}
@@ -332,6 +336,38 @@ func TestSandboxExecutorExpiredCallDoesNotAcquireGuest(t *testing.T) {
 	case <-runner.calls:
 		t.Fatal("expired call started a guest")
 	default:
+	}
+}
+
+// The timeout bounds the guest's own run: a call that waited for another
+// session's guest still gets its whole timeout once it has the slot.
+type deadlineHyperlightRunner struct {
+	remaining chan time.Duration
+}
+
+func (r *deadlineHyperlightRunner) Run(ctx context.Context, request hyperlight.Request) (hyperlight.Result, error) {
+	deadline, _ := ctx.Deadline()
+	r.remaining <- time.Until(deadline)
+	return hyperlight.Result{ExitCode: 0}, nil
+}
+
+func TestSandboxExecutorTimeoutStartsWhenTheGuestDoes(t *testing.T) {
+	runner := &deadlineHyperlightRunner{remaining: make(chan time.Duration, 1)}
+	executor := newSandboxExecutor(&SandboxExecConfig{})
+	executor.runner = runner
+	executor.slot <- struct{}{} // another session's guest is running
+	const wait = 300 * time.Millisecond
+	time.AfterFunc(wait, func() { <-executor.slot })
+	result, queued, err := executor.run(t.Context(), acp.SandboxExecRequest{Runtime: "python", Script: "1", Timeout: time.Second},
+		sandboxWorkspace{dir: "/queued"})
+	if err != nil || result.ExitCode != 0 || result.TimedOut {
+		t.Fatalf("queued call = %+v error=%v", result, err)
+	}
+	if queued < wait {
+		t.Fatalf("queued = %s, want at least the %s the slot was held", queued, wait)
+	}
+	if remaining := <-runner.remaining; remaining < 900*time.Millisecond {
+		t.Fatalf("the guest started with %s of its 1s timeout left; the wait was charged to the run", remaining)
 	}
 }
 

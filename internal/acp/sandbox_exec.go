@@ -40,14 +40,15 @@ const SandboxExecDescription = "Run a bash script, Python or JavaScript in a fre
 	"The VM has no network and nothing else from the host, and each call starts clean: " +
 	"only files written under /workspace persist. The shell is BusyBox; Python is CPython " +
 	"with its standard library except ssl, sqlite3 and subprocess; JavaScript is Node.js " +
-	"without child_process. Returns stdout, stderr and the exit code."
+	"without child_process. A call may wait for other calls to finish before it starts; " +
+	"its timeout counts only its own run. Returns stdout, stderr and the exit code."
 
 // SandboxExecInputSchema is the tool's JSON Schema. Execute enforces the same
 // limits; the schema only guides the model.
 const SandboxExecInputSchema = `{"type":"object","properties":{` +
 	`"language":{"type":"string","enum":["bash","python","javascript"],"default":"bash","description":"Interpreter for the code"},` +
 	`"code":{"type":"string","minLength":1,"description":"The script to run, starting in /workspace"},` +
-	`"timeout":{"type":"integer","minimum":1,"maximum":600,"default":120,"description":"Timeout in seconds"}},` +
+	`"timeout":{"type":"integer","minimum":1,"maximum":600,"default":120,"description":"Seconds the code may run, not counting any wait for other calls"}},` +
 	`"required":["code"],"additionalProperties":false}`
 
 // SandboxExecRequest is a validated sandbox_exec call.

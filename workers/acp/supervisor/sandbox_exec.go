@@ -88,9 +88,10 @@ func (s *Server) protectSandboxSessionRoot(root string, uid, gid int) error {
 	return nil
 }
 
-// sandboxRunner runs one authorized sandbox_exec call for a session.
+// sandboxRunner runs one authorized sandbox_exec call for a session and
+// reports how long it waited for the Pod's guest slot.
 type sandboxRunner interface {
-	run(ctx context.Context, request acp.SandboxExecRequest, workspace sandboxWorkspace) (acp.SandboxExecResult, error)
+	run(ctx context.Context, request acp.SandboxExecRequest, workspace sandboxWorkspace) (acp.SandboxExecResult, time.Duration, error)
 }
 
 type hyperlightRunner interface {
@@ -124,21 +125,31 @@ type sandboxWorkspace struct {
 	gid uint32
 }
 
-// run executes one call as the session's user, with only its workspace.
-func (e *sandboxExecutor) run(ctx context.Context, request acp.SandboxExecRequest, workspace sandboxWorkspace) (acp.SandboxExecResult, error) {
-	ctx, cancel := context.WithTimeout(ctx, request.Timeout)
-	defer cancel()
+// run executes one call as the session's user, with only its workspace. The
+// timeout bounds the guest's run alone: waiting for another session's guest
+// to free the slot is bounded separately, by the same length, so a queued
+// call is never killed for time it spent waiting.
+func (e *sandboxExecutor) run(ctx context.Context, request acp.SandboxExecRequest, workspace sandboxWorkspace) (acp.SandboxExecResult, time.Duration, error) {
+	start := time.Now()
+	wait, cancelWait := context.WithTimeout(ctx, request.Timeout)
 	select {
 	case e.slot <- struct{}{}:
 		defer func() { <-e.slot }()
-	case <-ctx.Done():
+	case <-wait.Done():
 	}
-	if err := ctx.Err(); err != nil {
-		if errors.Is(err, context.DeadlineExceeded) {
-			return acp.SandboxExecResult{ExitCode: -1, TimedOut: true, Stderr: "execution timed out waiting for another sandbox_exec call"}, nil
+	waitErr := wait.Err()
+	cancelWait()
+	queued := time.Since(start)
+	if waitErr != nil {
+		if errors.Is(waitErr, context.DeadlineExceeded) {
+			return acp.SandboxExecResult{ExitCode: -1, TimedOut: true, Stderr: fmt.Sprintf(
+				"execution did not start: other sandbox_exec calls kept the micro-VM busy for the whole %ds timeout; nothing ran",
+				int64(request.Timeout.Seconds()))}, queued, nil
 		}
-		return acp.SandboxExecResult{ExitCode: -1}, err
+		return acp.SandboxExecResult{ExitCode: -1}, queued, waitErr
 	}
+	ctx, cancel := context.WithTimeout(ctx, request.Timeout)
+	defer cancel()
 	stdout := newSandboxOutput(acp.SandboxExecOutputLimitBytes)
 	stderr := newSandboxOutput(acp.SandboxExecOutputLimitBytes)
 	run, err := e.runner.Run(ctx, hyperlight.Request{
@@ -162,7 +173,7 @@ func (e *sandboxExecutor) run(ctx context.Context, request acp.SandboxExecReques
 	case run.TimedOut:
 		result.Stderr = appendSandboxNote(result.Stderr, "execution timed out")
 	}
-	return result, err
+	return result, queued, err
 }
 
 // handleRuntimeLocalCall serves a runtime-local tool call that the session's
@@ -198,11 +209,12 @@ func (s *mcpProxySession) handleRuntimeLocalCall(w http.ResponseWriter, r *http.
 		cancel()
 	}()
 	start := time.Now()
-	result, err := s.proxy.sandbox.run(ctx, request, workspace)
+	result, queued, err := s.proxy.sandbox.run(ctx, request, workspace)
 	codeSum := sha256.Sum256([]byte(request.Script))
 	slog.Info("sandbox_exec audit",
 		"runtime", request.Runtime, "code_sha256", hex.EncodeToString(codeSum[:]), "code_bytes", len(request.Script),
 		"exit_code", result.ExitCode, "timed_out", result.TimedOut, "duration_ms", time.Since(start).Milliseconds(),
+		"queue_ms", queued.Milliseconds(),
 		"stdout_bytes", len(result.Stdout), "stderr_bytes", len(result.Stderr), "uid", workspace.uid, "error", err)
 	if gate.Err() != nil {
 		waitForPromptGateCancellation(r.Context(), gate)
