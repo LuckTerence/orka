@@ -299,6 +299,7 @@ func main() {
 	var acpCopilotRuntimeImage string
 	var acpOpencodeRuntimeImage string
 	var acpRuntimeNamespace string
+	var externalNativeSharedWorkers bool
 	var acpProviderProxyNamespace string
 	var acpProviderProxyBaseURL string
 	var acpProviderProxyPodLabels string
@@ -547,6 +548,8 @@ func main() {
 		"Copilot ACP runtime image with a tag or SHA256 digest. Tags resolve to digests at startup.")
 	flag.StringVar(&acpOpencodeRuntimeImage, "acp-opencode-runtime-image", os.Getenv("ORKA_ACP_OPENCODE_RUNTIME_IMAGE"),
 		"OpenCode ACP runtime image with a tag or SHA256 digest. Tags resolve to digests at startup.")
+	flag.BoolVar(&externalNativeSharedWorkers, "external-native-shared-workers", false,
+		"Spike: accept external native processes whose worker Pod hosts other instances (fiberd homes). Core ingress then admits every resident process.")
 	flag.StringVar(&acpRuntimeNamespace, "acp-runtime-namespace", envutil.String("ORKA_ACP_RUNTIME_NAMESPACE", "orka-runtimes"),
 		"Physical namespace for managed ACP runtime Pods.")
 	flag.StringVar(&acpProviderProxyNamespace, "acp-provider-proxy-namespace", os.Getenv("ORKA_ACP_PROVIDER_PROXY_NAMESPACE"),
@@ -1638,6 +1641,8 @@ func main() {
 			Scheme:               mgr.GetScheme(),
 			RuntimeNamespace:     acpRuntimeNamespace,
 			WorkspaceCleanupOnly: !workspaceProviderAPIEnabled,
+
+			ExternalNativeSharedWorkers: externalNativeSharedWorkers,
 		}
 		providerProxyLabels, err := parseExactLabels(acpProviderProxyPodLabels)
 		if err != nil {

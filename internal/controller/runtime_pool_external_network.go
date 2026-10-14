@@ -132,7 +132,7 @@ func (r *RuntimePoolReconciler) externalUniqueIngressWorker(ctx context.Context,
 	if err := reader.Get(ctx, types.NamespacedName{Namespace: process.Worker.Namespace, Name: process.Worker.Name}, worker); err != nil {
 		return nil, err
 	}
-	if worker.UID != process.Worker.UID || !worker.DeletionTimestamp.IsZero() || !externalWorkerLabelsBindIdentity(worker.Labels, identity) {
+	if worker.UID != process.Worker.UID || !worker.DeletionTimestamp.IsZero() || (!r.ExternalNativeSharedWorkers && !externalWorkerLabelsBindIdentity(worker.Labels, identity)) {
 		return nil, workspaceprovider.ErrStaleIdentity
 	}
 	pods := &corev1.PodList{}
@@ -156,12 +156,12 @@ func externalIngressPolicySpec(target externalProcessIngressTarget, workerNamesp
 	return networkingv1.NetworkPolicySpec{PodSelector: metav1.LabelSelector{MatchLabels: cloneStringMap(target.Selector)}, PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress}, Ingress: []networkingv1.NetworkPolicyIngressRule{{From: []networkingv1.NetworkPolicyPeer{{NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{corev1.LabelMetadataName: workerNamespace}}, PodSelector: &metav1.LabelSelector{MatchLabels: cloneStringMap(workerLabels)}}}, Ports: []networkingv1.NetworkPolicyPort{{Protocol: new(corev1.ProtocolTCP), Port: new(intstr.FromInt32(target.Port))}}}}}
 }
 
-func externalIngressPolicyMatchesIdentity(policy *networkingv1.NetworkPolicy, target externalProcessIngressTarget, binding *externalRuntimeInstanceEvidence) bool {
+func externalIngressPolicyMatchesIdentity(policy *networkingv1.NetworkPolicy, target externalProcessIngressTarget, binding *externalRuntimeInstanceEvidence, sharedWorkers bool) bool {
 	if binding == nil || !binding.NativeProcess || len(policy.Spec.Ingress) != 1 || len(policy.Spec.Ingress[0].From) != 1 {
 		return false
 	}
 	peer := policy.Spec.Ingress[0].From[0]
-	if peer.PodSelector == nil || len(peer.PodSelector.MatchExpressions) != 0 || !externalWorkerLabelsBindIdentity(peer.PodSelector.MatchLabels, binding.Identity) {
+	if peer.PodSelector == nil || len(peer.PodSelector.MatchExpressions) != 0 || (!sharedWorkers && !externalWorkerLabelsBindIdentity(peer.PodSelector.MatchLabels, binding.Identity)) {
 		return false
 	}
 	return reflect.DeepEqual(policy.Spec, externalIngressPolicySpec(target, binding.Pod.Namespace, peer.PodSelector.MatchLabels))
@@ -218,7 +218,7 @@ func (r *RuntimePoolReconciler) deleteExternalIngressPolicies(ctx context.Contex
 			// Another object's labels never authorize its deletion or block ours.
 			continue
 		}
-		if !externalIngressPolicyMatchesIdentity(policy, target, binding) {
+		if !externalIngressPolicyMatchesIdentity(policy, target, binding, r.ExternalNativeSharedWorkers) {
 			return false, workspaceprovider.ErrStaleIdentity
 		}
 		pending, err := r.deleteExternalCorePolicy(ctx, policy)

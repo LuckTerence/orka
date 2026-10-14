@@ -582,3 +582,33 @@ func TestExternalNativeIngressRejectsChangedExactPolicyBeforeBootstrapAndDeletio
 		})
 	}
 }
+
+func TestExternalNativeSharedWorkerAcceptsUnboundLabelsButNotSiblings(t *testing.T) {
+	for _, sibling := range []bool{false, true} {
+		f, cl, _, worker := nativeIngressReviewFixture(t)
+		f.r.APIReader = &nativeIngressReviewReader{Reader: cl.Client}
+		f.r.ExternalNativeSharedWorkers = true
+		delete(worker.Labels, "native.example/allocation")
+		delete(worker.Labels, "native.example/instance")
+		if err := cl.Update(t.Context(), &worker); err != nil {
+			t.Fatal(err)
+		}
+		if sibling {
+			other := worker.DeepCopy()
+			other.Name, other.UID, other.ResourceVersion = "unattested-sibling", "sibling-uid", ""
+			if err := cl.Client.Create(t.Context(), other); err != nil {
+				t.Fatal(err)
+			}
+		}
+		_, err := f.r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(f.pool)})
+		if sibling {
+			if !errors.Is(err, workspaceprovider.ErrStaleIdentity) || len(cl.creates) != 0 {
+				t.Fatalf("ambiguous shared worker accepted: %v, %d creates", err, len(cl.creates))
+			}
+			continue
+		}
+		if errors.Is(err, workspaceprovider.ErrStaleIdentity) || len(cl.creates) == 0 {
+			t.Fatalf("shared worker without identity labels was refused: %v, %d creates", err, len(cl.creates))
+		}
+	}
+}

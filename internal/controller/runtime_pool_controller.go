@@ -316,6 +316,13 @@ type RuntimePoolReconciler struct {
 	APIReader client.Reader
 	Scheme    *k8sruntime.Scheme
 
+	// ExternalNativeSharedWorkers accepts a native process whose infrastructure
+	// worker Pod hosts other instances, such as a fiberd home. The worker's
+	// labels then select every resident process, so Core's controller and
+	// provider-proxy ingress admits all of them; per-instance authority rests on
+	// the sealed credentials alone. Spike only.
+	ExternalNativeSharedWorkers bool
+
 	// RuntimeNamespace is used when spec.runtimeNamespace is empty.
 	RuntimeNamespace string
 	// ControllerNamespace is the namespace allowed to reach the runtime control port.
