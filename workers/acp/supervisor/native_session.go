@@ -353,7 +353,7 @@ func (s *Server) captureNativeSession(ctx context.Context, state *sessionState, 
 	if !ok {
 		return harnessv2.NativeSessionSnapshot{}, &nativeCaptureUnsupportedError{}
 	}
-	data, err := format.Capture(ctx, nativeSessionDirs(state.paths), state.descriptor.ProviderSessionID, limit)
+	data, err := format.Capture(ctx, nativeSessionDirs(format, state.paths), state.descriptor.ProviderSessionID, limit)
 	if err != nil {
 		if errors.Is(err, nativesession.ErrUnsupported) {
 			return harnessv2.NativeSessionSnapshot{}, &nativeCaptureUnsupportedError{}
@@ -388,8 +388,8 @@ func (s *Server) captureNativeSession(ctx context.Context, state *sessionState, 
 	return snapshot, nil
 }
 
-func nativeSessionDirs(paths acp.SessionPaths) nativesession.Dirs {
-	return nativesession.Dirs{Home: paths.Home, Data: paths.Data, Workspace: paths.Workspace}
+func nativeSessionDirs(format nativesession.Format, paths acp.SessionPaths) nativesession.Dirs {
+	return nativesession.RuntimeDirs(format, paths.Home, paths.Data, paths.Workspace)
 }
 
 func persistNativeSnapshot(root string, body []byte) error {

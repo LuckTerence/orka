@@ -12,6 +12,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -36,18 +37,18 @@ type openCodeFixture struct {
 func newOpenCodeFixture(t *testing.T) openCodeFixture {
 	t.Helper()
 	root := realDir(t)
-	dirs := Dirs{Home: filepath.Join(root, "home"), Data: filepath.Join(root, "xdg", "data"), Workspace: filepath.Join(root, "workspace")}
-	for _, dir := range []string{dirs.Home, filepath.Join(dirs.Data, "opencode", "tool-output"), dirs.Workspace} {
+	dirs := Dirs{State: filepath.Join(root, "xdg", "data"), Workspace: filepath.Join(root, "workspace")}
+	for _, dir := range []string{filepath.Join(dirs.State, "opencode", "tool-output"), dirs.Workspace} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			t.Fatal(err)
 		}
 	}
 	spill := []byte(strings.Repeat("spilled tool output\n", 64))
-	spillPath := filepath.Join(dirs.Data, "opencode", "tool-output", openCodeFixtureSpill)
+	spillPath := filepath.Join(dirs.State, "opencode", "tool-output", openCodeFixtureSpill)
 	if err := os.WriteFile(spillPath, spill, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	db, err := sql.Open("sqlite", "file:"+filepath.Join(dirs.Data, "opencode", "opencode.db"))
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(dirs.State, "opencode", "opencode.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,8 +95,8 @@ func (f openCodeFixture) exec(t *testing.T, query string, args ...any) {
 func freshOpenCodeDirs(t *testing.T) Dirs {
 	t.Helper()
 	root := realDir(t)
-	dirs := Dirs{Home: filepath.Join(root, "home"), Data: filepath.Join(root, "xdg", "data"), Workspace: filepath.Join(root, "workspace")}
-	for _, dir := range []string{dirs.Home, dirs.Data, dirs.Workspace} {
+	dirs := Dirs{State: filepath.Join(root, "xdg", "data"), Workspace: filepath.Join(root, "workspace")}
+	for _, dir := range []string{dirs.State, dirs.Workspace} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -136,7 +137,7 @@ func TestOpenCodeFormatCarriesWALConversationIntoANewWorkspace(t *testing.T) {
 	if err := format.Install(t.Context(), data, destination, realDir(t), openCodeFixtureLimit); err != nil {
 		t.Fatal(err)
 	}
-	restored, err := sql.Open("sqlite", "file:"+filepath.Join(destination.Data, "opencode", "opencode.db")+"?mode=ro")
+	restored, err := sql.Open("sqlite", "file:"+filepath.Join(destination.State, "opencode", "opencode.db")+"?mode=ro")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +149,7 @@ func TestOpenCodeFormatCarriesWALConversationIntoANewWorkspace(t *testing.T) {
 	if directory != destination.Workspace || path != strings.TrimPrefix(destination.Workspace, "/") {
 		t.Fatalf("session not moved to the new workspace: directory=%q path=%q", directory, path)
 	}
-	newSpill := filepath.Join(destination.Data, "opencode", "tool-output", openCodeFixtureSpill)
+	newSpill := filepath.Join(destination.State, "opencode", "tool-output", openCodeFixtureSpill)
 	var assistant, tool string
 	if err := restored.QueryRow(`SELECT data FROM message WHERE id = 'msg_assistant'`).Scan(&assistant); err != nil {
 		t.Fatal(err)
@@ -157,7 +158,7 @@ func TestOpenCodeFormatCarriesWALConversationIntoANewWorkspace(t *testing.T) {
 		t.Fatal(err)
 	}
 	previousRelative := strings.TrimPrefix(source.dirs.Workspace, "/")
-	if strings.Contains(assistant+tool, previousRelative) || strings.Contains(tool, source.dirs.Data) ||
+	if strings.Contains(assistant+tool, previousRelative) || strings.Contains(tool, source.dirs.State) ||
 		!strings.Contains(tool, destination.Workspace+"/LICENSE") || strings.Count(tool, newSpill) != 2 ||
 		!strings.Contains(tool, `"title":"`+strings.TrimPrefix(destination.Workspace, "/")+`/LICENSE"`) {
 		t.Fatalf("conversation still names the previous directories: %s %s", assistant, tool)
@@ -179,6 +180,71 @@ func TestOpenCodeFormatCarriesWALConversationIntoANewWorkspace(t *testing.T) {
 	}
 }
 
+// A developer's database holds every session they ran in every project, and
+// their tool-output directory every session's spills.
+func TestOpenCodeCaptureKeepsOnlyTheSessionFromADeveloperDatabase(t *testing.T) {
+	format, _ := For("opencode")
+	source := newOpenCodeFixture(t)
+	toolOutput := filepath.Join(source.dirs.State, "opencode", "tool-output")
+	otherSpill := filepath.Join(toolOutput, "tool_other")
+	for _, name := range []string{otherSpill, filepath.Join(toolOutput, ".DS_Store")} {
+		if err := os.WriteFile(name, []byte("another session's output"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A reference can end a sentence, and OpenCode may have deleted the file.
+	if err := os.WriteFile(filepath.Join(toolOutput, "tool_sentence"), []byte("the session's output"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	source.exec(t, `UPDATE message SET data = ? WHERE id = 'msg_user'`,
+		`{"role":"user","text":"Saved to `+filepath.Join(toolOutput, "tool_sentence")+`. Also `+filepath.Join(toolOutput, "tool_gone")+`"}`)
+	source.exec(t, `INSERT INTO project (id, worktree, vcs, time_created, time_updated, sandboxes) VALUES ('a1b2c3', '/src/other', 'git', 1, 1, '[]')`)
+	for _, session := range [][]any{{"ses_sibling", "global", nil}, {"ses_siblingchild", "global", "ses_sibling"}, {"ses_otherproject", "a1b2c3", nil}} {
+		source.exec(t, `INSERT INTO session (id, project_id, parent_id, slug, directory, title, version, time_created, time_updated)
+ VALUES (?, ?, ?, 'other', '/src/other', 'other', '1.19.0', 1, 1)`, session...)
+		source.exec(t, `INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?, ?, 1, 1, ?)`,
+			"msg_"+session[0].(string), session[0], `{"role":"user","text":"other-private"}`)
+		source.exec(t, `INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, 1, 1, ?)`,
+			"prt_"+session[0].(string), "msg_"+session[0].(string), session[0], `{"output":"saved to `+otherSpill+`"}`)
+		source.exec(t, `INSERT INTO todo (session_id, content, status, priority, position, time_created, time_updated) VALUES (?, 'other-private', 'pending', 'high', 0, 1, 1)`, session[0])
+	}
+	source.exec(t, `INSERT INTO workspace (id, type, project_id, time_used) VALUES ('wrk_other', 'worktree', 'a1b2c3', 1)`)
+	source.exec(t, `INSERT INTO permission (id, project_id, action, resource, time_created, time_updated) VALUES ('per_other', 'a1b2c3', 'allow', 'bash', 1, 1)`)
+
+	data, err := format.Capture(t.Context(), source.dirs, openCodeFixtureSession, openCodeFixtureLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := tarEntriesForTest(t, data)
+	if len(entries) != 4 || entries["tool-output/"+openCodeFixtureSpill] == nil || entries["tool-output/tool_sentence"] == nil {
+		t.Fatalf("capture must carry only the session's spilled output: %v", slices.Collect(maps.Keys(entries)))
+	}
+	database := filepath.Join(realDir(t), "captured.db")
+	if err := os.WriteFile(database, entries["opencode.db"], 0o600); err != nil {
+		t.Fatal(err)
+	}
+	captured, err := sql.Open("sqlite", "file:"+database+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = captured.Close() }()
+	var sessions, projects, messages, parts, rest int
+	if err := captured.QueryRow(`SELECT (SELECT count(*) FROM session), (SELECT count(*) FROM project), (SELECT count(*) FROM message),
+ (SELECT count(*) FROM part), (SELECT count(*) FROM todo) + (SELECT count(*) FROM workspace) + (SELECT count(*) FROM permission)`).
+		Scan(&sessions, &projects, &messages, &parts, &rest); err != nil {
+		t.Fatal(err)
+	}
+	if sessions != 1 || projects != 1 || messages != 2 || parts != 1 || rest != 0 {
+		t.Fatalf("sessions=%d projects=%d messages=%d parts=%d other rows=%d", sessions, projects, messages, parts, rest)
+	}
+	if bytes.Contains(gunzipForTest(t, data), []byte("other-private")) {
+		t.Fatal("capture carried another session's conversation")
+	}
+	if _, err := format.Inspect(t.Context(), data, openCodeFixtureLimit); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestOpenCodeInstallMovesAGitProjectWorktree(t *testing.T) {
 	format, _ := For("opencode")
 	source := newOpenCodeFixture(t)
@@ -194,7 +260,7 @@ func TestOpenCodeInstallMovesAGitProjectWorktree(t *testing.T) {
 	if err := format.Install(t.Context(), data, destination, realDir(t), openCodeFixtureLimit); err != nil {
 		t.Fatal(err)
 	}
-	restored, err := sql.Open("sqlite", "file:"+filepath.Join(destination.Data, "opencode", "opencode.db")+"?mode=ro")
+	restored, err := sql.Open("sqlite", "file:"+filepath.Join(destination.State, "opencode", "opencode.db")+"?mode=ro")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -242,7 +308,7 @@ func TestOpenCodeCaptureFallsBackOnStateItDoesNotCarry(t *testing.T) {
 		"corrupt pages": {reason: "unreadable or corrupt", mutate: func(t *testing.T, f openCodeFixture) {
 			// Garble every page after the schema page that the write-ahead
 			// log does not supersede.
-			path := filepath.Join(f.dirs.Data, "opencode", "opencode.db")
+			path := filepath.Join(f.dirs.State, "opencode", "opencode.db")
 			database, err := os.ReadFile(path)
 			if err != nil {
 				t.Fatal(err)
@@ -255,16 +321,15 @@ func TestOpenCodeCaptureFallsBackOnStateItDoesNotCarry(t *testing.T) {
 				t.Fatal(err)
 			}
 		}},
-		"directory outside the workspace": {reason: "outside its RuntimeSession workspace", mutate: func(t *testing.T, f openCodeFixture) {
+		"directory outside the workspace": {reason: "outside the given workspace", mutate: func(t *testing.T, f openCodeFixture) {
 			f.exec(t, `UPDATE session SET directory = '/'`)
 		}},
-		"too many spilled outputs": {reason: "more than 256 tool outputs", mutate: func(t *testing.T, f openCodeFixture) {
+		"too many spilled outputs": {reason: "more than 256 spilled tool outputs", mutate: func(t *testing.T, f openCodeFixture) {
+			var references strings.Builder
 			for i := range maxOpenCodeToolOutputs {
-				name := filepath.Join(f.dirs.Data, "opencode", "tool-output", fmt.Sprintf("tool_extra%03d", i))
-				if err := os.WriteFile(name, nil, 0o600); err != nil {
-					t.Fatal(err)
-				}
+				fmt.Fprintf(&references, "saved to %s\\n", filepath.Join(f.dirs.State, "opencode", "tool-output", fmt.Sprintf("tool_extra%03d", i)))
 			}
+			f.exec(t, `UPDATE message SET data = ? WHERE id = 'msg_user'`, references.String())
 		}},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -285,7 +350,7 @@ func TestOpenCodeCaptureFallsBackOnStateItDoesNotCarry(t *testing.T) {
 	}
 	// Spilled output compresses well, but it shares the expanded budget that
 	// Inspect enforces with the database.
-	spill := filepath.Join(fixture.dirs.Data, "opencode", "tool-output", openCodeFixtureSpill)
+	spill := filepath.Join(fixture.dirs.State, "opencode", "tool-output", openCodeFixtureSpill)
 	if err := os.WriteFile(spill, bytes.Repeat([]byte("a"), 2<<20-64<<10), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -313,7 +378,7 @@ func TestOpenCodeInstallBoundsRelocationGrowth(t *testing.T) {
 	if err := format.Install(t.Context(), data, destination, realDir(t), limit); err == nil || !strings.Contains(err.Error(), "expanded budget") {
 		t.Fatalf("install must refuse to grow the conversation past its expanded budget: %v", err)
 	}
-	if _, err := os.Lstat(filepath.Join(destination.Data, "opencode", "opencode.db")); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Lstat(filepath.Join(destination.State, "opencode", "opencode.db")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("a failed install published a database: %v", err)
 	}
 }
@@ -325,8 +390,8 @@ func TestOpenCodeCaptureRejectsSymlinks(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, plant := range map[string]func(Dirs) string{
-		"database":    func(d Dirs) string { return filepath.Join(d.Data, "opencode", "opencode.db") },
-		"tool output": func(d Dirs) string { return filepath.Join(d.Data, "opencode", "tool-output", "tool_link") },
+		"database":    func(d Dirs) string { return filepath.Join(d.State, "opencode", "opencode.db") },
+		"tool output": func(d Dirs) string { return filepath.Join(d.State, "opencode", "tool-output", openCodeFixtureSpill) },
 	} {
 		t.Run(name, func(t *testing.T) {
 			fixture := newOpenCodeFixture(t)

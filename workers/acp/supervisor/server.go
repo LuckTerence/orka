@@ -1232,7 +1232,7 @@ func (s *Server) createSession(
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("native session journal inspection", journalErr)
 		}
 		ownsNativeJournal = errors.Is(journalErr, os.ErrNotExist)
-		if installErr := format.Install(ctx, snapshot.Data, nativeSessionDirs(paths), nativeJournalDir, s.cfg.Capabilities.Limits.EffectiveMaxNativeSessionBytes()); installErr != nil {
+		if installErr := format.Install(ctx, snapshot.Data, nativeSessionDirs(format, paths), nativeJournalDir, s.cfg.Capabilities.Limits.EffectiveMaxNativeSessionBytes()); installErr != nil {
 			if isNativeInstallUnknown(installErr) {
 				cleanup = false
 				return nil, harnessv2.RuntimeSessionDescriptor{}, paths, nil, nil, nil, nil, sessionCreationFailed("native session installation", installErr)

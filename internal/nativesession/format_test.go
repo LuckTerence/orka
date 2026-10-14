@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 )
 
@@ -24,15 +25,15 @@ func realDir(t *testing.T) string {
 }
 
 // codexFixtureDirs writes codexstate's recorded Codex 0.160.0 rollout into a
-// session HOME and returns the HOME, the rollout path, and its bytes.
+// CODEX_HOME and returns its Dirs, the rollout path, and its bytes.
 func codexFixtureDirs(t *testing.T) (Dirs, string, []byte) {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join("..", "codexstate", "testdata", codexFixtureName))
 	if err != nil {
 		t.Fatal(err)
 	}
-	dirs := Dirs{Home: realDir(t), Workspace: realDir(t)}
-	rollout := filepath.Join(dirs.Home, ".codex", "sessions", "2026", "10", "02", codexFixtureName)
+	dirs := Dirs{State: filepath.Join(realDir(t), ".codex"), Workspace: realDir(t)}
+	rollout := filepath.Join(dirs.State, "sessions", "2026", "10", "02", codexFixtureName)
 	if err := os.MkdirAll(filepath.Dir(rollout), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -53,6 +54,23 @@ func TestForRegistersCodexAndOpenCode(t *testing.T) {
 			t.Fatalf("%q must not have a native session format", kind)
 		}
 	}
+	if kinds := Kinds(); !slices.Equal(kinds, []string{"codex", "opencode"}) {
+		t.Fatalf("kinds: %v", kinds)
+	}
+}
+
+// The runtime supervisor sets CODEX_HOME to HOME/.codex and XDG_DATA_HOME to
+// the session's data directory.
+func TestRuntimeDirsMatchTheRuntimeEnvironment(t *testing.T) {
+	for kind, want := range map[string]Dirs{
+		"codex":    {State: "/s/home/.codex", Workspace: "/s/workspace"},
+		"opencode": {State: "/s/xdg/data", Workspace: "/s/workspace"},
+	} {
+		format, _ := For(kind)
+		if got := RuntimeDirs(format, "/s/home", "/s/xdg/data", "/s/workspace"); got != want {
+			t.Errorf("%s: got %+v, want %+v", kind, got, want)
+		}
+	}
 }
 
 func TestCodexFormatCapturesInspectsAndInstalls(t *testing.T) {
@@ -71,15 +89,15 @@ func TestCodexFormatCapturesInspectsAndInstalls(t *testing.T) {
 	}
 
 	// The Codex provider's PrepareSession creates the private home first.
-	destination := Dirs{Home: realDir(t), Workspace: realDir(t)}
-	if err := os.Mkdir(filepath.Join(destination.Home, ".codex"), 0o700); err != nil {
+	destination := Dirs{State: filepath.Join(realDir(t), ".codex"), Workspace: realDir(t)}
+	if err := os.Mkdir(destination.State, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := format.Install(t.Context(), data, destination, realDir(t), codexFixtureLimit); err != nil {
 		t.Fatal(err)
 	}
 	var installed []byte
-	err = filepath.WalkDir(filepath.Join(destination.Home, ".codex", "sessions"), func(path string, entry os.DirEntry, err error) error {
+	err = filepath.WalkDir(filepath.Join(destination.State, "sessions"), func(path string, entry os.DirEntry, err error) error {
 		if err == nil && !entry.IsDir() && filepath.Ext(path) == ".jsonl" {
 			installed, err = os.ReadFile(path)
 		}

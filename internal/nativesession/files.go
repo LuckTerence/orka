@@ -79,21 +79,21 @@ func readBoundedFile(path string, limit int) ([]byte, error) {
 	return content, nil
 }
 
-// writeNewFile creates path, which must not exist, and syncs its content.
+// writeNewFile creates path, which must not exist, and syncs its content. A
+// failed write removes the file.
 func writeNewFile(path string, content []byte) error {
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return err
 	}
-	if _, err := file.Write(content); err != nil {
-		_ = file.Close()
-		return err
+	_, err = file.Write(content)
+	if err == nil {
+		err = file.Sync()
 	}
-	if err := file.Sync(); err != nil {
-		_ = file.Close()
-		return err
+	if err = errors.Join(err, file.Close()); err != nil {
+		_ = os.Remove(path)
 	}
-	return file.Close()
+	return err
 }
 
 func syncDir(path string) error {

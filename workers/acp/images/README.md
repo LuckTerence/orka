@@ -151,15 +151,15 @@ resume rejects creation without falling back to `session/new`.
 The supervisor also sets `MODEL_PROVIDER` to the destination provider ID;
 `CODEX_CONFIG.model_provider` alone does not select the provider passed to
 `thread/resume` in this adapter release. See the
-[Codex session migration guide](../../../website/docs/guides/codex-session-migration.md)
+[native session migration guide](../../../website/docs/guides/native-session-migration.md)
 for supported history, import/export commands, and recovery limits.
 
 For native OpenCode restoration, the supervisor captures the stopped session's
 `$XDG_DATA_HOME/opencode/opencode.db` with a consistent SQLite copy, keeping
 only that session's `project`, `session`, `message` and `part` rows plus the
-`migration` tables, and carries spilled `tool-output` files. It drops the
-duplicate `event` log, persisted permission grants, and credential tables; rows
-in any other table fall back to the canonical transcript. Before starting
+`migration` tables, and carries the spilled `tool-output` files they refer to.
+It drops the duplicate `event` log, persisted permission grants, and credential
+tables; rows in any other table fall back to the canonical transcript. Before starting
 OpenCode in the fresh RuntimeSession it installs that database, rewrites
 `session.directory`, `session.path` and recorded paths to the new workspace and
 data directory, because OpenCode resumes in the session's saved directory

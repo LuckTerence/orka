@@ -417,8 +417,8 @@ provider that saved it. When a conversation holds state Orka does not carry, the
 next turn uses the canonical transcript instead and the Task records a
 `NativeSessionCaptureSkipped` warning. Other runtimes use the canonical
 transcript. Neither path replays an accepted prompt. See
-[Codex session migration](../guides/codex-session-migration.md) for the Codex
-format and import/export commands; OpenCode checkpoints stay inside Orka.
+[Native session migration](../guides/native-session-migration.md) for the
+formats and the commands that move a conversation to and from a local agent.
 
 ## Runtime and credential boundaries
 

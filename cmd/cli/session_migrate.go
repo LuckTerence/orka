@@ -19,21 +19,31 @@ import (
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 
 	"github.com/orka-agents/orka/internal/cli/client"
-	"github.com/orka-agents/orka/internal/codexstate"
+	"github.com/orka-agents/orka/internal/nativesession"
 	"github.com/spf13/cobra"
 	"golang.org/x/sys/unix"
 )
 
 type migrationState struct {
-	Direction   string `json:"direction"`
-	Server      string `json:"server"`
-	Namespace   string `json:"namespace"`
-	Session     string `json:"session"`
-	Home        string `json:"home"`
-	Thread      string `json:"thread,omitempty"`
-	CWD         string `json:"cwd,omitempty"`
-	OperationID string `json:"operationID"`
-	Data        []byte `json:"data"`
+	Direction         string `json:"direction"`
+	Server            string `json:"server"`
+	Namespace         string `json:"namespace"`
+	Session           string `json:"session"`
+	Agent             string `json:"agent"`
+	StateDir          string `json:"stateDir"`
+	ProviderSessionID string `json:"providerSessionID,omitempty"`
+	CWD               string `json:"cwd,omitempty"`
+	OperationID       string `json:"operationID"`
+	Data              []byte `json:"data"`
+}
+
+// migrationFormat returns the native session format of a local agent.
+func migrationFormat(agent string) (nativesession.Format, error) {
+	format, ok := nativesession.For(agent)
+	if !ok {
+		return nil, fmt.Errorf("--agent must be one of: %s", strings.Join(nativesession.Kinds(), ", "))
+	}
+	return format, nil
 }
 
 // Native migration requires an explicitly selected API endpoint. Kubernetes
@@ -91,7 +101,7 @@ func privateMigrationJournal(name, home string) (string, error) {
 			return "", err
 		}
 		if rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			return "", errors.New("migration journal and Codex home must not overlap")
+			return "", errors.New("migration journal and agent state directory must not overlap")
 		}
 	}
 	return dir, nil
@@ -194,7 +204,7 @@ func migrationOperationID() (string, error) {
 }
 
 func newSessionMigrateCmd() *cobra.Command {
-	cmd := &cobra.Command{Use: "migrate", Short: "Move Codex 0.160.0 paginated conversation state"}
+	cmd := &cobra.Command{Use: "migrate", Short: "Move agent conversations between local Codex or OpenCode and Orka Sessions"}
 	cmd.PersistentFlags().Int("max-bundle-bytes", harnessv2.DefaultMaxNativeSessionBytes, "Maximum encoded native bundle bytes (1..67108864); ORKA_NATIVE_SESSION_MAX_BYTES supplies the default")
 	cmd.AddCommand(newSessionMigrateImportCmd(), newSessionMigrateExportCmd())
 	return cmd
@@ -221,24 +231,46 @@ func migrationMaxBundleBytes(cmd *cobra.Command) (int, error) {
 	return harnessv2.NormalizeNativeSessionMaxBytes(limit)
 }
 
+// migrationFlagHelp describes the --agent and --state-dir values every
+// native session format accepts.
+func migrationFlagHelp() (agent, stateDir string) {
+	kinds := nativesession.Kinds()
+	dirs := make([]string, 0, len(kinds))
+	for _, kind := range kinds {
+		format, _ := nativesession.For(kind)
+		dirs = append(dirs, format.Local().StateVar+" for "+kind)
+	}
+	return "Local agent: " + strings.Join(kinds, " or "), "agent state directory: " + strings.Join(dirs, ", ")
+}
+
 func newSessionMigrateImportCmd() *cobra.Command {
-	var home, thread, journal string
+	var agent, stateDir, providerSessionID, cwd, journal string
 	var stopped bool
 	cmd := &cobra.Command{
-		Use: "import <new-session-name>", Short: "Stage a stopped local Codex thread for its first Orka Task", Args: cobra.ExactArgs(1),
+		Use: "import <new-session-name>", Short: "Stage a stopped local agent conversation for its first Orka Task", Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			limit, err := migrationMaxBundleBytes(cmd)
 			if err != nil {
 				return err
 			}
-			if !stopped {
-				return errors.New("stop all source Codex writers, then pass --source-stopped")
-			}
-			resolvedHome, err := migrationDir(home, false)
+			format, err := migrationFormat(agent)
 			if err != nil {
 				return err
 			}
-			resolvedJournal, err := privateMigrationJournal(journal, resolvedHome)
+			if !stopped {
+				return fmt.Errorf("stop every local %s process using the state directory, then pass --source-stopped", agent)
+			}
+			resolvedState, err := migrationDir(stateDir, false)
+			if err != nil {
+				return err
+			}
+			resolvedCWD := ""
+			if cwd != "" {
+				if resolvedCWD, err = migrationDir(cwd, false); err != nil {
+					return err
+				}
+			}
+			resolvedJournal, err := privateMigrationJournal(journal, resolvedState)
 			if err != nil {
 				return err
 			}
@@ -248,13 +280,16 @@ func newSessionMigrateImportCmd() *cobra.Command {
 			}
 			defer cleanup()
 			c.NativeSessionMaxBytes = limit
-			expected := migrationState{Direction: "import", Server: target, Namespace: c.Namespace, Session: args[0], Home: resolvedHome, Thread: thread}
+			expected := migrationState{
+				Direction: "import", Server: target, Namespace: c.Namespace, Session: args[0],
+				Agent: agent, StateDir: resolvedState, ProviderSessionID: providerSessionID, CWD: resolvedCWD,
+			}
 			saved, err := readMigrationState(resolvedJournal, expected, limit)
 			if err != nil {
 				return err
 			}
 			if saved == nil {
-				expected.Data, err = codexstate.Capture(cmd.Context(), resolvedHome, thread, limit)
+				expected.Data, err = format.Capture(cmd.Context(), nativesession.Dirs{State: resolvedState, Workspace: resolvedCWD}, providerSessionID, limit)
 				if err != nil {
 					return err
 				}
@@ -267,52 +302,68 @@ func newSessionMigrateImportCmd() *cobra.Command {
 				}
 				saved = &expected
 			}
-			receipt, err := c.ImportNativeSession(cmd.Context(), args[0], saved.OperationID, saved.Data)
+			summary, err := format.Inspect(cmd.Context(), saved.Data, limit)
+			if err != nil {
+				return err
+			}
+			receipt, err := c.ImportNativeSession(cmd.Context(), args[0], saved.OperationID, agent, saved.Data)
 			if err != nil {
 				return fmt.Errorf("%w; retry using the same --journal-dir", err)
 			}
-			if receipt.OperationID != saved.OperationID || receipt.DataDigest != codexstate.DataDigest(saved.Data) || receipt.ProviderSessionID != thread || receipt.SessionName != args[0] || receipt.Namespace != c.Namespace {
+			if receipt.OperationID != saved.OperationID || receipt.DataDigest != summary.DataDigest || receipt.ProviderSessionID != providerSessionID ||
+				receipt.SessionName != args[0] || receipt.Namespace != c.Namespace {
 				return errors.New("native import receipt does not match the saved request")
 			}
 			if err := publishMigrationJSON(resolvedJournal, "import-receipt.json", receipt); err != nil {
 				return fmt.Errorf("save import receipt: %w; retry using the same --journal-dir", err)
 			}
-			_, err = fmt.Fprintf(cmd.OutOrStdout(), "Staged thread %s in Session %s. Submit a Task with this Session to continue.\n", thread, args[0])
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "Staged %s session %s in Session %s. Submit a Task with this Session to continue; its agent must run %s.\n", agent, providerSessionID, args[0], agent)
 			return err
 		},
 	}
-	cmd.Flags().StringVar(&home, "codex-home", "", "Source CODEX_HOME (must already exist)")
-	cmd.Flags().StringVar(&thread, "thread", "", "Native thread UUID")
+	agentHelp, stateDirHelp := migrationFlagHelp()
+	cmd.Flags().StringVar(&agent, "agent", "", agentHelp)
+	cmd.Flags().StringVar(&stateDir, "state-dir", "", "Source "+stateDirHelp)
+	cmd.Flags().StringVar(&providerSessionID, "session-id", "", "The agent's own session ID: a Codex thread UUID or an OpenCode ses_ ID")
+	cmd.Flags().StringVar(&cwd, "cwd", "", "Directory the source session ran in (required for opencode)")
 	cmd.Flags().StringVar(&journal, "journal-dir", "", "Private directory retained for exact retries")
-	cmd.Flags().BoolVar(&stopped, "source-stopped", false, "Confirm every source Codex writer has stopped")
-	for _, flag := range []string{"codex-home", "thread", "journal-dir"} {
+	cmd.Flags().BoolVar(&stopped, "source-stopped", false, "Confirm every local agent process using the state directory has stopped")
+	for _, flag := range []string{"agent", "state-dir", "session-id", "journal-dir"} {
 		_ = cmd.MarkFlagRequired(flag)
 	}
 	return cmd
 }
 
 func newSessionMigrateExportCmd() *cobra.Command {
-	var home, cwd, journal, binary string
+	var agent, stateDir, cwd, journal, binary string
 	cmd := &cobra.Command{
-		Use: "export <session-name>", Short: "Install a saved Orka checkpoint into a fresh local Codex home", Args: cobra.ExactArgs(1),
+		Use: "export <session-name>", Short: "Install a saved Orka checkpoint into a fresh local agent state directory", Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			limit, err := migrationMaxBundleBytes(cmd)
 			if err != nil {
 				return err
 			}
-			version, err := exec.CommandContext(cmd.Context(), binary, "--version").Output()
-			if err != nil || strings.TrimSpace(string(version)) != "codex-cli 0.160.0" {
-				return errors.New("destination requires codex-cli 0.160.0 (--codex-bin)")
-			}
-			resolvedHome, err := migrationDir(home, true)
+			format, err := migrationFormat(agent)
 			if err != nil {
 				return err
 			}
-			if sqliteHome := os.Getenv("CODEX_SQLITE_HOME"); sqliteHome != "" {
+			local := format.Local()
+			if binary == "" {
+				binary = local.Binary
+			}
+			version, err := exec.CommandContext(cmd.Context(), binary, "--version").Output()
+			if err != nil || strings.TrimSpace(string(version)) != local.Version {
+				return fmt.Errorf("destination requires %s reporting version %q (--agent-bin)", local.Binary, local.Version)
+			}
+			resolvedState, err := migrationDir(stateDir, true)
+			if err != nil {
+				return err
+			}
+			if sqliteHome := os.Getenv("CODEX_SQLITE_HOME"); agent == "codex" && sqliteHome != "" {
 				// Relative overrides depend on the resume CWD; fresh-home validation
 				// covers databases in this exact absolute home only.
 				resolvedSQLiteHome, sqliteErr := migrationDir(sqliteHome, false)
-				if sqliteHome != strings.TrimSpace(sqliteHome) || !filepath.IsAbs(sqliteHome) || sqliteErr != nil || resolvedSQLiteHome != resolvedHome {
+				if sqliteHome != strings.TrimSpace(sqliteHome) || !filepath.IsAbs(sqliteHome) || sqliteErr != nil || resolvedSQLiteHome != resolvedState {
 					return errors.New("CODEX_SQLITE_HOME must be unset or an absolute path without surrounding whitespace resolving to the destination CODEX_HOME before native export")
 				}
 			}
@@ -320,7 +371,7 @@ func newSessionMigrateExportCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			resolvedJournal, err := privateMigrationJournal(journal, resolvedHome)
+			resolvedJournal, err := privateMigrationJournal(journal, resolvedState)
 			if err != nil {
 				return err
 			}
@@ -330,7 +381,10 @@ func newSessionMigrateExportCmd() *cobra.Command {
 			}
 			defer cleanup()
 			c.NativeSessionMaxBytes = limit
-			expected := migrationState{Direction: "export", Server: target, Namespace: c.Namespace, Session: args[0], Home: resolvedHome, CWD: resolvedCWD}
+			expected := migrationState{
+				Direction: "export", Server: target, Namespace: c.Namespace, Session: args[0],
+				Agent: agent, StateDir: resolvedState, CWD: resolvedCWD,
+			}
 			saved, err := readMigrationState(resolvedJournal, expected, limit)
 			if err != nil {
 				return err
@@ -340,11 +394,14 @@ func newSessionMigrateExportCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				summary, err := codexstate.Inspect(cmd.Context(), response.Data, limit)
+				if response.ProviderKind != agent {
+					return fmt.Errorf("session %s holds a %s conversation, not %s", args[0], response.ProviderKind, agent)
+				}
+				summary, err := format.Inspect(cmd.Context(), response.Data, limit)
 				if err != nil {
 					return err
 				}
-				if summary.DataDigest != response.DataDigest || summary.ThreadID != response.ProviderSessionID {
+				if summary.DataDigest != response.DataDigest || summary.ProviderSessionID != response.ProviderSessionID {
 					return errors.New("native export identity mismatch")
 				}
 				expected.Data = response.Data
@@ -357,23 +414,34 @@ func newSessionMigrateExportCmd() *cobra.Command {
 				}
 				saved = &expected
 			}
-			receipt, err := codexstate.Install(cmd.Context(), saved.Data, resolvedHome, resolvedCWD, resolvedJournal, limit)
-			if err != nil {
-				return fmt.Errorf("install outcome %s: %w; retain the journal and retry it", receipt.Outcome, err)
-			}
-			summary, err := codexstate.Inspect(cmd.Context(), saved.Data, limit)
+			summary, err := format.Inspect(cmd.Context(), saved.Data, limit)
 			if err != nil {
 				return err
 			}
-			_, err = fmt.Fprintf(cmd.OutOrStdout(), "Installed thread %s in %s. Authenticate this home with current local credentials, then resume that UUID from %s.\n", summary.ThreadID, resolvedHome, resolvedCWD)
+			// A retry after a completed install finds its receipt; formats need
+			// not recognize their own earlier installation.
+			if _, err := os.Lstat(filepath.Join(resolvedJournal, "export-receipt.json")); errors.Is(err, os.ErrNotExist) {
+				if err := format.Install(cmd.Context(), saved.Data, nativesession.Dirs{State: resolvedState, Workspace: resolvedCWD}, resolvedJournal, limit); err != nil {
+					return fmt.Errorf("install: %w; retain the journal and retry it", err)
+				}
+				if err := publishMigrationJSON(resolvedJournal, "export-receipt.json", summary); err != nil {
+					return fmt.Errorf("save export receipt: %w; retry using the same --journal-dir", err)
+				}
+			} else if err != nil {
+				return err
+			}
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "Installed %s session %s in %s. Set %s to that directory, authenticate with current local credentials, then resume the session from %s.\n",
+				agent, summary.ProviderSessionID, resolvedState, local.StateVar, resolvedCWD)
 			return err
 		},
 	}
-	cmd.Flags().StringVar(&home, "codex-home", "", "Fresh isolated destination CODEX_HOME")
+	agentHelp, stateDirHelp := migrationFlagHelp()
+	cmd.Flags().StringVar(&agent, "agent", "", agentHelp)
+	cmd.Flags().StringVar(&stateDir, "state-dir", "", "Fresh private destination "+stateDirHelp)
 	cmd.Flags().StringVar(&cwd, "cwd", "", "Existing destination working directory")
-	cmd.Flags().StringVar(&journal, "journal-dir", "", "Private directory outside CODEX_HOME, retained for retries")
-	cmd.Flags().StringVar(&binary, "codex-bin", "codex", "Codex 0.160.0 executable")
-	for _, flag := range []string{"codex-home", "cwd", "journal-dir"} {
+	cmd.Flags().StringVar(&journal, "journal-dir", "", "Private directory outside the state directory, retained for retries")
+	cmd.Flags().StringVar(&binary, "agent-bin", "", "Local agent executable, which must report the release Orka carries (default: the agent's name)")
+	for _, flag := range []string{"agent", "state-dir", "cwd", "journal-dir"} {
 		_ = cmd.MarkFlagRequired(flag)
 	}
 	return cmd

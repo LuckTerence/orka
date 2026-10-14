@@ -1,35 +1,47 @@
 ---
-title: Codex session migration
-description: Move supported native Codex conversation state between local homes and Orka Sessions.
+title: Native session migration
+description: Move native Codex and OpenCode conversations between a local agent and Orka Sessions.
 ---
 
-# Codex session migration
+# Native session migration
 
-`orka session migrate` preserves Codex's original thread UUID and rollout bytes.
-It supports the `codex/paginated@0.160.0` profile on Linux and macOS. Legacy
-rollouts and encrypted reasoning context are outside this delivery.
+`orka session migrate` moves an agent's own conversation between a local
+install and an Orka Session and keeps the agent's session ID. `--agent` selects
+the agent, and `--state-dir` names the directory the agent keeps its state in:
+
+| `--agent` | Supported release | `--state-dir` | Bundle |
+| --- | --- | --- | --- |
+| `codex` | Codex 0.160.0 `codex/paginated` threads | `CODEX_HOME` | The verified SessionKit manifest and the thread's original rollout bytes |
+| `opencode` | OpenCode 1.19.0 | `XDG_DATA_HOME` (`~/.local/share` by default) | A copy of `opencode/opencode.db` holding only the session's rows, plus the spilled tool output the conversation refers to |
+
+Both run on Linux and macOS. A bundle never contains authentication files,
+provider configuration, or process memory. A Codex bundle excludes Codex's
+SQLite databases. An OpenCode bundle excludes every other session and project,
+the database's event log, saved permission grants, and its account and
+credential tables.
+
+Orka defaults to 8 MiB of encoded bundle data, configurable up to 64 MiB.
+This is a consumer transport limit, separate from SessionKit's native storage
+limits.
+
+The controller and runtime must both support native Sessions. Use the pinned
+Codex 0.160.0 / codex-acp 2.1.1 or OpenCode 1.19.0 runtime image. A checkpoint
+restores only into a runtime of the agent that saved it. Private checkpoints use
+the controller's existing execution-snapshot encryption key with separate
+associated data. Retain that key with the SQLite backup.
+
+Deploy this schema on a new installation. Existing Orka databases are not
+upgraded in place; see [Upgrading](../operations/upgrading.md).
+
+## Codex
+
+Legacy rollouts and encrypted reasoning context are not supported.
 
 Use a model that supports non-reasoning turns and set the destination Codex Agent's
 `spec.runtime.defaultReasoningEffort: none`. Set `model_reasoning_effort = "none"`
 in the source and return homes too. This selects Codex's non-reasoning mode; it
 does not bypass capture validation. A rollout with encrypted reasoning is still
 rejected, even if the configured effort is `none`.
-
-Orka defaults to 8 MiB of encoded bundle data, configurable up to 64 MiB.
-This is a consumer
-transport limit, separate from SessionKit's native storage limits. A bundle
-contains the verified manifest and rollout. Authentication files, native SQLite
-databases, provider configuration, and process memory are excluded.
-
-The controller and runtime must both support native Sessions. Use the pinned
-Codex 0.160.0 / codex-acp 2.1.1 runtime image. Private checkpoints use the
-controller's existing execution-snapshot encryption key with separate associated
-data. Retain that key with the SQLite backup.
-
-Deploy this schema on a new installation. Existing Orka databases are not
-upgraded in place; see [Upgrading](../operations/upgrading.md).
-
-## Current limitations
 
 ### Returning to an existing Codex home
 
@@ -64,7 +76,30 @@ existing encrypted content, and some models do not support `none`. Supported
 non-encrypted compaction records remain byte-identical. This is not general
 migration support for reasoning-enabled Codex sessions.
 
-### Bundle size
+## OpenCode
+
+OpenCode keeps every session in one SQLite database. Import copies it with
+SQLite and keeps only the named session, its project, and the spilled tool
+output files the conversation names. The source must be a database OpenCode
+1.19.0 wrote: any other schema is rejected. Import reads the database without
+changing it.
+
+Import rejects a session that holds state Orka does not carry: a todo list,
+subagent (child) sessions, per-session permission rules, or OpenCode
+workspaces. It also rejects a source database larger than twice the expanded
+budget (16 times the bundle limit) and a conversation that refers to more than
+256 spilled tool outputs.
+
+OpenCode resumes a session in the directory it recorded, not the directory it
+starts in. Import therefore needs `--cwd`, the directory the session ran in.
+Export and Orka's runtime restore move the session to the new working
+directory and rewrite the paths the conversation recorded.
+
+Export installs into a state directory without an OpenCode database. Use a
+fresh directory: OpenCode also keeps provider credentials there, so
+authenticate again before resuming.
+
+## Bundle size
 
 The default limit is 8 MiB, or 8,388,608 bytes, for the complete encoded bundle.
 Operators can select a limit from 1 byte through the 64 MiB hard ceiling with
@@ -86,16 +121,18 @@ retains the previous 512 KiB bound and rejects larger native restores before
 request delivery. Capture requests use the same opt-in header; older callers
 retain the 512 KiB capture limit and its structured rejection behavior.
 
-This is a byte limit, not a model token limit. The JSON bundle base64-encodes
-both the rollout and manifest, leaving approximately 6 MiB of combined raw
-bytes under the 8 MiB default, slightly less after JSON overhead. The HTTP
-envelope adds another encoding layer with its own bounded allowance. Ordinary
-API, prompt, and ACP message limits are unchanged.
+This is a byte limit, not a model token limit. A Codex bundle is JSON that
+base64-encodes both the rollout and manifest, leaving approximately 6 MiB of
+combined raw bytes under the 8 MiB default, slightly less after JSON overhead.
+An OpenCode bundle is gzip-compressed, and its uncompressed contents may reach
+eight times the limit. The HTTP envelope adds another encoding layer with its
+own bounded allowance. Ordinary API, prompt, and ACP message limits are
+unchanged.
 
 The cap applies to import and every runtime checkpoint, including growth after
-continuation. It counts the full saved rollout, including tool outputs and
-historical records retained after compaction. Orka does not compress or truncate
-the bundle. Oversized native data is rejected; an established native-continuity
+continuation. It counts the full saved conversation, including tool outputs and
+historical records retained after compaction. Orka does not truncate the
+bundle. Oversized native data is rejected; an established native-continuity
 Session does not silently fall back to transcript-only continuation. Lowering
 the policy preserves stored checkpoints but can block export, restore, or new
 capture until the limit is raised again. Before lowering the cap, pause new
@@ -120,16 +157,31 @@ an Orka API credential. Missing API authentication fails before capture or
 persistence of the migration bundle. Configure the endpoint and authentication
 before running the commands below.
 
-## Import a local thread
+## Import a local session
 
-Stop every Codex process using the source home before capture. `--source-stopped`
-records that assertion; it does not terminate a local client. Use a new Session
-name and a journal directory outside the source home:
+Stop every local agent process using the source state directory before capture.
+`--source-stopped` records that assertion; it does not terminate a local
+client. Use a new Session name and a journal directory outside the state
+directory:
 
 ```bash
 orka session migrate import migrated-review \
-  --codex-home /absolute/source/codex-home \
-  --thread 01a10020-1222-76e3-977d-d5165792ae72 \
+  --agent codex \
+  --state-dir /absolute/source/codex-home \
+  --session-id 01a10020-1222-76e3-977d-d5165792ae72 \
+  --journal-dir /absolute/private/import-journal \
+  --source-stopped
+```
+
+For OpenCode, `--session-id` is the `ses_` ID that `opencode session list`
+shows, and `--cwd` is the directory the session ran in:
+
+```bash
+orka session migrate import migrated-review \
+  --agent opencode \
+  --state-dir "$HOME/.local/share" \
+  --session-id ses_ec7cc3c6cffejC2X3k579awtpZ \
+  --cwd /absolute/local/project \
   --journal-dir /absolute/private/import-journal \
   --source-stopped
 ```
@@ -137,17 +189,18 @@ orka session migrate import migrated-review \
 Import reserves a fresh non-Gateway Session. It allocates no runtime or Task
 lease. An existing Session, including an empty one, cannot be overwritten.
 
-Submit a normal Codex Task with `spec.sessionRef.name: migrated-review` and
-`spec.sessionRef.create: true` for the first continuation. Use the Task's current
-workspace and tool policy. During admission, Orka installs the bundle in
-the child's fresh private `CODEX_HOME` before starting codex-acp. It uses
-capability-gated `session/resume` with the original UUID and current cwd,
-provider, MCP tools, approvals, and sandbox configuration. The runtime must
-advertise resume support and prove restoring the exact bundle before Orka sends
-the new user prompt. Canonical history is not injected again. Missing resume
-support or a failed resume rejects creation without falling back to
-`session/new`. The imported history stays native; the Orka transcript records
-new Tasks.
+Submit a normal Task for an Agent of the same runtime type with
+`spec.sessionRef.name: migrated-review` and `spec.sessionRef.create: true` for
+the first continuation. A Task for another runtime type is rejected. Use the
+Task's current workspace and tool policy. During admission, Orka installs the
+bundle in the child's fresh private state directory before starting the agent.
+It uses capability-gated `session/resume` with the original session ID and
+current cwd, provider, MCP tools, approvals, and sandbox configuration. The
+runtime must advertise resume support and prove restoring the exact bundle
+before Orka sends the new user prompt. Canonical history is not injected again.
+Missing resume support or a failed resume rejects creation without falling back
+to `session/new`. The imported history stays native; the Orka transcript
+records new Tasks.
 
 ## Export a checkpoint
 
@@ -163,24 +216,39 @@ transcript boundary.
 
 ```bash
 orka session migrate export migrated-review \
-  --codex-home /absolute/fresh/codex-home \
+  --agent codex \
+  --state-dir /absolute/fresh/codex-home \
   --cwd /absolute/local/workspace \
   --journal-dir /absolute/private/export-journal \
-  --codex-bin /absolute/codex-0.160.0
+  --agent-bin /absolute/codex-0.160.0
 ```
 
-The destination must be a fresh isolated Codex home with directory mode `0700`.
-The journal must be outside it and private, also with directory mode `0700`.
-Authenticate the destination with
-current local credentials and configure its provider before resuming the UUID.
-Migration does not copy source authentication or source policy into authority.
+`--agent` must match the agent that saved the checkpoint. `--agent-bin` names
+the local agent executable, `codex` or `opencode` on `PATH` by default, and
+must report the supported release. The destination must be a fresh private
+state directory with directory mode `0700`. The journal must be outside it and
+private, also with directory mode `0700`. Authenticate the destination with
+current local credentials and configure its provider before resuming the
+session. Migration does not copy source authentication or source policy into
+authority.
+
+Point the agent's state variable at the destination and resume the session ID
+from `--cwd`:
+
+```bash
+cd /absolute/local/workspace
+CODEX_HOME=/absolute/fresh/codex-home codex resume 01a10020-1222-76e3-977d-d5165792ae72
+XDG_DATA_HOME=/absolute/fresh/data opencode --session ses_ec7cc3c6cffejC2X3k579awtpZ
+```
 
 ## Retry and failure handling
 
 Retain the journal and repeat the same command after an uncertain response. The
-CLI reuses its saved bundle and operation ID. Export also reuses the same frozen
-SessionKit install plan and receipt. Changing the target, bundle, or cwd with
-that journal is rejected. The explicitly selected API endpoint must stay
+CLI reuses its saved bundle and operation ID. A Codex export also reuses the
+same frozen SessionKit install plan and receipt. A failed OpenCode install
+removes the files it created. Once an export installs its session, a retry with
+the same journal reports it again without reinstalling. Changing the agent,
+target, bundle, or cwd with that journal is rejected. The explicitly selected API endpoint must stay
 unchanged across retries. Automatic Kubernetes Service discovery and streaming
 are not available for native migration; use `--server` or a saved trusted API
 endpoint and supply API authentication as described above.
@@ -212,7 +280,7 @@ a Session with a native checkpoint they retain the exact runtime evidence and
 hold the Session lease until reconciliation. Accepted turns with
 `sessionRef.append: false` leave the checkpoint unchanged and retire their
 runtime before a later Task loads the saved state.
-Native restore reloads Codex's whole saved conversation, so
+Native restore reloads the agent's whole saved conversation, so
 `sessionRef.maxMessages` limits only the canonical transcript Orka sends when
 no checkpoint is used. A Task whose `sessionRef.throughMessageId` names any
 message other than the Session's latest fails before it binds the Session, with
@@ -227,7 +295,7 @@ A changed canonical boundary makes an older checkpoint unavailable for restore
 or export.
 If a native-continuity Session cannot produce a supported checkpoint, Orka
 retains the runtime evidence and blocks finalization. It does not silently start
-a new provider thread. An ordinary Session with no native checkpoint may use
+a new provider session. An ordinary Session with no native checkpoint may use
 canonical continuity after a terminal format or size rejection, but only after
 the runtime proves process exit. Before a capture intent or native checkpoint
 exists, canonical recovery also remains available after the exact runtime has
