@@ -36,7 +36,8 @@ placement uses the provider's pinned Linux WorkerPool. Core freezes the native
 bootstrap listener at port 80 and omits Kubernetes probes, lifecycle hooks and
 termination grace periods; the provider owns Actor readiness and exact retirement.
 Native requests use supervisor session-directory defaults and SystemInfo identity,
-and omit the Pod namespace and configured Core MCP broker environment overrides.
+and omit the Pod name, Pod namespace and configured Core MCP broker environment
+overrides, which keeps them within the backend's 32-entry environment limit.
 Pod-backed requests retain their health and shutdown settings,
 size-limited scratch mounts, ephemeral-storage quotas and Ingress/Egress policy. Existing admitted requests keep their
 original layout and cannot switch startup evidence kinds. Native operators must

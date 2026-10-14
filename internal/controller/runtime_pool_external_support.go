@@ -66,9 +66,11 @@ func runtimePoolNativeProcessTemplate(template corev1.PodTemplateSpec) corev1.Po
 		env := container.Env[:0]
 		for _, variable := range container.Env {
 			switch variable.Name {
-			case "ORKA_ACP_SESSION_BASE_DIR", "ORKA_ACP_MCP_BROKER_URL", "ORKA_ACP_POD_NAMESPACE":
+			case "ORKA_ACP_SESSION_BASE_DIR", "ORKA_ACP_MCP_BROKER_URL", "ORKA_ACP_POD_NAME", "ORKA_ACP_POD_NAMESPACE":
 				// The native adapter uses supervisor defaults and SystemInfo
-				// identity instead of these Pod-specific overrides.
+				// identity instead of these Pod-specific overrides. The
+				// supervisor never reads the Pod name or namespace; dropping
+				// them keeps headroom under the backend's 32-entry limit.
 				continue
 			case "ORKA_ACP_LISTEN_ADDRESS":
 				variable = corev1.EnvVar{Name: variable.Name, Value: ":80"}

@@ -47,6 +47,27 @@ func (f *externalRuntimePoolFixture) advertiseNativeProcess(t *testing.T) {
 	}
 }
 
+// The native backend admits at most 32 environment entries. Main's in-tree
+// native runtime fit its live conformance flags in that budget; keep it.
+func TestExternalRuntimePoolNativeEnvironmentFitsBackendLimit(t *testing.T) {
+	f := newExternalRuntimePoolFixture(t)
+	f.r.E2EPromptWriteAmbiguityMarker = "ORKA_E2E_WS_LC_AMBIGUOUS_OK"
+	f.advertiseNativeProcess(t)
+	w := f.currentWorkspace(t)
+	w.Spec.Lifecycle.AllowedOnDetach = append(w.Spec.Lifecycle.AllowedOnDetach, workspacev1alpha1.WorkspaceOnDetachSuspend)
+	if err := f.r.Update(t.Context(), w); err != nil {
+		t.Fatal(err)
+	}
+	env := f.publish(t).Spec.Workload.Runtime.Template.Spec.Containers[0].Env
+	names := map[string]bool{}
+	for _, variable := range env {
+		names[variable.Name] = true
+	}
+	if len(env) > 32 || !names["ORKA_ACP_POD_UID"] || !names[runtimePoolE2EPromptWriteAmbiguity] || names["ORKA_ACP_POD_NAME"] || names["ORKA_ACP_POD_NAMESPACE"] {
+		t.Fatalf("native environment has %d entries (backend limit 32) or wrong identity variables: %v", len(env), names)
+	}
+}
+
 func TestExternalRuntimePoolFreezesMaterializationLayoutBeforeRevision(t *testing.T) {
 	data, err := os.ReadFile("../../config/crd/bases/workspace.orka.ai_executionworkspaces.yaml")
 	if err != nil {
