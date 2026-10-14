@@ -5,10 +5,12 @@
 # hluk, built against Debian bookworm's glibc 2.36 so it runs on every Orka
 # worker and ACP runtime base. The pinned commit carries the guest fixes Orka
 # depends on: standard error kept apart, writes over 4 KiB whole, newlines as
-# written, and pipes and $(...) in the shell (a vfork child on its parent's TLS).
+# written, pipes and $(...) in the shell, a command that fails to execute
+# leaving the shell running, and a parent waiting for its child's pid waking
+# when the child exits (xargs or find -exec into a full pipe deadlocked).
 FROM rust:1-bookworm@sha256:114c7a4425406451c2866b6aafe69fe29b1b298832db1277d411ac73c82d04d6 AS hluk
 ARG HLUK_REPO=https://github.com/sozercan/hyperlight-unikraft.git
-ARG HLUK_COMMIT=b588756661c42c102a2183a0d0daaef1c42c8d40
+ARG HLUK_COMMIT=271fac8d4d5e9012b419d09e46499474a8a30a10
 # The default build drives KVM (/dev/kvm). Nodes with only the Microsoft
 # Hypervisor (/dev/mshv) need HLUK_FEATURES=mshv, which hluk leaves off by
 # default because it gives up KVM's fast snapshot restore.

@@ -193,6 +193,29 @@ console.log('javascript-read-only');`,
 	}
 }
 
+// The shell's child processes: xargs and find -exec wait for a cat that
+// fills the 64 KiB pipe, and a command that fails to execute must leave the
+// shell running. Each stopped the guest before the pinned hluk's kernel fixes.
+func TestHyperlightE2ESandboxExecBashChildProcesses(t *testing.T) {
+	fixture := newHyperlightE2ESandboxFixture(t)
+	_, endpoint := fixture.session(t, fixture.config, harnessv2.WorkspaceIntentWrite)
+	code := `i=0
+while [ $i -lt 2000 ]; do echo 0123456789012345678901234567890123456789; i=$((i+1)); done > big-a.txt
+cp big-a.txt big-b.txt
+n=$(find . -name 'big-*.txt' -print0 | xargs -0 cat | wc -c)
+echo "xargs=$((n))"
+n=$(find . -name 'big-*.txt' -exec cat {} + | wc -c)
+echo "find=$((n))"
+missing-command 2>/dev/null || echo missing
+missing-command 2>/dev/null || echo missing
+echo after`
+	result := hyperlightE2ESandboxResult(t, hyperlightE2ESandboxRPC(t, endpoint, hyperlightE2ESandboxCall(t, "bash", code, 60)))
+	if want := "xargs=164000\nfind=164000\nmissing\nmissing\nafter\n"; result.Stdout != want {
+		t.Fatalf("bash child processes: stdout = %q, want %q; stderr = %q", result.Stdout, want, result.Stderr)
+	}
+	fixture.reclaim(t)
+}
+
 // Exercise the production session layout with the same restricted supervisor
 // capabilities as the runtime, not just the fixture's already-protected parent.
 func TestHyperlightE2ESandboxSessionRootIsolation(t *testing.T) {
