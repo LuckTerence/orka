@@ -55,6 +55,11 @@ const (
 	repositoryScanPhaseSuspended = "Suspended"
 
 	repositoryScanReasonInvalidRepository = "InvalidRepository"
+	repositoryScanReasonAgentNotFound     = "AgentNotFound"
+	repositoryScanReasonAgentFound        = "AgentFound"
+	// repositoryScanAgentRecheckInterval paces rechecks of a scan whose
+	// analysis Agent does not exist yet.
+	repositoryScanAgentRecheckInterval = 30 * time.Second
 
 	scanRunPhasePending   = "pending"
 	scanRunPhaseRunning   = "running"
@@ -255,7 +260,19 @@ func (r *RepositoryScanReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 	}
 
+	// A new run's Task needs the analysis Agent. While it is missing, the scan
+	// says so instead of failing Task creation on every reconcile, and
+	// rechecks so it recovers once the Agent exists. Results of earlier runs
+	// are still ingested below.
+	missingAgent, err := r.reconcileAnalysisAgentPresence(ctx, scan)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
 	if scan.Status.LastScanID == "" && scheduleErr == nil {
+		if missingAgent != "" {
+			return r.reportMissingAnalysisAgent(ctx, scan, missingAgent)
+		}
 		if err := r.createScanRun(ctx, scan, "initial", "", ""); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -292,6 +309,9 @@ func (r *RepositoryScanReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{RequeueAfter: time.Until(nextRun)}, nil
 	}
 
+	if missingAgent != "" {
+		return r.reportMissingAnalysisAgent(ctx, scan, missingAgent)
+	}
 	if err := r.createScanRun(ctx, scan, scanModeIncremental, scan.Status.LastProcessedCommit, ""); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -4555,4 +4575,51 @@ func (r *RepositoryScanReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1alpha1.Task{}).
 		Named("repositoryscan").
 		Complete(r)
+}
+
+// reconcileAnalysisAgentPresence returns a message naming the analysis Agent
+// when it does not exist, and clears an earlier AgentNotFound error once it
+// does.
+func (r *RepositoryScanReconciler) reconcileAnalysisAgentPresence(ctx context.Context, scan *corev1alpha1.RepositoryScan) (string, error) {
+	ref := scan.Spec.AnalysisAgentRef
+	namespace := ref.Namespace
+	if namespace == "" {
+		namespace = scan.Namespace
+	}
+	err := r.agentRuntimePolicyReader().Get(ctx, types.NamespacedName{Name: ref.Name, Namespace: namespace}, &corev1alpha1.Agent{})
+	if apierrors.IsNotFound(err) {
+		return fmt.Sprintf("analysis agent %q not found in namespace %q", ref.Name, namespace), nil
+	}
+	if err != nil {
+		return "", err
+	}
+	ready := meta.FindStatusCondition(scan.Status.Conditions, readyConditionType)
+	if scan.Status.Phase == repositoryScanPhaseError && ready != nil && ready.Reason == repositoryScanReasonAgentNotFound {
+		if updateErr := r.updateStatusWithRetry(ctx, scan, func(s *corev1alpha1.RepositoryScan) {
+			s.Status.Phase = repositoryScanPhasePending
+			if s.Status.LastSuccessfulScanAt != nil {
+				s.Status.Phase = repositoryScanPhaseReady
+			}
+			meta.SetStatusCondition(&s.Status.Conditions, readyCondition(s.Generation, metav1.ConditionUnknown, repositoryScanReasonAgentFound, "analysis agent found; waiting for the next scan run"))
+		}); updateErr != nil {
+			return "", updateErr
+		}
+	}
+	return "", nil
+}
+
+// reportMissingAnalysisAgent records Error/AgentNotFound instead of starting a
+// run whose Task could not be created, and rechecks later.
+func (r *RepositoryScanReconciler) reportMissingAnalysisAgent(ctx context.Context, scan *corev1alpha1.RepositoryScan, message string) (ctrl.Result, error) {
+	ready := meta.FindStatusCondition(scan.Status.Conditions, readyConditionType)
+	if scan.Status.Phase != repositoryScanPhaseError || ready == nil || ready.Reason != repositoryScanReasonAgentNotFound ||
+		ready.ObservedGeneration != scan.Generation || ready.Message != message {
+		if err := r.updateStatusWithRetry(ctx, scan, func(s *corev1alpha1.RepositoryScan) {
+			s.Status.Phase = repositoryScanPhaseError
+			meta.SetStatusCondition(&s.Status.Conditions, readyCondition(s.Generation, metav1.ConditionFalse, repositoryScanReasonAgentNotFound, message))
+		}); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+	return ctrl.Result{RequeueAfter: repositoryScanAgentRecheckInterval}, nil
 }

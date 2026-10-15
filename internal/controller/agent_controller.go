@@ -299,6 +299,22 @@ func (r *AgentReconciler) agentsForAgentRuntime(ctx context.Context, obj client.
 	return requests
 }
 
+func (r *AgentReconciler) agentsForProvider(ctx context.Context, obj client.Object) []reconcile.Request {
+	agents := &corev1alpha1.AgentList{}
+	if err := r.List(ctx, agents, client.InNamespace(obj.GetNamespace())); err != nil {
+		log.FromContext(ctx).Error(err, "Failed to list Agents for Provider", "provider", obj.GetName())
+		return nil
+	}
+	var requests []reconcile.Request
+	for i := range agents.Items {
+		agent := &agents.Items[i]
+		if agent.Spec.ProviderRef != nil && agent.Spec.ProviderRef.Name == obj.GetName() {
+			requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(agent)})
+		}
+	}
+	return requests
+}
+
 // validateSecretRef validates the secretRef if set.
 func (r *AgentReconciler) validateSecretRef(ctx context.Context, agent *corev1alpha1.Agent) error {
 	if agent.Spec.SecretRef == nil {
@@ -497,8 +513,18 @@ func (r *AgentReconciler) updateStatus(ctx context.Context, agent *corev1alpha1.
 		}
 	}
 
+	// A failed validation usually waits on something created later (a
+	// Secret, Provider, or AgentRuntime); Secrets are not watched, so recheck.
+	if validationErr != nil {
+		return ctrl.Result{RequeueAfter: agentValidationRecheckInterval}, nil
+	}
+
 	return ctrl.Result{}, nil
 }
+
+// agentValidationRecheckInterval paces rechecks of an Agent whose referenced
+// resources were missing.
+const agentValidationRecheckInterval = 30 * time.Second
 
 // checkTTLExpiry deletes the agent if its TTL has expired and no tasks are active.
 func (r *AgentReconciler) checkTTLExpiry(ctx context.Context, agent *corev1alpha1.Agent, activeTasks int32) (ctrl.Result, bool) {
@@ -554,6 +580,8 @@ func (r *AgentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// exists, so its frequent status updates are ignored.
 		Watches(&corev1alpha1.AgentRuntime{}, handler.EnqueueRequestsFromMapFunc(r.agentsForAgentRuntime),
 			builder.WithPredicates(predicate.Funcs{UpdateFunc: func(event.UpdateEvent) bool { return false }})).
+		// A Provider created or changed after the Agent can change its readiness.
+		Watches(&corev1alpha1.Provider{}, handler.EnqueueRequestsFromMapFunc(r.agentsForProvider)).
 		Named("agent").
 		Complete(r)
 }

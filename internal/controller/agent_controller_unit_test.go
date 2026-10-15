@@ -8,6 +8,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -399,6 +400,26 @@ func TestAgentsForAgentRuntime(t *testing.T) {
 	requests := r.agentsForAgentRuntime(context.Background(), agentRuntime)
 	if len(requests) != 1 || requests[0].Name != "uses-runtime" || requests[0].Namespace != testNS {
 		t.Fatalf("requests = %v, want only %s/uses-runtime", requests, testNS)
+	}
+}
+
+func TestAgentsForProvider(t *testing.T) {
+	providerAgent := func(name, namespace, provider string) *corev1alpha1.Agent {
+		a := baseAgent(name)
+		a.Namespace = namespace
+		a.Spec.ProviderRef = &corev1alpha1.ProviderReference{Name: provider}
+		return a
+	}
+	r := setupAgentReconciler(
+		providerAgent("uses-vekil", testNS, "vekil"),
+		providerAgent("uses-other", testNS, "other"),
+		providerAgent("other-namespace", "other", "vekil"),
+	)
+	provider := &corev1alpha1.Provider{ObjectMeta: metav1.ObjectMeta{Name: "vekil", Namespace: testNS}}
+
+	requests := r.agentsForProvider(context.Background(), provider)
+	if len(requests) != 1 || requests[0].Name != "uses-vekil" || requests[0].Namespace != testNS {
+		t.Fatalf("requests = %v, want only %s/uses-vekil", requests, testNS)
 	}
 }
 
@@ -1423,6 +1444,26 @@ func TestUpdateStatus_NoTTLNoLastUsed(t *testing.T) {
 	}
 	if result.RequeueAfter != 0 {
 		t.Errorf("expected no requeue, got %v", result.RequeueAfter)
+	}
+}
+
+func TestUpdateStatus_RechecksFailedValidation(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	agent := baseAgent("status-missing-secret")
+
+	fc := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(agent).
+		WithStatusSubresource(agent).Build()
+	r := &AgentReconciler{Client: fc, Scheme: scheme}
+
+	// A Secret created later is not watched, so readiness must be rechecked.
+	result, err := r.updateStatus(context.Background(), agent, 0, errors.New(`referenced secret "later" not found`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter != agentValidationRecheckInterval {
+		t.Errorf("RequeueAfter = %v, want %v", result.RequeueAfter, agentValidationRecheckInterval)
 	}
 }
 
