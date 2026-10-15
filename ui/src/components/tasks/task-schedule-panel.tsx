@@ -83,7 +83,7 @@ export function TaskSchedulePanel({ task }: { task: Task }) {
           {isLoading ? (
             <p className="text-muted-foreground">Loading runs…</p>
           ) : error ? (
-            <p className="text-muted-foreground" role="alert">Could not load runs ({error.message}).</p>
+            <p className="text-muted-foreground" role="alert">Could not load runs ({error instanceof Error ? error.message : 'unknown error'}).</p>
           ) : runs.length === 0 ? (
             <p className="text-muted-foreground">No runs retained yet.</p>
           ) : (
