@@ -87,7 +87,8 @@ describe('RepositoryMonitorList', () => {
 
     render(<RepositoryMonitorList />)
 
-    expect(screen.getByText('orka-agents/orka')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'repo-monitor' })).toBeInTheDocument()
+    expect(screen.getByText('orka-agents/orka · main · */15 * * * *')).toBeInTheDocument()
     expect(screen.getByText(/Pending reviews:/)).toHaveTextContent('Pending reviews: 2')
     expect(screen.getByText(/Active repairs:/)).toHaveTextContent('Active repairs: 1')
     expect(screen.getByText('30s ago')).toBeInTheDocument()
@@ -101,8 +102,26 @@ describe('RepositoryMonitorList', () => {
 
     render(<RepositoryMonitorList />)
 
-    expect(screen.getByText('orka-agents/orka')).toBeInTheDocument()
+    expect(screen.getByText('orka-agents/orka · main · manual')).toBeInTheDocument()
     expect(screen.queryByText(/undefined/)).not.toBeInTheDocument()
+  })
+
+  it('titles each card with the monitor name so monitors of one repository stay distinct', () => {
+    mockUseRepositoryMonitors.mockReturnValue({
+      isLoading: false,
+      data: {
+        items: [
+          monitor({ metadata: { name: 'orka-main', namespace: 'default' } }),
+          monitor({ metadata: { name: 'orka-nightly', namespace: 'default' } }),
+        ],
+      },
+    })
+
+    render(<RepositoryMonitorList />)
+
+    expect(screen.getByRole('link', { name: 'orka-main' })).toHaveAttribute('href', '/monitors/$monitorId')
+    expect(screen.getByRole('link', { name: 'orka-nightly' })).toBeInTheDocument()
+    expect(screen.getAllByText('orka-agents/orka · main · */15 * * * *')).toHaveLength(2)
   })
 
   it('names the Ready=False reason on an errored monitor card', () => {

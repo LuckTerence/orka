@@ -45,8 +45,8 @@ export function RepositoryDetail({ repositoryName }: { repositoryName: string })
   return (
     <div className="space-y-4">
       <PageHeader
-        title={repositoryDisplayName(repo.spec, repo.metadata.name)}
-        description={repo.spec.repoURL}
+        title={repo.metadata.name}
+        description={repositoryDisplayName(repo.spec, repo.spec.repoURL)}
         action={
           <>
             <Badge variant={repo.status?.phase === 'Ready' ? 'default' : 'secondary'}>{repo.status?.phase || 'Pending'}</Badge>

@@ -89,10 +89,10 @@ function RepositoryMonitorCard({ monitor }: { monitor: RepositoryMonitor }) {
           <CardTitle className="flex items-center gap-2 text-lg">
             <Activity className="h-5 w-5 text-primary" />
             <Link to="/monitors/$monitorId" params={{ monitorId: monitor.metadata.name }} className="hover:underline">
-              {displayName}
+              {monitor.metadata.name}
             </Link>
           </CardTitle>
-          <p className="text-sm text-muted-foreground">{monitor.spec.branch || 'main'} · {monitor.spec.schedule || 'manual'}</p>
+          <p className="text-sm text-muted-foreground">{displayName} · {monitor.spec.branch || 'main'} · {monitor.spec.schedule || 'manual'}</p>
           {problem && <p className="text-sm font-medium text-status-failed" title={problem.message}>{problem.reason}</p>}
         </div>
         <Badge variant={status?.phase === 'Ready' ? 'default' : 'secondary'}>

@@ -71,6 +71,16 @@ describe('RepositoryDetail', () => {
     expect(alert).toHaveTextContent('repoURL must be a credential-free GitHub repository root')
   })
 
+  it('titles the page and browser tab with the RepositoryScan name, with the repository below', async () => {
+    serveRepository(repository({ phase: 'Ready' }))
+
+    render(<RepositoryDetail repositoryName="payments-main" />)
+
+    expect(await screen.findByRole('heading', { level: 1, name: 'payments-main' })).toBeInTheDocument()
+    expect(screen.getByText('example/payments')).toBeInTheDocument()
+    expect(document.title).toBe('payments-main · Orka')
+  })
+
   it('shows no alert for a ready repository', async () => {
     serveRepository(repository({
       phase: 'Ready',

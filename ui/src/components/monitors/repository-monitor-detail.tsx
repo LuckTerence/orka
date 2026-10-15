@@ -69,8 +69,8 @@ export function RepositoryMonitorDetail({ monitorName }: { monitorName: string }
   return (
     <div className="space-y-4">
       <PageHeader
-        title={displayName}
-        description={monitor.spec.repoURL}
+        title={monitor.metadata.name}
+        description={displayName}
         action={
           <>
             <Badge variant={status?.phase === 'Ready' ? 'default' : 'secondary'}>{status?.phase || 'Pending'}</Badge>

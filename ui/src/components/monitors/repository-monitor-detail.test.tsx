@@ -62,6 +62,14 @@ describe('RepositoryMonitorDetail', () => {
     expect(alert).toHaveTextContent('repoURL must be a GitHub repository root')
   })
 
+  it('titles the page and browser tab with the monitor name, with the repository below', () => {
+    render(<RepositoryMonitorDetail monitorName="repo-monitor" />)
+
+    expect(screen.getByRole('heading', { level: 1, name: 'repo-monitor' })).toBeInTheDocument()
+    expect(screen.getByText('orka-agents/orka')).toBeInTheDocument()
+    expect(document.title).toBe('repo-monitor · Orka')
+  })
+
   it('shows no alert for a ready monitor', () => {
     render(<RepositoryMonitorDetail monitorName="repo-monitor" />)
 
