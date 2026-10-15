@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"os"
 	"os/exec"
@@ -236,6 +237,9 @@ var _ = Describe("Workspace Provider Lifecycle", Ordered, Label("workspace-provi
 		// checkpoints reports whether the provider advertises export and restore.
 		checkpoints bool
 		checkpoint  workspacev1alpha1.ExecutionWorkspaceCheckpoint
+		// writeWorkspace returns a write-intent workspace on the fake forge
+		// that publishes to pushBranch, opening a pull request when asked.
+		writeWorkspace func(pushBranch string, createPR bool) map[string]any
 		// Every workspace UID the specs bound, for the final leftover check.
 		workspaceUIDs []string
 	)
@@ -243,6 +247,15 @@ var _ = Describe("Workspace Provider Lifecycle", Ordered, Label("workspace-provi
 	name := func(prefix string) string { return prefix + "-" + runID }
 	session := func(prefix string) string { return name(prefix + "-s") }
 	marker := func(check string) string { return "[e2e:wsp-" + check + "]" }
+	// dataTask runs in the data Session. Read-intent workspaces are read-only
+	// to the agent, and a session workspace freezes the runtime profile, which
+	// includes the intent, so every Task in this Session has write intent and
+	// publishes to its own branch.
+	dataTask := func(task string, create bool, prompt string) map[string]any {
+		manifest := wspTask(task, agent, suspend, session("data"), create, prompt, "15m", nil)
+		manifest["spec"].(map[string]any)["workspace"] = writeWorkspace("orka/e2e-"+task, false)
+		return manifest
+	}
 
 	BeforeAll(func() {
 		switch os.Getenv(workspaceProviderEnv) {
@@ -279,6 +292,31 @@ var _ = Describe("Workspace Provider Lifecycle", Ordered, Label("workspace-provi
 		caPEM := deployFakeForge()
 		DeferCleanup(deleteE2EObjects, "networkpolicy", fakeForgeNetworkPolicy)
 		trustFakeForgeInPublisher(caPEM)
+		repoURL := "https://" + fakeForgeHost() + "/" + fakeForgeRepository + ".git"
+		credentials := map[string]any{}
+		for _, role := range fakeforge.Roles {
+			DeferCleanup(deleteE2EObjects, "secret", fakeForgeCredential(role))
+			Expect(createK8sSecret(fakeForgeCredential(role), namespace,
+				map[string]string{"token": fakeForgeToken(role)})).To(Succeed())
+			credentials[role] = map[string]any{"name": fakeForgeCredential(role), "key": "token"}
+		}
+		writeWorkspace = func(pushBranch string, createPR bool) map[string]any {
+			workspace := map[string]any{
+				"intent": "write", "gitRepo": repoURL, "branch": "main",
+				"readCredentialRef":            credentials[fakeforge.RoleRead],
+				"publicationGitRepo":           repoURL,
+				"publicationReadCredentialRef": credentials[fakeforge.RolePublicationRead],
+				"publicationCredentialRef":     credentials[fakeforge.RolePush],
+				"pushBranch":                   pushBranch,
+			}
+			if createPR {
+				maps.Copy(workspace, map[string]any{
+					"forgeCredentialRef": credentials[fakeforge.RoleForge], "prBaseBranch": "main",
+					"prTitle": "E2E workspace provider publication", "createPR": true,
+				})
+			}
+			return workspace
+		}
 
 		agent = name("wsp-agent")
 		Expect(applyManifestJSON(runtimeAgentManifest(agent, "codex", runtimeMatrixMockCodexModel, 4, nil))).To(Succeed())
@@ -309,26 +347,9 @@ var _ = Describe("Workspace Provider Lifecycle", Ordered, Label("workspace-provi
 
 	It("clones, edits, and publishes a branch with a pull request from the workspace", func() {
 		const pushBranch, file = "orka/e2e-wsp", "WSP_PUBLISH.md"
-		repoURL := "https://" + fakeForgeHost() + "/" + fakeForgeRepository + ".git"
-		credentials := map[string]any{}
-		for _, role := range fakeforge.Roles {
-			DeferCleanup(deleteE2EObjects, "secret", fakeForgeCredential(role))
-			Expect(createK8sSecret(fakeForgeCredential(role), namespace,
-				map[string]string{"token": fakeForgeToken(role)})).To(Succeed())
-			credentials[role] = map[string]any{"name": fakeForgeCredential(role), "key": "token"}
-		}
 		task := name("wsp-publish")
 		manifest := wspTask(task, agent, deleting, "", false, "Create "+file+", then report it. "+marker("publish"), "15m", nil)
-		manifest["spec"].(map[string]any)["workspace"] = map[string]any{
-			"intent": "write", "gitRepo": repoURL, "branch": "main",
-			"readCredentialRef":            credentials[fakeforge.RoleRead],
-			"publicationGitRepo":           repoURL,
-			"publicationReadCredentialRef": credentials[fakeforge.RolePublicationRead],
-			"publicationCredentialRef":     credentials[fakeforge.RolePush],
-			"forgeCredentialRef":           credentials[fakeforge.RoleForge],
-			"pushBranch":                   pushBranch, "prBaseBranch": "main",
-			"prTitle": "E2E workspace provider publication", "createPR": true,
-		}
+		manifest["spec"].(map[string]any)["workspace"] = writeWorkspace(pushBranch, true)
 		Expect(applyManifestJSON(manifest)).To(Succeed())
 		ws := waitTaskWorkspace(task, deleting, backend)
 		workspaceUIDs = append(workspaceUIDs, ws.uid)
@@ -362,24 +383,22 @@ var _ = Describe("Workspace Provider Lifecycle", Ordered, Label("workspace-provi
 
 	It("keeps workspace data across suspend and cold resume", func() {
 		write := name("wsp-write")
-		Expect(applyManifestJSON(wspTask(write, agent, suspend, session("data"), true,
-			"Write the durable workspace file. "+marker("write"), "15m", nil))).To(Succeed())
+		Expect(applyManifestJSON(dataTask(write, true, "Write the durable workspace file. "+marker("write")))).To(Succeed())
 		dataWS = waitTaskWorkspace(write, suspend, backend)
 		workspaceUIDs = append(workspaceUIDs, dataWS.uid)
 		first := waitTaskExecution(write, corev1alpha1.TaskExecutionStateSucceeded)
-		// Without a repository the workspace has read intent, so delivery flags
-		// the written file; the file itself is what this check preserves.
 		Eventually(func(g Gomega) {
 			delivery := fetchTaskForACPAssertion(g, write).Status.Delivery
 			g.Expect(delivery).NotTo(BeNil())
-			g.Expect(delivery.State).To(Equal(corev1alpha1.TaskDeliveryStateReadOnlyWorkspaceModified))
+			g.Expect(delivery.Outcome).To(Equal(corev1alpha1.TaskDeliveryOutcomeVerifiedExact))
 		}, 2*time.Minute, 2*time.Second).Should(Succeed())
+		Expect(fakeForgeFile("orka/e2e-"+write, "orka-wsp-data")).To(Equal("ORKA_WSP_DURABLE_DATA\n"))
 		waitWorkspaceState(dataWS.name, workspacev1alpha1.ExecutionWorkspaceStateSuspended)
 		waitRuntimePoolStopped(dataWS.pool)
 
 		read := name("wsp-resume")
-		Expect(applyManifestJSON(wspTask(read, agent, suspend, session("data"), false,
-			"Read the durable workspace file. "+marker("resume"), "15m", nil))).To(Succeed())
+		Expect(applyManifestJSON(dataTask(read, false,
+			"Read the durable workspace file. "+marker("resume")))).To(Succeed())
 		second := waitTaskExecution(read, corev1alpha1.TaskExecutionStateSucceeded)
 		Expect(fetchTaskResultViaAPI(apiBaseURL, token, read)).To(ContainSubstring("ORKA_WSP_READ_OK"))
 		Expect(waitTaskWorkspace(read, suspend, backend).uid).To(Equal(dataWS.uid), "the Session must resume its workspace")
@@ -406,8 +425,8 @@ var _ = Describe("Workspace Provider Lifecycle", Ordered, Label("workspace-provi
 
 	It("finishes a suspension across a provider restart", func() {
 		task := name("wsp-provider-restart")
-		Expect(applyManifestJSON(wspTask(task, agent, suspend, session("data"), false,
-			"Read the durable workspace file. "+marker("provider-restart"), "15m", nil))).To(Succeed())
+		Expect(applyManifestJSON(dataTask(task, false,
+			"Read the durable workspace file. "+marker("provider-restart")))).To(Succeed())
 		waitTaskExecution(task, corev1alpha1.TaskExecutionStateSucceeded)
 		Eventually(func(g Gomega) {
 			var workspace workspacev1alpha1.ExecutionWorkspace
@@ -422,8 +441,8 @@ var _ = Describe("Workspace Provider Lifecycle", Ordered, Label("workspace-provi
 		}
 		waitWorkspaceState(dataWS.name, workspacev1alpha1.ExecutionWorkspaceStateSuspended)
 		next := name("wsp-after-provider-restart")
-		Expect(applyManifestJSON(wspTask(next, agent, suspend, session("data"), false,
-			"Read the durable workspace file. "+marker("after-provider-restart"), "15m", nil))).To(Succeed())
+		Expect(applyManifestJSON(dataTask(next, false,
+			"Read the durable workspace file. "+marker("after-provider-restart")))).To(Succeed())
 		waitTaskExecution(next, corev1alpha1.TaskExecutionStateSucceeded)
 		Expect(fetchTaskResultViaAPI(apiBaseURL, token, next)).To(ContainSubstring("ORKA_WSP_READ_OK"))
 		waitWorkspaceState(dataWS.name, workspacev1alpha1.ExecutionWorkspaceStateSuspended)
@@ -462,8 +481,8 @@ var _ = Describe("Workspace Provider Lifecycle", Ordered, Label("workspace-provi
 
 	It("settles a held prompt once across a controller restart and continues the Session", func() {
 		task := name("wsp-restart")
-		Expect(applyManifestJSON(wspTask(task, agent, suspend, session("data"), false,
-			"Wait for the model. "+marker("restart"), "15m", nil))).To(Succeed())
+		Expect(applyManifestJSON(dataTask(task, false,
+			"Wait for the model. "+marker("restart")))).To(Succeed())
 		waitHeldPrompt(task, marker("restart"))
 
 		By("restarting the controller while the prompt is held")
@@ -480,16 +499,16 @@ var _ = Describe("Workspace Provider Lifecycle", Ordered, Label("workspace-provi
 		waitTaskExecution(task, terminalExecutionStates...)
 		expectServedOnce(marker("restart"))
 		next := name("wsp-after-restart")
-		Expect(applyManifestJSON(wspTask(next, agent, suspend, session("data"), false,
-			"Read the durable workspace file. "+marker("after-restart"), "15m", nil))).To(Succeed())
+		Expect(applyManifestJSON(dataTask(next, false,
+			"Read the durable workspace file. "+marker("after-restart")))).To(Succeed())
 		waitTaskExecution(next, corev1alpha1.TaskExecutionStateSucceeded)
 		Expect(fetchTaskResultViaAPI(apiBaseURL, token, next)).To(ContainSubstring("ORKA_WSP_READ_OK"))
 	})
 
 	It("settles a prompt whose runtime instance is lost and fails its workspace", func() {
 		task := name("wsp-lost")
-		Expect(applyManifestJSON(wspTask(task, agent, suspend, session("data"), false,
-			"Wait for the model. "+marker("lost"), "15m", nil))).To(Succeed())
+		Expect(applyManifestJSON(dataTask(task, false,
+			"Wait for the model. "+marker("lost")))).To(Succeed())
 		waitHeldPrompt(task, marker("lost"))
 		lost := time.Now()
 		backend.loseInstance(dataWS)
@@ -508,8 +527,8 @@ var _ = Describe("Workspace Provider Lifecycle", Ordered, Label("workspace-provi
 		if !checkpoints {
 			By("failing the Session's next Task instead of leaving it pending")
 			next := name("wsp-after-loss")
-			Expect(applyManifestJSON(wspTask(next, agent, suspend, session("data"), false,
-				"Read the durable workspace file. "+marker("after-loss"), "15m", nil))).To(Succeed())
+			Expect(applyManifestJSON(dataTask(next, false,
+				"Read the durable workspace file. "+marker("after-loss")))).To(Succeed())
 			failed := waitTaskExecution(next, corev1alpha1.TaskExecutionStateFailed)
 			Expect(failed.Status.Execution.Reason).To(Equal(corev1alpha1.TaskExecutionReason("WorkspaceFailed")))
 			return
