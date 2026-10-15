@@ -336,6 +336,25 @@ describe('TaskList paging and access', () => {
     expect(screen.getByText(`${maxListWalkPages} loaded · more available`)).toBeInTheDocument()
   })
 
+  it('truncates a long name on narrow screens and keeps the full name in its title', async () => {
+    const name = 'a-very-long-task-name-that-would-push-phase-and-delete-off-a-phone-screen-x'
+    server.use(
+      http.get('/api/v1/tasks', () =>
+        HttpResponse.json({
+          items: [{ metadata: { name, namespace: 'default', uid: 'long' }, spec: { type: 'container' }, status: { phase: 'Succeeded' } }],
+          metadata: {},
+        }),
+      ),
+    )
+    render(<TaskList />)
+    const link = await screen.findByRole('link', { name })
+    expect(link).toHaveAttribute('title', name)
+    expect(link).toHaveClass('block', 'truncate')
+    expect(link.closest('td')).toHaveClass('w-full', 'max-w-0', 'sm:w-auto', 'sm:max-w-none')
+    expect(screen.getByRole('columnheader', { name: 'Age' })).toHaveClass('hidden', 'sm:table-cell')
+    expect(screen.getByRole('button', { name: `Delete task ${name}` }).closest('td')).not.toHaveClass('hidden')
+  })
+
   it('lists loaded tasks newest first and keeps Name and Phase visible on narrow screens', async () => {
     server.use(
       http.get('/api/v1/tasks', () =>

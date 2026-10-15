@@ -112,12 +112,13 @@ export function TaskList() {
           <TableHeader>
             <TableRow>
               <TableHead>Name</TableHead>
-              {/* Type and Namespace give way on narrow screens so Name and
-                  Phase stay visible; the list is namespace-scoped anyway. */}
+              {/* Type, Namespace, and Age give way on narrow screens so Name,
+                  Phase, and Delete fit without sideways scrolling; the list is
+                  namespace-scoped and newest first anyway. */}
               <TableHead className="hidden sm:table-cell">Type</TableHead>
               <TableHead>Phase</TableHead>
               <TableHead className="hidden md:table-cell">Namespace</TableHead>
-              <TableHead>Age</TableHead>
+              <TableHead className="hidden sm:table-cell">Age</TableHead>
               <TableHead className="w-12"></TableHead>
             </TableRow>
           </TableHeader>
@@ -161,8 +162,16 @@ export function TaskList() {
                     navigate({ to: '/tasks/$taskId', params: { taskId: task.metadata.name } })
                   }}
                 >
-                  <TableCell>
-                    <Link to="/tasks/$taskId" params={{ taskId: task.metadata.name }} className="font-mono text-sm font-medium hover:underline">
+                  {/* On narrow screens the name takes only the width the
+                      other columns leave and truncates; the full name is in
+                      its title. */}
+                  <TableCell className="w-full max-w-0 sm:w-auto sm:max-w-none">
+                    <Link
+                      to="/tasks/$taskId"
+                      params={{ taskId: task.metadata.name }}
+                      title={task.metadata.name}
+                      className="block truncate font-mono text-sm font-medium hover:underline"
+                    >
                       {task.metadata.name}
                     </Link>
                   </TableCell>
@@ -174,7 +183,7 @@ export function TaskList() {
                     </span>
                   </TableCell>
                   <TableCell className="hidden md:table-cell">{task.metadata.namespace}</TableCell>
-                  <TableCell>{timeAgo(task.metadata.creationTimestamp, { compact: true })}</TableCell>
+                  <TableCell className="hidden sm:table-cell">{timeAgo(task.metadata.creationTimestamp, { compact: true })}</TableCell>
                   <TableCell>
                     <Button
                       variant="ghost"
