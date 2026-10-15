@@ -1,6 +1,7 @@
 import type { Task, TaskPhase } from '@/schemas/task'
 import type { TaskTrace, Approval } from '@/schemas/execution-event'
 import type { ArtifactMetadata } from '@/schemas/artifact'
+import { podWaitingMessage } from '@/components/tasks/task-state'
 
 /**
  * Derived runtime health checks — NOT a formal evaluation. These summarize
@@ -42,12 +43,20 @@ export function deriveRuntimeChecks({ task, trace, approvals, artifacts }: Valid
 
   // A Failed or Cancelled task did reach a terminal state, so that check
   // passes and the outcome is its own check. A task still in progress is
-  // informational, not something that needs attention.
+  // informational, not something that needs attention, unless its Pod is
+  // stuck waiting (an image pull or config failure): that needs a person.
+  const podWaiting = podWaitingMessage(task)
   checks.push({
     id: 'terminal',
     label: 'Reached terminal state',
-    status: isTerminal(phase) ? 'pass' : phase ? 'info' : 'unknown',
-    reason: !phase ? 'No phase yet' : isTerminal(phase) ? `Phase ${phase}` : `Phase ${phase}; still in progress`,
+    status: isTerminal(phase) ? 'pass' : podWaiting ? 'warn' : phase ? 'info' : 'unknown',
+    reason: !phase
+      ? 'No phase yet'
+      : isTerminal(phase)
+        ? `Phase ${phase}`
+        : podWaiting
+          ? `Phase ${phase}; ${podWaiting}`
+          : `Phase ${phase}; still in progress`,
   })
   // The authoritative phase drives the outcome: Failed/Cancelled must
   // fail/warn regardless of trace contents, so a terminal failure can't read

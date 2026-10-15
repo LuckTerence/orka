@@ -96,6 +96,16 @@ describe('runtime-validation', () => {
     expect(rollupStatus(checks)).toBe('pass')
   })
 
+  it('a running task whose Pod is stuck waiting needs attention instead of passing', () => {
+    const message = 'pod waiting: ImagePullBackOff - Back-off pulling image "ghcr.io/example/missing:v1"'
+    const checks = deriveRuntimeChecks({
+      task: { ...base, status: { phase: 'Running', message } },
+      trace: trace(), approvals: [], artifacts: [],
+    })
+    expect(checks.find((c) => c.id === 'terminal')).toMatchObject({ status: 'warn', reason: `Phase Running; ${message}` })
+    expect(rollupStatus(checks)).toBe('warn')
+  })
+
   it('a succeeded task without artifacts still rolls up to pass', () => {
     const checks = deriveRuntimeChecks({
       task: { ...base, status: { phase: 'Succeeded', resultRef: { available: true } } },

@@ -78,6 +78,14 @@ describe('ValidationSummary', () => {
     expect(screen.getByText('Phase Running; still in progress')).toBeInTheDocument()
   })
 
+  it('flags a running task stuck on an image pull instead of reading all-pass', () => {
+    const message = 'pod waiting: ImagePullBackOff - Back-off pulling image "ghcr.io/example/missing:v1"'
+    render(<ValidationSummary task={task('Running', { message })} trace={trace()} approvals={[]} />)
+    expect(screen.getByText('Derived checks need attention')).toBeInTheDocument()
+    expect(screen.queryByText('All derived checks pass')).not.toBeInTheDocument()
+    expect(screen.getByText(`Phase Running; ${message}`)).toBeInTheDocument()
+  })
+
   it('rolls up to fail when the trace has errors', () => {
     render(
       <ValidationSummary
