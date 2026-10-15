@@ -37,6 +37,11 @@ describe('KanbanCard', () => {
     expect(screen.getByText('container')).toBeInTheDocument()
   })
 
+  it('exposes the full name as a tooltip when it is truncated', () => {
+    render(<KanbanCard task={makeTask()} />)
+    expect(screen.getByText('test-task')).toHaveAttribute('title', 'test-task')
+  })
+
   it('renders namespace', () => {
     render(<KanbanCard task={makeTask({ metadata: { name: 'ns-task', namespace: 'staging', uid: 'u2' } })} />)
     expect(screen.getByText('staging')).toBeInTheDocument()

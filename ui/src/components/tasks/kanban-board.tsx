@@ -1,5 +1,5 @@
 import { Skeleton } from '@/components/ui/skeleton'
-import { useTaskList } from '@/hooks/use-tasks'
+import { useTaskListAll } from '@/hooks/use-tasks'
 import { phaseStyle } from '@/lib/task-status'
 import { cn } from '@/lib/utils'
 import { PageHeader } from '@/components/layout/page-header'
@@ -34,13 +34,22 @@ function groupByPhase(tasks: Task[]): Record<string, Task[]> {
 }
 
 export function KanbanBoard() {
-  const { data, isLoading } = useTaskList('100', 5000)
+  // Walk every page up to the shared summary cap (like the Dashboard) so
+  // column counts cover the namespace instead of the first 100 names; the
+  // walk is heavier than one page, so it polls at the Live view's cadence.
+  const { data, isLoading } = useTaskListAll('100', 10000)
   const tasks = data?.items ?? []
+  const truncated = Boolean(data?.truncated)
   const grouped = groupByPhase(tasks)
 
   return (
     <div className="space-y-4">
       <PageHeader title="Board" description="Kanban view of task execution" />
+      {truncated && (
+        <p className="text-sm text-muted-foreground" role="status">
+          Column counts use {tasks.length.toLocaleString()} loaded tasks in resource-key order. More tasks exist.
+        </p>
+      )}
       <div className="flex gap-4 overflow-x-auto pb-4">
         {columns.map(({ phase, label }) => {
           const style = phaseStyle(phase)

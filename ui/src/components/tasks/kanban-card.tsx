@@ -31,7 +31,7 @@ export function KanbanCard({ task }: { task: Task }) {
           {/* Phase is encoded by the left-rail color; surface it to AT too. */}
           <span className="sr-only">Phase: {phase.label}</span>
           <div className="flex items-center justify-between gap-2">
-            <span className="font-semibold text-sm truncate">{task.metadata.name}</span>
+            <span className="font-semibold text-sm truncate" title={task.metadata.name}>{task.metadata.name}</span>
             <Badge className={type.tintClass} variant="secondary">
               <TypeIcon aria-hidden="true" />
               {type.label}

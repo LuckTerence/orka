@@ -198,4 +198,43 @@ describe('KanbanBoard', () => {
       expect(header.querySelector('[data-testid="live-indicator"]')).toBeNull()
     }
   })
+
+  it('follows continue tokens so tasks past the first page are counted', async () => {
+    server.use(
+      http.get('/api/v1/tasks', ({ request }) => {
+        const url = new URL(request.url)
+        if (url.searchParams.get('continue') === 'page-2') {
+          return HttpResponse.json({
+            items: [{ metadata: { name: 'second-page-task', namespace: 'default', uid: 'p2' }, spec: { type: 'ai' }, status: { phase: 'Running' } }],
+            metadata: {},
+          })
+        }
+        return HttpResponse.json({
+          items: [{ metadata: { name: 'first-page-task', namespace: 'default', uid: 'p1' }, spec: { type: 'ai' }, status: { phase: 'Running' } }],
+          metadata: { continue: 'page-2' },
+        })
+      }),
+    )
+    render(<KanbanBoard />)
+    expect(await screen.findByText('second-page-task')).toBeInTheDocument()
+    expect(screen.getByText('first-page-task')).toBeInTheDocument()
+    const chip = screen.getByText('Running').parentElement!.querySelector('span:last-child')!
+    expect(chip).toHaveTextContent('2')
+    expect(screen.queryByText(/More tasks exist/)).not.toBeInTheDocument()
+  })
+
+  it('says the counts are partial when the bounded walk stops early', async () => {
+    let page = 0
+    server.use(
+      http.get('/api/v1/tasks', () => {
+        page += 1
+        return HttpResponse.json({
+          items: [{ metadata: { name: `task-${page}`, namespace: 'default', uid: `u-${page}` }, spec: { type: 'ai' }, status: { phase: 'Succeeded' } }],
+          metadata: { continue: `page-${page + 1}` },
+        })
+      }),
+    )
+    render(<KanbanBoard />)
+    expect(await screen.findByText('Column counts use 20 loaded tasks in resource-key order. More tasks exist.')).toBeInTheDocument()
+  })
 })
