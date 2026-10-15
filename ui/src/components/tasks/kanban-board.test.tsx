@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { render, screen, waitFor } from '@/test/test-utils'
 import { http, HttpResponse } from 'msw'
+import { render as rawRender } from '@testing-library/react'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { server } from '@/test/mocks/server'
 
 vi.mock('zustand/middleware', () => ({
@@ -223,6 +225,33 @@ describe('KanbanBoard', () => {
     const chip = screen.getByText('Running').parentElement!.querySelector('span:last-child')!
     expect(chip).toHaveTextContent('2')
     expect(screen.queryByText(/More tasks exist/)).not.toBeInTheDocument()
+  })
+
+  it('shows a not-authorized panel instead of empty columns on 403', async () => {
+    server.use(
+      http.get('/api/v1/tasks', () =>
+        HttpResponse.json({ error: { code: 403, message: 'not authorized' } }, { status: 403 }),
+      ),
+    )
+    render(<KanbanBoard />)
+    expect(await screen.findByText('Not authorized to view tasks')).toBeInTheDocument()
+    expect(screen.getByRole('alert')).toHaveTextContent('not authorized')
+    expect(screen.queryByText('No pending tasks')).not.toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Pending' })).not.toBeInTheDocument()
+  })
+
+  it('shows the server error instead of empty columns when the walk fails', async () => {
+    server.use(
+      http.get('/api/v1/tasks', () =>
+        HttpResponse.json({ error: { code: 500, message: 'etcd unavailable' } }, { status: 500 }),
+      ),
+    )
+    // The hook retries server errors; skip the backoff so the error settles.
+    const client = new QueryClient({ defaultOptions: { queries: { retryDelay: 0, gcTime: 0 } } })
+    rawRender(<QueryClientProvider client={client}><KanbanBoard /></QueryClientProvider>)
+    expect(await screen.findByText('Could not load tasks')).toBeInTheDocument()
+    expect(screen.getByText('etcd unavailable')).toBeInTheDocument()
+    expect(screen.queryByText('No pending tasks')).not.toBeInTheDocument()
   })
 
   it('says the counts are partial when the bounded walk stops early', async () => {

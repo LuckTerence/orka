@@ -6,9 +6,10 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { SonarPing } from '@/components/ui/sonar-ping'
 import { EmptyState } from '@/components/ui/empty-state'
+import { ListAccessError } from '@/components/ui/list-access-error'
 import { PageHeader } from '@/components/layout/page-header'
 import { useTaskListAll, useTaskEvents } from '@/hooks/use-tasks'
-import { ApiError } from '@/lib/api-client'
+import { ApiError, isForbiddenError } from '@/lib/api-client'
 import { useUIStore } from '@/stores/ui'
 import { isLiveTask, selectActiveTask, type LatestActivityByTask } from '@/lib/runtime-activity'
 import type { Task } from '@/schemas/task'
@@ -113,9 +114,15 @@ export function RuntimeCanvas() {
         </div>
       ) : taskListError ? (
         <Card>
-          <CardContent className="flex flex-col items-center gap-3 py-12">
-            <p className="text-sm font-medium text-destructive" role="alert">Failed to load tasks</p>
-            <Button variant="outline" size="sm" onClick={() => refetchTasks()}>Retry</Button>
+          <CardContent>
+            {/* A 403 stays denied for this token, so it gets no Retry. */}
+            <ListAccessError
+              error={taskListError}
+              resource="tasks"
+              action={isForbiddenError(taskListError)
+                ? undefined
+                : <Button variant="outline" size="sm" onClick={() => refetchTasks()}>Retry</Button>}
+            />
           </CardContent>
         </Card>
       ) : tasks.length === 0 ? (

@@ -45,6 +45,32 @@ describe('RuntimeCanvas', () => {
     expect(screen.getByText(/only the selected namespace/)).toBeInTheDocument()
   })
 
+  it('says not authorized, without a Retry, when the task list is forbidden', async () => {
+    server.use(http.get('/api/v1/tasks', () =>
+      HttpResponse.json({ error: { code: 403, message: 'not authorized' } }, { status: 403 })))
+    render(<RuntimeCanvas />)
+    expect(await screen.findByText('Not authorized to view tasks')).toBeInTheDocument()
+    expect(screen.getByRole('alert')).toHaveTextContent('not authorized')
+    expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument()
+    expect(screen.queryByText(/No tasks in namespace/)).not.toBeInTheDocument()
+  })
+
+  it('shows the server error with a Retry when the task list fails', async () => {
+    let calls = 0
+    server.use(http.get('/api/v1/tasks', () => {
+      calls += 1
+      return HttpResponse.json({ error: { code: 500, message: 'etcd unavailable' } }, { status: 500 })
+    }))
+    // The hook retries server errors; skip the backoff so the error settles.
+    const client = new QueryClient({ defaultOptions: { queries: { retryDelay: 0, gcTime: 0 } } })
+    rawRender(<QueryClientProvider client={client}><RuntimeCanvas /></QueryClientProvider>)
+    expect(await screen.findByText('Could not load tasks')).toBeInTheDocument()
+    expect(screen.getByText('etcd unavailable')).toBeInTheDocument()
+    const before = calls
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Retry' }))
+    await waitFor(() => expect(calls).toBeGreaterThan(before))
+  })
+
   it('renders spotlight + roster for running tasks', async () => {
     server.use(http.get('/api/v1/tasks', () => HttpResponse.json({
       items: [running('r1'), running('r2')], metadata: {},
