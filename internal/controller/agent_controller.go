@@ -299,16 +299,27 @@ func (r *AgentReconciler) agentsForAgentRuntime(ctx context.Context, obj client.
 	return requests
 }
 
+// agentsForProvider maps a Provider to the Agents that reference it. A
+// providerRef may name another namespace, so Agents in every watched namespace
+// are matched on the reference's effective namespace.
 func (r *AgentReconciler) agentsForProvider(ctx context.Context, obj client.Object) []reconcile.Request {
 	agents := &corev1alpha1.AgentList{}
-	if err := r.List(ctx, agents, client.InNamespace(obj.GetNamespace())); err != nil {
+	if err := r.List(ctx, agents); err != nil {
 		log.FromContext(ctx).Error(err, "Failed to list Agents for Provider", "provider", obj.GetName())
 		return nil
 	}
 	var requests []reconcile.Request
 	for i := range agents.Items {
 		agent := &agents.Items[i]
-		if agent.Spec.ProviderRef != nil && agent.Spec.ProviderRef.Name == obj.GetName() {
+		ref := agent.Spec.ProviderRef
+		if ref == nil || ref.Name != obj.GetName() {
+			continue
+		}
+		namespace := ref.Namespace
+		if namespace == "" {
+			namespace = agent.Namespace
+		}
+		if namespace == obj.GetNamespace() {
 			requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(agent)})
 		}
 	}

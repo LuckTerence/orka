@@ -410,16 +410,27 @@ func TestAgentsForProvider(t *testing.T) {
 		a.Spec.ProviderRef = &corev1alpha1.ProviderReference{Name: provider}
 		return a
 	}
+	crossNamespace := providerAgent("cross-namespace", "other", "vekil")
+	crossNamespace.Spec.ProviderRef.Namespace = testNS
+	pointsElsewhere := providerAgent("points-elsewhere", testNS, "vekil")
+	pointsElsewhere.Spec.ProviderRef.Namespace = "other"
 	r := setupAgentReconciler(
 		providerAgent("uses-vekil", testNS, "vekil"),
 		providerAgent("uses-other", testNS, "other"),
 		providerAgent("other-namespace", "other", "vekil"),
+		crossNamespace,
+		pointsElsewhere,
 	)
 	provider := &corev1alpha1.Provider{ObjectMeta: metav1.ObjectMeta{Name: "vekil", Namespace: testNS}}
 
 	requests := r.agentsForProvider(context.Background(), provider)
-	if len(requests) != 1 || requests[0].Name != "uses-vekil" || requests[0].Namespace != testNS {
-		t.Fatalf("requests = %v, want only %s/uses-vekil", requests, testNS)
+	got := map[string]bool{}
+	for _, request := range requests {
+		got[request.Namespace+"/"+request.Name] = true
+	}
+	want := map[string]bool{testNS + "/uses-vekil": true, "other/cross-namespace": true}
+	if len(got) != len(want) || !got[testNS+"/uses-vekil"] || !got["other/cross-namespace"] {
+		t.Fatalf("requests = %v, want %v (matched on the reference's effective namespace)", requests, want)
 	}
 }
 
