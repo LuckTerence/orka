@@ -260,6 +260,26 @@ func (m *SessionManager) AppendMessages(ctx context.Context, task *corev1alpha1.
 	return fenced.AppendMessagesWithLock(ctx, task.Namespace, task.Spec.SessionRef.Name, task.Name, string(task.UID), messages)
 }
 
+// RecordTokenUsage adds a finished Task's consumed tokens to its Session's
+// cumulative counters. The write is fenced to the Task that still holds the
+// Session, so a repeated completion, a takeover, or an ACP turn whose
+// finalization already released the Session records nothing.
+func (m *SessionManager) RecordTokenUsage(ctx context.Context, task *corev1alpha1.Task, inputTokens, outputTokens int64) error {
+	if task == nil || task.Spec.SessionRef == nil || (inputTokens == 0 && outputTokens == 0) {
+		return nil
+	}
+	fenced, ok := m.store.(store.FencedSessionWriteStore)
+	if !ok {
+		return fmt.Errorf("session store does not support fenced token writes")
+	}
+	err := fenced.UpdateTokenCountsWithLock(ctx, task.Namespace, task.Spec.SessionRef.Name, task.Name, string(task.UID),
+		int(inputTokens), int(outputTokens))
+	if errors.Is(err, store.ErrConflict) {
+		return nil
+	}
+	return err
+}
+
 // LoadTranscript loads the session transcript for a task.
 func (m *SessionManager) LoadTranscript(ctx context.Context, task *corev1alpha1.Task) ([]store.SessionMessage, error) {
 	if task == nil {

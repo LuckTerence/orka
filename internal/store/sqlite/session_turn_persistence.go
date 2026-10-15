@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/usage"
 )
 
 var _ store.SessionTurnPersistenceStore = (*Store)(nil)
@@ -190,10 +191,20 @@ func (s *Store) CommitSessionTurnFinalization(ctx context.Context, request store
 }
 
 func finalizeSessionTranscriptTx(ctx context.Context, tx *sql.Tx, namespace, name, taskUID string, messageCountDelta int, finalizedAt time.Time) error {
+	// A turn is finalized exactly once, so its Task's usage is added to the
+	// Session's cumulative counters once. Totals beyond the exact reporting
+	// range stay out of the counters rather than block finalization.
+	inputTokens, outputTokens, err := taskTokenUsage(ctx, tx, namespace, taskUID)
+	if errors.Is(err, usage.ErrTotalsOutOfRange) {
+		inputTokens, outputTokens = 0, 0
+	} else if err != nil {
+		return err
+	}
 	result, err := tx.ExecContext(ctx,
-		`UPDATE sessions SET message_count = message_count + ?, updated_at = ?
+		`UPDATE sessions SET message_count = message_count + ?, input_tokens = input_tokens + ?,
+		     output_tokens = output_tokens + ?, updated_at = ?
 		 WHERE namespace = ? AND name = ?`,
-		messageCountDelta, finalizedAt, namespace, name,
+		messageCountDelta, inputTokens, outputTokens, finalizedAt, namespace, name,
 	)
 	if err != nil {
 		return err

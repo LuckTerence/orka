@@ -2824,6 +2824,9 @@ func (r *TaskReconciler) completeTaskWithOutcome(
 			log.Error(err, "failed to append session messages")
 			// Continue anyway
 		}
+		if err := r.recordSessionTokenUsage(ctx, task); err != nil {
+			log.Error(err, "failed to record session token usage")
+		}
 	}
 	// Release session lock regardless of Append setting
 	if task.Spec.SessionRef != nil {

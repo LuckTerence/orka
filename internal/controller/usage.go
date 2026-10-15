@@ -78,6 +78,33 @@ func (r *TaskReconciler) retainUsageTask(ctx context.Context, task *corev1alpha1
 	return usageStore.RegisterUsageTask(ctx, snapshot)
 }
 
+// taskTokenUsageReader reads a Task's consumed tokens as usage reports
+// attribute them.
+type taskTokenUsageReader interface {
+	TaskTokenUsage(ctx context.Context, namespace, taskUID string) (int64, int64, error)
+}
+
+// recordSessionTokenUsage adds a Job-backed Task's final usage to the Session
+// whose transcript it appended. Agent Tasks run as ACP Session turns, whose
+// finalization adds the turn's usage in the same transaction, so they are
+// skipped here. Chat Sessions count only their chat turns: Tasks a chat
+// creates have no spec.sessionRef and are not added, so chat tokens are never
+// double counted.
+func (r *TaskReconciler) recordSessionTokenUsage(ctx context.Context, task *corev1alpha1.Task) error {
+	if r.SessionManager == nil || task.Spec.SessionRef == nil || task.Spec.Type == corev1alpha1.TaskTypeAgent {
+		return nil
+	}
+	reader, ok := r.ExecutionEventStore.(taskTokenUsageReader)
+	if !ok || task.UID == "" {
+		return nil
+	}
+	inputTokens, outputTokens, err := reader.TaskTokenUsage(ctx, task.Namespace, string(task.UID))
+	if err != nil {
+		return err
+	}
+	return r.SessionManager.RecordTokenUsage(ctx, task, inputTokens, outputTokens)
+}
+
 func (r *RepositoryMonitorReconciler) prepareMonitorUsageWork(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, repository, kind string, number int64) (string, error) {
 	usageStore, ok := r.Store.(store.UsageStore)
 	if !ok || monitor.UID == "" {

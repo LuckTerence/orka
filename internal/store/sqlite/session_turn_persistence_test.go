@@ -94,6 +94,51 @@ func TestSessionTurnFinalizationTaskOwnership(t *testing.T) {
 	}
 }
 
+func TestSessionTurnFinalizationRecordsTaskTokenUsageOnce(t *testing.T) {
+	const taskUID = "token-turn-task-uid"
+	for _, persistenceOnly := range []bool{true, false} {
+		t.Run(fmt.Sprintf("persistence=%v", persistenceOnly), func(t *testing.T) {
+			ctx := context.Background()
+			s := setupTestStore(t)
+			request := sessionTurnFinalizationOwnershipFixture(t, s, persistenceOnly, taskUID)
+			for i, tokens := range [][2]int64{{30, 4}, {120, 9}} {
+				input, output := tokens[0], tokens[1]
+				if err := s.RecordUsage(ctx, store.UsageObservation{
+					Namespace: "ns", TaskUID: taskUID, TaskName: "task-name", ID: fmt.Sprintf("call-%d", i), CounterID: "call",
+					Scope: store.UsageScopeCall, Source: store.UsageSourceProvider, InputTokens: &input, OutputTokens: &output,
+					Status: store.UsageStatusCompleted, Complete: true, ObservedAt: request.FinalizedAt.Add(time.Duration(i-2) * time.Second),
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// Replaying the finalization must not count the turn again.
+			for range 2 {
+				var err error
+				if persistenceOnly {
+					_, err = s.CommitSessionTurnFinalization(ctx, store.CommitSessionTurnFinalizationRequest{
+						Key: request.Key, Namespace: "ns", SessionName: "session", Fence: request.Fence,
+						ExpectedTurnVersion: request.ExpectedTurnVersion, FinalizationDigest: request.FinalizationDigest,
+						TerminalKind: request.TerminalKind, TerminalContent: request.TerminalContent,
+						Projection: request.Projection, FinalizedAt: request.FinalizedAt,
+					})
+				} else {
+					_, err = s.FinalizeSessionTurn(ctx, request)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			session, err := s.GetSession(ctx, "ns", "session")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if session.InputTokens != 120 || session.OutputTokens != 9 {
+				t.Fatalf("session tokens = %d/%d, want the turn's 120/9 once", session.InputTokens, session.OutputTokens)
+			}
+		})
+	}
+}
+
 func sessionTurnFinalizationOwnershipFixture(t *testing.T, s *Store, persistenceOnly bool, taskUID string) store.FinalizeSessionTurnRequest {
 	t.Helper()
 	ctx := context.Background()

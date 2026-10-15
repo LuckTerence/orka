@@ -4201,6 +4201,76 @@ func TestCompleteTask_WithSessionRef(t *testing.T) {
 	}
 }
 
+func TestCompleteTask_RecordsSessionTokenUsage(t *testing.T) {
+	ctx := context.Background()
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "token-task", Namespace: "default", UID: "token-task-uid"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:       corev1alpha1.TaskTypeAI,
+			SessionRef: &corev1alpha1.SessionReference{Name: "token-session", Append: true},
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	r := newUnitReconciler(scheme, task)
+	sessions := r.SessionManager.store
+	now := time.Now().UTC()
+	if err := sessions.CreateSession(ctx, &store.SessionRecord{
+		Namespace: "default", Name: "token-session", SessionType: "task",
+		ActiveTask: task.Name, ActiveTaskUID: string(task.UID), CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	usageStore := r.ExecutionEventStore.(store.UsageStore)
+	count := func(v int64) *int64 { return &v }
+	for _, observation := range []store.UsageObservation{
+		// A running snapshot and the final summary of one call count once.
+		{ID: "call-1-running", CounterID: "call-1", Status: "running", InputTokens: count(40), OutputTokens: count(0)},
+		{ID: "call-1-done", CounterID: "call-1", Status: store.UsageStatusCompleted, InputTokens: count(100), OutputTokens: count(20), Complete: true},
+		{ID: "call-2-done", CounterID: "call-2", Status: store.UsageStatusCompleted, InputTokens: count(50), OutputTokens: count(5), Complete: true},
+	} {
+		observation.Namespace, observation.TaskUID, observation.TaskName = "default", string(task.UID), task.Name
+		observation.Scope, observation.Source, observation.ObservedAt = store.UsageScopeCall, store.UsageSourceProvider, now
+		if err := usageStore.RecordUsage(ctx, observation); err != nil {
+			t.Fatalf("RecordUsage(%s): %v", observation.ID, err)
+		}
+	}
+	requireTokens := func(input, output int) {
+		t.Helper()
+		session, err := sessions.GetSession(ctx, "default", "token-session")
+		if err != nil {
+			t.Fatalf("GetSession: %v", err)
+		}
+		if session.InputTokens != input || session.OutputTokens != output {
+			t.Fatalf("session tokens = %d/%d, want %d/%d", session.InputTokens, session.OutputTokens, input, output)
+		}
+	}
+
+	if _, err := r.completeTask(ctx, task, corev1alpha1.TaskPhaseSucceeded, "done"); err != nil {
+		t.Fatalf("completeTask() error = %v", err)
+	}
+	requireTokens(150, 25)
+
+	// The Session lock is released at completion, so a repeated completion
+	// cannot count the Task again.
+	if err := r.recordSessionTokenUsage(ctx, task); err != nil {
+		t.Fatalf("recordSessionTokenUsage() error = %v", err)
+	}
+	requireTokens(150, 25)
+
+	// Agent Tasks are ACP Session turns, counted when the turn finalizes, so
+	// a held lock still records nothing here.
+	agentTask := task.DeepCopy()
+	agentTask.Spec.Type = corev1alpha1.TaskTypeAgent
+	if err := sessions.AcquireLock(ctx, "default", "token-session", agentTask.Name, string(agentTask.UID)); err != nil {
+		t.Fatalf("AcquireLock: %v", err)
+	}
+	if err := r.recordSessionTokenUsage(ctx, agentTask); err != nil {
+		t.Fatalf("recordSessionTokenUsage(agent) error = %v", err)
+	}
+	requireTokens(150, 25)
+}
+
 // ---------------------------------------------------------------------------
 // retryTask
 // ---------------------------------------------------------------------------
