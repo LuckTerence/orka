@@ -28,7 +28,7 @@
       "match": {
         "userMessage": "[e2e:wsp-lost]"
       },
-      "latency": 300000,
+      "latency": 600000,
       "response": {
         "content": "ORKA_WSP_HELD_OK lost"
       }

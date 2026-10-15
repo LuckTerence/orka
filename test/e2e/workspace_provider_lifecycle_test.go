@@ -55,7 +55,7 @@ type workspaceBackend struct {
 	profileSpec                      func(suspend bool) map[string]any
 	prepare                          func(source string)
 	patchProvider                    func(deployment map[string]any)
-	loseInstance                     func(workspaceUID string)
+	loseInstance                     func(ws workspaceIdentity)
 	leftovers                        func(g Gomega, workspaceUID string) []string
 	// nativeLeftovers lists backend objects that carry no workspace label,
 	// checked once every workspace is gone; nil when there are none.
@@ -96,15 +96,27 @@ func sandboxWorkspaceBackend() workspaceBackend {
 				Expect(err).NotTo(HaveOccurred())
 			}
 		},
-		loseInstance: func(workspaceUID string) {
-			_, err := utils.Run(exec.Command("kubectl", "-n", wspSandboxNS, "delete", "sandboxes.agents.x-k8s.io",
-				"-l", wspSandboxUID+"="+workspaceUID, "--wait=false"))
+		// Upstream creates the Sandbox from the provider's claim without its
+		// labels, so delete the exact runtime Pod Core recorded as active.
+		loseInstance: func(ws workspaceIdentity) {
+			var pool corev1alpha1.RuntimePool
+			kubectlJSON(Default, &pool, "get", "runtimepool", ws.pool, "-n", namespace)
+			active := pool.Status.ActiveInstance
+			Expect(active).NotTo(BeNil(), "the held prompt's pool has no active runtime instance")
+			_, err := utils.Run(exec.Command("kubectl", "-n", active.PodNamespace, "delete", "pod", active.PodName, "--wait=false"))
 			Expect(err).NotTo(HaveOccurred())
 		},
 		leftovers: func(g Gomega, workspaceUID string) []string {
 			output, err := utils.Run(exec.Command("kubectl", "-n", wspSandboxNS, "get",
 				"sandboxclaims,sandboxwarmpools,sandboxtemplates,sandboxes.agents.x-k8s.io,configmaps",
 				"-l", wspSandboxUID+"="+workspaceUID, "-o", "name"))
+			g.Expect(err).NotTo(HaveOccurred())
+			return utils.GetNonEmptyLines(output)
+		},
+		// Sandboxes and their data volumes carry no workspace label.
+		nativeLeftovers: func(g Gomega) []string {
+			output, err := utils.Run(exec.Command("kubectl", "-n", wspSandboxNS, "get",
+				"sandboxes.agents.x-k8s.io,persistentvolumeclaims", "-o", "name"))
 			g.Expect(err).NotTo(HaveOccurred())
 			return utils.GetNonEmptyLines(output)
 		},
@@ -179,7 +191,7 @@ func substrateWorkspaceBackend() workspaceBackend {
 				"--native-key-file=/native/client/credential-bundle.pem", "--native-direct-egress=true",
 				"--native-boot-timeout=4m")
 		},
-		loseInstance: func(string) {
+		loseInstance: func(workspaceIdentity) {
 			var actors []string
 			Eventually(func(g Gomega) {
 				actors = nativeNames(g, "actors")
@@ -353,6 +365,13 @@ var _ = Describe("Workspace Provider Lifecycle", Ordered, Label("workspace-provi
 		dataWS = waitTaskWorkspace(write, suspend, backend)
 		workspaceUIDs = append(workspaceUIDs, dataWS.uid)
 		first := waitTaskExecution(write, corev1alpha1.TaskExecutionStateSucceeded)
+		// Without a repository the workspace has read intent, so delivery flags
+		// the written file; the file itself is what this check preserves.
+		Eventually(func(g Gomega) {
+			delivery := fetchTaskForACPAssertion(g, write).Status.Delivery
+			g.Expect(delivery).NotTo(BeNil())
+			g.Expect(delivery.State).To(Equal(corev1alpha1.TaskDeliveryStateReadOnlyWorkspaceModified))
+		}, 2*time.Minute, 2*time.Second).Should(Succeed())
 		waitWorkspaceState(dataWS.name, workspacev1alpha1.ExecutionWorkspaceStateSuspended)
 		waitRuntimePoolStopped(dataWS.pool)
 
@@ -470,11 +489,14 @@ var _ = Describe("Workspace Provider Lifecycle", Ordered, Label("workspace-provi
 		Expect(applyManifestJSON(wspTask(task, agent, suspend, session("data"), false,
 			"Wait for the model. "+marker("lost"), "15m", nil))).To(Succeed())
 		waitHeldPrompt(task, marker("lost"))
-		backend.loseInstance(dataWS.uid)
+		lost := time.Now()
+		backend.loseInstance(dataWS)
 		// A deleted Sandbox Pod terminates gracefully, so its supervisor reports
 		// the prompt failed; an abruptly lost Actor leaves the outcome unknown.
 		// Either way the prompt settles once and never succeeds.
 		waitTaskExecution(task, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionStateOutcomeUnknown)
+		// The model hold is far longer, so only the loss can settle it this soon.
+		Expect(time.Since(lost)).To(BeNumerically("<", 2*time.Minute), "the prompt settled by timing out, not by instance loss")
 		// The dying runtime may retry its own in-flight request, so count
 		// replays only after the Task settles.
 		expectNoReplayAfterSettle(marker("lost"))

@@ -46,8 +46,23 @@ jq -n --arg image "${worker/localhost:${KIND_REGISTRY_PORT}/${registry_ip}:5000}
    sandboxConfig:{sandboxClass:"SANDBOX_CLASS_GVISOR",configName:"gvisor-default"}}' >"${RUN_DIR}/orka-acp-infra.json"
 kubectl_ate get actor-template orka-acp-infra --atespace orka-system >/dev/null 2>&1 ||
   kubectl_ate create actor-template -f "${RUN_DIR}/orka-acp-infra.json"
-# No worker carries this selector, so its Actors never boot (boot time limit check).
-jq '.metadata.name = "orka-acp-unschedulable" | .workerSelector.matchLabels["orka.ai/native-pool"] = "none"' \
+# This template selects its own WorkerPool, whose workers can never start, so
+# its Actors never boot (boot time limit check).
+kubectl -n ate-demo apply -f - <<YAML
+apiVersion: ate.dev/v1alpha1
+kind: WorkerPool
+metadata:
+  name: orka-unschedulable
+  labels: {orka.ai/native-pool: unschedulable}
+spec:
+  replicas: 1
+  workerImage: registry.invalid/orka/never-starts:e2e
+  template:
+    resources:
+      requests: {cpu: 250m, memory: 512Mi}
+      limits: {cpu: "2", memory: 2Gi}
+YAML
+jq '.metadata.name = "orka-acp-unschedulable" | .workerSelector.matchLabels["orka.ai/native-pool"] = "unschedulable"' \
   "${RUN_DIR}/orka-acp-infra.json" >"${RUN_DIR}/orka-acp-unschedulable.json"
 kubectl_ate get actor-template orka-acp-unschedulable --atespace orka-system >/dev/null 2>&1 ||
   kubectl_ate create actor-template -f "${RUN_DIR}/orka-acp-unschedulable.json"

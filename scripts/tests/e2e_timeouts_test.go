@@ -72,7 +72,8 @@ func TestE2EWorkflowTimeoutHeadroom(t *testing.T) {
 					Strategy struct {
 						Matrix struct {
 							Include []struct {
-								TestTimeout string `json:"test_timeout"`
+								TestTimeout   string `json:"test_timeout"`
+								GinkgoTimeout string `json:"ginkgo_timeout"`
 							} `json:"include"`
 						} `json:"matrix"`
 					} `json:"strategy"`
@@ -96,18 +97,23 @@ func TestE2EWorkflowTimeoutHeadroom(t *testing.T) {
 				}
 				return parsed
 			}
-			suite := parse(job.Env["E2E_GINKGO_TIMEOUT"])
 			grace := parse(job.Env["E2E_GINKGO_GRACE_PERIOD"])
-			goTimeouts := []string{job.Env["E2E_GO_TEST_TIMEOUT"]}
+			// Each lane pairs its Go timeout with the suite timeout it runs.
+			type lane struct{ suite, goTimeout string }
+			lanes := []lane{{job.Env["E2E_GINKGO_TIMEOUT"], job.Env["E2E_GO_TEST_TIMEOUT"]}}
 			if len(job.Strategy.Matrix.Include) > 0 {
-				goTimeouts = make([]string, 0, len(job.Strategy.Matrix.Include))
-				for _, lane := range job.Strategy.Matrix.Include {
-					goTimeouts = append(goTimeouts, lane.TestTimeout)
+				lanes = lanes[:0]
+				for _, include := range job.Strategy.Matrix.Include {
+					suite := job.Env["E2E_GINKGO_TIMEOUT"]
+					if suite == "${{ matrix.ginkgo_timeout }}" {
+						suite = include.GinkgoTimeout
+					}
+					lanes = append(lanes, lane{suite, include.TestTimeout})
 				}
 			}
-			for _, timeout := range goTimeouts {
-				if suite+2*grace >= parse(timeout) {
-					t.Fatalf("Go timeout %s leaves no headroom for the interrupted spec and suite cleanup", timeout)
+			for _, lane := range lanes {
+				if parse(lane.suite)+2*grace >= parse(lane.goTimeout) {
+					t.Fatalf("Go timeout %s leaves no headroom for the interrupted spec and suite cleanup", lane.goTimeout)
 				}
 			}
 			if test.job == "gateway-live-e2e" {
