@@ -5098,6 +5098,95 @@ func TestHandlers_GetTaskLogs_WithClientsetNoPods(t *testing.T) {
 	require.Equal(t, http.StatusNotFound, resp.StatusCode)
 }
 
+func TestParseTaskLogTailLines(t *testing.T) {
+	tests := []struct {
+		raw     string
+		want    int64
+		wantErr bool
+	}{
+		{raw: "", want: defaultTaskLogTailLines},
+		{raw: " 200 ", want: 200},
+		{raw: "1", want: 1},
+		{raw: "10000", want: maxTaskLogTailLines},
+		{raw: "10001", want: maxTaskLogTailLines},
+		{raw: "99999999999999999999", want: maxTaskLogTailLines},
+		{raw: "0", wantErr: true},
+		{raw: "-5", wantErr: true},
+		{raw: "-99999999999999999999", wantErr: true},
+		{raw: "all", wantErr: true},
+		{raw: "1.5", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.raw, func(t *testing.T) {
+			got, err := parseTaskLogTailLines(tt.raw)
+			if tt.wantErr {
+				var fiberErr *fiber.Error
+				require.ErrorAs(t, err, &fiberErr)
+				require.Equal(t, fiber.StatusBadRequest, fiberErr.Code)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestHandlers_GetTaskLogs_TailLines(t *testing.T) {
+	tests := []struct {
+		name       string
+		query      string
+		wantStatus int
+		wantTail   int64
+	}{
+		{name: "default", query: "", wantStatus: http.StatusOK, wantTail: defaultTaskLogTailLines},
+		{name: "requested", query: "?tailLines=200", wantStatus: http.StatusOK, wantTail: 200},
+		{name: "clamped", query: "?tailLines=50000", wantStatus: http.StatusOK, wantTail: maxTaskLogTailLines},
+		{name: "invalid", query: "?tailLines=0", wantStatus: http.StatusBadRequest},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Name: "log-task", Namespace: "default"},
+				Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+				Status:     corev1alpha1.TaskStatus{JobName: "log-job"},
+			}
+			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+				Name: "log-job-abcde", Namespace: "default", Labels: map[string]string{"job-name": "log-job"},
+			}}
+			scheme := runtime.NewScheme()
+			_ = corev1alpha1.AddToScheme(scheme)
+			_ = corev1.AddToScheme(scheme)
+			fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(task).Build()
+			fakeCS := kubefake.NewSimpleClientset(pod) //nolint:staticcheck
+			h := NewHandlers(HandlersConfig{Client: fakeClient, KubeClient: fakeCS})
+
+			app := fiber.New()
+			app.Get("/tasks/:id/logs", h.GetTaskLogs)
+			resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/tasks/log-task/logs"+tt.query, nil))
+			require.NoError(t, err)
+			require.Equal(t, tt.wantStatus, resp.StatusCode)
+
+			var gotOpts []*corev1.PodLogOptions
+			for _, action := range fakeCS.Actions() {
+				if action.GetSubresource() != "log" {
+					continue
+				}
+				opts, ok := action.(k8stesting.GenericAction).GetValue().(*corev1.PodLogOptions)
+				require.True(t, ok, "log action carries %T", action)
+				gotOpts = append(gotOpts, opts)
+			}
+			if tt.wantStatus != http.StatusOK {
+				require.Empty(t, gotOpts, "an invalid tailLines must not reach the pod log API")
+				return
+			}
+			require.Len(t, gotOpts, 1)
+			require.NotNil(t, gotOpts[0].TailLines)
+			require.Equal(t, tt.wantTail, *gotOpts[0].TailLines)
+			require.Equal(t, "worker", gotOpts[0].Container)
+		})
+	}
+}
+
 // --- Tests: DeleteTask with watch namespace ---
 
 func TestHandlers_DeleteTask_WatchNamespaceScoped(t *testing.T) {

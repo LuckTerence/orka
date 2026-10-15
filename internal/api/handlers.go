@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"time"
 
@@ -855,7 +856,10 @@ func (h *Handlers) GetTaskLogs(c fiber.Ctx) error {
 	}
 
 	// Non-follow mode: return the last N lines
-	var tailLines int64 = 100
+	tailLines, err := parseTaskLogTailLines(c.Query("tailLines"))
+	if err != nil {
+		return err
+	}
 	opts := &corev1.PodLogOptions{
 		Container: "worker",
 		TailLines: &tailLines,
@@ -875,6 +879,33 @@ func (h *Handlers) GetTaskLogs(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{
 		"logs": string(logBytes),
 	})
+}
+
+const (
+	// defaultTaskLogTailLines is how many trailing pod log lines a non-follow
+	// task log request returns when it does not pass tailLines.
+	defaultTaskLogTailLines int64 = 100
+	// maxTaskLogTailLines caps tailLines: the lines are buffered in memory and
+	// returned in one JSON body, so a larger request is clamped to this bound.
+	maxTaskLogTailLines int64 = 10000
+)
+
+// parseTaskLogTailLines reads the tailLines query parameter of a non-follow
+// task log request: the default when absent, clamped to maxTaskLogTailLines.
+func parseTaskLogTailLines(raw string) (int64, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return defaultTaskLogTailLines, nil
+	}
+	tailLines, err := strconv.ParseInt(raw, 10, 64)
+	if errors.Is(err, strconv.ErrRange) && tailLines > 0 {
+		// A positive value past int64 is still a request for "everything".
+		err = nil
+	}
+	if err != nil || tailLines < 1 {
+		return 0, fiber.NewError(fiber.StatusBadRequest, "tailLines must be a positive integer")
+	}
+	return min(tailLines, maxTaskLogTailLines), nil
 }
 
 // GetTaskResult gets the result of a task
