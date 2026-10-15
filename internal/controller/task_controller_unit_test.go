@@ -3535,6 +3535,116 @@ func TestHandleRunning_RetryRecordsAttemptFailure(t *testing.T) {
 	}
 }
 
+func appendApprovalTestEvent(t *testing.T, r *TaskReconciler, task *corev1alpha1.Task, eventType string, content map[string]any) {
+	t.Helper()
+	data, err := json.Marshal(content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.ExecutionEventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
+		Namespace: task.Namespace, StreamType: store.ExecutionEventStreamTypeTask, StreamID: task.Name, TaskName: task.Name,
+		Type: eventType, Severity: events.ExecutionEventSeverityInfo, Content: data, CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("AppendExecutionEvent(%s): %v", eventType, err)
+	}
+}
+
+func TestParkOnPendingApprovalSetsWaitingForApproval(t *testing.T) {
+	ctx := context.Background()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "autonomous-approval", Namespace: "default", UID: "autonomous-uid"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning, Iteration: 2},
+	}
+	r := newUnitReconciler(newTestScheme(), task)
+	appendApprovalTestEvent(t, r, task, events.ExecutionEventTypeApprovalRequested, map[string]any{
+		"approvalID": "approval-1", "taskUID": string(task.UID), "targetTool": "merge_pull_request",
+	})
+
+	if _, parked, err := r.parkOnPendingApproval(ctx, task); err != nil || !parked {
+		t.Fatalf("parkOnPendingApproval() parked = %v, err = %v", parked, err)
+	}
+	waiting := meta.FindStatusCondition(task.Status.Conditions, ConditionTypeWaitingForApproval)
+	if waiting == nil || waiting.Status != metav1.ConditionTrue || waiting.Reason != waitingForApprovalReasonPending ||
+		waiting.Message != "waiting for approval approval-1 for merge_pull_request" {
+		t.Fatalf("WaitingForApproval = %+v, want True naming the pending approval", waiting)
+	}
+	if task.Status.Message != "waiting for approval approval-1 for merge_pull_request at iteration 2" {
+		t.Fatalf("message = %q", task.Status.Message)
+	}
+
+	appendApprovalTestEvent(t, r, task, events.ExecutionEventTypeApprovalApproved, map[string]any{"approvalID": "approval-1"})
+	if _, parked, err := r.parkOnPendingApproval(ctx, task); err != nil || parked {
+		t.Fatalf("parkOnPendingApproval() after decision parked = %v, err = %v", parked, err)
+	}
+	stored := &corev1alpha1.Task{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(task), stored); err != nil {
+		t.Fatal(err)
+	}
+	waiting = meta.FindStatusCondition(stored.Status.Conditions, ConditionTypeWaitingForApproval)
+	if waiting == nil || waiting.Status != metav1.ConditionFalse || waiting.Reason != waitingForApprovalReasonResolved {
+		t.Fatalf("WaitingForApproval after decision = %+v, want False/%s", waiting, waitingForApprovalReasonResolved)
+	}
+}
+
+func TestSyncACPWaitingForApproval(t *testing.T) {
+	ctx := context.Background()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "acp-approval", Namespace: "default", UID: "acp-uid"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	r := newUnitReconciler(newTestScheme(), task)
+	requireWaiting := func(status metav1.ConditionStatus, reason string) {
+		t.Helper()
+		stored := &corev1alpha1.Task{}
+		if err := r.Get(ctx, client.ObjectKeyFromObject(task), stored); err != nil {
+			t.Fatal(err)
+		}
+		waiting := meta.FindStatusCondition(stored.Status.Conditions, ConditionTypeWaitingForApproval)
+		if status == "" {
+			if waiting != nil {
+				t.Fatalf("WaitingForApproval = %+v, want unset", waiting)
+			}
+			return
+		}
+		if waiting == nil || waiting.Status != status || waiting.Reason != reason {
+			t.Fatalf("WaitingForApproval = %+v, want %s/%s", waiting, status, reason)
+		}
+	}
+
+	// No approval has been requested: the condition is not invented.
+	if err := r.syncACPWaitingForApproval(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	requireWaiting("", "")
+
+	appendApprovalTestEvent(t, r, task, events.ExecutionEventTypeApprovalRequested, map[string]any{
+		"approvalID": "brokered-1", "taskUID": string(task.UID), "targetTool": "deploy",
+		"expiresAt": time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+	})
+	if err := r.syncACPWaitingForApproval(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	requireWaiting(metav1.ConditionTrue, waitingForApprovalReasonPending)
+
+	appendApprovalTestEvent(t, r, task, events.ExecutionEventTypeApprovalDeclined, map[string]any{"approvalID": "brokered-1"})
+	if err := r.syncACPWaitingForApproval(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	requireWaiting(metav1.ConditionFalse, waitingForApprovalReasonResolved)
+
+	// An expired request no longer blocks the Task.
+	appendApprovalTestEvent(t, r, task, events.ExecutionEventTypeApprovalRequested, map[string]any{
+		"approvalID": "brokered-2", "taskUID": string(task.UID), "targetTool": "deploy",
+		"expiresAt": time.Now().Add(-time.Minute).UTC().Format(time.RFC3339),
+	})
+	if err := r.syncACPWaitingForApproval(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	requireWaiting(metav1.ConditionFalse, waitingForApprovalReasonResolved)
+}
+
 func TestHandleRunning_SurfacesPodWaitingReason(t *testing.T) {
 	ctx := context.Background()
 	scheme := newTestScheme()

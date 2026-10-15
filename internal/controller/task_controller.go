@@ -1770,6 +1770,9 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 		if err := r.reconcileRunningACPClassWorkspaceAttachment(ctx, task); err != nil {
 			return ctrl.Result{}, err
 		}
+		if err := r.syncACPWaitingForApproval(ctx, task); err != nil {
+			return ctrl.Result{}, err
+		}
 		// The leader-elected ACPDispatcher owns the non-reconnectable prompt stream,
 		// lease renewal, cancellation barrier, and terminal status projection.
 		return ctrl.Result{RequeueAfter: time.Second}, nil
@@ -4696,16 +4699,14 @@ func (r *TaskReconciler) parkOnPendingApproval(ctx context.Context, task *corev1
 		return ctrl.Result{}, false, err
 	}
 	if len(pending) == 0 {
+		if setWaitingForApprovalCondition(task, nil) {
+			if err := r.Status().Update(ctx, task); err != nil {
+				return ctrl.Result{}, false, err
+			}
+		}
 		return ctrl.Result{}, false, nil
 	}
 	approval := pending[0]
-	target := approval.TargetTool
-	if target == "" {
-		target = approval.Action
-	}
-	if target == "" {
-		target = "requested action"
-	}
 	log.Info(
 		"autonomous task waiting for approval",
 		"approvalID", approval.ID,
@@ -4715,16 +4716,93 @@ func (r *TaskReconciler) parkOnPendingApproval(ctx context.Context, task *corev1
 	waitingMessage := fmt.Sprintf(
 		"waiting for approval %s for %s at iteration %d",
 		approval.ID,
-		target,
+		approvalTargetName(approval),
 		task.Status.Iteration,
 	)
-	if task.Status.Message != waitingMessage {
+	conditionChanged := setWaitingForApprovalCondition(task, pending)
+	if task.Status.Message != waitingMessage || conditionChanged {
 		task.Status.Message = waitingMessage
 		if err := r.Status().Update(ctx, task); err != nil {
 			return ctrl.Result{}, false, err
 		}
 	}
 	return ctrl.Result{RequeueAfter: 30 * time.Second}, true, nil
+}
+
+const (
+	waitingForApprovalReasonPending  = "ApprovalPending"
+	waitingForApprovalReasonResolved = "ApprovalResolved"
+)
+
+func approvalTargetName(approval approvals.Approval) string {
+	if approval.TargetTool != "" {
+		return approval.TargetTool
+	}
+	if approval.Action != "" {
+		return approval.Action
+	}
+	return "requested action"
+}
+
+// setWaitingForApprovalCondition reports a running Task as waiting while it
+// has a pending approval, naming the first one, and as no longer waiting once
+// a condition it set before is resolved. It returns whether status changed.
+func setWaitingForApprovalCondition(task *corev1alpha1.Task, pending []approvals.Approval) bool {
+	existing := meta.FindStatusCondition(task.Status.Conditions, ConditionTypeWaitingForApproval)
+	condition := metav1.Condition{Type: ConditionTypeWaitingForApproval, ObservedGeneration: task.Generation, LastTransitionTime: metav1.Now()}
+	switch {
+	case len(pending) > 0:
+		condition.Status, condition.Reason = metav1.ConditionTrue, waitingForApprovalReasonPending
+		condition.Message = fmt.Sprintf("waiting for approval %s for %s", pending[0].ID, approvalTargetName(pending[0]))
+		if len(pending) > 1 {
+			condition.Message += fmt.Sprintf(" and %d more", len(pending)-1)
+		}
+	case existing != nil && existing.Status == metav1.ConditionTrue:
+		condition.Status, condition.Reason = metav1.ConditionFalse, waitingForApprovalReasonResolved
+		condition.Message = "no approval is pending"
+	default:
+		return false
+	}
+	if existing != nil && existing.Status == condition.Status && existing.Reason == condition.Reason &&
+		existing.Message == condition.Message && existing.ObservedGeneration == condition.ObservedGeneration {
+		return false
+	}
+	meta.SetStatusCondition(&task.Status.Conditions, condition)
+	return true
+}
+
+// syncACPWaitingForApproval mirrors pending brokered-tool approvals of a
+// running ACP Task into its WaitingForApproval condition. The controller's
+// MCP broker records those approvals in the Task's event stream.
+func (r *TaskReconciler) syncACPWaitingForApproval(ctx context.Context, task *corev1alpha1.Task) error {
+	if r == nil || r.ExecutionEventStore == nil {
+		return nil
+	}
+	listed, err := approvals.ListEvents(ctx, r.ExecutionEventStore, task.Namespace, task.Name)
+	if err != nil {
+		return err
+	}
+	// Brokered approvals carry an expiry; one past it no longer blocks.
+	pending := approvals.Pending(approvals.FilterEventsForTaskUID(listed, string(task.UID)), time.Now().UTC())
+	if !setWaitingForApprovalCondition(task.DeepCopy(), pending) {
+		return nil
+	}
+	reader := uncachedReader(r.APIReader, r.Client)
+	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		current := &corev1alpha1.Task{}
+		if err := reader.Get(ctx, client.ObjectKeyFromObject(task), current); err != nil {
+			return err
+		}
+		if current.UID != task.UID || current.Status.Phase != corev1alpha1.TaskPhaseRunning ||
+			!setWaitingForApprovalCondition(current, pending) {
+			return nil
+		}
+		if err := r.Status().Update(ctx, current); err != nil {
+			return err
+		}
+		task.ResourceVersion, task.Status = current.ResourceVersion, current.Status
+		return nil
+	})
 }
 
 func (r *TaskReconciler) handleAutonomousApprovalState(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, bool, error) {
