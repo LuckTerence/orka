@@ -277,7 +277,7 @@ func TestValidateAgent_ModelControlsRemainValidOutsideBuiltInACPRuntimes(t *test
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			r := setupAgentReconciler()
+			r := setupAgentReconciler(&corev1alpha1.AgentRuntime{ObjectMeta: metav1.ObjectMeta{Name: "custom-runtime", Namespace: testNS}})
 			agent := baseAgent(tt.name)
 			agent.Spec.Runtime = tt.runtime
 			agent.Spec.Model.Temperature = &temperature
@@ -331,6 +331,74 @@ func TestValidateAgent_RuntimeRefRequiresName(t *testing.T) {
 	err := setupAgentReconciler().validateAgent(context.Background(), agent)
 	if err == nil || !strings.Contains(err.Error(), "runtimeRef.name is required") {
 		t.Fatalf("validateAgent() error = %v, want runtimeRef.name rejection", err)
+	}
+}
+
+func TestValidateAgent_RuntimeRefRequiresExistingAgentRuntime(t *testing.T) {
+	runtimeRefAgent := func() *corev1alpha1.Agent {
+		agent := baseAgent("external-agent")
+		agent.Spec.Model = nil
+		agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{
+			RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "custom-runtime"},
+		}
+		return agent
+	}
+	inNamespace := &corev1alpha1.AgentRuntime{ObjectMeta: metav1.ObjectMeta{Name: "custom-runtime", Namespace: testNS}}
+	otherNamespace := &corev1alpha1.AgentRuntime{ObjectMeta: metav1.ObjectMeta{Name: "custom-runtime", Namespace: "other"}}
+
+	if err := setupAgentReconciler(inNamespace).validateAgent(context.Background(), runtimeRefAgent()); err != nil {
+		t.Fatalf("validateAgent() error = %v, want an existing AgentRuntime accepted", err)
+	}
+	for name, r := range map[string]*AgentReconciler{
+		"missing":         setupAgentReconciler(),
+		"other namespace": setupAgentReconciler(otherNamespace),
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := r.validateAgent(context.Background(), runtimeRefAgent())
+			if err == nil || err.Error() != `referenced AgentRuntime "custom-runtime" not found` {
+				t.Fatalf("validateAgent() error = %v, want missing AgentRuntime", err)
+			}
+		})
+	}
+
+	// The Agent reports the missing runtime as not Ready.
+	agent := runtimeRefAgent()
+	r := setupAgentReconciler()
+	r.Client = fake.NewClientBuilder().WithScheme(r.Scheme).WithObjects(agent).WithStatusSubresource(agent).Build()
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: agent.Name, Namespace: testNS}}); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	stored := &corev1alpha1.Agent{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: agent.Name, Namespace: testNS}, stored); err != nil {
+		t.Fatal(err)
+	}
+	ready := findCondition(stored.Status.Conditions, conditionReasonReady)
+	if stored.Status.Ready || ready == nil || ready.Status != metav1.ConditionFalse ||
+		ready.Message != `referenced AgentRuntime "custom-runtime" not found` {
+		t.Fatalf("status = ready %v condition %+v, want Ready=False for the missing AgentRuntime", stored.Status.Ready, ready)
+	}
+}
+
+func TestAgentsForAgentRuntime(t *testing.T) {
+	refAgent := func(name, namespace, runtimeName string) *corev1alpha1.Agent {
+		return &corev1alpha1.Agent{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+			Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
+				RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: runtimeName},
+			}},
+		}
+	}
+	r := setupAgentReconciler(
+		refAgent("uses-runtime", testNS, "custom-runtime"),
+		refAgent("uses-other-runtime", testNS, "other-runtime"),
+		refAgent("other-namespace", "other", "custom-runtime"),
+		baseAgent("provider-agent"),
+	)
+	runtime := &corev1alpha1.AgentRuntime{ObjectMeta: metav1.ObjectMeta{Name: "custom-runtime", Namespace: testNS}}
+
+	requests := r.agentsForAgentRuntime(context.Background(), runtime)
+	if len(requests) != 1 || requests[0].Name != "uses-runtime" || requests[0].Namespace != testNS {
+		t.Fatalf("requests = %v, want only %s/uses-runtime", requests, testNS)
 	}
 }
 

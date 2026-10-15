@@ -20,9 +20,12 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -58,6 +61,7 @@ const (
 // +kubebuilder:rbac:groups=core.orka.ai,resources=tasks,verbs=list
 // +kubebuilder:rbac:groups=core.orka.ai,resources=providers,verbs=get
 // +kubebuilder:rbac:groups=core.orka.ai,resources=tools,verbs=get
+// +kubebuilder:rbac:groups=core.orka.ai,resources=agentruntimes,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get
 
@@ -148,6 +152,9 @@ func (r *AgentReconciler) validateAgent(ctx context.Context, agent *corev1alpha1
 	}
 
 	if err := r.validateProviderRef(ctx, agent); err != nil {
+		return err
+	}
+	if err := r.validateRuntimeRef(ctx, agent); err != nil {
 		return err
 	}
 	if err := r.validateSecretRef(ctx, agent); err != nil {
@@ -254,6 +261,43 @@ func (r *AgentReconciler) validateProviderRef(ctx context.Context, agent *corev1
 		return fmt.Errorf("referenced provider %q is not ready", agent.Spec.ProviderRef.Name)
 	}
 	return nil
+}
+
+// validateRuntimeRef reports a runtime.runtimeRef whose AgentRuntime does not
+// exist in the Agent's namespace. Dispatch still resolves the runtime and
+// checks its live readiness in the Task namespace.
+func (r *AgentReconciler) validateRuntimeRef(ctx context.Context, agent *corev1alpha1.Agent) error {
+	if agent.Spec.Runtime == nil || agent.Spec.Runtime.RuntimeRef == nil {
+		return nil
+	}
+	name := strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name)
+	runtime := &corev1alpha1.AgentRuntime{}
+	if err := r.Get(ctx, client.ObjectKey{Name: name, Namespace: agent.Namespace}, runtime); err != nil {
+		if errors.IsNotFound(err) {
+			return fmt.Errorf("referenced AgentRuntime %q not found", name)
+		}
+		return fmt.Errorf("failed to get AgentRuntime %q: %w", name, err)
+	}
+	return nil
+}
+
+// agentsForAgentRuntime re-validates the Agents whose runtimeRef names an
+// AgentRuntime that was created or deleted.
+func (r *AgentReconciler) agentsForAgentRuntime(ctx context.Context, obj client.Object) []reconcile.Request {
+	agents := &corev1alpha1.AgentList{}
+	if err := r.List(ctx, agents, client.InNamespace(obj.GetNamespace())); err != nil {
+		log.FromContext(ctx).Error(err, "Failed to list Agents for AgentRuntime", "agentRuntime", obj.GetName())
+		return nil
+	}
+	var requests []reconcile.Request
+	for i := range agents.Items {
+		agent := &agents.Items[i]
+		if agent.Spec.Runtime != nil && agent.Spec.Runtime.RuntimeRef != nil &&
+			strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name) == obj.GetName() {
+			requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(agent)})
+		}
+	}
+	return requests
 }
 
 // validateSecretRef validates the secretRef if set.
@@ -506,6 +550,10 @@ func (r *AgentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 					},
 				}}
 			})).
+		// Agent readiness depends only on whether a referenced AgentRuntime
+		// exists, so its frequent status updates are ignored.
+		Watches(&corev1alpha1.AgentRuntime{}, handler.EnqueueRequestsFromMapFunc(r.agentsForAgentRuntime),
+			builder.WithPredicates(predicate.Funcs{UpdateFunc: func(event.UpdateEvent) bool { return false }})).
 		Named("agent").
 		Complete(r)
 }
