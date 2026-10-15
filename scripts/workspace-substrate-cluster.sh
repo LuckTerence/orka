@@ -52,6 +52,14 @@ jq '.metadata.name = "orka-acp-unschedulable" | .workerSelector.matchLabels["ork
 kubectl_ate get actor-template orka-acp-unschedulable --atespace orka-system >/dev/null 2>&1 ||
   kubectl_ate create actor-template -f "${RUN_DIR}/orka-acp-unschedulable.json"
 
+# Actor routes carry long-lived prompt streams; the router's default timeout
+# cuts them off.
+if ! kubectl -n ate-system get deployment atenet-router -o jsonpath='{.spec.template.spec.containers[0].args}' | grep -q -- '--route-timeout='; then
+  kubectl -n ate-system patch deployment atenet-router --type=json \
+    -p '[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--route-timeout=30m"}]'
+fi
+kubectl -n ate-system rollout status deployment/atenet-router --timeout=3m
+
 # Core reads worker Pod identity in the provider's worker namespace.
 kubectl -n ate-demo apply -f - <<'YAML'
 apiVersion: rbac.authorization.k8s.io/v1
