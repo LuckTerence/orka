@@ -810,6 +810,8 @@ func dumpWorkspaceProviderDiagnostics(backend workspaceBackend) {
 	for _, args := range [][]string{
 		{"-n", namespace, "get", "tasks,runtimepools,executionworkspaces,executionworkspacecheckpoints", "-o", "yaml"},
 		{"-n", wspProviderNS, "logs", "deployment/" + backend.deployment, "--tail=200"},
+		{"-n", namespace, "logs", "deployment/" + publisherDeployment, "--tail=100"},
+		{"-n", namespace, "logs", "deployment/orka-controller-manager", "-c", "manager", "--tail=200"},
 	} {
 		output, _ := utils.Run(exec.Command("kubectl", args...))
 		_, _ = fmt.Fprintf(GinkgoWriter, "kubectl %s:\n%s\n", strings.Join(args, " "), output)
