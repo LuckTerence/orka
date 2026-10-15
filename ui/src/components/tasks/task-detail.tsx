@@ -19,6 +19,7 @@ import { TaskApprovalPanel } from './task-approval-panel'
 import { ForkProvenance } from './fork-provenance'
 import { ExecutionGraph } from './execution-graph'
 import { RunTimeline } from './run-timeline'
+import { TaskSchedulePanel } from './task-schedule-panel'
 import { TaskRuntimeView } from '@/components/runtime/task-runtime-view'
 import { TaskExecutionRouteLedger } from '@/components/execution/execution-route-ledger'
 import { useTask, useDeleteTask, useTaskEvents } from '@/hooks/use-tasks'
@@ -244,6 +245,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
       </div>
 
       <TaskExecutionRouteLedger task={task} />
+      <TaskSchedulePanel task={task} />
 
       <Tabs value={activeTab} onValueChange={setTab}>
         <div className="overflow-x-auto">

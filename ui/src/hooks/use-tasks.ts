@@ -92,6 +92,19 @@ export function useTaskResult(id: string, enabled = false, taskUID?: string) {
   })
 }
 
+// Child Tasks the controller labeled with this parent: scheduled runs and
+// delegated children.
+export function useTaskChildren(id: string, enabled = true, taskUID?: string, refetchInterval: number | false = 10000) {
+  const namespace = useUIStore((s) => s.namespace)
+  return useQuery({
+    queryKey: ['taskChildren', id, namespace, taskUID ?? ''],
+    queryFn: () => api.get<ListResponse<Task>>(`/tasks/${id}/children`, { namespace }),
+    enabled: enabled && Boolean(id),
+    retry: retryUnlessForbidden,
+    refetchInterval: pollUnlessForbidden(refetchInterval),
+  })
+}
+
 export function useCreateTask() {
   const queryClient = useQueryClient()
   return useMutation({
