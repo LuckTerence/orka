@@ -242,7 +242,7 @@ func (f *fakeSessionStore) ListSessions(_ context.Context, _ string) ([]store.Se
 	return nil, nil
 }
 
-func (f *fakeSessionStore) ListSessionsPage(_ context.Context, _, _ string, _ int, _ string) ([]store.SessionMetadata, bool, error) {
+func (f *fakeSessionStore) ListSessionsPage(_ context.Context, _ string, _ *store.SessionPageCursor, _ int, _ string) ([]store.SessionMetadata, bool, error) {
 	return nil, false, nil
 }
 func (f *fakeSessionStore) DeleteSession(_ context.Context, ns, name string) error {

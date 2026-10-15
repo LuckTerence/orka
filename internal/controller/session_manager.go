@@ -364,7 +364,7 @@ func (m *SessionManager) ListSessions(ctx context.Context, namespace string) ([]
 	return m.store.ListSessions(ctx, namespace)
 }
 
-// ListSessionsPage lists one name-ordered page of sessions in a namespace.
-func (m *SessionManager) ListSessionsPage(ctx context.Context, namespace, afterName string, limit int, excludeType string) ([]store.SessionMetadata, bool, error) {
-	return m.store.ListSessionsPage(ctx, namespace, afterName, limit, excludeType)
+// ListSessionsPage lists one newest-first page of sessions in a namespace.
+func (m *SessionManager) ListSessionsPage(ctx context.Context, namespace string, after *store.SessionPageCursor, limit int, excludeType string) ([]store.SessionMetadata, bool, error) {
+	return m.store.ListSessionsPage(ctx, namespace, after, limit, excludeType)
 }

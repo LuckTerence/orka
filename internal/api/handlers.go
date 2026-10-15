@@ -9,6 +9,7 @@ package api
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -973,7 +974,32 @@ func (h *Handlers) GetTaskPlan(c fiber.Ctx) error {
 	return c.JSON(plan)
 }
 
-// ListSessions lists sessions
+// sessionListCursor is the opaque continue token of the newest-first sessions
+// list: the creation time and name of the last session on the page.
+type sessionListCursor struct {
+	CreatedAt time.Time `json:"createdAt"`
+	Name      string    `json:"name"`
+}
+
+func encodeSessionListCursor(position store.SessionPageCursor) string {
+	data, _ := json.Marshal(sessionListCursor(position))
+	return base64.RawURLEncoding.EncodeToString(data)
+}
+
+func decodeSessionListCursor(raw string) (*store.SessionPageCursor, error) {
+	if raw == "" {
+		return nil, nil
+	}
+	data, err := base64.RawURLEncoding.DecodeString(raw)
+	var cursor sessionListCursor
+	if err != nil || json.Unmarshal(data, &cursor) != nil || cursor.Name == "" {
+		return nil, errors.New("invalid continue token")
+	}
+	position := store.SessionPageCursor(cursor)
+	return &position, nil
+}
+
+// ListSessions lists sessions newest first.
 func (h *Handlers) ListSessions(c fiber.Ctx) error {
 	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
 	if err != nil {
@@ -992,12 +1018,15 @@ func (h *Handlers) ListSessions(c fiber.Ctx) error {
 	}
 
 	ctx := c.Context()
-	// The session cursor is a session name, not a Kubernetes cache token,
-	// so the cache sentinel normalization must not apply: a session named
-	// exactly like the sentinel is still a valid place to resume from.
-	sessionCursor := strings.TrimSpace(c.Query("continue", ""))
-	// The store applies the name cursor, gateway exclusion, ordering, and
-	// limit itself, so each page reads only its own rows.
+	// The session cursor is the store position of the last listed session,
+	// not a Kubernetes cache token, so the cache sentinel normalization must
+	// not apply.
+	sessionCursor, err := decodeSessionListCursor(strings.TrimSpace(c.Query("continue", "")))
+	if err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, err.Error())
+	}
+	// The store applies the cursor, gateway exclusion, newest-first ordering,
+	// and limit itself, so each page reads only its own rows.
 	// ParsePagination already caps Limit at MaxLimit; the explicit guard
 	// makes the narrowing conversion provably bounded.
 	limit := pagination.Limit
@@ -1013,7 +1042,8 @@ func (h *Handlers) ListSessions(c fiber.Ctx) error {
 	items := make([]fiber.Map, 0, len(sessions))
 	continueToken := ""
 	if more && len(sessions) > 0 {
-		continueToken = sessions[len(sessions)-1].Name
+		last := sessions[len(sessions)-1]
+		continueToken = encodeSessionListCursor(store.SessionPageCursor{CreatedAt: last.CreatedAt, Name: last.Name})
 	}
 	for _, s := range sessions {
 		items = append(items, fiber.Map{
