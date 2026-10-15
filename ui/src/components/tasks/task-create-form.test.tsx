@@ -989,7 +989,7 @@ describe('TaskCreateForm', () => {
     })
     expect(screen.getByText('anthropic')).toBeInTheDocument()
     expect(screen.getByText('claude-sonnet')).toBeInTheDocument()
-    expect(screen.getByText('codex ACP')).toBeInTheDocument()
+    expect(screen.getByText('Codex ACP')).toBeInTheDocument()
     expect(screen.getByText('Coordination')).toBeInTheDocument()
     expect(screen.getByText('2 tools')).toBeInTheDocument()
   })
