@@ -5,10 +5,11 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { SecretNameField } from '@/components/ui/secret-name-field'
 import { PageHeader } from '@/components/layout/page-header'
 import { useAgentList } from '@/hooks/use-agents'
 import { useCreateRepositoryMonitor } from '@/hooks/use-monitors'
-import { useSecretNames } from '@/hooks/use-secrets'
+import { isCredentialFreeGitHubRepositoryURL } from '@/lib/repository-form-validation'
 import { useUIStore } from '@/stores/ui'
 
 const REVIEW_EVENTS = ['COMMENT', 'APPROVE', 'REQUEST_CHANGES'] as const
@@ -30,32 +31,6 @@ function splitCommaList(value: string) {
   return labels
 }
 
-function isCredentialFreeGitHubRepositoryURL(value: string) {
-  const repoURL = value.trim()
-  if (!repoURL) return false
-
-  if (/^git@github\.com:[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+(?:\.git)?$/.test(repoURL)) {
-    return true
-  }
-
-  if (!repoURL.startsWith('https://')) {
-    return false
-  }
-
-  try {
-    const parsed = new URL(repoURL)
-    if (parsed.protocol !== 'https:' || parsed.hostname !== 'github.com') return false
-    if (parsed.username || parsed.password || parsed.search || parsed.hash) return false
-
-    const pathParts = parsed.pathname.split('/').filter(Boolean)
-    if (pathParts.length !== 2) return false
-
-    return pathParts.every((part) => /^[A-Za-z0-9._-]+(?:\.git)?$/.test(part))
-  } catch {
-    return false
-  }
-}
-
 function maybeObject<T extends Record<string, unknown>>(value: T) {
   const hasValue = Object.values(value).some((field) => {
     if (Array.isArray(field)) return field.length > 0
@@ -70,7 +45,6 @@ export function RepositoryMonitorCreateForm() {
   const namespace = useUIStore((s) => s.namespace)
   const createMonitor = useCreateRepositoryMonitor()
   const { data: agents, isLoading: agentsLoading } = useAgentList()
-  const { data: secrets } = useSecretNames()
 
   const [name, setName] = useState('')
   const [repoURL, setRepoURL] = useState('')
@@ -261,18 +235,12 @@ export function RepositoryMonitorCreateForm() {
               </div>
               <div className="space-y-2">
                 <label htmlFor="monitor-git-secret" className="text-sm font-medium">Git Secret name</label>
-                <Input
+                <SecretNameField
                   id="monitor-git-secret"
-                  list="monitor-git-secret-options"
                   value={gitSecretName}
-                  onChange={(event) => setGitSecretName(event.target.value)}
+                  onChange={setGitSecretName}
                   placeholder="Optional, for private repos or rate limits"
                 />
-                <datalist id="monitor-git-secret-options">
-                  {(secrets?.items ?? []).map((secret) => (
-                    <option key={secret.name} value={secret.name} />
-                  ))}
-                </datalist>
                 <p className="text-xs text-muted-foreground">Secret must contain token, password, or GITHUB_TOKEN.</p>
               </div>
             </div>

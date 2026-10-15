@@ -7,7 +7,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { PageHeader } from '@/components/layout/page-header'
 import { useCreateAgent } from '@/hooks/use-agents'
 import { useProviderList } from '@/hooks/use-providers'
-import { useSecretNames } from '@/hooks/use-secrets'
+import { SecretNameField } from '@/components/ui/secret-name-field'
 import { useUIStore } from '@/stores/ui'
 import { toast } from 'sonner'
 import {
@@ -21,7 +21,6 @@ const PROVIDER_DOCS_URL = 'https://orka-agents.github.io/orka/docs/reference/con
 export function AgentCreateForm() {
   const navigate = useNavigate()
   const createAgent = useCreateAgent()
-  const { data: secretsData } = useSecretNames()
   const { data: providersData, isLoading: providersLoading, error: providersError } = useProviderList()
   const namespace = useUIStore((s) => s.namespace)
   const providers = providersError ? [] : (providersData?.items ?? [])
@@ -271,16 +270,8 @@ export function AgentCreateForm() {
                   />
                 </div>
                 <div className="space-y-2">
-                  <label className="text-sm font-medium">Secret Reference</label>
-                  <Select value={secretRef} onValueChange={setSecretRef}>
-                    <SelectTrigger><SelectValue placeholder="Select a secret..." /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="__none__">None</SelectItem>
-                      {(secretsData?.items ?? []).map((secret) => (
-                        <SelectItem key={secret.name} value={secret.name}>{secret.name}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                  <label htmlFor="agent-secret-ref" className="text-sm font-medium">Secret Reference</label>
+                  <SecretNameField id="agent-secret-ref" value={secretRef} onChange={setSecretRef} placeholder="Select a secret..." />
                   <p className="text-xs text-muted-foreground">Kubernetes Secret containing native AI provider credentials</p>
                 </div>
               </div>
