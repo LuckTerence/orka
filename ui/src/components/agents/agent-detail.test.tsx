@@ -94,6 +94,17 @@ describe('AgentDetail', () => {
     expect(screen.queryByText('Agent not found')).not.toBeInTheDocument()
   })
 
+  it('names the back link to the agent list and nests no button in it', async () => {
+    server.use(
+      http.get('/api/v1/agents/:name', () => HttpResponse.json(fullAgent))
+    )
+    render(<AgentDetail agentId="test-agent" />)
+    const back = await screen.findByRole('link', { name: 'Back to agents' })
+    expect(back).toHaveAttribute('href', '/agents')
+    expect(back.querySelector('button')).toBeNull()
+    expect(back.closest('button')).toBeNull()
+  })
+
   it('shows agent name and namespace', async () => {
     server.use(
       http.get('/api/v1/agents/:name', () => HttpResponse.json(fullAgent))

@@ -74,6 +74,29 @@ describe('ToolDetail', () => {
     expect(screen.queryByText('Tool not found')).not.toBeInTheDocument()
   })
 
+  it('names the back link and makes the scrollable schema keyboard focusable', async () => {
+    server.use(
+      http.get('/api/v1/tools/:name', () =>
+        HttpResponse.json({
+          name: 'web_search',
+          builtin: true,
+          description: 'Search the web',
+          parameters: { type: 'object', properties: { query: { type: 'string' } } },
+        })
+      )
+    )
+
+    render(<ToolDetail toolName="web_search" />)
+    const back = await screen.findByRole('link', { name: 'Back to tools' })
+    expect(back).toHaveAttribute('href', '/tools')
+    expect(back.querySelector('button')).toBeNull()
+    expect(back.closest('button')).toBeNull()
+    const schema = screen.getByRole('region', { name: 'Parameters JSON Schema' })
+    expect(schema.tagName).toBe('PRE')
+    expect(schema).toHaveAttribute('tabindex', '0')
+    expect(schema).toHaveTextContent('"query"')
+  })
+
   it('custom tool shows name, description, HTTP config, parameters, and status', async () => {
     server.use(
       http.get('/api/v1/tools/:name', () =>

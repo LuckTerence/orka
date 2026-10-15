@@ -113,6 +113,17 @@ describe('SessionDetail', () => {
     expect(screen.queryByText('Session not found')).not.toBeInTheDocument()
   })
 
+  it('names the back link to the session list and nests no button in it', async () => {
+    server.use(
+      http.get('/api/v1/sessions/:id', () => HttpResponse.json({ name: 'back-session', namespace: 'default' })),
+    )
+    render(<SessionDetail sessionId="back-session" />)
+    const back = await screen.findByRole('link', { name: 'Back to sessions' })
+    expect(back).toHaveAttribute('href', '/sessions')
+    expect(back.querySelector('button')).toBeNull()
+    expect(back.closest('button')).toBeNull()
+  })
+
   it('shows session name and namespace', async () => {
     server.use(
       http.get('/api/v1/sessions/:id', () => {

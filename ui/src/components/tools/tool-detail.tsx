@@ -95,7 +95,9 @@ export function ToolDetail({ toolName }: { toolName: string }) {
   return (
     <div className="space-y-4">
       <div className="flex items-center gap-4">
-        <Link to="/tools"><Button variant="ghost" size="icon"><ArrowLeft className="h-4 w-4" /></Button></Link>
+        <Button asChild variant="ghost" size="icon">
+          <Link to="/tools" aria-label="Back to tools"><ArrowLeft className="h-4 w-4" /></Link>
+        </Button>
         <div>
           <PageHeader title={isBuiltin ? (tool as Record<string, unknown>).name as string : tool.metadata?.name ?? toolName} />
           <div className="flex items-center gap-2">
@@ -195,7 +197,16 @@ export function ToolDetail({ toolName }: { toolName: string }) {
         <Card>
           <CardHeader><CardTitle>Parameters (JSON Schema)</CardTitle></CardHeader>
           <CardContent>
-            <pre className="max-h-64 overflow-auto rounded-md bg-muted p-4 text-xs">{JSON.stringify(parameters, null, 2)}</pre>
+            {/* A named, focusable region, so keyboard users can scroll a schema
+                taller or wider than the box. */}
+            <pre
+              tabIndex={0}
+              role="region"
+              aria-label="Parameters JSON Schema"
+              className="max-h-64 overflow-auto rounded-md bg-muted p-4 text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              {JSON.stringify(parameters, null, 2)}
+            </pre>
           </CardContent>
         </Card>
       )}

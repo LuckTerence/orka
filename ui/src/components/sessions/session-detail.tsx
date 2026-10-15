@@ -120,7 +120,9 @@ export function SessionDetail({ sessionId }: { sessionId: string }) {
   return (
     <div className="space-y-4">
       <div className="flex items-center gap-4">
-        <Link to="/sessions"><Button variant="ghost" size="icon"><ArrowLeft className="h-4 w-4" /></Button></Link>
+        <Button asChild variant="ghost" size="icon">
+          <Link to="/sessions" aria-label="Back to sessions"><ArrowLeft className="h-4 w-4" /></Link>
+        </Button>
         <PageHeader
           className="flex-1"
           title={session.name}

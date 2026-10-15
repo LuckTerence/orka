@@ -103,7 +103,9 @@ export function AgentDetail({ agentId }: { agentId: string }) {
   return (
     <div className="space-y-4">
       <div className="flex items-center gap-4">
-        <Link to="/agents"><Button variant="ghost" size="icon"><ArrowLeft className="h-4 w-4" /></Button></Link>
+        <Button asChild variant="ghost" size="icon">
+          <Link to="/agents" aria-label="Back to agents"><ArrowLeft className="h-4 w-4" /></Link>
+        </Button>
         <div className="flex h-10 w-10 items-center justify-center rounded-full bg-primary/10">
           <Bot className="h-5 w-5 text-primary" />
         </div>
