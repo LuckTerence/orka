@@ -60,9 +60,6 @@ type workspaceBackend struct {
 	// nativeLeftovers lists backend objects that carry no workspace label,
 	// checked once every workspace is gone; nil when there are none.
 	nativeLeftovers func(g Gomega) []string
-	// lostWorkspaceFails reports whether losing the instance fails the
-	// workspace (native process) rather than replacing its Pod.
-	lostWorkspaceFails bool
 	// unbootable is a profile whose instance can never start, for the boot
 	// time limit; nil skips that check.
 	unbootable map[string]any
@@ -219,7 +216,6 @@ func substrateWorkspaceBackend() workspaceBackend {
 			g.Expect(err).NotTo(HaveOccurred())
 			return append(left, utils.GetNonEmptyLines(output)...)
 		},
-		lostWorkspaceFails: true,
 		// No worker carries this template's selector; see the cluster script.
 		unbootable: map[string]any{"templateRef": map[string]any{"namespace": wspAtespace, "name": "orka-acp-unschedulable"}},
 	}
@@ -490,7 +486,7 @@ var _ = Describe("Workspace Provider Lifecycle", Ordered, Label("workspace-provi
 		Expect(fetchTaskResultViaAPI(apiBaseURL, token, next)).To(ContainSubstring("ORKA_WSP_READ_OK"))
 	})
 
-	It("settles a prompt whose runtime instance is lost and recovers the workspace data", func() {
+	It("settles a prompt whose runtime instance is lost and fails its workspace", func() {
 		task := name("wsp-lost")
 		Expect(applyManifestJSON(wspTask(task, agent, suspend, session("data"), false,
 			"Wait for the model. "+marker("lost"), "15m", nil))).To(Succeed())
@@ -507,18 +503,19 @@ var _ = Describe("Workspace Provider Lifecycle", Ordered, Label("workspace-provi
 		// replays only after the Task settles.
 		expectNoReplayAfterSettle(marker("lost"))
 
-		if !backend.lostWorkspaceFails {
-			By("continuing the Session on a replacement instance")
+		By("failing the workspace instead of restarting the lost instance")
+		waitWorkspaceState(dataWS.name, workspacev1alpha1.ExecutionWorkspaceStateFailed)
+		if !checkpoints {
+			By("failing the Session's next Task instead of leaving it pending")
 			next := name("wsp-after-loss")
 			Expect(applyManifestJSON(wspTask(next, agent, suspend, session("data"), false,
 				"Read the durable workspace file. "+marker("after-loss"), "15m", nil))).To(Succeed())
-			waitTaskExecution(next, corev1alpha1.TaskExecutionStateSucceeded)
-			Expect(fetchTaskResultViaAPI(apiBaseURL, token, next)).To(ContainSubstring("ORKA_WSP_READ_OK"))
+			failed := waitTaskExecution(next, corev1alpha1.TaskExecutionStateFailed)
+			Expect(failed.Status.Execution.Reason).To(Equal(corev1alpha1.TaskExecutionReason("WorkspaceFailed")))
 			return
 		}
 
-		By("failing the workspace and exporting its last checkpoint only on explicit recovery")
-		waitWorkspaceState(dataWS.name, workspacev1alpha1.ExecutionWorkspaceStateFailed)
+		By("exporting its last checkpoint only on explicit recovery")
 		recovered := exportCheckpoint(name("wsp-recover"), dataWS, true)
 		restore := name("wsp-after-loss")
 		Expect(applyManifestJSON(wspTask(restore, agent, suspend, "", false,
