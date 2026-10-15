@@ -706,6 +706,9 @@ func (h *Handlers) CreateRepositoryScan(c fiber.Ctx) error {
 		return err
 	}
 	h.normalizeRepositoryScanSpec(&req.Spec)
+	if err := security.ValidateRepositoryScanSource(req.Spec); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, err.Error())
+	}
 	if err := h.authorizeContextTokenRepositoryScanPolicyRefs(c, "createRepositoryScanPolicy", namespace, req.Spec); err != nil {
 		return err
 	}
@@ -770,6 +773,9 @@ func (h *Handlers) UpdateRepositoryScan(c fiber.Ctx) error {
 	}
 
 	h.normalizeRepositoryScanSpec(&req.Spec)
+	if err := security.ValidateRepositoryScanSource(req.Spec); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, err.Error())
+	}
 	if err := h.authorizeContextTokenRepositoryScanPolicyRefs(c, "updateRepositoryScanPolicy", namespace, req.Spec); err != nil {
 		return err
 	}
@@ -1002,6 +1008,9 @@ func (h *Handlers) CreateManualSecurityScan(c fiber.Ctx) error {
 	}
 	if err := h.authorizeContextTokenSecurityScanTask(c, "createManualSecurityScan", scan, scan.Spec.AnalysisAgentRef); err != nil {
 		return err
+	}
+	if err := security.ValidateRepositoryScanSource(scan.Spec); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, err.Error())
 	}
 	active, err := h.hasActiveSecurityScanPipelineTask(c.Context(), scan)
 	if err != nil {

@@ -54,6 +54,8 @@ const (
 	repositoryScanPhaseError     = "Error"
 	repositoryScanPhaseSuspended = "Suspended"
 
+	repositoryScanReasonInvalidRepository = "InvalidRepository"
+
 	scanRunPhasePending   = "pending"
 	scanRunPhaseRunning   = "running"
 	scanRunPhaseSucceeded = "succeeded"
@@ -215,6 +217,22 @@ func (r *RepositoryScanReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 				meta.SetStatusCondition(&s.Status.Conditions, readyCondition(s.Generation, metav1.ConditionFalse, "Suspended", "Scheduled scans are suspended"))
 			}); err != nil {
 				return ctrl.Result{}, err
+			}
+		}
+		return ctrl.Result{}, nil
+	}
+
+	// A repository the provider cannot clone fails every run, so it is a
+	// terminal configuration error rather than something to retry with Tasks.
+	if err := security.ValidateRepositoryScanSource(scan.Spec); err != nil {
+		ready := meta.FindStatusCondition(scan.Status.Conditions, readyConditionType)
+		if scan.Status.Phase != repositoryScanPhaseError || ready == nil || ready.Reason != repositoryScanReasonInvalidRepository ||
+			ready.ObservedGeneration != scan.Generation {
+			if updateErr := r.updateStatusWithRetry(ctx, scan, func(s *corev1alpha1.RepositoryScan) {
+				s.Status.Phase = repositoryScanPhaseError
+				meta.SetStatusCondition(&s.Status.Conditions, readyCondition(s.Generation, metav1.ConditionFalse, repositoryScanReasonInvalidRepository, repositoryScanConditionMessage(err.Error(), "invalid repository")))
+			}); updateErr != nil {
+				return ctrl.Result{}, updateErr
 			}
 		}
 		return ctrl.Result{}, nil

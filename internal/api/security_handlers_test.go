@@ -21,6 +21,7 @@ import (
 	"github.com/gofiber/fiber/v3"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -934,6 +935,67 @@ func TestUpdateRepositoryScanRejectsRepositoryChange(t *testing.T) {
 	var got corev1alpha1.RepositoryScan
 	require.NoError(t, handlers.client.Get(context.Background(), clientObjectKey("scan-1"), &got))
 	require.Equal(t, securityTestRepoURL, got.Spec.RepoURL)
+}
+
+func TestRepositoryScanMutationsRejectUnclonableRepositoryURL(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	token := issueTestContextToken(t, provider, nil, map[string]any{"scope": ContextTokenScopeSecurityWrite})
+	send := func(t *testing.T, app *fiber.App, method, path, body string) (int, string) {
+		t.Helper()
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.Header.Set(TransactionTokenHeaderName, token)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+		defer resp.Body.Close() //nolint:errcheck
+		data, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		return resp.StatusCode, string(data)
+	}
+
+	for _, tt := range []struct {
+		name    string
+		repoURL string
+		want    string
+	}{
+		{name: "not a url", repoURL: "not a url", want: "spec.repoURL must be a GitHub repository URL"},
+		{name: "other forge", repoURL: "https://gitlab.com/a/b", want: "spec.repoURL must be a GitHub repository URL"},
+		{name: "owner only", repoURL: "https://github.com/owner", want: "spec.repoURL must include GitHub owner and repository"},
+		{name: "embedded credentials", repoURL: "https://token@github.com/owner/repo", want: "spec.repoURL must not include credentials"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			existing := securityAuthzTestRepositoryScan("legacy-scan", tt.repoURL)
+			app, handlers := setupSecurityHandlersWithAuthzFixture(t, ctxTokenConfig, ContextTokenAuthorizationModeOff, existing)
+
+			body, err := json.Marshal(CreateRepositoryScanRequest{
+				Name: "new-scan", Namespace: "demo",
+				Spec: corev1alpha1.RepositoryScanSpec{RepoURL: tt.repoURL, AnalysisAgentRef: corev1alpha1.AgentReference{Name: "analysis"}},
+			})
+			require.NoError(t, err)
+			status, message := send(t, app, http.MethodPost, "/security/repositories", string(body))
+			require.Equal(t, http.StatusBadRequest, status)
+			require.Contains(t, message, tt.want)
+			err = handlers.client.Get(ctx, client.ObjectKey{Namespace: "demo", Name: "new-scan"}, &corev1alpha1.RepositoryScan{})
+			require.True(t, apierrors.IsNotFound(err), "an invalid repository must not create a RepositoryScan")
+
+			// Scans admitted before validation can neither be saved nor run.
+			body, err = json.Marshal(UpdateRepositoryScanRequest{
+				Spec: corev1alpha1.RepositoryScanSpec{RepoURL: tt.repoURL, Branch: "dev", AnalysisAgentRef: corev1alpha1.AgentReference{Name: "analysis"}},
+			})
+			require.NoError(t, err)
+			status, message = send(t, app, http.MethodPut, "/security/repositories/legacy-scan?namespace=demo", string(body))
+			require.Equal(t, http.StatusBadRequest, status)
+			require.Contains(t, message, tt.want)
+			status, message = send(t, app, http.MethodPost, "/security/repositories/legacy-scan/scans?namespace=demo", "")
+			require.Equal(t, http.StatusBadRequest, status)
+			require.Contains(t, message, tt.want)
+			tasks := &corev1alpha1.TaskList{}
+			require.NoError(t, handlers.client.List(ctx, tasks))
+			require.Empty(t, tasks.Items)
+		})
+	}
 }
 
 func TestListRepositoryScans_ContextTokenFiltersMismatchedScansInEnforceMode(t *testing.T) {
