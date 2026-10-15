@@ -14,6 +14,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { ListAccessError } from '@/components/ui/list-access-error'
+import { isForbiddenError } from '@/lib/api-client'
 import { Plus, Trash2 } from 'lucide-react'
 import { PageHeader } from '@/components/layout/page-header'
 import { TaskStatusBadge } from './task-status-badge'
@@ -35,7 +36,10 @@ export function TaskList() {
   // task whose name sorts late off the first screen. Walk every page up to
   // the shared summary cap instead; this is the Board's query, so the two
   // views share one cache entry.
-  const { data, isLoading, error } = useTaskListAll('100', 10000)
+  const { data, isLoading, error: listError } = useTaskListAll('100', 10000)
+  // A 403 always replaces the list; any other failure only blocks a list that
+  // never loaded, so a failed background refresh keeps the rows.
+  const error = listError && (isForbiddenError(listError) || !data) ? listError : null
   const deleteTask = useDeleteTask()
   const navigate = useNavigate()
   const [filter, setFilter] = useState('')

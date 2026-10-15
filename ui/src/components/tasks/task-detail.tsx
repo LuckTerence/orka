@@ -23,6 +23,7 @@ import { RunTimeline } from './run-timeline'
 import { TaskSchedulePanel } from './task-schedule-panel'
 import { TaskRuntimeView } from '@/components/runtime/task-runtime-view'
 import { TaskExecutionRouteLedger } from '@/components/execution/execution-route-ledger'
+import { useStickyQueryError } from '@/hooks/use-sticky-query-error'
 import { useTask, useDeleteTask, useTaskEvents } from '@/hooks/use-tasks'
 import { useTaskTrace, useTaskApprovals } from '@/hooks/use-execution-events'
 import { useTaskArtifacts } from '@/hooks/use-task-artifacts'
@@ -117,16 +118,8 @@ function TaskAccessError({ message, forbidden = true }: { message: string; forbi
 export function TaskDetail({ taskId }: { taskId: string }) {
   const [following, setFollowing] = useState(true)
   const { data: task, isLoading, error: queryTaskError, errorUpdatedAt } = useTask(taskId, following ? 5000 : false)
-  // React Query puts a query that never loaded back to pending, clearing its
-  // error, each time it polls again. Keep the last failure of this query
-  // (matched by its error timestamp) until a load succeeds, so a failed first
-  // load keeps its error page instead of flipping back to the skeleton.
-  const [lastTaskFailure, setLastTaskFailure] = useState<{ error: Error; at: number } | null>(null)
-  if (queryTaskError && lastTaskFailure?.error !== queryTaskError) {
-    setLastTaskFailure({ error: queryTaskError, at: errorUpdatedAt })
-  }
-  const taskError = queryTaskError ??
-    (task === undefined && lastTaskFailure?.at === errorUpdatedAt ? lastTaskFailure.error : null)
+  // A failed first load keeps its error page while polling retries it.
+  const taskError = useStickyQueryError({ data: task, error: queryTaskError, errorUpdatedAt })
   // Dependent queries (events, trace, approvals, artifacts) wait until the
   // task has loaded, and stay off once the task query 404s or 403s, so a
   // missing or forbidden task generates no hidden dependent traffic.

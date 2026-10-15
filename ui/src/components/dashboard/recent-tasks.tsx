@@ -7,19 +7,20 @@ import { ListTodo } from 'lucide-react'
 import type { Task } from '@/schemas/task'
 import { timeAgo } from '@/lib/time'
 import { TaskStateBadges } from '@/components/tasks/task-state-badges'
+import { loadProblemText, type LoadProblem } from '@/lib/load-problem'
 
 export function RecentTasks({
   tasks,
   isLoading,
-  forbiddenMessage,
+  problem,
   isTruncated,
 }: {
   tasks?: Task[]
   isLoading?: boolean
-  forbiddenMessage?: string
+  problem?: LoadProblem
   isTruncated?: boolean
 }) {
-  if (forbiddenMessage) {
+  if (problem) {
     return (
       <Card>
         <CardHeader>
@@ -27,7 +28,7 @@ export function RecentTasks({
         </CardHeader>
         <CardContent>
           <p className="text-sm text-muted-foreground" role="alert">
-            Not authorized to list tasks ({forbiddenMessage}).
+            {loadProblemText('tasks', problem)}
           </p>
         </CardContent>
       </Card>

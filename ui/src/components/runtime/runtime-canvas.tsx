@@ -46,7 +46,10 @@ export function RuntimeCanvas() {
   const namespace = useUIStore((s) => s.namespace)
   const queryClient = useQueryClient()
   const [following, setFollowing] = useState(true)
-  const { data, isLoading, error: taskListError, refetch: refetchTasks } = useTaskListAll('100', following ? 10000 : false)
+  const { data, isLoading, error: listError, refetch: refetchTasks } = useTaskListAll('100', following ? 10000 : false)
+  // A 403 always replaces the canvas; any other failure only blocks a canvas
+  // that never loaded, so a failed background refresh keeps the last one.
+  const taskListError = listError && (isForbiddenError(listError) || !data) ? listError : null
 
   const tasks = data?.items ?? []
   // The full-list walk is bounded; beyond that the roster is a prefix and

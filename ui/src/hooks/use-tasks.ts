@@ -4,6 +4,7 @@ import { isPaginationProtocolError, pageParams, pollUnlessForbidden, retryUnless
 import { useAuthStore } from '@/stores/auth'
 import { useUIStore } from '@/stores/ui'
 import type { ExecutionEvent, Task, TaskEventsResponse } from '@/schemas/task'
+import { useStickyQueryError } from './use-sticky-query-error'
 
 function fetchTaskListPage(namespace: string, limit: string, continueToken?: string) {
   return api.get<ListResponse<Task>>('/tasks', pageParams({ namespace, limit }, continueToken))
@@ -24,7 +25,7 @@ export function useTaskList(limit = '25', refetchInterval: number | false = 1000
 export function useTaskListAll(pageLimit = '100', refetchInterval: number | false = 10000) {
   const namespace = useUIStore((s) => s.namespace)
   const token = useAuthStore((s) => s.token)
-  return useQuery({
+  const query = useQuery({
     queryKey: ['tasks', 'all', namespace, pageLimit],
     enabled: Boolean(token),
     // Bounded by maxListWalkPages; views built on this walk are summaries and
@@ -41,6 +42,10 @@ export function useTaskListAll(pageLimit = '100', refetchInterval: number | fals
       !isForbiddenError(error) && !isPaginationProtocolError(error) && failureCount < 3,
     refetchInterval: pollUnlessForbidden(refetchInterval),
   })
+  // Views built on this walk show the error, not a skeleton, while a failed
+  // first load is retried by polling.
+  const error = useStickyQueryError(query)
+  return { ...query, error, isLoading: query.isLoading && !error }
 }
 
 export function useTask(id: string, refetchInterval: number | false = 5000) {

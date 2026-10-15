@@ -5,24 +5,25 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Sparkline } from '@/components/ui/sparkline'
 import { phaseStyle } from '@/lib/task-status'
 import { cn } from '@/lib/utils'
+import type { LoadProblem } from '@/lib/load-problem'
 
 interface StatsCardsProps {
   tasks?: Task[]
   /** True when the bounded task walk stopped with more pages available. */
   tasksTruncated?: boolean
-  /** Set when the tasks list failed with 403; the task cards show this instead of "0". */
-  tasksForbiddenMessage?: string
+  /** Set when the tasks list could not be loaded; shown instead of a fabricated "0". */
+  tasksProblem?: LoadProblem
   sessionCount?: number
   /** True when the bounded session walk stopped with more pages available. */
   sessionsTruncated?: boolean
-  /** Set when the sessions list failed with 403; the card shows this instead of "0". */
-  sessionsForbiddenMessage?: string
+  /** Set when the sessions list could not be loaded; shown instead of a fabricated "0". */
+  sessionsProblem?: LoadProblem
   agentCount?: number
-  /** Set when the agents list failed with 403; the card shows this instead of "0". */
-  agentsForbiddenMessage?: string
+  /** Set when the agents list could not be loaded; shown instead of a fabricated "0". */
+  agentsProblem?: LoadProblem
   toolCount?: number
-  /** Set when the tools list failed with 403; the card shows this instead of "0". */
-  toolsForbiddenMessage?: string
+  /** Set when the tools list could not be loaded; shown instead of a fabricated "0". */
+  toolsProblem?: LoadProblem
   /** Every list is still loading: render skeleton cards only. */
   isLoading?: boolean
   /** Per-list loading, so each card fills in as its own data arrives. */
@@ -33,13 +34,16 @@ function ValueSkeleton() {
   return <Skeleton className="h-8 w-16" />
 }
 
-/** The "Not authorized" body a stat card renders instead of a fabricated count. */
-function ForbiddenStat({ resource, message }: { resource: string; message: string }) {
+/** The body a stat card renders instead of a fabricated count. */
+function ProblemStat({ resource, problem }: { resource: string; problem: LoadProblem }) {
+  const detail = problem.message ? ` (${problem.message})` : ''
   return (
     <div className="space-y-0.5" role="alert">
-      <div className="text-sm font-medium">Not authorized</div>
+      <div className="text-sm font-medium">{problem.forbidden ? 'Not authorized' : 'Could not load'}</div>
       <div className="text-xs text-muted-foreground">
-        Your token lacks <code>{resource}</code> read permission ({message}).
+        {problem.forbidden
+          ? <>Your token lacks <code>{resource}</code> read permission{detail}.</>
+          : <>The <code>{resource}</code> request failed{detail}.</>}
       </div>
     </div>
   )
@@ -89,14 +93,14 @@ function taskWindow(tasks: Task[]): { min: number; max: number } | null {
 export function StatsCards({
   tasks,
   tasksTruncated,
-  tasksForbiddenMessage,
+  tasksProblem,
   sessionCount,
   sessionsTruncated,
-  sessionsForbiddenMessage,
+  sessionsProblem,
   agentCount,
-  agentsForbiddenMessage,
+  agentsProblem,
   toolCount,
-  toolsForbiddenMessage,
+  toolsProblem,
   isLoading,
   loading = {},
 }: StatsCardsProps) {
@@ -162,8 +166,8 @@ export function StatsCards({
           <CardContent>
             {loading.tasks ? (
               <ValueSkeleton />
-            ) : tasksForbiddenMessage ? (
-              <ForbiddenStat resource="tasks" message={tasksForbiddenMessage} />
+            ) : tasksProblem ? (
+              <ProblemStat resource="tasks" problem={tasksProblem} />
             ) : (
               <div className="flex items-end justify-between gap-2">
                 <div>
@@ -186,8 +190,8 @@ export function StatsCards({
         <CardContent>
           {loading.sessions ? (
             <ValueSkeleton />
-          ) : sessionsForbiddenMessage ? (
-            <ForbiddenStat resource="sessions" message={sessionsForbiddenMessage} />
+          ) : sessionsProblem ? (
+            <ProblemStat resource="sessions" problem={sessionsProblem} />
           ) : (
             <div className="text-2xl font-bold tabular-nums">{sessionCount ?? 0}</div>
           )}
@@ -201,8 +205,8 @@ export function StatsCards({
         <CardContent>
           {loading.agents ? (
             <ValueSkeleton />
-          ) : agentsForbiddenMessage ? (
-            <ForbiddenStat resource="agents" message={agentsForbiddenMessage} />
+          ) : agentsProblem ? (
+            <ProblemStat resource="agents" problem={agentsProblem} />
           ) : (
             <div className="text-2xl font-bold tabular-nums">{agentCount ?? 0}</div>
           )}
@@ -216,8 +220,8 @@ export function StatsCards({
         <CardContent>
           {loading.tools ? (
             <ValueSkeleton />
-          ) : toolsForbiddenMessage ? (
-            <ForbiddenStat resource="tools" message={toolsForbiddenMessage} />
+          ) : toolsProblem ? (
+            <ProblemStat resource="tools" problem={toolsProblem} />
           ) : (
             <div className="text-2xl font-bold tabular-nums">{toolCount ?? 0}</div>
           )}

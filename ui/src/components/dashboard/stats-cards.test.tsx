@@ -66,7 +66,7 @@ describe('StatsCards', () => {
   })
 
   it('shows a not-authorized message on the Sessions card instead of 0', () => {
-    render(<StatsCards tasks={[]} sessionsForbiddenMessage="not authorized" agentCount={1} toolCount={2} />)
+    render(<StatsCards tasks={[]} sessionsProblem={{ forbidden: true, message: "not authorized" }} agentCount={1} toolCount={2} />)
     expect(screen.getByText('Not authorized')).toBeInTheDocument()
     expect(screen.getByText(/read permission \(not authorized\)/)).toBeInTheDocument()
     // total, running, succeeded, failed — the Sessions card no longer renders a 0
