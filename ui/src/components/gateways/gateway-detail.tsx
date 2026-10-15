@@ -85,12 +85,15 @@ export function GatewayDetail({ name }: { name: string }) {
       </div>
 
       <Tabs defaultValue="events" className="gap-4">
-        <TabsList variant="line">
-          <TabsTrigger value="queues">Session queues</TabsTrigger>
-          <TabsTrigger value="events">Event timeline</TabsTrigger>
-          <TabsTrigger value="deliveries">Deliveries</TabsTrigger>
-          <TabsTrigger value="bindings">Bindings</TabsTrigger>
-        </TabsList>
+        {/* pb-1 leaves room for the active-tab underline so the scroller never scrolls vertically. */}
+        <div className="overflow-x-auto pb-1">
+          <TabsList variant="line">
+            <TabsTrigger value="queues">Session queues</TabsTrigger>
+            <TabsTrigger value="events">Event timeline</TabsTrigger>
+            <TabsTrigger value="deliveries">Deliveries</TabsTrigger>
+            <TabsTrigger value="bindings">Bindings</TabsTrigger>
+          </TabsList>
+        </div>
         <TabsContent value="queues" className="space-y-3">
           {events.error ? <ListAccessError resource="gateway Session queues" error={events.error} /> : <>
             <GatewaySessionQueue events={events.data?.items ?? []} loading={events.isLoading} />

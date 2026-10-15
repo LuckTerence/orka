@@ -28,6 +28,21 @@ describe('GatewayDetail', () => {
     )
   })
 
+  it('keeps every ledger tab reachable on narrow screens', async () => {
+    server.use(http.get('/api/v1/gateways/chat', () => HttpResponse.json({
+      metadata: { name: 'chat', namespace: 'default', generation: 1 },
+      spec: { gatewayClassName: 'generic-chat', adapter: { endpoint: 'https://adapter.example' } },
+      status: { ready: true, observedGeneration: 1 },
+    })))
+
+    render(<GatewayDetail name="chat" />)
+
+    const bindingsTab = await screen.findByRole('tab', { name: 'Bindings' })
+    // The tab strip scrolls horizontally instead of pushing tabs past the viewport.
+    expect(screen.getByRole('tablist').parentElement).toHaveClass('overflow-x-auto')
+    expect(bindingsTab).toBeInTheDocument()
+  })
+
   it('renders a titled access-error page with a way back on 403', async () => {
     server.use(http.get('/api/v1/gateways/chat', () => HttpResponse.json(
       { error: { code: 403, message: 'not authorized' } },
