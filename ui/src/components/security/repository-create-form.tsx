@@ -12,6 +12,9 @@ import { useAgentList } from '@/hooks/use-agents'
 import { isCredentialFreeGitHubRepositoryURL, isCronScheduleShape } from '@/lib/repository-form-validation'
 import { useUIStore } from '@/stores/ui'
 
+// Radix Select items cannot use an empty value, so clearing uses a sentinel.
+const noPatchAgent = '__none__'
+
 export function RepositoryCreateForm() {
   const navigate = useNavigate()
   const namespace = useUIStore((s) => s.namespace)
@@ -66,7 +69,7 @@ export function RepositoryCreateForm() {
           validationMode,
           analysisAgentRef: { name: analysisAgentRef },
           patchAgentRef: patchAgentRef ? { name: patchAgentRef } : undefined,
-          gitSecretRef: gitSecretRef ? { name: gitSecretRef } : undefined,
+          gitSecretRef: gitSecretRef.trim() ? { name: gitSecretRef.trim() } : undefined,
         },
       }
       await createRepository.mutateAsync(body)
@@ -120,9 +123,10 @@ export function RepositoryCreateForm() {
               </div>
               <div className="space-y-2">
                 <label htmlFor="security-patch-agent" className="text-sm font-medium">Patch Agent</label>
-                <Select disabled={agentsLoading || noAgentsInNamespace} value={patchAgentRef} onValueChange={setPatchAgentRef}>
+                <Select disabled={agentsLoading || noAgentsInNamespace} value={patchAgentRef} onValueChange={(value) => setPatchAgentRef(value === noPatchAgent ? '' : value)}>
                   <SelectTrigger id="security-patch-agent"><SelectValue placeholder="Optional patch agent" /></SelectTrigger>
                   <SelectContent>
+                    <SelectItem value={noPatchAgent}>Same as analysis agent</SelectItem>
                     {currentAgents.map((agent) => (
                       <SelectItem key={agent.metadata.name} value={agent.metadata.name}>{agent.metadata.name}</SelectItem>
                     ))}

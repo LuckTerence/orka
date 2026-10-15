@@ -137,8 +137,8 @@ export function AgentCreateForm() {
       if (systemPrompt) {
         spec.systemPrompt = { inline: systemPrompt }
       }
-      if (secretRef && secretRef !== '__none__') {
-        spec.secretRef = { name: secretRef }
+      if (secretRef.trim() && secretRef !== '__none__') {
+        spec.secretRef = { name: secretRef.trim() }
       }
     } else {
       spec.runtime = runtimeSource === 'built-in'

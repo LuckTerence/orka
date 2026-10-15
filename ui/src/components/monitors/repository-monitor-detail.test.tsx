@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 
 const mockMutateAsync = vi.fn()
+const mockCommandMutate = vi.fn()
 
 vi.mock('sonner', () => ({ toast: { success: vi.fn(), error: vi.fn() } }))
 
@@ -16,14 +17,15 @@ vi.mock('@/hooks/use-monitors', () => {
       },
     }),
     useRepositoryMonitorRuns: empty,
-    useRepositoryMonitorItems: empty,
+    useRepositoryMonitorItems: (_name: string, kind?: string) =>
+      kind === 'issue' ? { data: { items: [{ itemKey: 'issue-7', number: 7, title: 'Flaky test' }] } } : empty(),
     useRepositoryMonitorActions: empty,
     useRepositoryMonitorCommands: empty,
     useRepositoryMonitorWorkActions: empty,
     useRepositoryMonitorImplementationJobs: empty,
     useRepositoryMonitorMutations: empty,
     useRunRepositoryMonitor: () => ({ mutateAsync: mockMutateAsync, isPending: false }),
-    useCreateRepositoryMonitorCommand: () => ({ mutate: vi.fn(), isPending: false }),
+    useCreateRepositoryMonitorCommand: () => ({ mutate: mockCommandMutate, isPending: false }),
   }
 })
 
@@ -36,6 +38,7 @@ import { RepositoryMonitorDetail } from './repository-monitor-detail'
 describe('RepositoryMonitorDetail', () => {
   beforeEach(() => {
     mockMutateAsync.mockReset()
+    mockCommandMutate.mockReset()
     vi.mocked(toast.success).mockClear()
     vi.mocked(toast.error).mockClear()
   })
@@ -59,5 +62,27 @@ describe('RepositoryMonitorDetail', () => {
 
     await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Failed to start monitor run: not authorized to run monitors'))
     expect(toast.success).not.toHaveBeenCalled()
+  })
+
+  it('confirms a queued item command', async () => {
+    mockCommandMutate.mockImplementation((_command, options) => options.onSuccess())
+    const user = userEvent.setup()
+    render(<RepositoryMonitorDetail monitorName="repo-monitor" />)
+
+    await user.click(screen.getByRole('button', { name: 'Triage' }))
+
+    expect(mockCommandMutate).toHaveBeenCalledWith({ kind: 'issue', number: 7, intent: 'triage' }, expect.any(Object))
+    expect(toast.success).toHaveBeenCalledWith('Queued triage for #7')
+  })
+
+  it('reports a refused item command with the server message', async () => {
+    mockCommandMutate.mockImplementation((_command, options) =>
+      options.onError(new Error('not authorized to command monitors')))
+    const user = userEvent.setup()
+    render(<RepositoryMonitorDetail monitorName="repo-monitor" />)
+
+    await user.click(screen.getByRole('button', { name: 'Research' }))
+
+    expect(toast.error).toHaveBeenCalledWith('Failed to queue research: not authorized to command monitors')
   })
 })

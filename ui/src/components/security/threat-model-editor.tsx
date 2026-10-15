@@ -86,6 +86,7 @@ export function ThreatModelEditor({ repositoryName }: { repositoryName: string }
               </div>
             )}
             <textarea
+              aria-label="Threat model"
               value={content}
               onChange={(event) => setContent(event.target.value)}
               className="min-h-72 w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring"

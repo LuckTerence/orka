@@ -57,6 +57,7 @@ describe('ThreatModelEditor', () => {
     render(<ThreatModelEditor repositoryName="payments" />)
 
     const editor = await screen.findByDisplayValue('Generated model v3')
+    expect(editor).toBe(screen.getByRole('textbox', { name: 'Threat model' }))
     await user.type(editor, ' + auth notes')
     await user.click(screen.getByRole('button', { name: 'Save' }))
     await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Threat model saved'))
