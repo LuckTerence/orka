@@ -103,8 +103,11 @@ export function ActivitySpotlight({ task, latestEvent, following, eventError = f
           </Link>
           <StatusDot phase={task.status?.phase} />
         </div>
-        <div className="flex items-center gap-2 text-xs text-muted-foreground">
-          <span>{agent}</span>
+        {/* The row wraps as a whole (badges drop below on a phone); the
+            agent name stays on one line and truncates, full name in its
+            title, instead of breaking mid-name. */}
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+          <span className="min-w-0 max-w-full truncate" title={agent}>{agent}</span>
           <span aria-hidden="true">·</span>
           <span className="tabular-nums">{elapsed}</span>
           <TaskStateBadges task={task} />

@@ -30,6 +30,24 @@ describe('ActivitySpotlight', () => {
     expect(screen.getByText('Following live')).toBeInTheDocument()
   })
 
+  it('keeps a long agent name on one line and wraps the row instead', () => {
+    const agent = 'repository-security-analysis-assistant'
+    render(
+      <ActivitySpotlight
+        task={task('a1', {
+          spec: { type: 'agent', agentRef: { name: agent } },
+          status: { phase: 'Running', startTime: new Date(0).toISOString(), conditions: [{ type: 'WaitingForApproval', status: 'True' }] },
+        })}
+        following
+      />,
+    )
+    const name = screen.getByText(agent)
+    expect(name).toHaveAttribute('title', agent)
+    expect(name).toHaveClass('truncate', 'min-w-0', 'max-w-full')
+    expect(name.parentElement).toHaveClass('flex', 'flex-wrap')
+    expect(name.parentElement).toContainElement(screen.getByText('Waiting for approval'))
+  })
+
   it('falls back to unassigned when no agentRef and shows paused', () => {
     render(<ActivitySpotlight task={task('r2')} following={false} />)
     expect(screen.getByText('unassigned')).toBeInTheDocument()
