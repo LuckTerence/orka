@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { render, screen } from '@/test/test-utils'
+import { fireEvent, render, screen } from '@/test/test-utils'
+import userEvent from '@testing-library/user-event'
 
 vi.mock('zustand/middleware', () => ({
   persist: (fn: unknown) => fn,
@@ -86,6 +87,60 @@ describe('StructuredLogViewer', () => {
     } finally {
       scrollHeight.mockRestore()
       Element.prototype.scrollIntoView = originalScrollIntoView
+    }
+  })
+
+  it('wraps the header controls and lets the filter grow on narrow cards', () => {
+    mockedUseTaskLogs.mockReturnValue({
+      logs: ['line one'],
+      isStreaming: false,
+      isLive: true,
+      error: null,
+      refetch: vi.fn(),
+      clear: vi.fn(),
+    })
+    render(<StructuredLogViewer taskId="task-1" taskPhase="Running" />)
+    const filter = screen.getByLabelText('Filter logs')
+    expect(filter).toHaveClass('w-full', 'sm:w-48')
+    expect(filter).not.toHaveClass('w-48')
+    expect(filter.parentElement).toHaveClass('min-w-0', 'flex-1')
+    const controls = filter.parentElement!.parentElement!
+    expect(controls).toHaveClass('w-full', 'sm:w-auto')
+    expect(controls).toContainElement(screen.getByRole('button', { name: 'Clear logs' }))
+    expect(controls.parentElement).toHaveClass('flex-wrap')
+  })
+
+  it('holds the lines being read while unpinned and offers a jump to the latest', async () => {
+    const user = userEvent.setup()
+    const hookResult = (logs: string[]) => ({
+      logs,
+      isStreaming: false,
+      isLive: true,
+      error: null,
+      refetch: vi.fn(),
+      clear: vi.fn(),
+    })
+    const lineTexts = () => screen.getAllByTestId('log-line').map((line) => line.textContent)
+    mockedUseTaskLogs.mockReturnValue(hookResult(['first', 'second']))
+    const scrollHeight = vi.spyOn(Element.prototype, 'scrollHeight', 'get').mockReturnValue(2000)
+    try {
+      const { rerender } = render(<StructuredLogViewer taskId="task-1" taskPhase="Running" />)
+      const output = screen.getByRole('region', { name: 'Log output' })
+      // The reader scrolls up, which unpins the view.
+      output.scrollTop = 100
+      fireEvent.scroll(output)
+      expect(screen.getByRole('button', { name: 'Pin logs to bottom' })).not.toHaveClass('bg-primary')
+
+      // The next poll returns a slid tail window; the rows on screen stay put.
+      mockedUseTaskLogs.mockReturnValue(hookResult(['second', 'third']))
+      rerender(<StructuredLogViewer taskId="task-1" taskPhase="Running" />)
+      expect(lineTexts()).toEqual(['1first', '2second'])
+
+      await user.click(screen.getByRole('button', { name: /jump to latest/i }))
+      expect(lineTexts()).toEqual(['1second', '2third'])
+      expect(screen.queryByRole('button', { name: /jump to latest/i })).not.toBeInTheDocument()
+    } finally {
+      scrollHeight.mockRestore()
     }
   })
 

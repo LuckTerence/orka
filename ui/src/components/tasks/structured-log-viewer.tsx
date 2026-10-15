@@ -25,6 +25,10 @@ function parseLogLevel(line: string): LogLevel {
   return 'default'
 }
 
+function sameLines(a: string[], b: string[]): boolean {
+  return a.length === b.length && a.every((line, i) => line === b[i])
+}
+
 function HighlightedText({ text, search }: { text: string; search: string }) {
   if (!search) return <>{text}</>
   const parts = text.split(new RegExp(`(${search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi'))
@@ -46,10 +50,17 @@ export function StructuredLogViewer({ taskId, taskPhase }: { taskId: string; tas
   const [search, setSearch] = useState('')
   const [pinToBottom, setPinToBottom] = useState(true)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
+  // While the reader is scrolled up, hold the lines they are reading: a
+  // running task refetches a sliding tail window every poll, which would
+  // shift rows (and restart their numbers) under them. Pinning resumes.
+  const [frozen, setFrozen] = useState<{ taskId: string; lines: string[] } | null>(null)
+  const frozenLines = !pinToBottom && frozen?.taskId === taskId ? frozen.lines : null
+  const shownLogs = frozenLines ?? logs
+  const newLinesWaiting = frozenLines !== null && !sameLines(frozenLines, logs)
 
-  const indexedLogs = logs.map((line, index) => ({ index: index + 1, line }))
+  const indexedLogs = shownLogs.map((line, index) => ({ index: index + 1, line }))
   // Sized for the widest row number so text does not shift at 10, 100, ...
-  const lineNumberWidth = `${String(logs.length).length}ch`
+  const lineNumberWidth = `${String(shownLogs.length).length}ch`
 
   const filteredLogs = search
     ? indexedLogs.filter(({ line }) => line.toLowerCase().includes(search.toLowerCase()))
@@ -70,13 +81,21 @@ export function StructuredLogViewer({ taskId, taskPhase }: { taskId: string; tas
     const el = scrollContainerRef.current
     if (!el) return
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40
-    if (!atBottom && pinToBottom) setPinToBottom(false)
-  }, [pinToBottom])
+    if (!atBottom && pinToBottom) {
+      setPinToBottom(false)
+      setFrozen({ taskId, lines: logs })
+    }
+  }, [pinToBottom, taskId, logs])
+
+  const jumpToLatest = useCallback(() => {
+    setPinToBottom(true)
+    scrollToBottom()
+  }, [scrollToBottom])
 
   // No Job or pod yet (pending, scheduled parents, runtime-pool agents) is
   // expected, not a failure: explain it with the server's reason instead of
   // an error and Retry. Running tasks keep polling, so logs replace this.
-  if (!logs.length && unavailable && !error) {
+  if (!shownLogs.length && unavailable && !error) {
     return (
       <Card>
         <CardHeader><CardTitle>Logs</CardTitle></CardHeader>
@@ -96,7 +115,7 @@ export function StructuredLogViewer({ taskId, taskPhase }: { taskId: string; tas
     )
   }
 
-  if (!logs.length && !isStreaming && !error) {
+  if (!shownLogs.length && !isStreaming && !error) {
     return (
       <Card>
         <CardHeader><CardTitle>Logs</CardTitle></CardHeader>
@@ -134,12 +153,14 @@ export function StructuredLogViewer({ taskId, taskPhase }: { taskId: string; tas
   return (
     <Card>
       <CardHeader>
-        <div className="flex items-center justify-between">
+        {/* The controls wrap below the title on narrow cards, and the filter
+            grows to the row instead of pushing Pin and Clear off the card. */}
+        <div className="flex flex-wrap items-center justify-between gap-2">
           <CardTitle className="flex items-center gap-2">
             Logs
             <span className="text-xs font-normal text-muted-foreground">
               {search
-                ? `(${filteredLogs.length} of ${logs.length} loaded line${logs.length !== 1 ? 's' : ''})`
+                ? `(${filteredLogs.length} of ${shownLogs.length} loaded line${shownLogs.length !== 1 ? 's' : ''})`
                 : `(${filteredLogs.length} line${filteredLogs.length !== 1 ? 's' : ''})`}
             </span>
             {isLive && (
@@ -155,15 +176,15 @@ export function StructuredLogViewer({ taskId, taskPhase }: { taskId: string; tas
               </span>
             )}
           </CardTitle>
-          <div className="flex items-center gap-2">
-            <div className="relative">
+          <div className="flex w-full items-center gap-2 sm:w-auto">
+            <div className="relative min-w-0 flex-1 sm:flex-none">
               <Search className="absolute left-2 top-1/2 h-3 w-3 -translate-y-1/2 text-muted-foreground" />
               <input
                 type="text"
                 placeholder="Filter logs..."
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
-                className="h-8 w-48 rounded-md border bg-background pl-7 pr-7 text-sm"
+                className="h-8 w-full rounded-md border bg-background pl-7 pr-7 text-sm sm:w-48"
                 aria-label="Filter logs"
               />
               {search && (
@@ -179,20 +200,28 @@ export function StructuredLogViewer({ taskId, taskPhase }: { taskId: string; tas
             <Button
               variant={pinToBottom ? 'default' : 'outline'}
               size="sm"
-              onClick={() => {
-                setPinToBottom(true)
-                scrollToBottom()
-              }}
+              onClick={jumpToLatest}
               title="Pin to bottom"
               aria-label="Pin logs to bottom"
             >
               <ArrowDown className="h-3 w-3" />
             </Button>
-            <Button variant="outline" size="sm" onClick={clear} aria-label="Clear logs">Clear</Button>
+            {/* Clearing starts over from the newest output, so it follows it. */}
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                clear()
+                setPinToBottom(true)
+              }}
+              aria-label="Clear logs"
+            >
+              Clear
+            </Button>
           </div>
         </div>
       </CardHeader>
-      <CardContent>
+      <CardContent className="relative">
         {/* A native scroller, so the ref and onScroll sit on the element
             that actually scrolls; it takes focus so the keyboard can
             scroll it too. */}
@@ -219,6 +248,16 @@ export function StructuredLogViewer({ taskId, taskPhase }: { taskId: string; tas
             )
           })}
         </div>
+        {newLinesWaiting && (
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={jumpToLatest}
+            className="absolute bottom-3 left-1/2 -translate-x-1/2 shadow-md"
+          >
+            <ArrowDown className="mr-1 h-3 w-3" /> New lines · Jump to latest
+          </Button>
+        )}
       </CardContent>
     </Card>
   )
