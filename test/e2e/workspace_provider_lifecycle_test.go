@@ -468,7 +468,9 @@ var _ = Describe("Workspace Provider Lifecycle", Ordered, Label("workspace-provi
 		// the prompt failed; an abruptly lost Actor leaves the outcome unknown.
 		// Either way the prompt settles once and never succeeds.
 		waitTaskExecution(task, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionStateOutcomeUnknown)
-		expectServedOnce(marker("lost"))
+		// The dying runtime may retry its own in-flight request, so count
+		// replays only after the Task settles.
+		expectNoReplayAfterSettle(marker("lost"))
 
 		if !backend.lostWorkspaceFails {
 			By("continuing the Session on a replacement instance")
@@ -760,7 +762,25 @@ func waitHeldPrompt(task, promptMarker string) {
 func expectServedOnce(promptMarker string) {
 	requests, err := providerProxyMockLLM.requestsFor(promptMarker)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred())
-	ExpectWithOffset(1, requests).To(HaveLen(1), "%s must not be replayed", promptMarker)
+	if len(requests) != 1 {
+		var times []int64
+		for _, request := range requests {
+			times = append(times, request.Timestamp)
+		}
+		Fail(fmt.Sprintf("%s reached the model %d times, at %v; it must not be replayed", promptMarker, len(requests), times), 1)
+	}
+}
+
+// expectNoReplayAfterSettle checks that no new request for a settled prompt
+// reaches the model.
+func expectNoReplayAfterSettle(promptMarker string) {
+	settled, err := providerProxyMockLLM.requestsFor(promptMarker)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred())
+	ConsistentlyWithOffset(1, func(g Gomega) {
+		requests, err := providerProxyMockLLM.requestsFor(promptMarker)
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(requests).To(HaveLen(len(settled)), "%s was replayed after its Task settled", promptMarker)
+	}, 30*time.Second, 3*time.Second).Should(Succeed())
 }
 
 func waitWorkspaceState(name string, state workspacev1alpha1.ExecutionWorkspaceState) {
