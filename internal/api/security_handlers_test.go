@@ -1198,9 +1198,6 @@ func TestThreatModelExpectedVersionRejectsLostUpdate(t *testing.T) {
 		securityAuthzTestRepositoryScan("scan-1", securityTestRepoURL),
 	)
 	ctx := context.Background()
-	require.NoError(t, handlers.securityStore.SaveThreatModel(ctx, &store.ThreatModel{
-		Namespace: "demo", RepositoryScan: "scan-1", Content: "Generated model.", Source: "scan",
-	}))
 	token := issueTestContextToken(t, provider, nil, map[string]any{
 		"scope": ContextTokenScopeSecurityWrite,
 		"tctx":  securityAuthzTestTctx(securityTestRepoURL),
@@ -1227,16 +1224,28 @@ func TestThreatModelExpectedVersionRejectsLostUpdate(t *testing.T) {
 		require.Equal(t, version, model.Version)
 	}
 
+	version := func(v int64) *int64 { return &v }
+
+	// Two editors load the repository before any model exists; the first
+	// save creates version 1 and the second must not overwrite it.
+	status, _ := put(t, UpdateThreatModelRequest{Content: "Generated model.", ExpectedVersion: version(0)})
+	require.Equal(t, http.StatusOK, status)
+	requireStored(t, "Generated model.", 1)
+	status, message := put(t, UpdateThreatModelRequest{Content: "Second creator.", ExpectedVersion: version(0)})
+	require.Equal(t, http.StatusConflict, status)
+	require.Contains(t, message, "threat model changed since it was loaded")
+	requireStored(t, "Generated model.", 1)
+
 	// Two editors load version 1; the first save wins and the second conflicts.
-	status, _ := put(t, UpdateThreatModelRequest{Content: "First editor.", ExpectedVersion: 1})
+	status, _ = put(t, UpdateThreatModelRequest{Content: "First editor.", ExpectedVersion: version(1)})
 	require.Equal(t, http.StatusOK, status)
 	requireStored(t, "First editor.", 2)
-	status, message := put(t, UpdateThreatModelRequest{Content: "Second editor.", ExpectedVersion: 1})
+	status, message = put(t, UpdateThreatModelRequest{Content: "Second editor.", ExpectedVersion: version(1)})
 	require.Equal(t, http.StatusConflict, status)
 	require.Contains(t, message, "threat model changed since it was loaded")
 	requireStored(t, "First editor.", 2)
 
-	status, _ = put(t, UpdateThreatModelRequest{Content: "Negative version.", ExpectedVersion: -1})
+	status, _ = put(t, UpdateThreatModelRequest{Content: "Negative version.", ExpectedVersion: version(-1)})
 	require.Equal(t, http.StatusBadRequest, status)
 	requireStored(t, "First editor.", 2)
 

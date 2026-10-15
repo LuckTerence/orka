@@ -43,9 +43,10 @@ type UpdateRepositoryScanRequest struct {
 type UpdateThreatModelRequest struct {
 	Content string `json:"content"`
 	Source  string `json:"source,omitempty"`
-	// ExpectedVersion, when positive, is the threat model version the edit was
-	// based on; the save is rejected if another edit replaced it since.
-	ExpectedVersion int64 `json:"expectedVersion,omitempty"`
+	// ExpectedVersion is the threat model version the edit was based on, 0
+	// when it was loaded with no model; the save is rejected if the stored
+	// model changed since. Omitted, the edit replaces whatever is stored.
+	ExpectedVersion *int64 `json:"expectedVersion,omitempty"`
 }
 
 const (
@@ -898,7 +899,7 @@ func (h *Handlers) UpdateThreatModel(c fiber.Ctx) error {
 	if strings.TrimSpace(req.Content) == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "content is required")
 	}
-	if req.ExpectedVersion < 0 {
+	if req.ExpectedVersion != nil && *req.ExpectedVersion < 0 {
 		return fiber.NewError(fiber.StatusBadRequest, "expectedVersion must not be negative")
 	}
 
@@ -927,9 +928,9 @@ func (h *Handlers) UpdateThreatModel(c fiber.Ctx) error {
 		model.Source = "edited"
 	}
 	// Without an expected version, the edit replaces whatever is stored, which
-	// keeps older clients working.
-	if req.ExpectedVersion > 0 {
-		err = h.securityStore.SaveThreatModelIfVersion(c.Context(), model, req.ExpectedVersion)
+	// keeps older clients working. Version 0 requires that no model exists yet.
+	if req.ExpectedVersion != nil {
+		err = h.securityStore.SaveThreatModelIfVersion(c.Context(), model, *req.ExpectedVersion)
 	} else {
 		err = h.securityStore.SaveThreatModel(c.Context(), model)
 	}
