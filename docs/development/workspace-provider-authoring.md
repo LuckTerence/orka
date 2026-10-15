@@ -54,12 +54,17 @@ the attested allocation ID and instance ID. Providers must use label-safe
 identities and birth labels unique to that allocation and incarnation. Before
 granting ingress, Core requires that only the exact attested worker Pod matches
 the full selector, including during deletion, and re-reads its UID and labels
-through the authoritative API. Core freezes its two endpoint policy targets
-before creation, verifies exact ownership and permissions on retries, and
-deletes only its known policies with UID/resourceVersion preconditions. Cold
-resume removes predecessor grants before saving the replacement evidence.
-A later workload cannot change those targets within the same pool; retire the
-exact pool and create a new one to change endpoint namespaces or permissions.
+through the authoritative API. Core freezes both endpoint targets (the provider
+proxy and the controller) before creation, but grants ingress only on the
+provider proxy, whose shipped policy is already isolated. Core never creates a
+policy selecting the controller: that would isolate it and block its other
+clients, such as the Publisher. Operators who isolate controller ingress must
+admit native workers and Publisher callbacks themselves. Core verifies exact
+ownership and permissions on retries, and deletes only its known policies with
+UID/resourceVersion preconditions. Cold resume removes predecessor grants
+before saving the replacement evidence. A later workload cannot change those
+targets within the same pool; retire the exact pool and create a new one to
+change endpoint namespaces or permissions.
 
 Fresh native requests freeze an opaque Core runtime identity from the exact pool
 UID, workspace UID and workload sequence before admission. Raw provider process
