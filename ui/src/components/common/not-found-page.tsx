@@ -12,7 +12,7 @@ export function NotFoundPage() {
     <div className="space-y-4">
       <PageHeader title="Page not found" />
       <Card>
-        <CardContent className="pt-6">
+        <CardContent>
           <EmptyState
             icon={Compass}
             headline={`Nothing lives at ${pathname}`}

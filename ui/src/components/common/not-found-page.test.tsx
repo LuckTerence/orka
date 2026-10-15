@@ -24,4 +24,10 @@ describe('NotFoundPage', () => {
     expect(screen.getByRole('link', { name: 'Go to Dashboard' })).toHaveAttribute('href', '/')
     expect(document.title).toBe('Page not found · Orka')
   })
+
+  it('leaves the top padding to the card', () => {
+    const { container } = render(<NotFoundPage />)
+    // Card already pads its top (py-6); a second pt-6 on the content doubled it.
+    expect(container.querySelector('[data-slot="card-content"]')).not.toHaveClass('pt-6')
+  })
 })
