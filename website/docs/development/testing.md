@@ -48,7 +48,8 @@ make ui-lint
 
 The E2E runner uses separate Go and Ginkgo deadlines. Local defaults are
 `E2E_GO_TEST_TIMEOUT=50m`, `E2E_GINKGO_TIMEOUT=45m`, and
-`E2E_GINKGO_GRACE_PERIOD=2m`; the heavy CI lanes use `75m`, `70m`, and `2m`.
+`E2E_GINKGO_GRACE_PERIOD=2m`. Each CI lane sets its Ginkgo deadline 5m
+below its Go deadline, and Gateway live E2E uses `75m` and `70m`.
 When overriding these values, leave room inside the Go deadline for both an
 interrupted spec and suite cleanup to finish their grace periods.
 
