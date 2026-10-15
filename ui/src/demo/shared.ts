@@ -55,6 +55,9 @@ export function uid(seed: string): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-a${hex.slice(17, 20)}-${hex.slice(20, 32)}`
 }
 
+/** Whether a name is a lowercase RFC 1123 label, as Kubernetes object names here must be. */
+export const isDNSLabel = (name: string) => name.length <= 63 && /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/.test(name)
+
 /** A task's metadata.uid; usage records carry it to link back to the live task. */
 export const taskUID = (name: string, createdMs: number) => uid(`task:${name}:${createdMs}`)
 

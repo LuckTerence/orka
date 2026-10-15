@@ -5,7 +5,7 @@ import { scriptChatTurn, type ChatStep } from '../data/chat'
 import { demoAgent, seedAgents } from '../data/agents'
 import { agentRuntimes, runtimePools } from '../data/runtimes'
 import { builtinTools, customTools, toolListItem } from '../data/tools'
-import { api, apiError, digest, DEMO_NAMESPACE, inDemoNamespace, list, noContent, notFound, now, sseFrame } from '../shared'
+import { api, apiError, digest, DEMO_NAMESPACE, inDemoNamespace, list, noContent, notFound, now, sseFrame, isDNSLabel } from '../shared'
 import { PROVIDERS } from '../world'
 
 // Chat turns (scripted, streamed), agents, tools, and the ACP runtime fabric.
@@ -72,8 +72,15 @@ function chatTurn(body: ChatRequest): Response {
           send('done', { usage })
         }
         controller.close()
-      } catch {
-        // The reader went away (navigation or abort); the turn just ends.
+      } catch (err) {
+        // A failed step ends the turn with an error frame; when the reader
+        // went away (navigation or abort) the stream is already closed.
+        try {
+          send('error', { error: err instanceof Error ? err.message : 'chat turn failed' })
+          controller.close()
+        } catch {
+          // Already closed or cancelled.
+        }
       } finally {
         if (activeTurns.get(sessionId) === turn) activeTurns.delete(sessionId)
       }
@@ -85,8 +92,6 @@ function chatTurn(body: ChatRequest): Response {
 function findAgent(name: string) {
   return agents.find((agent) => agent.metadata.name === name)
 }
-
-const NAME_PATTERN = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/
 
 export const chatHandlers: RequestHandler[] = [
   // Chat
@@ -109,7 +114,7 @@ export const chatHandlers: RequestHandler[] = [
   http.post(api('/agents'), async ({ request }) => {
     const body = (await request.json()) as { name?: string; namespace?: string; spec?: unknown }
     const name = body.name?.trim() ?? ''
-    if (!NAME_PATTERN.test(name) || name.length > 63) return apiError(400, `invalid agent name "${name}": must be a lowercase RFC 1123 label`)
+    if (!isDNSLabel(name)) return apiError(400, `invalid agent name "${name}": must be a lowercase RFC 1123 label`)
     if ((body.namespace || DEMO_NAMESPACE) !== DEMO_NAMESPACE) return apiError(403, `the demo only allows creating agents in namespace "${DEMO_NAMESPACE}"`)
     if (findAgent(name)) return apiError(409, `agents.orka.ai "${name}" already exists`)
     const status: Agent['status'] = {

@@ -167,6 +167,25 @@ describe('demo task API', () => {
     expect(events.at(-1)).toMatchObject({ type: 'TaskCancelled', summary: 'Cancelled: repository monitor stopped by command' })
   })
 
+  it('forks a finished container task with its own container and keeps its outcome', async () => {
+    const source = 'db-migrate-orders-v42-e2l9o'
+    const fork = forkTaskResponseSchema.parse(await json(`/tasks/${source}/fork`, post({})))
+    const forked = taskSchema.parse(await json(`/tasks/${fork.newTaskName}`))
+    expect(forked.spec).toMatchObject({ type: 'container', image: 'ghcr.io/northwind-labs/checkout-migrate:v42', command: ['migrate', 'up'] })
+
+    // The fork events land after the outcome; the stream still reports the outcome.
+    const frames = new SSEFrameBuffer().push(await (await call(`/tasks/${source}/stream?after=0`)).text())
+    const events = frames.flatMap((frame) => (frame.kind === 'event' ? [frame.event] : []))
+    const complete = frames.find((frame) => frame.kind === 'complete')
+    expect(events.at(-1)?.type).toBe('TaskForkCreated')
+    expect(complete && complete.kind === 'complete' && complete.complete).toEqual({ lastSeq: events.at(-1)?.seq, type: 'TaskFailed' })
+  })
+
+  it('rejects task names the API could not route to', async () => {
+    expect((await call('/tasks', post({ name: 'My Task/1', type: 'ai', agentRef: { name: 'issue-triager' } }))).status).toBe(400)
+    expect((await call('/tasks/review-pr-1479-b7n2k/fork', post({ newTaskName: 'bad name' }))).status).toBe(400)
+  })
+
   it('forks a task into a new one that records its source', async () => {
     const response = forkTaskResponseSchema.parse(await json('/tasks/review-pr-1479-b7n2k/fork', post({ afterSeq: 5 })))
     expect(response.forkContext.events.every((e) => e.seq <= 5)).toBe(true)

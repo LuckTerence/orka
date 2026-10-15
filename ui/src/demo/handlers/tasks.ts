@@ -16,7 +16,7 @@ import {
 } from '../data/tasks'
 import { currentRuntimePool } from '../data/runtimes'
 import { SESSION_FIXTURES, sessionExecutionControl } from '../data/sessions'
-import { api, apiError, DEMO_NAMESPACE, digest, inDemoNamespace, list, noContent, notFound, NOW, query, sseFrame, taskUID, uid } from '../shared'
+import { api, apiError, DEMO_NAMESPACE, digest, inDemoNamespace, list, noContent, notFound, NOW, query, sseFrame, taskUID, uid, isDNSLabel } from '../shared'
 import { AGENTS, REPOS, TASKS, type AgentKey, type DemoTaskSeed, type RepoKey } from '../world'
 
 // The demo's task engine. Every task is a record that plays its story (see
@@ -469,6 +469,11 @@ function decide(rec: TaskRecord, approval: Approval, decision: 'approve' | 'decl
   rec.end = (rec.timeline[rec.timeline.length - 1]?.at ?? now) + 1500
 }
 
+/** The event that recorded the task's outcome; later events (forks) do not replace it. */
+function terminalEvent(rec: TaskRecord) {
+  return [...rec.events].reverse().find((e) => e.type === 'TaskSucceeded' || e.type === 'TaskFailed' || e.type === 'TaskCancelled')
+}
+
 function isWaiting(rec: TaskRecord) {
   return Boolean(rec.gate) && !rec.finished
 }
@@ -874,7 +879,7 @@ function buildTrace(rec: TaskRecord, now = Date.now()): TaskTrace {
     if (e.severity === 'warning' && !e.type.startsWith('Approval') && e.type !== 'TaskCancelled') warnings.push({ seq: e.seq, type: e.type, severity: e.severity, message: e.summary ?? e.type })
   }
 
-  const terminal = [...rec.events].reverse().find((e) => e.type === 'TaskSucceeded' || e.type === 'TaskFailed' || e.type === 'TaskCancelled')
+  const terminal = terminalEvent(rec)
   return {
     task: {
       namespace: DEMO_NAMESPACE,
@@ -1068,6 +1073,7 @@ export const taskHandlers: RequestHandler[] = [
     if (body.namespace && body.namespace !== DEMO_NAMESPACE) return forbiddenNamespace()
     const type = body.type ?? 'container'
     const name = body.name?.trim() || `${type}-task-${randomSuffix()}`
+    if (!isDNSLabel(name)) return apiError(400, `invalid task name "${name}": must be a lowercase RFC 1123 label`)
     if (tasks.has(name)) return apiError(409, `tasks.orka.ai "${name}" already exists`)
     const agentName = body.agentRef?.name
     const agent = agentKeyByName(agentName)
@@ -1155,8 +1161,8 @@ export const taskHandlers: RequestHandler[] = [
     return eventStream(request.signal, Number(query(request, 'after') ?? 0), () => {
       const rec = tasks.get(name)
       if (!rec) return undefined
-      const terminal = rec.finished ? rec.events[rec.events.length - 1] : undefined
-      return { events: rec.events, complete: terminal && { lastSeq: terminal.seq, type: terminal.type } }
+      const terminal = rec.finished ? terminalEvent(rec) : undefined
+      return { events: rec.events, complete: terminal && { lastSeq: rec.events[rec.events.length - 1].seq, type: terminal.type } }
     })
   }),
 
@@ -1189,6 +1195,7 @@ export const taskHandlers: RequestHandler[] = [
     const body = (await request.json().catch(() => ({}))) as ForkTaskRequest
     const afterSeq = Math.min(body.afterSeq ?? source.events.length, source.events.length)
     const name = body.newTaskName?.trim() || `${source.name.slice(0, 40)}-fork-${randomSuffix()}`
+    if (!isDNSLabel(name)) return apiError(400, `invalid task name "${name}": must be a lowercase RFC 1123 label`)
     if (tasks.has(name)) return apiError(409, `tasks.orka.ai "${name}" already exists`)
     const now = Date.now()
     emit(source, { type: 'TaskForkRequested', summary: `Fork requested after seq ${afterSeq}`, content: { afterSeq } }, now)
@@ -1204,7 +1211,11 @@ export const taskHandlers: RequestHandler[] = [
       parent: undefined,
       labels: { 'orka.ai/parent-task': source.name },
       annotations: { 'orka.ai/fork-source-task': source.name, 'orka.ai/fork-source-seq': String(afterSeq) },
-      specExtras: body.workspace ? { workspace: body.workspace as Task['spec']['workspace'] } : undefined,
+      specExtras: {
+        // A fork runs the source's container, not the catalog default.
+        ...(source.type === 'container' && containerSpec(source)),
+        ...(body.workspace && { workspace: body.workspace as Task['spec']['workspace'] }),
+      },
     })
     emit(source, { type: 'TaskForkCreated', summary: `Forked into ${name}`, content: { newTaskName: name } }, now + 50)
     return HttpResponse.json({
