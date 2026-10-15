@@ -9,6 +9,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { ArrowLeft, SearchX, Trash2 } from 'lucide-react'
 import { EmptyState } from '@/components/ui/empty-state'
 import { PageHeader } from '@/components/layout/page-header'
+import { useDocumentTitle } from '@/hooks/use-document-title'
 import { TaskStatusBadge } from './task-status-badge'
 import { PRStatusBadge } from './pr-status-badge'
 import { TaskResultViewer } from './task-result-viewer'
@@ -54,6 +55,25 @@ function latestEventPlan(events: ExecutionEvent[]): PlanState | undefined {
     goalComplete: typeof fields?.goalComplete === 'boolean' ? fields.goalComplete : undefined,
     planDocument: latest.contentText,
   }
+}
+
+// The missing-task page has no PageHeader, so it names the browser tab itself.
+function TaskNotFound({ taskId }: { taskId: string }) {
+  useDocumentTitle('Task not found')
+  return (
+    <EmptyState
+      icon={SearchX}
+      headline="Task not found"
+      hint={`No task named "${taskId}" exists in this namespace. It may have been deleted, or it belongs to another namespace.`}
+      action={
+        <Link to="/tasks">
+          <Button variant="outline" size="sm">
+            <ArrowLeft className="mr-1 h-4 w-4" /> Back to Tasks
+          </Button>
+        </Link>
+      }
+    />
+  )
 }
 
 export function TaskDetail({ taskId }: { taskId: string }) {
@@ -172,6 +192,21 @@ export function TaskDetail({ taskId }: { taskId: string }) {
     }
   }, [refetchArtifacts, refetchTrace, runtimeActive, task?.metadata.uid, task?.status?.phase, taskTerminal])
 
+  // On narrow screens the tab bar scrolls sideways; keep the active tab in
+  // view when it changes (or first renders) without scrolling the page.
+  const tabsScrollRef = useRef<HTMLDivElement>(null)
+  const tabsShown = Boolean(task) && !taskMissing && !taskForbidden
+  useEffect(() => {
+    const container = tabsScrollRef.current
+    if (!container || container.scrollWidth <= container.clientWidth) return
+    const active = container.querySelector<HTMLElement>('[role="tab"][data-state="active"]')
+    if (!active) return
+    const bounds = container.getBoundingClientRect()
+    const tab = active.getBoundingClientRect()
+    if (tab.left < bounds.left) container.scrollLeft -= bounds.left - tab.left
+    else if (tab.right > bounds.right) container.scrollLeft += tab.right - bounds.right
+  }, [activeTab, tabsShown])
+
   if (isLoading) {
     return (
       <div className="space-y-4">
@@ -198,20 +233,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
   // when a refetch fails, so a task deleted after it loaded would otherwise
   // keep rendering as if it still existed.
   if (taskMissing || !task) {
-    return (
-      <EmptyState
-        icon={SearchX}
-        headline="Task not found"
-        hint={`No task named "${taskId}" exists in this namespace. It may have been deleted, or it belongs to another namespace.`}
-        action={
-          <Link to="/tasks">
-            <Button variant="outline" size="sm">
-              <ArrowLeft className="mr-1 h-4 w-4" /> Back to Tasks
-            </Button>
-          </Link>
-        }
-      />
-    )
+    return <TaskNotFound taskId={taskId} />
   }
 
   // The controller's parent annotation is authoritative; the label can be a
@@ -284,7 +306,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
       <TaskSchedulePanel task={task} />
 
       <Tabs value={activeTab} onValueChange={setTab}>
-        <div className="overflow-x-auto">
+        <div ref={tabsScrollRef} className="overflow-x-auto">
         <TabsList>
           <TabsTrigger value="runtime">Runtime</TabsTrigger>
           <TabsTrigger value="overview">Overview</TabsTrigger>

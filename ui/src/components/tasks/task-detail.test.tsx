@@ -454,6 +454,43 @@ describe('TaskDetail', () => {
     expect(screen.getByText('Deleting', { selector: '[data-slot="badge"]' })).toBeInTheDocument()
   })
 
+  it('names the browser tab "Task not found" for a missing task', async () => {
+    server.use(
+      http.get('/api/v1/tasks/:id', () =>
+        HttpResponse.json({ error: { code: 404, message: 'task not found' } }, { status: 404 }),
+      ),
+    )
+    const { unmount } = render(<TaskDetail taskId="gone" />)
+    await screen.findByText('Task not found')
+    expect(document.title).toBe('Task not found · Orka')
+    unmount()
+  })
+
+  it('scrolls the sideways-scrolling tab bar to bring the selected tab into view', async () => {
+    const rect = (left: number, right: number) => ({ left, right, top: 0, bottom: 20, width: right - left, height: 20, x: left, y: 0, toJSON: () => ({}) }) as DOMRect
+    const scrollWidth = vi.spyOn(Element.prototype, 'scrollWidth', 'get').mockReturnValue(600)
+    const clientWidth = vi.spyOn(Element.prototype, 'clientWidth', 'get').mockReturnValue(300)
+    // The tab bar spans 0-300px; the Logs tab sits past its right edge.
+    const bounds = vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) {
+      if (this.getAttribute('role') === 'tab') return this.textContent === 'Logs' ? rect(400, 460) : rect(10, 70)
+      return rect(0, 300)
+    })
+    try {
+      const user = userEvent.setup()
+      render(<TaskDetail taskId="test-task" />)
+      const logs = await screen.findByRole('tab', { name: 'Logs' })
+      const scroller = screen.getByRole('tablist').parentElement!
+      // The initially active Overview tab is already in view.
+      expect(scroller.scrollLeft).toBe(0)
+      await user.click(logs)
+      await waitFor(() => expect(scroller.scrollLeft).toBe(160))
+    } finally {
+      scrollWidth.mockRestore()
+      clientWidth.mockRestore()
+      bounds.mockRestore()
+    }
+  })
+
   it('links a child task back to its parent', async () => {
     server.use(
       http.get('/api/v1/tasks/:id', () =>
