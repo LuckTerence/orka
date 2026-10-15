@@ -1,9 +1,18 @@
-import { useMemo, useState } from 'react'
-import { Link } from '@tanstack/react-router'
+import { useMemo, useRef, useState } from 'react'
+import { Link, useNavigate } from '@tanstack/react-router'
+import { toast } from 'sonner'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import { ListAccessError } from '@/components/ui/list-access-error'
 import { Plus, Trash2 } from 'lucide-react'
 import { PageHeader } from '@/components/layout/page-header'
@@ -13,11 +22,19 @@ import type { Task } from '@/schemas/task'
 import { taskTypeLabel } from '@/lib/task-status'
 import { matchesTaskFilter } from '@/lib/task-filter'
 import { timeAgo } from '@/lib/time'
+import { actionErrorMessage } from './action-error'
 
 export function TaskList() {
   const { data, isLoading, error, fetchNextPage, hasNextPage, isFetchingNextPage } = useTaskListPages()
   const deleteTask = useDeleteTask()
+  const navigate = useNavigate()
   const [filter, setFilter] = useState('')
+  // The task whose delete is awaiting confirmation. The dialog lives outside
+  // the table so its clicks never bubble into a row's navigate handler.
+  const [pendingDelete, setPendingDelete] = useState<Task | null>(null)
+  // isPending lands a render later, so a fast double click needs a
+  // synchronous guard to send a single DELETE.
+  const deletingRef = useRef(false)
 
   // An errored list must not keep rendering a previous token's or
   // namespace's rows; the access panel replaces it.
@@ -25,6 +42,21 @@ export function TaskList() {
   const visible = useMemo(() => tasks.filter((task) => matchesTaskFilter(task, filter)), [tasks, filter])
   const lastPage = data?.pages[data.pages.length - 1]
   const remaining = lastPage?.metadata?.remainingItemCount
+
+  async function confirmDelete() {
+    if (!pendingDelete || deletingRef.current) return
+    deletingRef.current = true
+    const name = pendingDelete.metadata.name
+    try {
+      await deleteTask.mutateAsync(name)
+      toast.success(`Task ${name} deleted`)
+    } catch (err) {
+      toast.error(actionErrorMessage('Failed to delete task', err))
+    } finally {
+      deletingRef.current = false
+      setPendingDelete(null)
+    }
+  }
 
   return (
     <div className="space-y-4">
@@ -96,7 +128,17 @@ export function TaskList() {
               </TableRow>
             ) : (
               visible.map((task: Task) => (
-                <TableRow key={task.metadata.uid || task.metadata.name} className="cursor-pointer">
+                <TableRow
+                  key={task.metadata.uid || task.metadata.name}
+                  className="cursor-pointer"
+                  // The name link is the keyboard and assistive-technology
+                  // path; the row click is a pointer convenience that leaves
+                  // the row's own links and buttons alone.
+                  onClick={(e) => {
+                    if ((e.target as HTMLElement).closest('a, button')) return
+                    navigate({ to: '/tasks/$taskId', params: { taskId: task.metadata.name } })
+                  }}
+                >
                   <TableCell>
                     <Link to="/tasks/$taskId" params={{ taskId: task.metadata.name }} className="font-mono text-sm font-medium hover:underline">
                       {task.metadata.name}
@@ -110,10 +152,12 @@ export function TaskList() {
                     <Button
                       variant="ghost"
                       size="icon"
+                      aria-label={`Delete task ${task.metadata.name}`}
+                      title="Delete task"
                       onClick={(e) => {
                         e.preventDefault()
                         e.stopPropagation()
-                        deleteTask.mutate(task.metadata.name)
+                        setPendingDelete(task)
                       }}
                     >
                       <Trash2 className="h-4 w-4 text-muted-foreground" />
@@ -132,6 +176,24 @@ export function TaskList() {
           </Button>
         </div>
       )}
+      <Dialog open={pendingDelete !== null} onOpenChange={(open) => { if (!open && !deleteTask.isPending) setPendingDelete(null) }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete task?</DialogTitle>
+            <DialogDescription>
+              <span className="font-mono">{pendingDelete?.metadata.name}</span> will be deleted. A running task is cancelled.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setPendingDelete(null)} disabled={deleteTask.isPending}>
+              Cancel
+            </Button>
+            <Button variant="destructive" onClick={confirmDelete} disabled={deleteTask.isPending}>
+              {deleteTask.isPending ? 'Deleting…' : 'Delete'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

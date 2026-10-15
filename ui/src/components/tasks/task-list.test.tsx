@@ -4,19 +4,25 @@ import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { server } from '@/test/mocks/server'
 
+const navigateMock = vi.hoisted(() => vi.fn())
+
 vi.mock('zustand/middleware', () => ({
   persist: (fn: unknown) => fn,
 }))
+
+vi.mock('sonner', () => ({ toast: { success: vi.fn(), error: vi.fn() } }))
 
 vi.mock('@tanstack/react-router', async () => {
   const actual = await vi.importActual('@tanstack/react-router')
   return {
     ...actual,
     Link: ({ children, to, ...props }: any) => <a href={to} {...props}>{children}</a>,
-    useNavigate: () => vi.fn(),
+    useNavigate: () => navigateMock,
     useLocation: () => ({ pathname: '/tasks' }),
   }
 })
+
+import { toast } from 'sonner'
 
 import { useUIStore } from '@/stores/ui'
 import { useAuthStore } from '@/stores/auth'
@@ -26,6 +32,7 @@ describe('TaskList', () => {
   beforeEach(() => {
     useUIStore.setState({ sidebarCollapsed: false, theme: 'light', namespace: 'default' })
     useAuthStore.setState({ token: 'test-token' })
+    vi.clearAllMocks()
   })
 
   it('loading state shows skeleton rows', () => {
@@ -88,8 +95,7 @@ describe('TaskList', () => {
     expect(link).toHaveAttribute('href', '/tasks/new')
   })
 
-  it('delete button calls deleteTask', async () => {
-    const user = userEvent.setup()
+  function serveDeletableTask() {
     server.use(
       http.get('/api/v1/tasks', () =>
         HttpResponse.json({
@@ -104,16 +110,69 @@ describe('TaskList', () => {
         }),
       ),
     )
+  }
+
+  it('asks for confirmation before deleting and deletes once on confirm', async () => {
+    const user = userEvent.setup()
+    serveDeletableTask()
+    const deletes: string[] = []
+    server.use(
+      http.delete('/api/v1/tasks/:id', ({ params }) => {
+        deletes.push(String(params.id))
+        return new HttpResponse(null, { status: 204 })
+      }),
+    )
     render(<TaskList />)
-    await waitFor(() => {
-      expect(screen.getByText('del-task')).toBeInTheDocument()
-    })
-    // The New Task link button is also present, so find the trash icon button in the table row
-    const row = screen.getByText('del-task').closest('tr')!
-    const deleteBtn = row.querySelector('button')!
-    await user.click(deleteBtn)
-    // Verify no error - mutation fires without throwing
-    expect(screen.getByText('del-task')).toBeInTheDocument()
+    await user.click(await screen.findByRole('button', { name: 'Delete task del-task' }))
+    // The trash icon only arms the delete; nothing is sent yet.
+    expect(screen.getByRole('dialog')).toHaveTextContent('del-task')
+    expect(deletes).toEqual([])
+
+    await user.dblClick(screen.getByRole('button', { name: 'Delete' }))
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Task del-task deleted'))
+    expect(deletes).toEqual(['del-task'])
+    expect(navigateMock).not.toHaveBeenCalled()
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+  })
+
+  it('cancelling the confirmation sends no delete', async () => {
+    const user = userEvent.setup()
+    serveDeletableTask()
+    const deletes: string[] = []
+    server.use(
+      http.delete('/api/v1/tasks/:id', ({ params }) => {
+        deletes.push(String(params.id))
+        return new HttpResponse(null, { status: 204 })
+      }),
+    )
+    render(<TaskList />)
+    await user.click(await screen.findByRole('button', { name: 'Delete task del-task' }))
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    expect(deletes).toEqual([])
+  })
+
+  it('shows the server message without a repeated prefix when the delete fails', async () => {
+    const user = userEvent.setup()
+    serveDeletableTask()
+    server.use(
+      http.delete('/api/v1/tasks/:id', () =>
+        HttpResponse.json({ error: { code: 500, message: 'failed to delete task: etcd unavailable' } }, { status: 500 }),
+      ),
+    )
+    render(<TaskList />)
+    await user.click(await screen.findByRole('button', { name: 'Delete task del-task' }))
+    await user.click(screen.getByRole('button', { name: 'Delete' }))
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Failed to delete task: etcd unavailable'))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+  })
+
+  it('navigates when any part of a row is clicked', async () => {
+    const user = userEvent.setup()
+    serveDeletableTask()
+    render(<TaskList />)
+    await user.click(await screen.findByText('Succeeded'))
+    expect(navigateMock).toHaveBeenCalledWith({ to: '/tasks/$taskId', params: { taskId: 'del-task' } })
   })
 
   it('timeAgo covers minutes, hours, and days', async () => {
