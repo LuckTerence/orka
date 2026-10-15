@@ -394,9 +394,9 @@ func TestAgentsForAgentRuntime(t *testing.T) {
 		refAgent("other-namespace", "other", "custom-runtime"),
 		baseAgent("provider-agent"),
 	)
-	runtime := &corev1alpha1.AgentRuntime{ObjectMeta: metav1.ObjectMeta{Name: "custom-runtime", Namespace: testNS}}
+	agentRuntime := &corev1alpha1.AgentRuntime{ObjectMeta: metav1.ObjectMeta{Name: "custom-runtime", Namespace: testNS}}
 
-	requests := r.agentsForAgentRuntime(context.Background(), runtime)
+	requests := r.agentsForAgentRuntime(context.Background(), agentRuntime)
 	if len(requests) != 1 || requests[0].Name != "uses-runtime" || requests[0].Namespace != testNS {
 		t.Fatalf("requests = %v, want only %s/uses-runtime", requests, testNS)
 	}

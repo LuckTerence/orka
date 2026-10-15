@@ -271,8 +271,7 @@ func (r *AgentReconciler) validateRuntimeRef(ctx context.Context, agent *corev1a
 		return nil
 	}
 	name := strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name)
-	runtime := &corev1alpha1.AgentRuntime{}
-	if err := r.Get(ctx, client.ObjectKey{Name: name, Namespace: agent.Namespace}, runtime); err != nil {
+	if err := r.Get(ctx, client.ObjectKey{Name: name, Namespace: agent.Namespace}, &corev1alpha1.AgentRuntime{}); err != nil {
 		if errors.IsNotFound(err) {
 			return fmt.Errorf("referenced AgentRuntime %q not found", name)
 		}
