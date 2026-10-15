@@ -36,6 +36,14 @@ describe('ValidationSummary', () => {
     expect(screen.getByText('Not a formal evaluation')).toBeInTheDocument()
   })
 
+  it('lets the rollup badge wrap inside a narrow card instead of overflowing it', () => {
+    render(<ValidationSummary task={task('Failed', { message: 'boom' })} trace={trace()} />)
+    const badge = screen.getByText('Derived checks failing')
+    expect(badge).toHaveClass('shrink', 'whitespace-normal')
+    expect(badge).not.toHaveClass('shrink-0', 'whitespace-nowrap')
+    expect(badge.parentElement).toHaveClass('flex-wrap')
+  })
+
   it('rolls up to pass for a clean succeeded task', () => {
     render(
       <ValidationSummary
