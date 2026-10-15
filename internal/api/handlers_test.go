@@ -456,6 +456,22 @@ func TestHandlers_CreateTaskRejectsNonPositiveTimeout(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, http.StatusBadRequest, resp.StatusCode, timeout)
 	}
+	// The Kubernetes-style body carries the timeout in spec.timeout.
+	for _, timeout := range []time.Duration{0, -5 * time.Minute} {
+		body := CreateTaskRequest{
+			Name: "zero-timeout", Namespace: "default",
+			Spec: &corev1alpha1.TaskSpec{
+				Type: corev1alpha1.TaskTypeContainer, Image: "busybox", Command: []string{"true"},
+				Timeout: &metav1.Duration{Duration: timeout},
+			},
+		}
+		bodyBytes, _ := json.Marshal(body)
+		req := httptest.NewRequest(http.MethodPost, "/tasks", bytes.NewReader(bodyBytes))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+		require.Equal(t, http.StatusBadRequest, resp.StatusCode, "spec.timeout %s", timeout)
+	}
 	err := handlers.client.Get(context.Background(), types.NamespacedName{Name: "zero-timeout", Namespace: "default"}, &corev1alpha1.Task{})
 	require.True(t, apierrors.IsNotFound(err), "no Task may be created with a non-positive timeout")
 }
