@@ -1010,6 +1010,9 @@ func TestRepositoryScanMutationsRejectInvalidValues(t *testing.T) {
 		{name: "negative history days", spec: `"historyDays":-1`, want: "spec.historyDays must not be negative"},
 		{name: "negative max findings", spec: `"maxFindingsPerRun":-5`, want: "spec.maxFindingsPerRun must not be negative"},
 		{name: "negative validation findings", spec: `"validationMaxFindingsPerRun":-1`, want: "spec.validationMaxFindingsPerRun must not be negative"},
+		{name: "minute out of range", spec: `"schedule":"61 * * * *"`, want: "spec.schedule is invalid"},
+		{name: "minute far out of range", spec: `"schedule":"99 * * * *"`, want: "spec.schedule is invalid"},
+		{name: "not a cron expression", spec: `"schedule":"every day"`, want: "spec.schedule is invalid"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -1034,6 +1037,22 @@ func TestRepositoryScanMutationsRejectInvalidValues(t *testing.T) {
 			require.NoError(t, handlers.client.Get(ctx, client.ObjectKey{Namespace: "demo", Name: "scan-1"}, &got))
 			require.Equal(t, existing.Spec, got.Spec)
 		})
+	}
+}
+
+func TestCreateRepositoryScanAcceptsStandardSchedules(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	token := issueTestContextToken(t, provider, nil, map[string]any{"scope": ContextTokenScopeSecurityWrite})
+	app, _ := setupSecurityHandlersWithAuthzFixture(t, ctxTokenConfig, ContextTokenAuthorizationModeOff)
+	for i, schedule := range []string{"*/15 * * * *", "0 3 * * 1-5", "@daily"} {
+		body := fmt.Sprintf(`{"name":"scan-%d","namespace":"demo","spec":{"repoURL":%q,"analysisAgentRef":{"name":"analysis"},"schedule":%q}}`, i, securityTestRepoURL, schedule)
+		req := httptest.NewRequest(http.MethodPost, "/security/repositories", strings.NewReader(body))
+		req.Header.Set(TransactionTokenHeaderName, token)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+		require.Equal(t, http.StatusCreated, resp.StatusCode, schedule)
 	}
 }
 

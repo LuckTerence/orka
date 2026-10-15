@@ -408,6 +408,9 @@ func TestRepositoryMonitorMutationsRejectInvalidValues(t *testing.T) {
 		want  string
 	}{
 		{name: "negative stale review TTL", field: `"review":{"staleReviewTTL":"-1h"}`, want: "spec.review.staleReviewTTL must not be negative"},
+		{name: "not a cron expression", field: `"schedule":"every day"`, want: "spec.schedule is invalid"},
+		{name: "minute out of range", field: `"schedule":"61 * * * *"`, want: "spec.schedule is invalid"},
+		{name: "unknown time zone", field: `"schedule":"0 * * * *","timeZone":"Mars/Olympus"`, want: "spec.schedule is invalid"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			existing := &corev1alpha1.RepositoryMonitor{
@@ -430,6 +433,18 @@ func TestRepositoryMonitorMutationsRejectInvalidValues(t *testing.T) {
 			err := handlers.client.Get(context.Background(), crclient.ObjectKey{Namespace: "demo", Name: "repo-monitor"}, &corev1alpha1.RepositoryMonitor{})
 			require.True(t, apierrors.IsNotFound(err), "an invalid spec must not create a RepositoryMonitor")
 		})
+	}
+}
+
+func TestCreateRepositoryMonitor_AcceptsStandardSchedules(t *testing.T) {
+	app, _ := setupRepositoryMonitorHandlers(t, ContextTokenConfig{}, ContextTokenAuthorizationModeOff)
+	for i, schedule := range []string{"*/15 * * * *", "@hourly"} {
+		body := fmt.Sprintf(`{"name":"monitor-%d","namespace":"demo","spec":{"repoURL":%q,"schedule":%q,"timeZone":"America/Los_Angeles","agents":{"reviewer":{"name":"reviewer"}}}}`, i, monitorTestRepoURL, schedule)
+		req := httptest.NewRequest(http.MethodPost, "/monitors/repositories", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+		require.Equal(t, http.StatusCreated, resp.StatusCode, readRespBody(t, resp))
 	}
 }
 

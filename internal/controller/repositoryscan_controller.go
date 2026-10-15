@@ -238,6 +238,15 @@ func (r *RepositoryScanReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, nil
 	}
 
+	// Parse the schedule before starting any run, so an invalid one reports
+	// InvalidSchedule without creating the initial scan Tasks. A run already
+	// in progress still finishes.
+	var sched cron.Schedule
+	var scheduleErr error
+	if scan.Spec.Schedule != "" {
+		sched, scheduleErr = ParseRepositoryScanSchedule(scan.Spec.Schedule)
+	}
+
 	active, err := r.hasActiveScanPipelineTask(ctx, scan)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -246,7 +255,7 @@ func (r *RepositoryScanReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 	}
 
-	if scan.Status.LastScanID == "" {
+	if scan.Status.LastScanID == "" && scheduleErr == nil {
 		if err := r.createScanRun(ctx, scan, "initial", "", ""); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -261,18 +270,16 @@ func (r *RepositoryScanReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 	}
 
-	if scan.Spec.Schedule == "" {
-		return ctrl.Result{}, nil
-	}
-
-	sched, err := cron.ParseStandard(scan.Spec.Schedule)
-	if err != nil {
+	if scheduleErr != nil {
 		if updateErr := r.updateStatusWithRetry(ctx, scan, func(s *corev1alpha1.RepositoryScan) {
 			s.Status.Phase = repositoryScanPhaseError
-			meta.SetStatusCondition(&s.Status.Conditions, readyCondition(s.Generation, metav1.ConditionFalse, "InvalidSchedule", repositoryScanConditionMessage(err.Error(), "invalid scan schedule")))
+			meta.SetStatusCondition(&s.Status.Conditions, readyCondition(s.Generation, metav1.ConditionFalse, "InvalidSchedule", repositoryScanConditionMessage(scheduleErr.Error(), "invalid scan schedule")))
 		}); updateErr != nil {
 			return ctrl.Result{}, updateErr
 		}
+		return ctrl.Result{}, nil
+	}
+	if sched == nil {
 		return ctrl.Result{}, nil
 	}
 
@@ -289,6 +296,11 @@ func (r *RepositoryScanReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
+}
+
+// ParseRepositoryScanSchedule parses spec.schedule the way scheduled scans run it.
+func ParseRepositoryScanSchedule(schedule string) (cron.Schedule, error) {
+	return cron.ParseStandard(schedule)
 }
 
 func taskSecurityStage(task *corev1alpha1.Task) string {

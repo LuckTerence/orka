@@ -184,7 +184,7 @@ func (r *RepositoryMonitorReconciler) prepareRepositoryMonitor(ctx context.Conte
 	var schedule cron.Schedule
 	var scheduleErr error
 	if !suspended {
-		schedule, scheduleErr = parseRepositoryMonitorSchedule(monitor)
+		schedule, scheduleErr = ParseRepositoryMonitorSchedule(monitor)
 	}
 	return repositoryMonitorReconcileState{owner: owner, repository: repository, schedule: schedule, scheduleErr: scheduleErr, suspended: suspended}, false, ctrl.Result{}, nil
 }
@@ -193,7 +193,9 @@ func repositoryMonitorSuspended(monitor *corev1alpha1.RepositoryMonitor) bool {
 	return monitor.Spec.Suspend != nil && *monitor.Spec.Suspend
 }
 
-func parseRepositoryMonitorSchedule(monitor *corev1alpha1.RepositoryMonitor) (cron.Schedule, error) {
+// ParseRepositoryMonitorSchedule parses spec.schedule in spec.timeZone the way
+// background monitor runs use it; an empty schedule yields a nil schedule.
+func ParseRepositoryMonitorSchedule(monitor *corev1alpha1.RepositoryMonitor) (cron.Schedule, error) {
 	schedule := repositoryMonitorSchedule(monitor)
 	if schedule == "" {
 		return nil, nil

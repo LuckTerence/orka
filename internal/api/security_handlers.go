@@ -18,6 +18,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/agentruntimepolicy"
+	"github.com/orka-agents/orka/internal/controller"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/metrics"
 	"github.com/orka-agents/orka/internal/security"
@@ -89,6 +90,11 @@ func validateRepositoryScanSpecValues(spec corev1alpha1.RepositoryScanSpec) erro
 	} {
 		if limit.value != nil && *limit.value < 0 {
 			return fiber.NewError(fiber.StatusBadRequest, limit.path+" must not be negative")
+		}
+	}
+	if spec.Schedule != "" {
+		if _, err := controller.ParseRepositoryScanSchedule(spec.Schedule); err != nil {
+			return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("spec.schedule is invalid: %v", err))
 		}
 	}
 	return nil

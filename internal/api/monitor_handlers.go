@@ -149,6 +149,9 @@ func validateRepositoryMonitorSpec(spec corev1alpha1.RepositoryMonitorSpec) erro
 	if (spec.Review.Publish.Enabled || spec.Repair.Enabled) && repositoryMonitorCredentialRefName(spec.ForgeCredentialRef) == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "spec.forgeCredentialRef is required when review publication or repair is enabled")
 	}
+	if _, err := controller.ParseRepositoryMonitorSchedule(&corev1alpha1.RepositoryMonitor{Spec: spec}); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("spec.schedule is invalid: %v", err))
+	}
 	// The CRD schema bounds the integer limits; this duration has no minimum.
 	if ttl := spec.Review.StaleReviewTTL; ttl != nil && ttl.Duration < 0 {
 		return fiber.NewError(fiber.StatusBadRequest, "spec.review.staleReviewTTL must not be negative")

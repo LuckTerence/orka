@@ -1652,6 +1652,59 @@ func TestRepositoryScanIdempotencyMarksOrphanedRunFailedAndStartsReplacement(t *
 	requireExplicitTaskAllowedTools(t, &tasks.Items[0], []string{"read_evidence"})
 }
 
+func TestRepositoryScanReconcileRejectsInvalidScheduleBeforeInitialRun(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		schedule  string
+		wantTasks int
+	}{
+		{name: "valid schedule starts the initial scan", schedule: "0 * * * *", wantTasks: 1},
+		{name: "invalid schedule starts nothing", schedule: "61 * * * *"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			scheme := runtime.NewScheme()
+			if err := corev1alpha1.AddToScheme(scheme); err != nil {
+				t.Fatalf("AddToScheme() error = %v", err)
+			}
+			scan := &corev1alpha1.RepositoryScan{
+				TypeMeta:   metav1.TypeMeta{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "RepositoryScan"},
+				ObjectMeta: metav1.ObjectMeta{Name: "scheduled", Namespace: defaultNS},
+				Spec: corev1alpha1.RepositoryScanSpec{
+					RepoURL:          "https://github.com/example/repo",
+					AnalysisAgentRef: corev1alpha1.AgentReference{Name: "scan-reviewer"},
+					Schedule:         tt.schedule,
+				},
+				Status: corev1alpha1.RepositoryScanStatus{Phase: repositoryScanPhasePending},
+			}
+			cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.RepositoryScan{}).
+				WithObjects(scan, repositoryScanTestAgent(scan.Spec.AnalysisAgentRef.Name)).Build()
+			reconciler := &RepositoryScanReconciler{Client: cl, Scheme: scheme, SecurityStore: setupControllerSQLiteStore(t)}
+
+			if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(scan)}); err != nil {
+				t.Fatalf("Reconcile() error = %v", err)
+			}
+
+			var tasks corev1alpha1.TaskList
+			if err := cl.List(ctx, &tasks, client.InNamespace(defaultNS)); err != nil {
+				t.Fatalf("List(Task) error = %v", err)
+			}
+			if len(tasks.Items) != tt.wantTasks {
+				t.Fatalf("created %d Tasks, want %d", len(tasks.Items), tt.wantTasks)
+			}
+			current := &corev1alpha1.RepositoryScan{}
+			if err := cl.Get(ctx, client.ObjectKeyFromObject(scan), current); err != nil {
+				t.Fatalf("Get(RepositoryScan) error = %v", err)
+			}
+			ready := meta.FindStatusCondition(current.Status.Conditions, readyConditionType)
+			invalid := current.Status.Phase == repositoryScanPhaseError && ready != nil && ready.Reason == "InvalidSchedule"
+			if invalid != (tt.wantTasks == 0) {
+				t.Fatalf("status phase/condition = %q/%#v, want InvalidSchedule only for the invalid schedule", current.Status.Phase, ready)
+			}
+		})
+	}
+}
+
 func TestCreateScanRunConcurrentReconcilesCreateOnePipeline(t *testing.T) {
 	ctx := context.Background()
 	securityStore := setupControllerSQLiteStore(t)
