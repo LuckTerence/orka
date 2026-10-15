@@ -103,7 +103,8 @@ function ApprovalCard({
               call: {approval.toolCallID.length > 12 ? approval.toolCallID.slice(0, 12) + '…' : approval.toolCallID}
             </Badge>
           )}
-          <span className="ml-auto font-mono text-xs text-muted-foreground">{approval.id}</span>
+          {/* IDs can be 64 characters; break them rather than overflow the card. */}
+          <span className="ml-auto break-all font-mono text-xs text-muted-foreground">{approval.id}</span>
         </div>
 
         {/* Request guidance can describe an unexecuted tool; after a decision,

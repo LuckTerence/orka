@@ -44,6 +44,15 @@ describe('TaskApprovalPanel', () => {
     expect(screen.getByRole('button', { name: 'Decline' })).toBeInTheDocument()
   })
 
+  it('breaks a long approval ID instead of overflowing the card', async () => {
+    const id = 'a'.repeat(64)
+    server.use(
+      http.get(`${API}/tasks/:id/approvals`, () => HttpResponse.json(listResponse([approval({ id })]))),
+    )
+    render(<TaskApprovalPanel taskId="tk" />)
+    expect(await screen.findByText(id)).toHaveClass('break-all')
+  })
+
   it('shows the wrapped operation, safe inputs, and an unknown execution outcome', async () => {
     server.use(
       http.get(`${API}/tasks/:id/approvals`, () => HttpResponse.json(listResponse([approval({
