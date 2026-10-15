@@ -175,6 +175,9 @@ describe('ToolList', () => {
       expect(screen.getByText(description)).toBeInTheDocument()
     })
     expect(screen.getByText(description)).toHaveAttribute('title', description)
+    // The cap only widens from xl, so every column fits beside the sidebar at 1024px.
+    expect(screen.getByText(description)).toHaveClass('truncate', 'max-w-48', 'xl:max-w-xs')
+    expect(screen.getByText(description)).not.toHaveClass('max-w-xs')
   })
 
   it('custom tools show "Custom" badge', async () => {
