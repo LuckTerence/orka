@@ -48,9 +48,9 @@ function LoginPage() {
   // is still stored, instead of silently continuing as the old identity.
   useEffect(() => {
     if (token && !isValidating && !error && location.pathname === '/login') {
-      navigate({ href: takeLoginReturn() })
+      navigate({ href: takeLoginReturn(location.hash) })
     }
-  }, [token, isValidating, error, location.pathname, navigate])
+  }, [token, isValidating, error, location.pathname, location.hash, navigate])
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()

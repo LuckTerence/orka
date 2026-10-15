@@ -15,7 +15,8 @@ vi.mock('@tanstack/react-router', async () => {
     ...actual,
     createFileRoute: (_path: string) => (opts: any) => ({ ...opts, path: _path }),
     useNavigate: () => mockNavigate,
-    useLocation: () => ({ pathname: mockPathname }),
+    // Like the browser-history router, the fragment mirrors the address bar.
+    useLocation: () => ({ pathname: mockPathname, hash: window.location.hash.slice(1) }),
   }
 })
 
