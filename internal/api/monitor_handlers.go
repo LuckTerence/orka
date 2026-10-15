@@ -853,6 +853,11 @@ func (h *Handlers) CreateRepositoryMonitorRun(c fiber.Ctx) error {
 	if err := validateRepositoryMonitorRunRequest(req); err != nil {
 		return err
 	}
+	// The controller skips queued runs while the monitor reports a
+	// configuration Error, so a new run would stay queued and block the next.
+	if ready := controller.RepositoryMonitorRunsBlockedCondition(monitor); ready != nil {
+		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("repository monitor is not ready (%s): %s; fix the monitor before starting a run", ready.Reason, ready.Message))
+	}
 	if err := h.ensureNoActiveRepositoryMonitorRun(c, namespace, monitor.Name); err != nil {
 		return err
 	}

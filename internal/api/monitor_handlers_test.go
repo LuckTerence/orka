@@ -171,6 +171,56 @@ func TestRepositoryMonitorHandlers_CRUDAndManualRun(t *testing.T) {
 	require.Equal(t, http.StatusConflict, resp.StatusCode)
 }
 
+func TestCreateRepositoryMonitorRun_RejectsMonitorInConfigurationError(t *testing.T) {
+	for _, tt := range []struct {
+		name               string
+		phase              string
+		reason             string
+		observedGeneration int64
+		want               string
+	}{
+		{name: "reviewer agent not found", phase: "Error", reason: "ReviewerAgentNotFound", observedGeneration: 2, want: `repository monitor is not ready (ReviewerAgentNotFound): spec.agents.reviewer "gone" not found`},
+		{name: "store unavailable", phase: "Error", reason: "StoreUnavailable", observedGeneration: 2, want: "repository monitor is not ready (StoreUnavailable)"},
+		{name: "failed run can be retried", phase: "Error", reason: "RunFailed", observedGeneration: 2},
+		{name: "invalid schedule still runs manually", phase: "Error", reason: "InvalidSchedule", observedGeneration: 2},
+		{name: "error from an older generation", phase: "Error", reason: "ReviewerAgentNotFound", observedGeneration: 1},
+		{name: "ready monitor", phase: "Ready", reason: "RunSucceeded", observedGeneration: 2},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			status := metav1.ConditionFalse
+			if tt.phase == "Ready" {
+				status = metav1.ConditionTrue
+			}
+			monitor := &corev1alpha1.RepositoryMonitor{
+				ObjectMeta: metav1.ObjectMeta{Name: "repo-monitor", Namespace: "demo", Generation: 2},
+				Spec:       corev1alpha1.RepositoryMonitorSpec{RepoURL: monitorTestRepoURL, Agents: corev1alpha1.RepositoryMonitorAgents{Reviewer: &corev1alpha1.AgentReference{Name: "gone"}}},
+				Status: corev1alpha1.RepositoryMonitorStatus{
+					Phase: tt.phase,
+					Conditions: []metav1.Condition{{
+						Type: "Ready", Status: status, Reason: tt.reason, ObservedGeneration: tt.observedGeneration,
+						Message: `spec.agents.reviewer "gone" not found in namespace "demo"`, LastTransitionTime: metav1.Now(),
+					}},
+				},
+			}
+			app, handlers := setupRepositoryMonitorHandlers(t, ContextTokenConfig{}, ContextTokenAuthorizationModeOff, monitor)
+			req := httptest.NewRequest(http.MethodPost, "/monitors/repositories/repo-monitor/runs?namespace=demo", nil)
+			resp, err := app.Test(req)
+			require.NoError(t, err)
+			body := readRespBody(t, resp)
+			runs, _, err := handlers.repositoryMonitorStore.ListMonitorRuns(t.Context(), store.MonitorRunFilter{Namespace: "demo", MonitorName: "repo-monitor", Limit: 10})
+			require.NoError(t, err)
+			if tt.want == "" {
+				require.Equal(t, http.StatusCreated, resp.StatusCode, body)
+				require.Len(t, runs, 1)
+				return
+			}
+			require.Equal(t, http.StatusBadRequest, resp.StatusCode, body)
+			require.Contains(t, body, tt.want)
+			require.Empty(t, runs, "a run the controller will not process must not be queued")
+		})
+	}
+}
+
 func TestRepositoryMonitorHandlers_ListSubresourcesAcceptContinueToken(t *testing.T) {
 	app, handlers := setupRepositoryMonitorHandlers(t, ContextTokenConfig{}, ContextTokenAuthorizationModeOff)
 	createRepositoryMonitorForHandlerTest(t, app)

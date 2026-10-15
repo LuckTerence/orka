@@ -61,6 +61,8 @@ const (
 	repositoryMonitorReasonGitSecretInvalid           = "GitSecretInvalid"
 	repositoryMonitorReasonLegacyValidationCommands   = "LegacyValidationCommandsUnsupported"
 	repositoryMonitorReasonValidationImageInvalid     = "InvalidValidationImage"
+	repositoryMonitorReasonInvalidSchedule            = "InvalidSchedule"
+	repositoryMonitorReasonRunFailed                  = "RunFailed"
 )
 
 // RepositoryMonitorReconciler reconciles RepositoryMonitor resources.
@@ -526,7 +528,7 @@ func (r *RepositoryMonitorReconciler) reconcileRepositoryMonitorRuns(ctx context
 		return ctrl.Result{RequeueAfter: requeueAfter}, err
 	}
 	if state.scheduleErr != nil {
-		err := r.updateRepositoryMonitorNotReadyCondition(ctx, monitor, repositoryMonitorPhaseError, "InvalidSchedule", repositoryScanConditionMessage(state.scheduleErr.Error(), "invalid monitor schedule"))
+		err := r.updateRepositoryMonitorNotReadyCondition(ctx, monitor, repositoryMonitorPhaseError, repositoryMonitorReasonInvalidSchedule, repositoryScanConditionMessage(state.scheduleErr.Error(), "invalid monitor schedule"))
 		return ctrl.Result{RequeueAfter: requeueAfter}, err
 	}
 	if state.schedule != nil {
@@ -605,6 +607,25 @@ func minimumRepositoryMonitorRequeueAfter(requeueAfter time.Duration) time.Durat
 		return time.Second
 	}
 	return requeueAfter
+}
+
+// RepositoryMonitorRunsBlockedCondition returns the current Ready condition
+// when it reports an Error that stops reconciliation before queued runs are
+// processed, so a new manual run would stay queued until the monitor is fixed.
+// A failed run or an invalid schedule still lets queued runs proceed.
+func RepositoryMonitorRunsBlockedCondition(monitor *corev1alpha1.RepositoryMonitor) *metav1.Condition {
+	if monitor == nil || monitor.Status.Phase != repositoryMonitorPhaseError {
+		return nil
+	}
+	ready := meta.FindStatusCondition(monitor.Status.Conditions, readyConditionType)
+	if ready == nil || ready.Status != metav1.ConditionFalse || ready.ObservedGeneration != monitor.Generation {
+		return nil
+	}
+	switch ready.Reason {
+	case repositoryMonitorReasonRunFailed, repositoryMonitorReasonInvalidSchedule:
+		return nil
+	}
+	return ready
 }
 
 func (r *RepositoryMonitorReconciler) updateRepositoryMonitorNotReadyCondition(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, phase, reason, message string) error {
@@ -928,7 +949,7 @@ func (r *RepositoryMonitorReconciler) updateStatusAfterMonitorRun(ctx context.Co
 		if run.Phase == repositoryMonitorRunPhaseFailed {
 			m.Status.Phase = repositoryMonitorPhaseError
 			condition.Status = metav1.ConditionFalse
-			condition.Reason = "RunFailed"
+			condition.Reason = repositoryMonitorReasonRunFailed
 			condition.Message = repositoryScanConditionMessage(run.Error, "repository monitor run failed")
 		} else {
 			m.Status.Phase = repositoryMonitorPhaseReady
