@@ -72,7 +72,7 @@ func (e *ToolExecutor) executeTool(ctx context.Context, name string, args map[st
 		EnforceNamespaceIsolation: e.enforceNamespaceIsolation,
 		ResultStore:               e.resultStore,
 		SessionDeleter:            e.sessionManager,
-		GenerateTaskName:          e.generateTaskName,
+		GenerateTaskName:          func() string { return e.generateTaskName(ctx) },
 		TaskLabels:                e.taskLabels,
 		CheckTaskLimit: func() *tools.ChatToolError {
 			if e.tasksCreated >= e.maxTasks {
@@ -483,8 +483,8 @@ func TestNewToolExecutor(t *testing.T) {
 
 func TestGenerateTaskName(t *testing.T) {
 	e := newTestExecutor()
-	name1 := e.generateTaskName()
-	name2 := e.generateTaskName()
+	name1 := e.generateTaskName(context.Background())
+	name2 := e.generateTaskName(context.Background())
 
 	if !strings.HasPrefix(name1, "chat-sess-12345678-") {
 		t.Errorf("name1 = %q, expected prefix chat-sess-12345678-", name1)
@@ -494,14 +494,60 @@ func TestGenerateTaskName(t *testing.T) {
 	}
 }
 
+func TestExecute_CreatesTaskInEachTurnOfSession(t *testing.T) {
+	ctx := context.Background()
+	turn1 := newTestExecutor()
+	// A Task of another session must not advance this session's sequence.
+	other := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{
+		Name: "chat-other-00000000-7", Namespace: "other",
+		Labels: map[string]string{labels.LabelChatSession: "other"},
+	}}
+	if err := turn1.client.Create(ctx, other); err != nil {
+		t.Fatal(err)
+	}
+
+	var names []string
+	for turn := range 3 {
+		// Each chat turn builds a fresh executor for the same session.
+		e := turn1
+		if turn > 0 {
+			e = newTestExecutor()
+			e.client = turn1.client
+		}
+		for range turn + 1 {
+			result, err := e.Execute(ctx, llm.ToolCall{
+				ID: "create", Name: "create_ai_task", Arguments: mustJSON(map[string]any{"prompt": "hello"}),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var tr ToolResult
+			if err := json.Unmarshal([]byte(result), &tr); err != nil {
+				t.Fatal(err)
+			}
+			if !tr.Success {
+				t.Fatalf("turn %d create failed: %s", turn+1, result)
+			}
+			names = append(names, tr.Data.(map[string]any)["name"].(string))
+		}
+	}
+
+	prefix := "chat-sess-12345678-" + newTestExecutor().taskNameHash() + "-"
+	for i, name := range names {
+		if want := prefix + fmt.Sprint(i+1); name != want {
+			t.Fatalf("task %d name = %q, want %q (all: %v)", i+1, name, want, names)
+		}
+	}
+}
+
 func TestGenerateTaskName_AvoidsCrossSessionCollisions(t *testing.T) {
 	e1 := newTestExecutor()
 	e1.sessionID = "demo-magic-chat-pr-one"
 	e2 := newTestExecutor()
 	e2.sessionID = "demo-magic-chat-pr-two"
 
-	name1 := e1.generateTaskName()
-	name2 := e2.generateTaskName()
+	name1 := e1.generateTaskName(context.Background())
+	name2 := e2.generateTaskName(context.Background())
 
 	if name1 == name2 {
 		t.Fatalf("expected distinct names for different sessions, got %q", name1)
@@ -518,7 +564,7 @@ func TestGenerateTaskNameTruncatesLongSessionToDNSLabelLimit(t *testing.T) {
 	e := newTestExecutor()
 	e.sessionID = strings.Repeat("a", 80)
 
-	name := e.generateTaskName()
+	name := e.generateTaskName(context.Background())
 
 	if len(name) > 63 {
 		t.Fatalf("len(name) = %d, want <= 63: %q", len(name), name)

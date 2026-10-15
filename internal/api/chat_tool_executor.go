@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -50,6 +51,7 @@ type ToolExecutor struct {
 	executionMode             executionmode.Mode
 	sessionID                 string
 	taskSeq                   atomic.Int32
+	seedTaskSeq               sync.Once
 	tasksCreated              int
 	maxTasks                  int
 	toolTimeout               time.Duration
@@ -230,7 +232,7 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolCall llm.ToolCall) (stri
 		EnforceNamespaceIsolation: e.enforceNamespaceIsolation,
 		ResultStore:               e.resultStore,
 		SessionDeleter:            e.sessionManager,
-		GenerateTaskName:          e.generateTaskName,
+		GenerateTaskName:          func() string { return e.generateTaskName(toolCtx) },
 		TaskLabels:                e.taskLabels,
 		AuthorizeAgentReference: func(ctx context.Context, agent *corev1alpha1.Agent) *tools.ChatToolError {
 			return chatToolAuthorizationError(e.authorizeAgentReference, ctx, agent, "Use an authorized Agent reference")
@@ -311,14 +313,17 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolCall llm.ToolCall) (stri
 
 // ---- Task creation helpers ----
 
-func (e *ToolExecutor) generateTaskName() string {
+// generateTaskName returns the next chat-<session>-<hash>-<seq> Task name. The
+// executor lives for one turn, so its first name continues after the Tasks that
+// earlier turns of this session created instead of restarting at 1.
+func (e *ToolExecutor) generateTaskName(ctx context.Context) string {
+	e.seedTaskSeq.Do(func() { e.taskSeq.Store(e.latestSessionTaskSeq(ctx)) })
 	seq := e.taskSeq.Add(1)
 	prefix := sanitizeTaskNameComponent(e.sessionID)
 	if prefix == "" {
 		prefix = "session"
 	}
-	hash := sha256.Sum256([]byte(e.sessionID))
-	hashSuffix := hex.EncodeToString(hash[:])[:8]
+	hashSuffix := e.taskNameHash()
 	seqSuffix := strconv.FormatInt(int64(seq), 10)
 
 	// Kubernetes task names must fit DNS label rules (max 63 chars).
@@ -332,6 +337,43 @@ func (e *ToolExecutor) generateTaskName() string {
 	}
 
 	return fmt.Sprintf("chat-%s-%s-%s", prefix, hashSuffix, seqSuffix)
+}
+
+// taskNameHash distinguishes sessions whose sanitized names collide.
+func (e *ToolExecutor) taskNameHash() string {
+	hash := sha256.Sum256([]byte(e.sessionID))
+	return hex.EncodeToString(hash[:])[:8]
+}
+
+// latestSessionTaskSeq returns the highest sequence number among the Tasks
+// labeled with this chat session, or 0 when there are none or listing fails.
+func (e *ToolExecutor) latestSessionTaskSeq(ctx context.Context) int32 {
+	opts := []client.ListOption{client.MatchingLabels{labels.LabelChatSession: e.sessionID}}
+	// Chat tools can only create Tasks in these namespaces when restricted.
+	switch {
+	case e.watchNamespace != "":
+		opts = append(opts, client.InNamespace(e.watchNamespace))
+	case e.enforceNamespaceIsolation:
+		opts = append(opts, client.InNamespace(e.namespace))
+	}
+	var tasks corev1alpha1.TaskList
+	if err := uncachedReaderOr(e.policyReader, e.client).List(ctx, &tasks, opts...); err != nil {
+		chatLog.Error(err, "Failed to list chat session tasks; task names restart at 1", "session", e.sessionID)
+		return 0
+	}
+	hashMarker := "-" + e.taskNameHash()
+	var latest int32
+	for i := range tasks.Items {
+		name := tasks.Items[i].Name
+		dash := strings.LastIndexByte(name, '-')
+		if !strings.HasPrefix(name, "chat-") || dash < 0 || !strings.HasSuffix(name[:dash], hashMarker) {
+			continue
+		}
+		if seq, err := strconv.ParseInt(name[dash+1:], 10, 32); err == nil && int32(seq) > latest {
+			latest = int32(seq)
+		}
+	}
+	return latest
 }
 
 func (e *ToolExecutor) taskLabels() map[string]string {
