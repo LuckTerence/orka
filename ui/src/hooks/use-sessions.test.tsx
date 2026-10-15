@@ -72,7 +72,8 @@ describe('useSession', () => {
     }))
 
     const { result } = renderHook(() => useSession('sess-1', 20), { wrapper: createWrapper() })
-    await waitFor(() => expect(result.current.data?.messageCount).toBe('3'))
+    // Each poll answers a higher count; the data must follow past the first load.
+    await waitFor(() => expect(Number(result.current.data?.messageCount)).toBeGreaterThanOrEqual(3))
   })
 
   it.each([403, 404])('stops polling once the session answers %i', async (status) => {
