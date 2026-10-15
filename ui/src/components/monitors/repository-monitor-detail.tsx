@@ -1,4 +1,5 @@
-import { Play } from 'lucide-react'
+import { Link } from '@tanstack/react-router'
+import { ArrowLeft, Play } from 'lucide-react'
 import { toast } from 'sonner'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -6,11 +7,15 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { PageHeader } from '@/components/layout/page-header'
+import { NotFoundView } from '@/components/common/not-found-page'
 import { StatusProblemAlert } from '@/components/common/status-problem-alert'
 import { statusProblem } from '@/components/common/status-problem'
 import { useCreateRepositoryMonitorCommand, useRepositoryMonitor, useRepositoryMonitorActions, useRepositoryMonitorCommands, useRepositoryMonitorImplementationJobs, useRepositoryMonitorItems, useRepositoryMonitorMutations, useRepositoryMonitorRuns, useRepositoryMonitorWorkActions, useRunRepositoryMonitor } from '@/hooks/use-monitors'
 import { repositoryMonitorDisplayName } from './repository-monitor-display'
+import { isNotFoundError } from '@/lib/api-client'
 import { formatTimestamp } from '@/lib/time'
+import { useUIStore } from '@/stores/ui'
+import type { RepositoryMonitor } from '@/schemas/monitor'
 
 function shortSHA(value?: string) {
   if (!value) return '-'
@@ -32,7 +37,40 @@ function publishLabel(phase?: string, reason?: string) {
 }
 
 export function RepositoryMonitorDetail({ monitorName }: { monitorName: string }) {
-  const { data: monitor, isLoading } = useRepositoryMonitor(monitorName)
+  const namespace = useUIStore((s) => s.namespace)
+  const { data: monitor, isLoading, error } = useRepositoryMonitor(monitorName)
+
+  if (isLoading) {
+    return (
+      <div className="space-y-4">
+        <Skeleton className="h-10 w-80" />
+        <Skeleton className="h-32 w-full" />
+      </div>
+    )
+  }
+
+  // A 404 wins over cached data: a monitor deleted after it loaded keeps its
+  // last `data`. The detail queries live in RepositoryMonitorDetailContent, so
+  // a missing monitor sends none of them.
+  if (isNotFoundError(error) || !monitor) {
+    return (
+      <NotFoundView
+        title="Repository monitor not found"
+        headline={`No repository monitor named "${monitorName}" in ${namespace}`}
+        hint="It may have been deleted, or it belongs to another namespace."
+        action={
+          <Button asChild variant="outline">
+            <Link to="/monitors"><ArrowLeft className="mr-1 h-4 w-4" />Back to Monitors</Link>
+          </Button>
+        }
+      />
+    )
+  }
+
+  return <RepositoryMonitorDetailContent monitorName={monitorName} monitor={monitor} />
+}
+
+function RepositoryMonitorDetailContent({ monitorName, monitor }: { monitorName: string; monitor: RepositoryMonitor }) {
   const runs = useRepositoryMonitorRuns(monitorName)
   const items = useRepositoryMonitorItems(monitorName)
   const issueItems = useRepositoryMonitorItems(monitorName, 'issue')
@@ -48,19 +86,6 @@ export function RepositoryMonitorDetail({ monitorName }: { monitorName: string }
       onSuccess: () => toast.success(`Queued ${command.intent.replace(/_/g, ' ')} for #${command.number}`),
       onError: (error) => toast.error(`Failed to queue ${command.intent.replace(/_/g, ' ')}: ${error instanceof Error ? error.message : 'Unknown error'}`),
     })
-
-  if (isLoading) {
-    return (
-      <div className="space-y-4">
-        <Skeleton className="h-10 w-80" />
-        <Skeleton className="h-32 w-full" />
-      </div>
-    )
-  }
-
-  if (!monitor) {
-    return <div className="text-muted-foreground">Repository monitor not found.</div>
-  }
 
   const status = monitor.status
   const displayName = repositoryMonitorDisplayName(monitor)

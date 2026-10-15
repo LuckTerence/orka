@@ -18,9 +18,10 @@ vi.mock('@tanstack/react-router', async () => {
 
 vi.mock('sonner', () => ({ toast: { success: vi.fn(), error: vi.fn() } }))
 
+import { focusManager } from '@tanstack/react-query'
 import { http, HttpResponse } from 'msw'
 import { server } from '@/test/mocks/server'
-import { render, screen } from '@/test/test-utils'
+import { act, render, screen } from '@/test/test-utils'
 import { useUIStore } from '@/stores/ui'
 import type { RepositoryScan } from '@/schemas/security'
 import { RepositoryDetail } from './repository-detail'
@@ -91,5 +92,42 @@ describe('RepositoryDetail', () => {
 
     expect(await screen.findByText('Ready')).toBeInTheDocument()
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('renders a titled not-found page and sends no detail requests for a missing repository', async () => {
+    const requests: string[] = []
+    server.use(http.all('/api/v1/security/*', ({ request }) => {
+      requests.push(new URL(request.url).pathname)
+      return HttpResponse.json({ error: { code: 404, message: 'repository scan not found' } }, { status: 404 })
+    }))
+
+    render(<RepositoryDetail repositoryName="findings" />)
+
+    expect(await screen.findByRole('heading', { level: 1, name: 'Repository not found' })).toBeInTheDocument()
+    expect(screen.getByText('No repository named "findings" in default')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Back to Security' })).toHaveAttribute('href', '/security')
+    expect(document.title).toBe('Repository not found · Orka')
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(requests).toEqual(['/api/v1/security/repositories/findings'])
+  })
+
+  it('switches to the not-found page when a loaded repository is deleted', async () => {
+    let deleted = false
+    serveRepository(repository({ phase: 'Ready' }))
+    server.use(http.get(repositoryPath, () => deleted
+      ? HttpResponse.json({ error: { code: 404, message: 'repository scan not found' } }, { status: 404 })
+      : HttpResponse.json(repository({ phase: 'Ready' }))))
+
+    render(<RepositoryDetail repositoryName="payments-main" />)
+    expect(await screen.findByRole('heading', { level: 1, name: 'payments-main' })).toBeInTheDocument()
+
+    deleted = true
+    act(() => {
+      focusManager.setFocused(false)
+      focusManager.setFocused(true)
+    })
+
+    expect(await screen.findByRole('heading', { level: 1, name: 'Repository not found' })).toBeInTheDocument()
+    act(() => focusManager.setFocused(undefined))
   })
 })

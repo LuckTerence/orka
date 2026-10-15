@@ -1,9 +1,12 @@
+import { Link } from '@tanstack/react-router'
+import { ArrowLeft } from 'lucide-react'
 import { toast } from 'sonner'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { PageHeader } from '@/components/layout/page-header'
+import { NotFoundView } from '@/components/common/not-found-page'
 import { StatusProblemAlert } from '@/components/common/status-problem-alert'
 import { statusProblem } from '@/components/common/status-problem'
 import { useAllFindings, useDroppedFindings, useRepositoryScan, useReviewSlices, useRunSecurityScan, useScanRuns } from '@/hooks/use-security'
@@ -11,15 +14,46 @@ import { ThreatModelEditor } from './threat-model-editor'
 import { RecommendedFindings } from './recommended-findings'
 import { FindingTable } from './finding-table'
 import { FindingCountBadges } from './finding-count-badges'
+import { isNotFoundError } from '@/lib/api-client'
 import { repositoryDisplayName } from '@/lib/repository-name'
 import { timeAgo } from '@/lib/time'
+import { useUIStore } from '@/stores/ui'
+import type { RepositoryScan } from '@/schemas/security'
 
 export function RepositoryDetail({ repositoryName }: { repositoryName: string }) {
-  const { data: repo, isLoading } = useRepositoryScan(repositoryName)
+  const namespace = useUIStore((s) => s.namespace)
+  const { data: repo, isLoading, error } = useRepositoryScan(repositoryName)
+
+  if (isLoading) {
+    return <Skeleton className="h-96 w-full" />
+  }
+
+  // A 404 wins over cached data: a repository deleted after it loaded keeps
+  // its last `data`. The detail queries live in RepositoryDetailContent, so a
+  // missing repository sends none of them.
+  if (isNotFoundError(error) || !repo) {
+    return (
+      <NotFoundView
+        title="Repository not found"
+        headline={`No repository named "${repositoryName}" in ${namespace}`}
+        hint="It may have been deleted, or it belongs to another namespace."
+        action={
+          <Button asChild variant="outline">
+            <Link to="/security"><ArrowLeft className="mr-1 h-4 w-4" />Back to Security</Link>
+          </Button>
+        }
+      />
+    )
+  }
+
+  return <RepositoryDetailContent repositoryName={repositoryName} repo={repo} />
+}
+
+function RepositoryDetailContent({ repositoryName, repo }: { repositoryName: string; repo: RepositoryScan }) {
   const findings = useAllFindings(repositoryName)
   const scanRuns = useScanRuns(repositoryName)
   const reviewSlices = useReviewSlices(repositoryName)
-  const droppedFindings = useDroppedFindings(repositoryName, repo?.status?.lastScanID)
+  const droppedFindings = useDroppedFindings(repositoryName, repo.status?.lastScanID)
   const runScan = useRunSecurityScan(repositoryName)
   const latestDropped = droppedFindings.data?.items ?? []
   const droppedByLayer = latestDropped.reduce<Record<string, number>>((acc, item) => {
@@ -31,14 +65,6 @@ export function RepositoryDetail({ repositoryName }: { repositoryName: string })
     acc[item.reason] = (acc[item.reason] ?? 0) + 1
     return acc
   }, {})).sort((a, b) => b[1] - a[1]).slice(0, 3)
-
-  if (isLoading) {
-    return <Skeleton className="h-96 w-full" />
-  }
-
-  if (!repo) {
-    return <div className="text-muted-foreground">Repository not found.</div>
-  }
 
   const problem = statusProblem(repo.status)
 

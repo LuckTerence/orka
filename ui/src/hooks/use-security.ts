@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { api } from '@/lib/api-client'
+import { api, isForbiddenError, isNotFoundError } from '@/lib/api-client'
 import { pollUnlessForbidden, retryUnlessForbidden, walkAllPages, type ListResponse } from '@/lib/list-api'
 import { useUIStore } from '@/stores/ui'
 import type { DroppedFinding, PatchProposal, RepositoryScan, ReviewSlice, ScanRun, SecurityFinding, ThreatModel } from '@/schemas/security'
@@ -27,13 +27,26 @@ export function useRepositoryScans() {
   })
 }
 
+// A 403 or 404 does not clear on a retry.
+const retryUnlessDeniedOrMissing = (failureCount: number, error: unknown) =>
+  !isForbiddenError(error) && !isNotFoundError(error) && failureCount < 3
+
 export function useRepositoryScan(name: string) {
   const namespace = useUIStore((s) => s.namespace)
   return useQuery({
     queryKey: ['security', 'repository', namespace, name],
     queryFn: () => api.get<RepositoryScan>(`/security/repositories/${name}`, { namespace }),
     enabled: !!name,
-    refetchInterval: 10000,
+    retry: retryUnlessDeniedOrMissing,
+    // A forbidden repository stays forbidden, and one that 404s after it
+    // loaded was deleted; polling those only spams the API. One never seen
+    // keeps polling: the API reads RepositoryScans through the controller
+    // cache, so a just-created one can 404 briefly.
+    refetchInterval: (query) => {
+      if (isForbiddenError(query.state.error)) return false
+      if (isNotFoundError(query.state.error) && query.state.data !== undefined) return false
+      return 10000
+    },
   })
 }
 
@@ -153,7 +166,10 @@ export function useFinding(id: string) {
     queryKey: ['security', 'finding', namespace, id],
     queryFn: () => api.get<SecurityFinding>(`/security/findings/${id}`, { namespace }),
     enabled: !!id,
-    refetchInterval: 10000,
+    retry: retryUnlessDeniedOrMissing,
+    // Findings come from the security store, so a 404 is final.
+    refetchInterval: (query) =>
+      isForbiddenError(query.state.error) || isNotFoundError(query.state.error) ? false : 10000,
   })
 }
 

@@ -1,5 +1,9 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 
+vi.mock('zustand/middleware', () => ({
+  persist: (fn: unknown) => fn,
+}))
+
 const mockMutateAsync = vi.fn()
 const mockCommandMutate = vi.fn()
 const mockUseRepositoryMonitor = vi.fn()
@@ -12,13 +16,26 @@ const readyMonitor = {
 
 vi.mock('sonner', () => ({ toast: { success: vi.fn(), error: vi.fn() } }))
 
+vi.mock('@tanstack/react-router', async () => {
+  const actual = await vi.importActual('@tanstack/react-router')
+  return {
+    ...actual,
+    Link: ({ children, to, ...props }: any) => <a href={to} {...props}>{children}</a>,
+  }
+})
+
+const mockDetailQuery = vi.fn()
+
 vi.mock('@/hooks/use-monitors', () => {
-  const empty = () => ({ data: { items: [] } })
+  const empty = (name: string) => {
+    mockDetailQuery(name)
+    return { data: { items: [] } }
+  }
   return {
     useRepositoryMonitor: () => mockUseRepositoryMonitor(),
     useRepositoryMonitorRuns: empty,
-    useRepositoryMonitorItems: (_name: string, kind?: string) =>
-      kind === 'issue' ? { data: { items: [{ itemKey: 'issue-7', number: 7, title: 'Flaky test' }] } } : empty(),
+    useRepositoryMonitorItems: (name: string, kind?: string) =>
+      kind === 'issue' ? { data: { items: [{ itemKey: 'issue-7', number: 7, title: 'Flaky test' }] } } : empty(name),
     useRepositoryMonitorActions: empty,
     useRepositoryMonitorCommands: empty,
     useRepositoryMonitorWorkActions: empty,
@@ -33,12 +50,15 @@ import userEvent from '@testing-library/user-event'
 import { toast } from 'sonner'
 import { render, screen, waitFor } from '@/test/test-utils'
 import { ApiError } from '@/lib/api-client'
+import { useUIStore } from '@/stores/ui'
 import { RepositoryMonitorDetail } from './repository-monitor-detail'
 
 describe('RepositoryMonitorDetail', () => {
   beforeEach(() => {
     mockMutateAsync.mockReset()
     mockCommandMutate.mockReset()
+    mockDetailQuery.mockReset()
+    useUIStore.setState({ namespace: 'default', sidebarCollapsed: false, theme: 'light' })
     mockUseRepositoryMonitor.mockReturnValue({ isLoading: false, data: readyMonitor })
     vi.mocked(toast.success).mockClear()
     vi.mocked(toast.error).mockClear()
@@ -68,6 +88,32 @@ describe('RepositoryMonitorDetail', () => {
     expect(screen.getByRole('heading', { level: 1, name: 'repo-monitor' })).toBeInTheDocument()
     expect(screen.getByText('orka-agents/orka')).toBeInTheDocument()
     expect(document.title).toBe('repo-monitor · Orka')
+  })
+
+  it('renders a titled not-found page and runs no detail queries for a missing monitor', () => {
+    mockUseRepositoryMonitor.mockReturnValue({
+      isLoading: false,
+      data: undefined,
+      error: new ApiError(404, '{"error":{"code":404,"message":"repository monitor not found"}}'),
+    })
+    render(<RepositoryMonitorDetail monitorName="gone-monitor" />)
+
+    expect(screen.getByRole('heading', { level: 1, name: 'Repository monitor not found' })).toBeInTheDocument()
+    expect(screen.getByText('No repository monitor named "gone-monitor" in default')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Back to Monitors' })).toHaveAttribute('href', '/monitors')
+    expect(document.title).toBe('Repository monitor not found · Orka')
+    expect(mockDetailQuery).not.toHaveBeenCalled()
+  })
+
+  it('prefers the not-found page over cached data once the monitor 404s', () => {
+    mockUseRepositoryMonitor.mockReturnValue({
+      isLoading: false,
+      data: readyMonitor,
+      error: new ApiError(404, '{"error":{"code":404,"message":"repository monitor not found"}}'),
+    })
+    render(<RepositoryMonitorDetail monitorName="repo-monitor" />)
+
+    expect(screen.getByRole('heading', { level: 1, name: 'Repository monitor not found' })).toBeInTheDocument()
   })
 
   it('shows no alert for a ready monitor', () => {
