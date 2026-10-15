@@ -141,12 +141,14 @@ export function RuntimeCanvas() {
               Task roster is truncated: only the first pages of this namespace were loaded, so active tasks may be missing.
             </p>
           ) : null}
-        <div className="grid gap-4 lg:grid-cols-3">
-          <div className="space-y-4 lg:col-span-2">
+        <div className="grid min-w-0 gap-4 lg:grid-cols-3">
+          <div className="min-w-0 space-y-4 lg:col-span-2">
             <ActiveSpotlight task={active} following={following} />
             <TaskFlowPanel task={active} tasks={runningTasks} />
           </div>
-          <AgentsRoster tasks={runningTasks} activeTaskName={active?.metadata.name} latestActivity={latestActivity} />
+          <div className="min-w-0">
+            <AgentsRoster tasks={runningTasks} activeTaskName={active?.metadata.name} latestActivity={latestActivity} />
+          </div>
         </div>
         </>
       )}

@@ -55,6 +55,19 @@ describe('RuntimeCanvas', () => {
     expect(screen.getByText('Agents')).toBeInTheDocument()
   })
 
+  it('lets grid columns shrink below their content so mobile cards are not clipped', async () => {
+    server.use(http.get('/api/v1/tasks', () => HttpResponse.json({
+      items: [running('r1')], metadata: {},
+    })))
+    render(<RuntimeCanvas />)
+    const spotlight = await screen.findByText('Active now')
+    const grid = spotlight.closest('.grid')!
+    expect(grid).toHaveClass('min-w-0')
+    for (const column of Array.from(grid.children)) {
+      expect(column).toHaveClass('min-w-0')
+    }
+  })
+
   it('selects a stable active task when none has startTime', async () => {
     server.use(http.get('/api/v1/tasks', () => HttpResponse.json({
       items: [
