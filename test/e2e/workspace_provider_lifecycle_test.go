@@ -210,8 +210,14 @@ func substrateWorkspaceBackend() workspaceBackend {
 		},
 		// Actors and checkpoint Tags are atespace-wide; suspended workspaces
 		// keep theirs until deleted.
+		// Checkpoint catalogs hold a provider finalizer until their Tags are
+		// released, so drain them while the provider is still registered.
 		nativeLeftovers: func(g Gomega) []string {
-			return append(nativeNames(g, "actors"), nativeNames(g, "tags")...)
+			left := append(nativeNames(g, "actors"), nativeNames(g, "tags")...)
+			output, err := utils.Run(exec.Command("kubectl", "-n", namespace, "get", "configmaps",
+				"-l", "substrate.workspace.orka.ai/checkpoint-catalog", "-o", "name"))
+			g.Expect(err).NotTo(HaveOccurred())
+			return append(left, utils.GetNonEmptyLines(output)...)
 		},
 		lostWorkspaceFails: true,
 		// No worker carries this template's selector; see the cluster script.
