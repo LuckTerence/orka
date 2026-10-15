@@ -131,6 +131,8 @@ describe('SessionList', () => {
     expect(screen.getByText('Name')).toBeInTheDocument()
     expect(screen.getByText('Namespace')).toBeInTheDocument()
     expect(screen.getByText('Messages')).toBeInTheDocument()
+    // The delete column's header is named for screen readers, not left empty.
+    expect(screen.getByRole('columnheader', { name: 'Actions' })).toBeInTheDocument()
   })
 
   it('names each delete button by its session', async () => {

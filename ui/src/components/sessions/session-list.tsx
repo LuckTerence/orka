@@ -38,7 +38,7 @@ export function SessionList() {
               <TableHead>Tokens (in/out)</TableHead>
               <TableHead>Active Task</TableHead>
               <TableHead>Age</TableHead>
-              <TableHead className="w-12"></TableHead>
+              <TableHead className="w-12"><span className="sr-only">Actions</span></TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
