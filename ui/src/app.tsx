@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { RouterProvider, createRouter } from '@tanstack/react-router'
 import { routeTree } from './routeTree.gen'
+import { captureHashToken } from './lib/login-return'
 import { useAuthStore } from './stores/auth'
 import { useChatStore } from './stores/chat'
 import { useUIStore } from './stores/ui'
@@ -40,6 +41,9 @@ useUIStore.subscribe((state) => {
     useChatStore.getState().selectNamespace(state.namespace)
   }
 })
+
+// Before the router reads the URL: see captureHashToken.
+captureHashToken()
 
 const router = createRouter({ routeTree })
 
