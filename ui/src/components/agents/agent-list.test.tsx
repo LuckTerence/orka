@@ -78,16 +78,50 @@ describe('AgentList', () => {
     // Agent A: name, namespace, provider badge, model badge, tools count
     expect(screen.getByText('anthropic')).toBeInTheDocument()
     expect(screen.getByText('claude-sonnet-4-20250514')).toBeInTheDocument()
-    expect(screen.getByText('1 tools')).toBeInTheDocument()
+    expect(screen.getByText('1 tool')).toBeInTheDocument()
     expect(screen.getByText('Active: 3')).toBeInTheDocument()
 
     // Agent B: name, runtime badge
     expect(screen.getByText('agent-b')).toBeInTheDocument()
-    expect(screen.getByText('codex ACP')).toBeInTheDocument()
+    expect(screen.getByText('Codex ACP')).toBeInTheDocument()
 
     // Agent C: OpenCode keeps its branded runtime label.
     expect(screen.getByText('agent-c')).toBeInTheDocument()
     expect(screen.getByText('OpenCode ACP')).toBeInTheDocument()
+  })
+
+  it('shows the providerRef name and a readiness badge from the Ready condition', async () => {
+    server.use(
+      http.get('/api/v1/agents', () =>
+        HttpResponse.json({
+          items: [
+            {
+              metadata: { name: 'ref-agent', namespace: 'default', uid: 'uid-r' },
+              spec: { providerRef: { name: 'anthropic-prod' }, model: { provider: 'anthropic' } },
+              status: { activeTasks: 0, conditions: [{ type: 'Ready', status: 'True' }] },
+            },
+            {
+              metadata: { name: 'broken-agent', namespace: 'default', uid: 'uid-b' },
+              spec: { providerRef: { name: 'missing' } },
+              status: { activeTasks: 0, conditions: [{ type: 'Ready', status: 'False', message: 'referenced provider "missing" not found' }] },
+            },
+            {
+              metadata: { name: 'new-agent', namespace: 'default', uid: 'uid-n' },
+              spec: { providerRef: { name: 'anthropic-prod' } },
+            },
+          ],
+          metadata: {},
+        })
+      )
+    )
+
+    render(<AgentList />)
+    await waitFor(() => expect(screen.getByText('ref-agent')).toBeInTheDocument())
+    expect(screen.getAllByText('anthropic-prod')).toHaveLength(2)
+    expect(screen.queryByText('anthropic')).not.toBeInTheDocument()
+    expect(screen.getByText('missing')).toBeInTheDocument()
+    expect(screen.getByText('Ready')).toBeInTheDocument()
+    expect(screen.getByText('Not ready')).toHaveAttribute('title', 'referenced provider "missing" not found')
   })
 
   it('agent card shows namespace', async () => {

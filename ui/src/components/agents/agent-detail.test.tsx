@@ -95,7 +95,7 @@ describe('AgentDetail', () => {
     await waitFor(() => {
       expect(screen.getByText('Agent Runtime')).toBeInTheDocument()
     })
-    expect(screen.getByText('claude ACP')).toBeInTheDocument()
+    expect(screen.getByText('Claude ACP')).toBeInTheDocument()
     expect(screen.getByText('Orka-managed RuntimePool')).toBeInTheDocument()
   })
 
@@ -108,7 +108,60 @@ describe('AgentDetail', () => {
       expect(screen.getByText('Status')).toBeInTheDocument()
     })
     expect(screen.getAllByText('2').length).toBeGreaterThanOrEqual(1)
-    expect(screen.getByText('Ready')).toBeInTheDocument()
+    // Readiness badge plus the Ready condition row.
+    expect(screen.getAllByText('Ready')).toHaveLength(2)
+  })
+
+  it('shows the providerRef and a Not ready badge with the condition message', async () => {
+    server.use(
+      http.get('/api/v1/agents/:name', () => HttpResponse.json({
+        metadata: { name: 'ref-agent', namespace: 'default' },
+        spec: { providerRef: { name: 'anthropic-prod' } },
+        status: {
+          activeTasks: 0,
+          conditions: [{ type: 'Ready', status: 'False', message: 'referenced provider "anthropic-prod" is not ready' }],
+        },
+      })),
+    )
+    render(<AgentDetail agentId="ref-agent" />)
+    await waitFor(() => expect(screen.getByText('Model Configuration')).toBeInTheDocument())
+    expect(screen.getByText('anthropic-prod')).toBeInTheDocument()
+    expect(screen.getByText('(Provider resource)')).toBeInTheDocument()
+    expect(screen.getByText('Not ready')).toBeInTheDocument()
+    expect(screen.getAllByText('referenced provider "anthropic-prod" is not ready').length).toBeGreaterThanOrEqual(1)
+  })
+
+  it('shows coordination autonomy and runtime defaults', async () => {
+    server.use(
+      http.get('/api/v1/agents/:name', () => HttpResponse.json({
+        metadata: { name: 'coord-agent', namespace: 'default' },
+        spec: {
+          runtime: {
+            type: 'codex',
+            contractVersion: 'orka.harness.v2',
+            defaultMaxTurns: 40,
+            defaultAllowedTools: ['Read', 'Grep'],
+          },
+          coordination: {
+            enabled: true,
+            autonomous: true,
+            maxIterations: 7,
+            approvalRequiredTools: ['deploy_release'],
+          },
+        },
+        status: { activeTasks: 0 },
+      })),
+    )
+    render(<AgentDetail agentId="coord-agent" />)
+    await waitFor(() => expect(screen.getByText('Agent Runtime')).toBeInTheDocument())
+    expect(screen.getByText('Codex ACP')).toBeInTheDocument()
+    expect(screen.getByText('orka.harness.v2')).toBeInTheDocument()
+    expect(screen.getByText('40')).toBeInTheDocument()
+    expect(screen.getByText('Read')).toBeInTheDocument()
+    expect(screen.getByText('Grep')).toBeInTheDocument()
+    expect(screen.getByText('Autonomous:').parentElement).toHaveTextContent('Autonomous: Yes')
+    expect(screen.getByText('Max Iterations:').parentElement).toHaveTextContent('Max Iterations: 7')
+    expect(screen.getByText('deploy_release')).toBeInTheDocument()
   })
 
   it('shows tools card', async () => {

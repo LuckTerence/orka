@@ -8,7 +8,7 @@ import { PageHeader } from '@/components/layout/page-header'
 import { ArrowLeft, Bot, Trash2 } from 'lucide-react'
 import { useAgent, useDeleteAgent } from '@/hooks/use-agents'
 import { toast } from 'sonner'
-import { builtInAgentRuntimeLabel } from '@/lib/agent-runtime'
+import { agentProviderName, agentReadiness, builtInAgentRuntimeLabel } from '@/lib/agent-runtime'
 
 export function AgentDetail({ agentId }: { agentId: string }) {
   const { data: agent, isLoading } = useAgent(agentId)
@@ -34,6 +34,11 @@ export function AgentDetail({ agentId }: { agentId: string }) {
     return <div className="text-muted-foreground">Agent not found</div>
   }
 
+  const providerName = agentProviderName(agent)
+  const readiness = agentReadiness(agent)
+  const runtime = agent.spec.runtime
+  const coordination = agent.spec.coordination
+
   return (
     <div className="space-y-4">
       <div className="flex items-center gap-4">
@@ -54,33 +59,52 @@ export function AgentDetail({ agentId }: { agentId: string }) {
       </div>
 
       <div className="grid gap-4 md:grid-cols-2">
-        {agent.spec.model && (
+        {(agent.spec.model || providerName) && (
           <Card>
             <CardHeader><CardTitle>Model Configuration</CardTitle></CardHeader>
             <CardContent className="space-y-2 text-sm">
-              {agent.spec.model.provider && <div><span className="text-muted-foreground">Provider:</span> {agent.spec.model.provider}</div>}
-              {agent.spec.model.name && <div><span className="text-muted-foreground">Model:</span> {agent.spec.model.name}</div>}
-              {agent.spec.model.temperature !== undefined && <div><span className="text-muted-foreground">Temperature:</span> {agent.spec.model.temperature}</div>}
-              {agent.spec.model.contextWindow && <div><span className="text-muted-foreground">Context Window:</span> {agent.spec.model.contextWindow}</div>}
-              {agent.spec.model.maxTokens && <div><span className="text-muted-foreground">Max Tokens:</span> {agent.spec.model.maxTokens}</div>}
+              {providerName && (
+                <div>
+                  <span className="text-muted-foreground">Provider:</span> {providerName}
+                  {agent.spec.providerRef && <span className="text-muted-foreground"> (Provider resource)</span>}
+                </div>
+              )}
+              {agent.spec.model?.name && <div><span className="text-muted-foreground">Model:</span> {agent.spec.model.name}</div>}
+              {agent.spec.model?.temperature !== undefined && <div><span className="text-muted-foreground">Temperature:</span> {agent.spec.model.temperature}</div>}
+              {agent.spec.model?.contextWindow && <div><span className="text-muted-foreground">Context Window:</span> {agent.spec.model.contextWindow}</div>}
+              {agent.spec.model?.maxTokens && <div><span className="text-muted-foreground">Max Tokens:</span> {agent.spec.model.maxTokens}</div>}
             </CardContent>
           </Card>
         )}
 
-        {agent.spec.runtime && (
+        {runtime && (
           <Card>
             <CardHeader><CardTitle>Agent Runtime</CardTitle></CardHeader>
             <CardContent className="space-y-2 text-sm">
-              {'type' in agent.spec.runtime ? (
+              {'type' in runtime ? (
                 <>
                   <div><span className="text-muted-foreground">Source:</span> Orka-managed RuntimePool</div>
-                  <div><span className="text-muted-foreground">Profile:</span> <Badge variant="secondary">{builtInAgentRuntimeLabel(agent.spec.runtime.type)}</Badge></div>
+                  <div><span className="text-muted-foreground">Profile:</span> <Badge variant="secondary">{builtInAgentRuntimeLabel(runtime.type)}</Badge></div>
+                  {runtime.contractVersion && <div><span className="text-muted-foreground">Contract Version:</span> <span className="font-mono">{runtime.contractVersion}</span></div>}
                 </>
               ) : (
                 <>
                   <div><span className="text-muted-foreground">Source:</span> External v2 AgentRuntime</div>
-                  <div><span className="text-muted-foreground">Registration:</span> <Badge variant="secondary">{agent.spec.runtime.runtimeRef.name}</Badge></div>
+                  <div><span className="text-muted-foreground">Registration:</span> <Badge variant="secondary">{runtime.runtimeRef.name}</Badge></div>
                 </>
+              )}
+              {runtime.defaultMaxTurns !== undefined && <div><span className="text-muted-foreground">Default Max Turns:</span> {runtime.defaultMaxTurns}</div>}
+              {runtime.defaultAllowedTools && (
+                <div>
+                  <span className="text-muted-foreground">Default Allowed Tools:</span>{' '}
+                  {runtime.defaultAllowedTools.length === 0 ? (
+                    'None'
+                  ) : (
+                    <div className="mt-1 flex flex-wrap gap-1">
+                      {runtime.defaultAllowedTools.map((tool) => <Badge key={tool} variant="outline" className="text-xs">{tool}</Badge>)}
+                    </div>
+                  )}
+                </div>
               )}
             </CardContent>
           </Card>
@@ -89,6 +113,17 @@ export function AgentDetail({ agentId }: { agentId: string }) {
         <Card>
           <CardHeader><CardTitle>Status</CardTitle></CardHeader>
           <CardContent className="space-y-2 text-sm">
+            {readiness && (
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge
+                  variant="secondary"
+                  className={readiness.ready ? 'bg-status-succeeded-bg text-status-succeeded' : 'bg-status-failed-bg text-status-failed'}
+                >
+                  {readiness.ready ? 'Ready' : 'Not ready'}
+                </Badge>
+                {readiness.message && <span className="text-muted-foreground">{readiness.message}</span>}
+              </div>
+            )}
             <div><span className="text-muted-foreground">Active Tasks:</span> {agent.status?.activeTasks ?? 0}</div>
             {agent.status?.lastUsed && <div><span className="text-muted-foreground">Last Used:</span> {new Date(agent.status.lastUsed).toLocaleString()}</div>}
             {(agent.status?.conditions?.length ?? 0) > 0 && (
@@ -133,18 +168,33 @@ export function AgentDetail({ agentId }: { agentId: string }) {
           </Card>
         )}
 
-        {agent.spec.coordination && (
+        {coordination && (
           <Card>
             <CardHeader><CardTitle>Coordination</CardTitle></CardHeader>
             <CardContent className="space-y-2 text-sm">
-              <div><span className="text-muted-foreground">Enabled:</span> {agent.spec.coordination.enabled ? 'Yes' : 'No'}</div>
-              {agent.spec.coordination.maxConcurrentChildren && <div><span className="text-muted-foreground">Max Concurrent:</span> {agent.spec.coordination.maxConcurrentChildren}</div>}
-              {agent.spec.coordination.maxDepth && <div><span className="text-muted-foreground">Max Depth:</span> {agent.spec.coordination.maxDepth}</div>}
-              {(agent.spec.coordination.allowedAgents?.length ?? 0) > 0 && (
+              <div><span className="text-muted-foreground">Enabled:</span> {coordination.enabled ? 'Yes' : 'No'}</div>
+              {coordination.maxConcurrentChildren && <div><span className="text-muted-foreground">Max Concurrent:</span> {coordination.maxConcurrentChildren}</div>}
+              {coordination.maxDepth && <div><span className="text-muted-foreground">Max Depth:</span> {coordination.maxDepth}</div>}
+              <div><span className="text-muted-foreground">Autonomous:</span> {coordination.autonomous ? 'Yes' : 'No'}</div>
+              {coordination.autonomous && (
+                <div>
+                  <span className="text-muted-foreground">Max Iterations:</span>{' '}
+                  {coordination.maxIterations ? coordination.maxIterations : 'Unlimited'}
+                </div>
+              )}
+              {(coordination.allowedAgents?.length ?? 0) > 0 && (
                 <div>
                   <span className="text-muted-foreground">Allowed Agents:</span>
                   <div className="mt-1 flex flex-wrap gap-1">
-                    {agent.spec.coordination.allowedAgents!.map(a => <Badge key={a.name} variant="outline" className="text-xs">{a.name}</Badge>)}
+                    {coordination.allowedAgents!.map(a => <Badge key={a.name} variant="outline" className="text-xs">{a.name}</Badge>)}
+                  </div>
+                </div>
+              )}
+              {(coordination.approvalRequiredTools?.length ?? 0) > 0 && (
+                <div>
+                  <span className="text-muted-foreground">Approval Required Tools:</span>
+                  <div className="mt-1 flex flex-wrap gap-1">
+                    {coordination.approvalRequiredTools!.map((tool) => <Badge key={tool} variant="outline" className="text-xs">{tool}</Badge>)}
                   </div>
                 </div>
               )}
