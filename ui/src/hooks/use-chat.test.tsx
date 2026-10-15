@@ -2,6 +2,8 @@ import { renderHook, waitFor, act } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
 
+vi.mock('sonner', () => ({ toast: { error: vi.fn(), success: vi.fn() } }))
+
 vi.mock('zustand/middleware', () => ({
   persist: (fn: unknown) => fn,
 }))
@@ -9,6 +11,7 @@ vi.mock('zustand/middleware', () => ({
 import { useUIStore } from '@/stores/ui'
 import { useAuthStore } from '@/stores/auth'
 import { useChatStore } from '@/stores/chat'
+import { toast } from 'sonner'
 import { useChatConfig, useSendMessage } from './use-chat'
 
 function createWrapper() {
@@ -848,6 +851,32 @@ describe('useSendMessage', () => {
       expect(deletes.map((d) => d.url)).toEqual(['/api/v1/chat/sess-new-chat?namespace=default'])
       expect(useChatStore.getState().messages).toEqual([])
       expect(useChatStore.getState().isStreaming).toBe(false)
+    })
+
+    it('reports a failed cancel of a turn New Chat orphaned and offers a retry', async () => {
+      vi.mocked(toast.error).mockClear()
+      const { sse, deletes } = mockTurn({ deleteStatus: 403, deleteBody: { error: { code: 403, message: 'not authorized' } } })
+      const { result } = renderHook(() => useSendMessage(), { wrapper: createWrapper() })
+      act(() => {
+        void result.current('Hi there')
+      })
+      sse.emit('status', { sessionId: 'sess-orphan', provider: 'openai', model: 'gpt-4o' })
+      await waitFor(() => expect(useChatStore.getState().currentSessionId).toBe('sess-orphan'))
+      act(() => {
+        useChatStore.getState().newSession()
+      })
+
+      // The discarded transcript cannot show it, so the failure is a toast.
+      await waitFor(() => expect(toast.error).toHaveBeenCalledWith(
+        'Could not stop the previous reply: not authorized',
+        expect.objectContaining({ action: expect.objectContaining({ label: 'Retry' }) }),
+      ))
+      expect(useChatStore.getState().messages).toEqual([])
+      const retry = vi.mocked(toast.error).mock.calls[0][1] as { action: { onClick: () => void } }
+      act(() => retry.action.onClick())
+      await waitFor(() => expect(deletes).toHaveLength(2))
+      expect(deletes[1].url).toBe('/api/v1/chat/sess-orphan?namespace=default')
+      sse.close()
     })
 
     it('a turn orphaned before its status event keeps reading until it can cancel, in its own namespace', async () => {

@@ -1,5 +1,6 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useCallback } from 'react'
+import { toast } from 'sonner'
 import { api, apiErrorMessage } from '@/lib/api-client'
 import { API_BASE_URL } from '@/lib/constants'
 import { useAuthStore } from '@/stores/auth'
@@ -111,6 +112,17 @@ export function useSendMessage() {
       let stopped = false
       let terminalEventSeen = false
       let cancelPromise: Promise<void> | undefined
+      const reportOrphanedCancelFailure = (sessionId: string, err: unknown) => {
+        toast.error(`Could not stop the previous reply: ${err instanceof Error ? err.message : 'Unknown error'}`, {
+          description: 'It may still run tools or create tasks.',
+          action: {
+            label: 'Retry',
+            onClick: () => {
+              cancelChatTurn(sessionId, namespace, token).catch((retryErr: unknown) => reportOrphanedCancelFailure(sessionId, retryErr))
+            },
+          },
+        })
+      }
       const cancelServerTurn = () => {
         cancelWanted = true
         // After done/error the server turn is over; cancelling would only
@@ -132,6 +144,13 @@ export function useSendMessage() {
             })
           },
           (err: unknown) => {
+            if (orphaned) {
+              // New Chat (or a namespace or identity switch) discarded this
+              // turn's transcript, but its server turn keeps running, so say
+              // so outside the transcript and offer a retry.
+              reportOrphanedCancelFailure(sessionId, err)
+              return
+            }
             if (!stopped || !live()) return
             // The turn keeps running; re-arm Stop so it can be retried.
             stopped = false
