@@ -155,6 +155,52 @@ describe('TaskDetail', () => {
     expect(screen.getByRole('link', { name: /back to tasks/i })).toHaveAttribute('href', '/tasks')
   })
 
+  it('keeps the load-error page, not the skeleton, while a failed first load polls again', async () => {
+    let failing = true
+    let hits = 0
+    server.use(
+      http.get('/api/v1/tasks/:id', () => {
+        hits += 1
+        return failing
+          ? HttpResponse.json({ error: { code: 500, message: 'store unavailable' } }, { status: 500 })
+          : HttpResponse.json({
+            metadata: { name: 'broken', namespace: 'default', uid: 'uid-broken' },
+            spec: { type: 'container', image: 'alpine' },
+            status: { phase: 'Succeeded' },
+          })
+      }),
+    )
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      const { container } = render(<TaskDetail taskId="broken" />)
+      // The first load and its three retries (1s, 2s, 4s backoff) settle into the error page.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(8_000)
+      })
+      expect(screen.getByText('The task could not be loaded')).toBeInTheDocument()
+      const settledHits = hits
+      // The 5s poll (re-armed when the error landed) starts another load
+      // that is still retrying: the error page and its back link stay up
+      // instead of the loading skeleton.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_500)
+      })
+      expect(hits).toBeGreaterThan(settledHits)
+      expect(screen.getByText('The task could not be loaded')).toBeInTheDocument()
+      expect(screen.getByRole('link', { name: /back to tasks/i })).toBeInTheDocument()
+      expect(container.querySelector('[data-slot="skeleton"]')).toBeNull()
+      // A later successful load replaces the error page with the task.
+      failing = false
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10_000)
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+    expect(await screen.findByRole('heading', { name: 'broken' })).toBeInTheDocument()
+    expect(screen.queryByText('The task could not be loaded')).not.toBeInTheDocument()
+  })
+
   it('shows not-found when task does not exist', async () => {
     server.use(
       http.get('/api/v1/tasks/:id', () => new HttpResponse(null, { status: 404 })),

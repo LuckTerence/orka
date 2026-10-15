@@ -110,7 +110,17 @@ function TaskAccessError({ message, forbidden = true }: { message: string; forbi
 
 export function TaskDetail({ taskId }: { taskId: string }) {
   const [following, setFollowing] = useState(true)
-  const { data: task, isLoading, error: taskError } = useTask(taskId, following ? 5000 : false)
+  const { data: task, isLoading, error: queryTaskError, errorUpdatedAt } = useTask(taskId, following ? 5000 : false)
+  // React Query puts a query that never loaded back to pending, clearing its
+  // error, each time it polls again. Keep the last failure of this query
+  // (matched by its error timestamp) until a load succeeds, so a failed first
+  // load keeps its error page instead of flipping back to the skeleton.
+  const [lastTaskFailure, setLastTaskFailure] = useState<{ error: Error; at: number } | null>(null)
+  if (queryTaskError && lastTaskFailure?.error !== queryTaskError) {
+    setLastTaskFailure({ error: queryTaskError, at: errorUpdatedAt })
+  }
+  const taskError = queryTaskError ??
+    (task === undefined && lastTaskFailure?.at === errorUpdatedAt ? lastTaskFailure.error : null)
   // Dependent queries (events, trace, approvals, artifacts) wait until the
   // task has loaded, and stay off once the task query 404s or 403s, so a
   // missing or forbidden task generates no hidden dependent traffic.
@@ -256,7 +266,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
     else if (tab.right > bounds.right) container.scrollLeft += tab.right - bounds.right
   }, [activeTab, tabsShown, pendingApprovals])
 
-  if (isLoading) {
+  if (isLoading && !taskError) {
     return (
       <div className="space-y-4">
         <Skeleton className="h-8 w-64" />
