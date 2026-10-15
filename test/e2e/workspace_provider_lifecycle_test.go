@@ -464,7 +464,10 @@ var _ = Describe("Workspace Provider Lifecycle", Ordered, Label("workspace-provi
 			"Wait for the model. "+marker("lost"), "15m", nil))).To(Succeed())
 		waitHeldPrompt(task, marker("lost"))
 		backend.loseInstance(dataWS.uid)
-		waitTaskExecution(task, corev1alpha1.TaskExecutionStateOutcomeUnknown)
+		// A deleted Sandbox Pod terminates gracefully, so its supervisor reports
+		// the prompt failed; an abruptly lost Actor leaves the outcome unknown.
+		// Either way the prompt settles once and never succeeds.
+		waitTaskExecution(task, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionStateOutcomeUnknown)
 		expectServedOnce(marker("lost"))
 
 		if !backend.lostWorkspaceFails {
