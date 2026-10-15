@@ -1,4 +1,4 @@
-import { CheckCircle2, XCircle, AlertTriangle, HelpCircle } from 'lucide-react'
+import { CheckCircle2, XCircle, AlertTriangle, HelpCircle, Info } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { cn } from '@/lib/utils'
@@ -7,6 +7,7 @@ import {
   rollupStatus,
   type RuntimeCheck,
   type CheckStatus,
+  type RollupStatus,
 } from '@/lib/runtime-validation'
 import type { Task } from '@/schemas/task'
 import type { TaskTrace, Approval } from '@/schemas/execution-event'
@@ -29,9 +30,10 @@ const STATUS_META: Record<
   fail: { Icon: XCircle, label: 'Fail', color: 'text-status-failed', variant: 'destructive' },
   warn: { Icon: AlertTriangle, label: 'Warn', color: 'text-status-pending', variant: 'secondary' },
   unknown: { Icon: HelpCircle, label: 'Unknown', color: 'text-muted-foreground', variant: 'outline' },
+  info: { Icon: Info, label: 'Info', color: 'text-muted-foreground', variant: 'outline' },
 }
 
-const ROLLUP_LABEL: Record<CheckStatus, string> = {
+const ROLLUP_LABEL: Record<RollupStatus, string> = {
   pass: 'All derived checks pass',
   fail: 'Derived checks failing',
   warn: 'Derived checks need attention',

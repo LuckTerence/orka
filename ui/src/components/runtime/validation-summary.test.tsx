@@ -50,6 +50,26 @@ describe('ValidationSummary', () => {
     expect(screen.getByText('No errors')).toBeInTheDocument()
   })
 
+  it('does not drag a succeeded task without artifacts to unknown', () => {
+    render(
+      <ValidationSummary
+        task={task('Succeeded', { resultRef: { available: true } })}
+        trace={trace()}
+        approvals={[]}
+        artifacts={[]}
+      />,
+    )
+    expect(screen.getByText('All derived checks pass')).toBeInTheDocument()
+    expect(screen.getByText('None published')).toBeInTheDocument()
+    expect(screen.getByText(/— Info/)).toBeInTheDocument()
+  })
+
+  it('does not flag a cleanly running task as needing attention', () => {
+    render(<ValidationSummary task={task('Running')} trace={trace()} approvals={[]} />)
+    expect(screen.queryByText('Derived checks need attention')).not.toBeInTheDocument()
+    expect(screen.getByText('Phase Running; still in progress')).toBeInTheDocument()
+  })
+
   it('rolls up to fail when the trace has errors', () => {
     render(
       <ValidationSummary
