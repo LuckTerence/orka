@@ -20,6 +20,7 @@ vi.mock('@tanstack/react-router', async () => {
 vi.mock('sonner', () => ({ toast: { success: vi.fn(), error: vi.fn() } }))
 
 import { render, screen, waitFor } from '@/test/test-utils'
+import { toast } from 'sonner'
 import { useUIStore } from '@/stores/ui'
 import { useAuthStore } from '@/stores/auth'
 import { SessionList } from './session-list'
@@ -28,6 +29,9 @@ describe('SessionList', () => {
   beforeEach(() => {
     useUIStore.setState({ namespace: 'default', sidebarCollapsed: false, theme: 'light' })
     useAuthStore.setState({ token: 'test-token' })
+    vi.mocked(toast.success).mockClear()
+    vi.mocked(toast.error).mockClear()
+    vi.restoreAllMocks()
   })
 
   it('shows skeleton rows while loading', () => {
@@ -129,23 +133,68 @@ describe('SessionList', () => {
     expect(screen.getByText('Messages')).toBeInTheDocument()
   })
 
-  it('delete button calls deleteSession', async () => {
-    const user = userEvent.setup()
+  it('names each delete button by its session', async () => {
     server.use(
       http.get('/api/v1/sessions', () =>
-        HttpResponse.json({
-          items: [{ name: 'sess-del', namespace: 'default', createdAt: new Date().toISOString() }],
-          metadata: {},
-        }),
+        HttpResponse.json({ items: [{ name: 'sess-1', namespace: 'default' }], metadata: {} }),
       ),
     )
     render(<SessionList />)
-    await waitFor(() => {
-      expect(screen.getByText('sess-del')).toBeInTheDocument()
-    })
-    await user.click(screen.getByRole('button'))
-    // Verify no error - mutation fires
-    expect(screen.getByText('sess-del')).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: 'Delete session sess-1' })).toBeInTheDocument()
+  })
+
+  it('asks for confirmation and does nothing when declined', async () => {
+    const user = userEvent.setup()
+    let deletes = 0
+    vi.spyOn(window, 'confirm').mockReturnValue(false)
+    server.use(
+      http.get('/api/v1/sessions', () =>
+        HttpResponse.json({ items: [{ name: 'sess-keep', namespace: 'default' }], metadata: {} }),
+      ),
+      http.delete('/api/v1/sessions/:id', () => {
+        deletes += 1
+        return new HttpResponse(null, { status: 204 })
+      }),
+    )
+    render(<SessionList />)
+    await user.click(await screen.findByRole('button', { name: 'Delete session sess-keep' }))
+    expect(window.confirm).toHaveBeenCalledWith('Delete session "sess-keep"?')
+    expect(deletes).toBe(0)
+  })
+
+  it('deletes a confirmed session and reports success', async () => {
+    const user = userEvent.setup()
+    let deleted: string | undefined
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    server.use(
+      http.get('/api/v1/sessions', () =>
+        HttpResponse.json({ items: [{ name: 'sess-del', namespace: 'default', createdAt: new Date().toISOString() }], metadata: {} }),
+      ),
+      http.delete('/api/v1/sessions/:id', ({ params }) => {
+        deleted = params.id as string
+        return new HttpResponse(null, { status: 204 })
+      }),
+    )
+    render(<SessionList />)
+    await user.click(await screen.findByRole('button', { name: 'Delete session sess-del' }))
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Session deleted'))
+    expect(deleted).toBe('sess-del')
+  })
+
+  it('shows the server message when a delete is refused', async () => {
+    const user = userEvent.setup()
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    server.use(
+      http.get('/api/v1/sessions', () =>
+        HttpResponse.json({ items: [{ name: 'sess-ro', namespace: 'default' }], metadata: {} }),
+      ),
+      http.delete('/api/v1/sessions/:id', () =>
+        HttpResponse.json({ error: { code: 403, message: 'not authorized' } }, { status: 403 }),
+      ),
+    )
+    render(<SessionList />)
+    await user.click(await screen.findByRole('button', { name: 'Delete session sess-ro' }))
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Failed to delete session: not authorized'))
   })
 
   it('timeAgo covers minutes, hours, and days', async () => {

@@ -8,12 +8,14 @@ vi.mock('zustand/middleware', () => ({
 }))
 
 const mockNavigate = vi.fn()
+const mockSearch: { current: { tab?: string } } = { current: {} }
 vi.mock('@tanstack/react-router', async () => {
   const actual = await vi.importActual('@tanstack/react-router')
   return {
     ...actual,
     Link: ({ children, to, ...props }: any) => <a href={to} {...props}>{children}</a>,
     useNavigate: () => mockNavigate,
+    useSearch: () => mockSearch.current,
     useLocation: () => ({ pathname: '/sessions/test-session' }),
   }
 })
@@ -36,6 +38,7 @@ vi.mock('@/hooks/use-execution-event-stream', () => ({
 }))
 
 import { render, screen, waitFor } from '@/test/test-utils'
+import { toast } from 'sonner'
 import { useUIStore } from '@/stores/ui'
 import { useAuthStore } from '@/stores/auth'
 import { SessionDetail } from './session-detail'
@@ -45,6 +48,10 @@ describe('SessionDetail', () => {
     useUIStore.setState({ namespace: 'default', sidebarCollapsed: false, theme: 'light' })
     useAuthStore.setState({ token: 'test-token' })
     mockNavigate.mockClear()
+    mockSearch.current = {}
+    vi.mocked(toast.success).mockClear()
+    vi.mocked(toast.error).mockClear()
+    vi.restoreAllMocks()
   })
 
   it('shows skeletons while loading', () => {
@@ -171,8 +178,9 @@ describe('SessionDetail', () => {
     })
   })
 
-  it('delete button removes session and navigates', async () => {
+  it('delete button removes a confirmed session and navigates', async () => {
     const user = userEvent.setup()
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
     server.use(
       http.get('/api/v1/sessions/:id', () =>
         HttpResponse.json({
@@ -189,8 +197,69 @@ describe('SessionDetail', () => {
       expect(screen.getByText('del-session')).toBeInTheDocument()
     })
     await user.click(screen.getByRole('button', { name: /delete/i }))
+    expect(window.confirm).toHaveBeenCalledWith('Delete session "del-session"?')
     await waitFor(() => {
       expect(mockNavigate).toHaveBeenCalledWith({ to: '/sessions' })
     })
+    expect(toast.success).toHaveBeenCalledWith('Session deleted')
+  })
+
+  it('declining the confirmation keeps the session', async () => {
+    const user = userEvent.setup()
+    let deletes = 0
+    vi.spyOn(window, 'confirm').mockReturnValue(false)
+    server.use(
+      http.get('/api/v1/sessions/:id', () => HttpResponse.json({ name: 'keep-session', namespace: 'default' })),
+      http.delete('/api/v1/sessions/:id', () => {
+        deletes += 1
+        return new HttpResponse(null, { status: 204 })
+      }),
+    )
+    render(<SessionDetail sessionId="keep-session" />)
+    await user.click(await screen.findByRole('button', { name: /delete/i }))
+    expect(deletes).toBe(0)
+    expect(mockNavigate).not.toHaveBeenCalled()
+  })
+
+  it('shows the server message instead of throwing when a viewer deletes', async () => {
+    const user = userEvent.setup()
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    server.use(
+      http.get('/api/v1/sessions/:id', () => HttpResponse.json({ name: 'ro-session', namespace: 'default' })),
+      http.delete('/api/v1/sessions/:id', () =>
+        HttpResponse.json({ error: { code: 403, message: 'not authorized' } }, { status: 403 }),
+      ),
+    )
+    render(<SessionDetail sessionId="ro-session" />)
+    await user.click(await screen.findByRole('button', { name: /delete/i }))
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Failed to delete session: not authorized'))
+    expect(mockNavigate).not.toHaveBeenCalled()
+  })
+
+  it('opens the tab named in the URL and records tab changes there', async () => {
+    const user = userEvent.setup()
+    mockSearch.current = { tab: 'timeline' }
+    server.use(
+      http.get('/api/v1/sessions/:id', () => HttpResponse.json({ name: 'tab-session', namespace: 'default' })),
+    )
+    render(<SessionDetail sessionId="tab-session" />)
+    await waitFor(() => expect(screen.getByRole('tab', { name: 'Timeline' })).toHaveAttribute('aria-selected', 'true'))
+    await user.click(screen.getByRole('tab', { name: 'Overview' }))
+    expect(mockNavigate).toHaveBeenCalledWith({
+      to: '/sessions/$sessionId',
+      params: { sessionId: 'tab-session' },
+      search: { tab: 'overview' },
+      replace: true,
+    })
+    expect(screen.getByRole('tab', { name: 'Overview' })).toHaveAttribute('aria-selected', 'true')
+  })
+
+  it('falls back to Overview for an unknown tab in the URL', async () => {
+    mockSearch.current = { tab: 'bogus' }
+    server.use(
+      http.get('/api/v1/sessions/:id', () => HttpResponse.json({ name: 'tab-session', namespace: 'default' })),
+    )
+    render(<SessionDetail sessionId="tab-session" />)
+    await waitFor(() => expect(screen.getByRole('tab', { name: 'Overview' })).toHaveAttribute('aria-selected', 'true'))
   })
 })

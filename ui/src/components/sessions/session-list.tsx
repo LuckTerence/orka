@@ -8,11 +8,22 @@ import { PageHeader } from '@/components/layout/page-header'
 import { Trash2 } from 'lucide-react'
 import { useSessionListPages, useDeleteSession } from '@/hooks/use-sessions'
 import { timeAgo } from '@/lib/time'
+import { toast } from 'sonner'
 
 export function SessionList() {
   const { data, isLoading, error, fetchNextPage, hasNextPage, isFetchingNextPage } = useSessionListPages()
   const deleteSession = useDeleteSession()
   const sessions = error ? [] : (data?.pages ?? []).flatMap((page) => page.items)
+
+  const handleDelete = async (name: string) => {
+    if (!confirm(`Delete session "${name}"?`)) return
+    try {
+      await deleteSession.mutateAsync(name)
+      toast.success('Session deleted')
+    } catch (err) {
+      toast.error(`Failed to delete session: ${err instanceof Error ? err.message : 'Unknown error'}`)
+    }
+  }
 
   return (
     <div className="space-y-4">
@@ -69,7 +80,14 @@ export function SessionList() {
                   </TableCell>
                   <TableCell>{timeAgo(session.createdAt, { compact: true })}</TableCell>
                   <TableCell>
-                    <Button variant="ghost" size="icon" onClick={() => deleteSession.mutate(session.name)}>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      aria-label={`Delete session ${session.name}`}
+                      title="Delete session"
+                      onClick={() => handleDelete(session.name)}
+                      disabled={deleteSession.isPending && deleteSession.variables === session.name}
+                    >
                       <Trash2 className="h-4 w-4 text-muted-foreground" />
                     </Button>
                   </TableCell>

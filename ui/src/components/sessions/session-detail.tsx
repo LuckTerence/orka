@@ -1,4 +1,5 @@
-import { Link, useNavigate } from '@tanstack/react-router'
+import { useState } from 'react'
+import { Link, useNavigate, useSearch } from '@tanstack/react-router'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Button } from '@/components/ui/button'
@@ -10,11 +11,37 @@ import { SessionEventTimeline } from './session-event-timeline'
 import { SessionExecutionRouteLedger } from '@/components/execution/execution-route-ledger'
 import { useSession, useDeleteSession } from '@/hooks/use-sessions'
 import { isForbiddenError } from '@/lib/api-client'
+import { toast } from 'sonner'
+
+const SESSION_TABS = new Set(['overview', 'timeline'])
 
 export function SessionDetail({ sessionId }: { sessionId: string }) {
   const { data: session, isLoading, error } = useSession(sessionId)
   const deleteSession = useDeleteSession()
   const navigate = useNavigate()
+  const search = useSearch({ from: '/sessions/$sessionId' })
+  // Like the task detail: a local override answers a tab click instantly and
+  // is dropped whenever the URL's tab changes, so the URL stays the source of
+  // truth (deep links, Back from a linked task).
+  const [tabState, setTabState] = useState<{ override: string | null; seen?: string }>({ override: null })
+  if (tabState.seen !== search.tab) setTabState({ override: null, seen: search.tab })
+  const requestedTab = tabState.override ?? search.tab ?? 'overview'
+  const activeTab = SESSION_TABS.has(requestedTab) ? requestedTab : 'overview'
+  const setTab = (tab: string) => {
+    setTabState({ override: tab, seen: search.tab })
+    navigate({ to: '/sessions/$sessionId', params: { sessionId }, search: { tab }, replace: true })
+  }
+
+  const handleDelete = async (name: string) => {
+    if (!confirm(`Delete session "${name}"?`)) return
+    try {
+      await deleteSession.mutateAsync(name)
+      toast.success('Session deleted')
+      navigate({ to: '/sessions' })
+    } catch (err) {
+      toast.error(`Failed to delete session: ${err instanceof Error ? err.message : 'Unknown error'}`)
+    }
+  }
 
   if (isLoading) {
     return (
@@ -52,12 +79,10 @@ export function SessionDetail({ sessionId }: { sessionId: string }) {
             <Button
               variant="destructive"
               size="sm"
-              onClick={async () => {
-                await deleteSession.mutateAsync(session.name)
-                navigate({ to: '/sessions' })
-              }}
+              onClick={() => handleDelete(session.name)}
+              disabled={deleteSession.isPending}
             >
-              <Trash2 className="mr-2 h-4 w-4" /> Delete
+              <Trash2 className="mr-2 h-4 w-4" /> {deleteSession.isPending ? 'Deleting...' : 'Delete'}
             </Button>
           }
         />
@@ -65,7 +90,7 @@ export function SessionDetail({ sessionId }: { sessionId: string }) {
 
       <SessionExecutionRouteLedger session={session} />
 
-      <Tabs defaultValue="overview">
+      <Tabs value={activeTab} onValueChange={setTab}>
         <TabsList>
           <TabsTrigger value="overview">Overview</TabsTrigger>
           <TabsTrigger value="timeline">Timeline</TabsTrigger>
