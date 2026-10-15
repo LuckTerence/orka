@@ -8,6 +8,7 @@ import { useUIStore } from '@/stores/ui'
 vi.mock('zustand/middleware', () => ({ persist: (fn: unknown) => fn }))
 vi.mock('sonner', () => ({ toast: { success: vi.fn(), error: vi.fn() } }))
 
+import { toast } from 'sonner'
 import { TaskApprovalPanel } from './task-approval-panel'
 
 const API = '/api/v1'
@@ -192,6 +193,19 @@ describe('TaskApprovalPanel', () => {
     // updates to the settled state — no more action buttons.
     await waitFor(() => expect(getCalls).toBeGreaterThan(callsBefore))
     await waitFor(() => expect(screen.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument())
+    // Once the card has settled, the stale conflict note goes away.
+    expect(screen.queryByText(/approval is already declined/i)).not.toBeInTheDocument()
+  })
+
+  it('confirms a decision in plain words', async () => {
+    server.use(
+      http.get(`${API}/tasks/:id/approvals`, () => HttpResponse.json(listResponse([approval()]))),
+      http.post(`${API}/tasks/:id/approvals/:approvalID/decision`, () => HttpResponse.json(approval({ status: 'approved' }))),
+    )
+    const user = userEvent.setup()
+    render(<TaskApprovalPanel taskId="tk" />)
+    await user.click(await screen.findByRole('button', { name: 'Approve' }))
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Decision recorded: Approved'))
   })
 
   it('disables the action buttons while a decision is in flight', async () => {

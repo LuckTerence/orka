@@ -74,7 +74,7 @@ function ApprovalCard({
         decision,
         reason: reason.trim() || undefined,
       })
-      toast.success(`Approval ${updated.status}`)
+      toast.success(`Decision recorded: ${statusStyle(updated.status).label}`)
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
         // The approval changed underneath us (decided elsewhere, expired, or
@@ -152,7 +152,9 @@ function ApprovalCard({
           </div>
         )}
 
-        {conflict && (
+        {/* The note explains why a decision on a still-pending card failed;
+            once the refetched card settles, its decision details replace it. */}
+        {conflict && isPending && (
           <p className="rounded-md border border-status-pending/40 bg-status-pending-bg px-3 py-2 text-xs text-status-pending">
             {conflict}
           </p>
