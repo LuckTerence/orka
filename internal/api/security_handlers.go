@@ -75,6 +75,24 @@ func (h *Handlers) normalizeRepositoryScanSpec(spec *corev1alpha1.RepositoryScan
 	}
 }
 
+// validateRepositoryScanSpecValues rejects settings the controller cannot run.
+// The CRD schema leaves some of these limits unbounded.
+func validateRepositoryScanSpecValues(spec corev1alpha1.RepositoryScanSpec) error {
+	for _, limit := range []struct {
+		path  string
+		value *int32
+	}{
+		{path: "spec.historyDays", value: spec.HistoryDays},
+		{path: "spec.maxFindingsPerRun", value: spec.MaxFindingsPerRun},
+		{path: "spec.validationMaxFindingsPerRun", value: spec.ValidationMaxFindingsPerRun},
+	} {
+		if limit.value != nil && *limit.value < 0 {
+			return fiber.NewError(fiber.StatusBadRequest, limit.path+" must not be negative")
+		}
+	}
+	return nil
+}
+
 func (h *Handlers) ensureSecurityStore() error {
 	if h.securityStore == nil {
 		return fiber.NewError(fiber.StatusNotImplemented, "security store not configured")
@@ -712,6 +730,9 @@ func (h *Handlers) CreateRepositoryScan(c fiber.Ctx) error {
 	if err := security.ValidateRepositoryScanSource(req.Spec); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, err.Error())
 	}
+	if err := validateRepositoryScanSpecValues(req.Spec); err != nil {
+		return err
+	}
 	if err := h.authorizeContextTokenRepositoryScanPolicyRefs(c, "createRepositoryScanPolicy", namespace, req.Spec); err != nil {
 		return err
 	}
@@ -737,6 +758,9 @@ func (h *Handlers) CreateRepositoryScan(c fiber.Ctx) error {
 	if err := h.client.Create(c.Context(), scan); err != nil {
 		if apierrors.IsAlreadyExists(err) {
 			return fiber.NewError(fiber.StatusConflict, "repository scan already exists")
+		}
+		if invalid := invalidObjectError("repository scan", err); invalid != nil {
+			return invalid
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create repository scan: %v", err))
 	}
@@ -779,6 +803,9 @@ func (h *Handlers) UpdateRepositoryScan(c fiber.Ctx) error {
 	if err := security.ValidateRepositoryScanSource(req.Spec); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, err.Error())
 	}
+	if err := validateRepositoryScanSpecValues(req.Spec); err != nil {
+		return err
+	}
 	if err := h.authorizeContextTokenRepositoryScanPolicyRefs(c, "updateRepositoryScanPolicy", namespace, req.Spec); err != nil {
 		return err
 	}
@@ -799,6 +826,9 @@ func (h *Handlers) UpdateRepositoryScan(c fiber.Ctx) error {
 		return err
 	}
 	if err := h.client.Update(c.Context(), updated); err != nil {
+		if invalid := invalidObjectError("repository scan", err); invalid != nil {
+			return invalid
+		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to update repository scan: %v", err))
 	}
 	return c.JSON(updated)

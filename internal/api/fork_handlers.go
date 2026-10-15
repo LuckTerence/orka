@@ -587,6 +587,15 @@ func listTaskEventsThrough(
 	return newTaskTimelineReader(eventStore, namespace, taskName).listRecentContextThrough(ctx, throughSeq, forkcontext.DefaultMaxEvents+1)
 }
 
+// invalidObjectError reports a Kubernetes Invalid rejection of a caller-supplied
+// object as 400 naming the rejected fields. It returns nil for any other error.
+func invalidObjectError(kind string, err error) error {
+	if !apierrors.IsInvalid(err) {
+		return nil
+	}
+	return fiber.NewError(fiber.StatusBadRequest, invalidObjectMessage(kind+" is invalid", err))
+}
+
 // invalidObjectMessage names the fields an Invalid create rejected, so the
 // caller can correct them, without repeating the whole object in the reply.
 func invalidObjectMessage(prefix string, err error) string {

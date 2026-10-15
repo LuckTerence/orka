@@ -149,6 +149,10 @@ func validateRepositoryMonitorSpec(spec corev1alpha1.RepositoryMonitorSpec) erro
 	if (spec.Review.Publish.Enabled || spec.Repair.Enabled) && repositoryMonitorCredentialRefName(spec.ForgeCredentialRef) == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "spec.forgeCredentialRef is required when review publication or repair is enabled")
 	}
+	// The CRD schema bounds the integer limits; this duration has no minimum.
+	if ttl := spec.Review.StaleReviewTTL; ttl != nil && ttl.Duration < 0 {
+		return fiber.NewError(fiber.StatusBadRequest, "spec.review.staleReviewTTL must not be negative")
+	}
 	return nil
 }
 
@@ -664,6 +668,9 @@ func (h *Handlers) CreateRepositoryMonitor(c fiber.Ctx) error {
 		if apierrors.IsAlreadyExists(err) {
 			return fiber.NewError(fiber.StatusConflict, "repository monitor already exists")
 		}
+		if invalid := invalidObjectError("repository monitor", err); invalid != nil {
+			return invalid
+		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create repository monitor: %v", err))
 	}
 	return c.Status(fiber.StatusCreated).JSON(monitor)
@@ -785,6 +792,9 @@ func (h *Handlers) UpdateRepositoryMonitor(c fiber.Ctx) error {
 		return err
 	}
 	if err := h.client.Update(c.Context(), updated); err != nil {
+		if invalid := invalidObjectError("repository monitor", err); invalid != nil {
+			return invalid
+		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to update repository monitor: %v", err))
 	}
 	return c.JSON(updated)

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"github.com/gofiber/fiber/v3"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -395,6 +397,38 @@ func TestCreateRepositoryMonitor_RejectsUnsupportedPublishConfig(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 			require.Contains(t, readRespBody(t, resp), tt.want)
+		})
+	}
+}
+
+func TestRepositoryMonitorMutationsRejectInvalidValues(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		field string
+		want  string
+	}{
+		{name: "negative stale review TTL", field: `"review":{"staleReviewTTL":"-1h"}`, want: "spec.review.staleReviewTTL must not be negative"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			existing := &corev1alpha1.RepositoryMonitor{
+				ObjectMeta: metav1.ObjectMeta{Name: "existing", Namespace: "demo"},
+				Spec:       corev1alpha1.RepositoryMonitorSpec{RepoURL: monitorTestRepoURL},
+			}
+			app, handlers := setupRepositoryMonitorHandlers(t, ContextTokenConfig{}, ContextTokenAuthorizationModeOff, existing)
+			spec := fmt.Sprintf(`{"repoURL":%q,"agents":{"reviewer":{"name":"reviewer"}},%s}`, monitorTestRepoURL, tt.field)
+			for _, req := range []struct{ method, path, body string }{
+				{http.MethodPost, "/monitors/repositories", `{"name":"repo-monitor","namespace":"demo","spec":` + spec + `}`},
+				{http.MethodPut, "/monitors/repositories/existing?namespace=demo", `{"spec":` + spec + `}`},
+			} {
+				httpReq := httptest.NewRequest(req.method, req.path, strings.NewReader(req.body))
+				httpReq.Header.Set("Content-Type", "application/json")
+				resp, err := app.Test(httpReq)
+				require.NoError(t, err)
+				require.Equal(t, http.StatusBadRequest, resp.StatusCode, req.method)
+				require.Contains(t, readRespBody(t, resp), tt.want)
+			}
+			err := handlers.client.Get(context.Background(), crclient.ObjectKey{Namespace: "demo", Name: "repo-monitor"}, &corev1alpha1.RepositoryMonitor{})
+			require.True(t, apierrors.IsNotFound(err), "an invalid spec must not create a RepositoryMonitor")
 		})
 	}
 }

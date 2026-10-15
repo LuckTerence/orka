@@ -591,6 +591,9 @@ func (h *Handlers) CreateTask(c fiber.Ctx) error {
 		if apierrors.IsAlreadyExists(err) {
 			return fiber.NewError(fiber.StatusConflict, "task already exists")
 		}
+		if invalid := invalidObjectError("task", err); invalid != nil {
+			return invalid
+		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create task: %v", err))
 	}
 
@@ -1472,6 +1475,9 @@ func (h *Handlers) CreateAgent(c fiber.Ctx) error {
 		if apierrors.IsAlreadyExists(err) {
 			return fiber.NewError(fiber.StatusConflict, "agent already exists")
 		}
+		if invalid := invalidObjectError("agent", err); invalid != nil {
+			return invalid
+		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create agent: %v", err))
 	}
 
@@ -1529,6 +1535,9 @@ func (h *Handlers) UpdateAgent(c fiber.Ctx) error {
 		}
 		if apierrors.IsConflict(err) {
 			return fiber.NewError(fiber.StatusConflict, "agent was modified concurrently")
+		}
+		if invalid := invalidObjectError("agent", err); invalid != nil {
+			return invalid
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to update agent: %v", err))
 	}
@@ -1715,6 +1724,9 @@ func (h *Handlers) CreateSkill(c fiber.Ctx) error {
 		if apierrors.IsAlreadyExists(err) {
 			return fiber.NewError(fiber.StatusConflict, "skill already exists")
 		}
+		if invalid := invalidObjectError("skill", err); invalid != nil {
+			return invalid
+		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create skill: %v", err))
 	}
 
@@ -1748,6 +1760,9 @@ func (h *Handlers) UpdateSkill(c fiber.Ctx) error {
 
 	skill.Spec = req.Spec
 	if err := h.client.Update(ctx, skill); err != nil {
+		if invalid := invalidObjectError("skill", err); invalid != nil {
+			return invalid
+		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to update skill: %v", err))
 	}
 

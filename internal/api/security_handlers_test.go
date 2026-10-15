@@ -998,6 +998,45 @@ func TestRepositoryScanMutationsRejectUnclonableRepositoryURL(t *testing.T) {
 	}
 }
 
+func TestRepositoryScanMutationsRejectInvalidValues(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	token := issueTestContextToken(t, provider, nil, map[string]any{"scope": ContextTokenScopeSecurityWrite})
+	for _, tt := range []struct {
+		name string
+		spec string
+		want string
+	}{
+		{name: "negative history days", spec: `"historyDays":-1`, want: "spec.historyDays must not be negative"},
+		{name: "negative max findings", spec: `"maxFindingsPerRun":-5`, want: "spec.maxFindingsPerRun must not be negative"},
+		{name: "negative validation findings", spec: `"validationMaxFindingsPerRun":-1`, want: "spec.validationMaxFindingsPerRun must not be negative"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			existing := securityAuthzTestRepositoryScan("scan-1", securityTestRepoURL)
+			app, handlers := setupSecurityHandlersWithAuthzFixture(t, ctxTokenConfig, ContextTokenAuthorizationModeOff, existing)
+			spec := fmt.Sprintf(`{"repoURL":%q,"analysisAgentRef":{"name":"analysis"},%s}`, securityTestRepoURL, tt.spec)
+			for _, req := range []struct{ method, path, body string }{
+				{http.MethodPost, "/security/repositories", `{"name":"new-scan","namespace":"demo","spec":` + spec + `}`},
+				{http.MethodPut, "/security/repositories/scan-1?namespace=demo", `{"spec":` + spec + `}`},
+			} {
+				httpReq := httptest.NewRequest(req.method, req.path, strings.NewReader(req.body))
+				httpReq.Header.Set(TransactionTokenHeaderName, token)
+				httpReq.Header.Set("Content-Type", "application/json")
+				resp, err := app.Test(httpReq)
+				require.NoError(t, err)
+				require.Equal(t, http.StatusBadRequest, resp.StatusCode, req.method)
+				require.Contains(t, readRespBody(t, resp), tt.want)
+			}
+			err := handlers.client.Get(ctx, client.ObjectKey{Namespace: "demo", Name: "new-scan"}, &corev1alpha1.RepositoryScan{})
+			require.True(t, apierrors.IsNotFound(err), "an invalid spec must not create a RepositoryScan")
+			var got corev1alpha1.RepositoryScan
+			require.NoError(t, handlers.client.Get(ctx, client.ObjectKey{Namespace: "demo", Name: "scan-1"}, &got))
+			require.Equal(t, existing.Spec, got.Spec)
+		})
+	}
+}
+
 func TestListRepositoryScans_ContextTokenFiltersMismatchedScansInEnforceMode(t *testing.T) {
 	provider := newTestOIDCProvider(t)
 	ctxTokenConfig := testContextTokenConfig(t, provider, "")
