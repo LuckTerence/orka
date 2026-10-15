@@ -101,12 +101,22 @@ func TestSessionTurnFinalizationRecordsTaskTokenUsageOnce(t *testing.T) {
 			ctx := context.Background()
 			s := setupTestStore(t)
 			request := sessionTurnFinalizationOwnershipFixture(t, s, persistenceOnly, taskUID)
-			for i, tokens := range [][2]int64{{30, 4}, {120, 9}} {
-				input, output := tokens[0], tokens[1]
+			for i, observation := range []struct {
+				attemptID, counterID string
+				input, output        int64
+			}{
+				// An earlier attempt's usage belongs to that attempt's own turn.
+				{attemptID: "0/earlier-prompt", counterID: taskUID + "/earlier-prompt", input: 500, output: 50},
+				// This turn's cumulative counter counts its final value once.
+				{attemptID: "1/prompt", counterID: taskUID + "/prompt", input: 30, output: 4},
+				{attemptID: "1/prompt", counterID: taskUID + "/prompt", input: 120, output: 9},
+			} {
+				input, output := observation.input, observation.output
 				if err := s.RecordUsage(ctx, store.UsageObservation{
-					Namespace: "ns", TaskUID: taskUID, TaskName: "task-name", ID: fmt.Sprintf("call-%d", i), CounterID: "call",
-					Scope: store.UsageScopeCall, Source: store.UsageSourceProvider, InputTokens: &input, OutputTokens: &output,
-					Status: store.UsageStatusCompleted, Complete: true, ObservedAt: request.FinalizedAt.Add(time.Duration(i-2) * time.Second),
+					Namespace: "ns", TaskUID: taskUID, TaskName: "task-name", ID: fmt.Sprintf("usage-%d", i),
+					AttemptID: observation.attemptID, CounterID: observation.counterID,
+					Scope: store.UsageScopeAttempt, Source: store.UsageSourceAgent, InputTokens: &input, OutputTokens: &output,
+					Status: "running", ObservedAt: request.FinalizedAt.Add(time.Duration(i-3) * time.Second),
 				}); err != nil {
 					t.Fatal(err)
 				}

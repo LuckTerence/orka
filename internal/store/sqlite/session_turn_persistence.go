@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"time"
@@ -140,7 +141,7 @@ func (s *Store) CommitSessionTurnFinalization(ctx context.Context, request store
 		}
 	}
 	if err := finalizeSessionTranscriptTx(ctx, tx, normalized.Namespace, normalized.SessionName,
-		normalized.Key.TaskUID, messageCountDelta, normalized.FinalizedAt); err != nil {
+		normalized.Key, messageCountDelta, normalized.FinalizedAt); err != nil {
 		return nil, err
 	}
 	if err := s.commitNativeSessionFinalizationTx(ctx, tx, turn.ID, normalized.Namespace, normalized.SessionName, normalized.Key.SessionUID, normalized.NativeSession, normalized.NativeSessionCarried); err != nil {
@@ -190,11 +191,13 @@ func (s *Store) CommitSessionTurnFinalization(ctx context.Context, request store
 	return &turn, nil
 }
 
-func finalizeSessionTranscriptTx(ctx context.Context, tx *sql.Tx, namespace, name, taskUID string, messageCountDelta int, finalizedAt time.Time) error {
-	// A turn is finalized exactly once, so its Task's usage is added to the
-	// Session's cumulative counters once. Totals beyond the exact reporting
-	// range stay out of the counters rather than block finalization.
-	inputTokens, outputTokens, err := taskTokenUsage(ctx, tx, namespace, taskUID)
+func finalizeSessionTranscriptTx(ctx context.Context, tx *sql.Tx, namespace, name string, key store.SessionTurnKey, messageCountDelta int, finalizedAt time.Time) error {
+	taskUID := key.TaskUID
+	// A turn is finalized exactly once, so the usage of its prompt attempt is
+	// added to the Session's cumulative counters once; an earlier attempt of
+	// the same Task was counted by its own turn. Totals beyond the exact
+	// reporting range stay out of the counters rather than block finalization.
+	inputTokens, outputTokens, err := taskTokenUsage(ctx, tx, namespace, taskUID, fmt.Sprintf("%d/%s", key.Attempt, key.PromptID))
 	if errors.Is(err, usage.ErrTotalsOutOfRange) {
 		inputTokens, outputTokens = 0, 0
 	} else if err != nil {

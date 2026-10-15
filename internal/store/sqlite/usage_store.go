@@ -380,13 +380,15 @@ func (s *Store) TaskTokenUsage(ctx context.Context, namespace, taskUID string) (
 	var inputTokens, outputTokens int64
 	err := s.usageTransaction(ctx, func(ctx context.Context) error {
 		var err error
-		inputTokens, outputTokens, err = taskTokenUsage(ctx, s.taskDataExecutor(ctx), namespace, taskUID)
+		inputTokens, outputTokens, err = taskTokenUsage(ctx, s.taskDataExecutor(ctx), namespace, taskUID, "")
 		return err
 	})
 	return inputTokens, outputTokens, err
 }
 
-func taskTokenUsage(ctx context.Context, db taskDataExecutor, namespace, taskUID string) (int64, int64, error) {
+// taskTokenUsage sums a Task's attributed usage, limited to one prompt
+// attempt's measurements when attemptID is set.
+func taskTokenUsage(ctx context.Context, db taskDataExecutor, namespace, taskUID, attemptID string) (int64, int64, error) {
 	// Other Tasks' observations of the same counters are the baselines that
 	// keep their usage out of this Task's share.
 	observations, err := readUsageRows[store.UsageObservation](ctx, db,
@@ -406,9 +408,25 @@ func taskTokenUsage(ctx context.Context, db taskDataExecutor, namespace, taskUID
 	}
 	for _, group := range report.OtherWork {
 		for _, task := range group.Tasks {
-			if task.Namespace == namespace && task.TaskUID == taskUID {
+			if task.Namespace != namespace || task.TaskUID != taskUID {
+				continue
+			}
+			if attemptID == "" {
 				return task.Totals.InputTokens, task.Totals.OutputTokens, nil
 			}
+			var inputTokens, outputTokens int64
+			for _, measurement := range task.Measurements {
+				if measurement.AttemptID != attemptID {
+					continue
+				}
+				if measurement.InputTokens != nil {
+					inputTokens += *measurement.InputTokens
+				}
+				if measurement.OutputTokens != nil {
+					outputTokens += *measurement.OutputTokens
+				}
+			}
+			return inputTokens, outputTokens, nil
 		}
 	}
 	return 0, 0, nil
