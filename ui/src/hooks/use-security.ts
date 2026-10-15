@@ -58,9 +58,13 @@ export function useUpdateThreatModel(name: string) {
   const queryClient = useQueryClient()
   const namespace = useUIStore((s) => s.namespace)
   return useMutation({
-    mutationFn: (body: { content: string; source?: string }) =>
+    // expectedVersion is the version the edit started from; the server
+    // answers 409 when the model has moved on since (0 skips the check).
+    mutationFn: (body: { content: string; source?: string; expectedVersion?: number }) =>
       api.put<ThreatModel>(`/security/repositories/${name}/threat-model`, body, { namespace }),
-    onSuccess: () => {
+    onSuccess: (saved) => {
+      // The saved version is the base for the next edit, even before the refetch lands.
+      if (saved) queryClient.setQueryData(['security', 'threat-model', namespace, name], saved)
       queryClient.invalidateQueries({ queryKey: ['security', 'threat-model', namespace, name] })
       queryClient.invalidateQueries({ queryKey: ['security', 'repository', namespace, name] })
     },
