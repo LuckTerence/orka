@@ -218,6 +218,29 @@ describe('RepositoryMonitorCreateForm', () => {
     expect(mockMutateAsync.mock.calls[0][0].spec.schedule).toBeUndefined()
   })
 
+  it('suggests every reviewer Agent the controller accepts', () => {
+    mockUseAgentList.mockReturnValue({
+      data: {
+        items: [
+          { metadata: { name: 'claude-reviewer' }, spec: { runtime: { type: 'claude' } } },
+          { metadata: { name: 'codex-reviewer' }, spec: { runtime: { type: 'codex' } } },
+          { metadata: { name: 'opencode-reviewer' }, spec: { runtime: { type: 'opencode' } } },
+          { metadata: { name: 'copilot-agent' }, spec: { runtime: { type: 'copilot' } } },
+          { metadata: { name: 'external-agent' }, spec: { runtime: { runtimeRef: { name: 'remote' } } } },
+          { metadata: { name: 'keyed-claude' }, spec: { runtime: { type: 'claude' }, secretRef: { name: 'anthropic-key' } } },
+          { metadata: { name: 'llm-agent' }, spec: {} },
+        ],
+      },
+      isLoading: false,
+    })
+    const { container } = render(<RepositoryMonitorCreateForm />)
+
+    const options = Array.from(container.querySelectorAll('#monitor-reviewer-agent-options option')).map((option) => option.getAttribute('value'))
+    expect(options).toEqual(['claude-reviewer', 'codex-reviewer', 'opencode-reviewer'])
+    expect(screen.getByText(/Must be a claude, codex, or opencode runtime Agent/)).toBeInTheDocument()
+    expect(screen.queryByText(/Anthropic credential/)).not.toBeInTheDocument()
+  })
+
   it('requires a reviewer Agent name', async () => {
     const user = userEvent.setup()
     render(<RepositoryMonitorCreateForm />)

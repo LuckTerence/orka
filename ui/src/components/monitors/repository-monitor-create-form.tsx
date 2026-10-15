@@ -16,6 +16,10 @@ const REVIEW_EVENTS = ['COMMENT', 'APPROVE', 'REQUEST_CHANGES'] as const
 
 type ReviewEvent = (typeof REVIEW_EVENTS)[number]
 
+// The controller runs PR reviews only on these built-in runtimes; it refuses
+// other runtimes, external runtimeRef Agents, and Agents with a secretRef.
+const REVIEWER_RUNTIME_TYPES: ReadonlySet<string> = new Set(['claude', 'codex', 'opencode'])
+
 function splitCommaList(value: string) {
   const seen = new Set<string>()
   const labels: string[] = []
@@ -61,8 +65,9 @@ export function RepositoryMonitorCreateForm() {
   const [pauseLabels, setPauseLabels] = useState('')
   const [formError, setFormError] = useState('')
 
-  const claudeAgents = useMemo(
-    () => (agents?.items ?? []).filter((agent) => agent.spec.runtime && 'type' in agent.spec.runtime && agent.spec.runtime.type === 'claude'),
+  const reviewerAgents = useMemo(
+    () => (agents?.items ?? []).filter((agent) =>
+      agent.spec.runtime && 'type' in agent.spec.runtime && REVIEWER_RUNTIME_TYPES.has(agent.spec.runtime.type) && !agent.spec.secretRef),
     [agents?.items],
   )
 
@@ -174,7 +179,7 @@ export function RepositoryMonitorCreateForm() {
         <CardHeader>
           <CardTitle>Monitor setup</CardTitle>
           <CardDescription>
-            Orka stores Secret names only. Add GitHub tokens or Claude keys as Kubernetes Secrets before creating the monitor.
+            Orka stores Secret names only. Add any GitHub token as a Kubernetes Secret before creating the monitor.
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -229,12 +234,12 @@ export function RepositoryMonitorCreateForm() {
                   aria-invalid={formError.includes('Reviewer Agent')}
                 />
                 <datalist id="monitor-reviewer-agent-options">
-                  {claudeAgents.map((agent) => (
+                  {reviewerAgents.map((agent) => (
                     <option key={agent.metadata.name} value={agent.metadata.name} />
                   ))}
                 </datalist>
                 <p className="text-xs text-muted-foreground">
-                  Must be a Claude runtime Agent with an Anthropic credential Secret in this namespace.
+                  Must be a claude, codex, or opencode runtime Agent in this namespace, without a secretRef: the controller's runtime proxy supplies provider credentials.
                 </p>
               </div>
               <div className="space-y-2">
