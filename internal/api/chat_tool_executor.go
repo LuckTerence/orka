@@ -8,6 +8,7 @@ package api
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -40,18 +41,22 @@ const (
 // ToolExecutor executes orchestrator LLM tool calls by creating and managing
 // Kubernetes resources (Tasks, Agents, Tools, Sessions).
 type ToolExecutor struct {
-	client                    client.Client
-	policyReader              client.Reader
-	kubeClient                kubernetes.Interface
-	sessionManager            *controller.SessionManager
-	namespace                 string
-	provider                  string
-	providerNamespace         string
-	providerType              string
-	executionMode             executionmode.Mode
-	sessionID                 string
-	taskSeq                   atomic.Int32
-	seedTaskSeq               sync.Once
+	client            client.Client
+	policyReader      client.Reader
+	kubeClient        kubernetes.Interface
+	sessionManager    *controller.SessionManager
+	namespace         string
+	provider          string
+	providerNamespace string
+	providerType      string
+	executionMode     executionmode.Mode
+	sessionID         string
+	taskSeq           atomic.Int32
+	// taskSeqMu guards seeding taskSeq from the Session's existing Tasks;
+	// taskSeqSeeded is set only after a successful lookup, so a failed one
+	// is retried by the next name instead of restarting numbering at 1.
+	taskSeqMu                 sync.Mutex
+	taskSeqSeeded             bool
 	tasksCreated              int
 	maxTasks                  int
 	toolTimeout               time.Duration
@@ -317,14 +322,12 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolCall llm.ToolCall) (stri
 // executor lives for one turn, so its first name continues after the Tasks that
 // earlier turns of this session created instead of restarting at 1.
 func (e *ToolExecutor) generateTaskName(ctx context.Context) string {
-	e.seedTaskSeq.Do(func() { e.taskSeq.Store(e.latestSessionTaskSeq(ctx)) })
-	seq := e.taskSeq.Add(1)
+	seqSuffix := e.nextTaskSeqSuffix(ctx)
 	prefix := sanitizeTaskNameComponent(e.sessionID)
 	if prefix == "" {
 		prefix = "session"
 	}
 	hashSuffix := e.taskNameHash()
-	seqSuffix := strconv.FormatInt(int64(seq), 10)
 
 	// Kubernetes task names must fit DNS label rules (max 63 chars).
 	const taskNameOverhead = len("chat-") + len("-") + len("-")
@@ -345,9 +348,28 @@ func (e *ToolExecutor) taskNameHash() string {
 	return hex.EncodeToString(hash[:])[:8]
 }
 
+// nextTaskSeqSuffix numbers this turn's Tasks after those earlier turns of
+// the Session created. When the Session's Tasks cannot be listed it returns a
+// random suffix, which cannot collide with a numbered name, and the next call
+// retries the lookup.
+func (e *ToolExecutor) nextTaskSeqSuffix(ctx context.Context) string {
+	e.taskSeqMu.Lock()
+	defer e.taskSeqMu.Unlock()
+	if !e.taskSeqSeeded {
+		latest, err := e.latestSessionTaskSeq(ctx)
+		if err != nil {
+			chatLog.Error(err, "Failed to list chat session tasks; using a random task name suffix", "session", e.sessionID)
+			return "r" + strings.ToLower(rand.Text()[:8])
+		}
+		e.taskSeq.Store(latest)
+		e.taskSeqSeeded = true
+	}
+	return strconv.FormatInt(int64(e.taskSeq.Add(1)), 10)
+}
+
 // latestSessionTaskSeq returns the highest sequence number among the Tasks
-// labeled with this chat session, or 0 when there are none or listing fails.
-func (e *ToolExecutor) latestSessionTaskSeq(ctx context.Context) int32 {
+// labeled with this chat session, or 0 when there are none.
+func (e *ToolExecutor) latestSessionTaskSeq(ctx context.Context) (int32, error) {
 	opts := []client.ListOption{client.MatchingLabels{labels.LabelChatSession: e.sessionID}}
 	// Chat tools can only create Tasks in these namespaces when restricted.
 	switch {
@@ -358,8 +380,7 @@ func (e *ToolExecutor) latestSessionTaskSeq(ctx context.Context) int32 {
 	}
 	var tasks corev1alpha1.TaskList
 	if err := uncachedReaderOr(e.policyReader, e.client).List(ctx, &tasks, opts...); err != nil {
-		chatLog.Error(err, "Failed to list chat session tasks; task names restart at 1", "session", e.sessionID)
-		return 0
+		return 0, err
 	}
 	hashMarker := "-" + e.taskNameHash()
 	var latest int32
@@ -373,7 +394,7 @@ func (e *ToolExecutor) latestSessionTaskSeq(ctx context.Context) int32 {
 			latest = int32(seq)
 		}
 	}
-	return latest
+	return latest, nil
 }
 
 func (e *ToolExecutor) taskLabels() map[string]string {

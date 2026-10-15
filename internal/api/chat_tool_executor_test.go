@@ -21,7 +21,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	apitypes "k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/controller"
@@ -491,6 +493,51 @@ func TestGenerateTaskName(t *testing.T) {
 	}
 	if name1 == name2 {
 		t.Errorf("expected unique names, got %q twice", name1)
+	}
+}
+
+func TestExecute_RetriesTaskNameSeedAfterListFailure(t *testing.T) {
+	ctx := context.Background()
+	e := newTestExecutor()
+	base := e.client
+	failed := false
+	e.client = interceptor.NewClient(base.(client.WithWatch), interceptor.Funcs{
+		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			if _, tasks := list.(*corev1alpha1.TaskList); tasks && !failed {
+				failed = true
+				return errors.New("apiserver unavailable")
+			}
+			return c.List(ctx, list, opts...)
+		},
+	})
+	create := func() string {
+		t.Helper()
+		result, err := e.Execute(ctx, llm.ToolCall{
+			ID: "create", Name: "create_ai_task", Arguments: mustJSON(map[string]any{"prompt": "hello"}),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var tr ToolResult
+		if err := json.Unmarshal([]byte(result), &tr); err != nil {
+			t.Fatal(err)
+		}
+		if !tr.Success {
+			t.Fatalf("create failed: %s", result)
+		}
+		return tr.Data.(map[string]any)["name"].(string)
+	}
+
+	prefix := "chat-sess-12345678-" + e.taskNameHash() + "-"
+	// The failed lookup must not restart numbering at 1, which would collide
+	// with an earlier turn's Tasks; a random suffix is used instead.
+	first := create()
+	if !strings.HasPrefix(first, prefix+"r") || first == prefix+"1" {
+		t.Fatalf("first name = %q, want a random suffix after the failed lookup", first)
+	}
+	// The next name retries the lookup and continues the numbering.
+	if second := create(); second != prefix+"1" {
+		t.Fatalf("second name = %q, want %q once the lookup succeeds", second, prefix+"1")
 	}
 }
 
