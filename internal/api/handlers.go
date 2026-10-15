@@ -675,6 +675,9 @@ func (h *Handlers) ListTasks(c fiber.Ctx) error {
 				}
 			}
 			if allowed {
+				// Server-side apply bookkeeping is about a third of each
+				// serialized Task and no API client reads it.
+				task.ManagedFields = nil
 				filtered = append(filtered, *task)
 			}
 		}
@@ -728,6 +731,7 @@ func (h *Handlers) GetTask(c fiber.Ctx) error {
 	}
 
 	resp := taskResponse{Task: *task}
+	resp.ManagedFields = nil // server-side apply bookkeeping; no API client reads it
 	if h.planStore != nil {
 		if plan, planErr := h.planStore.GetPlan(ctx, task.Namespace, task.Name); planErr == nil {
 			resp.Plan = &planResponse{

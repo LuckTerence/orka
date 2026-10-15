@@ -2357,6 +2357,49 @@ func TestHandlers_ListTasks(t *testing.T) {
 	}
 }
 
+func TestHandlers_TaskResponsesOmitManagedFields(t *testing.T) {
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "managed-task",
+			Namespace: "default",
+			Labels:    map[string]string{"team": "core"},
+			ManagedFields: []metav1.ManagedFieldsEntry{{
+				Manager:    "orka-controller",
+				Operation:  metav1.ManagedFieldsOperationUpdate,
+				APIVersion: corev1alpha1.GroupVersion.String(),
+				FieldsType: "FieldsV1",
+				FieldsV1:   metav1.NewFieldsV1(`{"f:status":{"f:phase":{}}}`),
+			}},
+		},
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+	}
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithReturnManagedFields().WithRuntimeObjects(task).Build()
+	stored := &corev1alpha1.Task{}
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "managed-task", Namespace: "default"}, stored))
+	require.NotEmpty(t, stored.ManagedFields, "the fixture must carry managedFields for the assertion to mean anything")
+
+	handlers := NewHandlers(HandlersConfig{Client: fakeClient})
+	app := fiber.New()
+	app.Get("/tasks", handlers.ListTasks)
+	app.Get("/tasks/:id", handlers.GetTask)
+
+	for _, path := range []string{"/tasks", "/tasks/managed-task"} {
+		t.Run(path, func(t *testing.T) {
+			resp, err := app.Test(httptest.NewRequest(http.MethodGet, path, nil))
+			require.NoError(t, err)
+			require.Equal(t, http.StatusOK, resp.StatusCode)
+			body, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+			require.NotContains(t, string(body), "managedFields")
+			// The rest of the metadata is still served.
+			require.Contains(t, string(body), `"team":"core"`)
+		})
+	}
+}
+
 func TestHandlers_ListTasks_WithPagination(t *testing.T) {
 	handlers, app := setupTestHandlers()
 	app.Get("/tasks", handlers.ListTasks)
