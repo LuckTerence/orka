@@ -26,7 +26,7 @@ interface ChatState {
   selectNamespace: (namespace: string) => void
   addMessage: (message: ChatMessage) => void
   updateLastAssistantMessage: (content: string) => void
-  setSessionId: (id: string) => void
+  setSessionId: (id: string | null) => void
   setStreaming: (streaming: boolean) => void
   requestStop: () => void
   newSession: () => void
