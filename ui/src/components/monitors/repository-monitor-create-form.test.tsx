@@ -186,6 +186,38 @@ describe('RepositoryMonitorCreateForm', () => {
     expect(mockMutateAsync).not.toHaveBeenCalled()
   })
 
+  it('rejects a schedule with an out-of-range field before submitting', async () => {
+    const user = userEvent.setup()
+    render(<RepositoryMonitorCreateForm />)
+
+    await user.type(screen.getByLabelText(/Monitor name/i), 'example-app')
+    await user.type(screen.getByLabelText(/GitHub repository URL/i), 'https://github.com/example/app')
+    await user.type(screen.getByLabelText(/Reviewer Agent name/i), 'repo-reviewer')
+    await user.clear(screen.getByLabelText(/Schedule/i))
+    await user.type(screen.getByLabelText(/Schedule/i), '0 24 * * *')
+
+    await user.click(screen.getByRole('button', { name: /Create Monitor/i }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Schedule must be a five-field cron expression with in-range values')
+    expect(screen.getByLabelText(/Schedule/i)).toHaveAttribute('aria-invalid', 'true')
+    expect(mockMutateAsync).not.toHaveBeenCalled()
+  })
+
+  it('accepts an empty schedule for manual runs only', async () => {
+    const user = userEvent.setup()
+    render(<RepositoryMonitorCreateForm />)
+
+    await user.type(screen.getByLabelText(/Monitor name/i), 'example-app')
+    await user.type(screen.getByLabelText(/GitHub repository URL/i), 'https://github.com/example/app')
+    await user.type(screen.getByLabelText(/Reviewer Agent name/i), 'repo-reviewer')
+    await user.clear(screen.getByLabelText(/Schedule/i))
+
+    await user.click(screen.getByRole('button', { name: /Create Monitor/i }))
+
+    await waitFor(() => expect(mockMutateAsync).toHaveBeenCalledTimes(1))
+    expect(mockMutateAsync.mock.calls[0][0].spec.schedule).toBeUndefined()
+  })
+
   it('requires a reviewer Agent name', async () => {
     const user = userEvent.setup()
     render(<RepositoryMonitorCreateForm />)

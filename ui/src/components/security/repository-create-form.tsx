@@ -9,7 +9,7 @@ import { SecretNameField } from '@/components/ui/secret-name-field'
 import { PageHeader } from '@/components/layout/page-header'
 import { useCreateRepositoryScan } from '@/hooks/use-security'
 import { useAgentList } from '@/hooks/use-agents'
-import { isCredentialFreeGitHubRepositoryURL, isCronScheduleShape } from '@/lib/repository-form-validation'
+import { isCredentialFreeGitHubRepositoryURL, isCronSchedule } from '@/lib/repository-form-validation'
 import { useUIStore } from '@/stores/ui'
 
 // Radix Select items cannot use an empty value, so clearing uses a sentinel.
@@ -47,8 +47,8 @@ export function RepositoryCreateForm() {
       toast.error('Repository URL must be a credential-free GitHub repository root, such as https://github.com/org/repo')
       return
     }
-    if (trimmedSchedule && !isCronScheduleShape(trimmedSchedule)) {
-      toast.error('Schedule must be a five-field cron expression, such as 0 */6 * * *')
+    if (trimmedSchedule && !isCronSchedule(trimmedSchedule)) {
+      toast.error('Schedule must be a five-field cron expression with in-range values, such as 0 */6 * * *')
       return
     }
     if (!analysisAgentRef) {

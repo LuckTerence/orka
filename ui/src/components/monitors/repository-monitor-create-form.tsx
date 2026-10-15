@@ -9,7 +9,7 @@ import { SecretNameField } from '@/components/ui/secret-name-field'
 import { PageHeader } from '@/components/layout/page-header'
 import { useAgentList } from '@/hooks/use-agents'
 import { useCreateRepositoryMonitor } from '@/hooks/use-monitors'
-import { isCredentialFreeGitHubRepositoryURL } from '@/lib/repository-form-validation'
+import { isCredentialFreeGitHubRepositoryURL, isCronSchedule } from '@/lib/repository-form-validation'
 import { useUIStore } from '@/stores/ui'
 
 const REVIEW_EVENTS = ['COMMENT', 'APPROVE', 'REQUEST_CHANGES'] as const
@@ -70,6 +70,7 @@ export function RepositoryMonitorCreateForm() {
     const trimmedName = name.trim()
     const trimmedRepoURL = repoURL.trim()
     const trimmedReviewerAgentName = reviewerAgentName.trim()
+    const trimmedSchedule = schedule.trim()
 
     if (!trimmedName) {
       return 'Monitor name is required.'
@@ -85,6 +86,9 @@ export function RepositoryMonitorCreateForm() {
     }
     if (!trimmedReviewerAgentName) {
       return 'Reviewer Agent name is required.'
+    }
+    if (trimmedSchedule && !isCronSchedule(trimmedSchedule)) {
+      return 'Schedule must be a five-field cron expression with in-range values, such as */30 * * * *.'
     }
     if (!/^\d+$/.test(maxPRsPerRun)) {
       return 'Max PRs per run must be a whole number from 1 to 100.'
@@ -248,7 +252,13 @@ export function RepositoryMonitorCreateForm() {
             <div className="grid gap-4 md:grid-cols-2">
               <div className="space-y-2">
                 <label htmlFor="monitor-schedule" className="text-sm font-medium">Schedule</label>
-                <Input id="monitor-schedule" value={schedule} onChange={(event) => setSchedule(event.target.value)} placeholder="*/30 * * * *" />
+                <Input
+                  id="monitor-schedule"
+                  value={schedule}
+                  onChange={(event) => setSchedule(event.target.value)}
+                  placeholder="*/30 * * * *"
+                  aria-invalid={formError.startsWith('Schedule')}
+                />
                 <p className="text-xs text-muted-foreground">Leave empty for manual runs only.</p>
               </div>
               <div className="space-y-2">

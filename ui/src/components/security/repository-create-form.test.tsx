@@ -154,6 +154,21 @@ describe('RepositoryCreateForm', () => {
     expect(mockMutateAsync).not.toHaveBeenCalled()
   })
 
+  it('refuses a schedule with an out-of-range field', async () => {
+    withDefaultNamespaceAgents()
+    const user = userEvent.setup()
+    render(<RepositoryCreateForm />)
+
+    await fillRequiredFields(user, 'https://github.com/org/repo')
+    const schedule = screen.getByLabelText('Schedule')
+    await user.clear(schedule)
+    await user.type(schedule, '0 */6 * * 7')
+    await user.click(screen.getByRole('button', { name: 'Register Repository' }))
+
+    expect(toast.error).toHaveBeenCalledWith(expect.stringContaining('in-range values'))
+    expect(mockMutateAsync).not.toHaveBeenCalled()
+  })
+
   it('registers a GitHub repository with a typed Secret name when Secrets cannot be listed', async () => {
     withDefaultNamespaceAgents()
     mockUseSecretNames.mockReturnValue({ data: undefined, error: new ApiError(403, 'forbidden'), isLoading: false })
