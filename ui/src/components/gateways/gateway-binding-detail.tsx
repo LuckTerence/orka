@@ -7,7 +7,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { useGatewayBinding } from '@/hooks/use-gateways'
 import { Button } from '@/components/ui/button'
 import { AccessErrorView, NotFoundView } from '@/components/common/not-found-page'
-import { isNotFoundError } from '@/lib/api-client'
+import { isForbiddenError, isNotFoundError } from '@/lib/api-client'
 import { isGatewayResourceReady, isGatewayStatusFresh } from './gateway-readiness'
 import { GatewayStatusBadge } from './gateway-tables'
 import { formatTimestamp } from '@/lib/time'
@@ -18,7 +18,7 @@ export function GatewayBindingDetail({ name }: { name: string }) {
 
   if (binding.isLoading) return <Skeleton className="h-96 rounded-xl" />
   const backToGateways = <Button asChild variant="outline"><Link to="/gateways"><ArrowLeft className="mr-1 h-4 w-4" />Back to Gateways</Link></Button>
-  if (binding.error && !isNotFoundError(binding.error)) {
+  if (binding.error && !isNotFoundError(binding.error) && (isForbiddenError(binding.error) || !binding.data)) {
     return <AccessErrorView title="Could not load GatewayBinding" resource={`GatewayBinding ${name}`} error={binding.error} action={backToGateways} />
   }
   if (isNotFoundError(binding.error) || !binding.data) {

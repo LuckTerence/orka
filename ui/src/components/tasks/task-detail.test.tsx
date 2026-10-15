@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { render, screen, waitFor } from '@/test/test-utils'
+import { act, render, screen, waitFor } from '@/test/test-utils'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { server } from '@/test/mocks/server'
@@ -134,6 +134,25 @@ describe('TaskDetail', () => {
     expect(hits.trace ?? 0).toBe(0)
     expect(hits.approvals ?? 0).toBe(0)
     expect(hits.artifacts ?? 0).toBe(0)
+  })
+
+  it('shows an error, not "Task not found", when the first load fails with a 500', async () => {
+    server.use(
+      http.get('/api/v1/tasks/:id', () => HttpResponse.json({ error: { code: 500, message: 'store unavailable' } }, { status: 500 })),
+    )
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      render(<TaskDetail taskId="broken" />)
+      // The detail read retries a failed load three times before giving up.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10_000)
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+    expect(await screen.findByText('The task could not be loaded')).toBeInTheDocument()
+    expect(screen.queryByText('Task not found')).not.toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /back to tasks/i })).toHaveAttribute('href', '/tasks')
   })
 
   it('shows not-found when task does not exist', async () => {

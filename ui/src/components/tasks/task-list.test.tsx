@@ -380,6 +380,8 @@ describe('TaskList paging and access', () => {
     expect(names).toEqual(['zzz-newest', 'mmm-middle', 'aaa-oldest'])
     expect(screen.getByRole('columnheader', { name: 'Namespace' })).toHaveClass('hidden', 'md:table-cell')
     expect(screen.getByRole('columnheader', { name: 'Type' })).toHaveClass('hidden', 'sm:table-cell')
+    // The delete column is named for screen readers.
+    expect(screen.getByRole('columnheader', { name: 'Actions' })).toBeInTheDocument()
     expect(screen.getByRole('columnheader', { name: 'Phase' })).not.toHaveClass('hidden')
   })
 

@@ -6,7 +6,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
-import { ArrowLeft, SearchX, ShieldCheck, Trash2 } from 'lucide-react'
+import { AlertTriangle, ArrowLeft, SearchX, ShieldCheck, Trash2 } from 'lucide-react'
 import { EmptyState } from '@/components/ui/empty-state'
 import { PageHeader } from '@/components/layout/page-header'
 import { useDocumentTitle } from '@/hooks/use-document-title'
@@ -80,7 +80,7 @@ function TaskNotFound({ taskId }: { taskId: string }) {
 // A forbidden task gets a titled page like the session, agent, and tool
 // detail views: the header names the browser tab, and the card says why and
 // links back to the list.
-function TaskAccessError({ message }: { message: string }) {
+function TaskAccessError({ message, forbidden = true }: { message: string; forbidden?: boolean }) {
   return (
     <div className="space-y-4">
       <PageHeader title="Could not load task" />
@@ -88,9 +88,11 @@ function TaskAccessError({ message }: { message: string }) {
         <CardContent>
           <div role="alert">
             <EmptyState
-              icon={ShieldCheck}
-              headline="Not authorized to view this task"
-              hint={`Your token lacks tasks read permission${message ? ` (${message})` : ''}.`}
+              icon={forbidden ? ShieldCheck : AlertTriangle}
+              headline={forbidden ? 'Not authorized to view this task' : 'The task could not be loaded'}
+              hint={forbidden
+                ? `Your token lacks tasks read permission${message ? ` (${message})` : ''}.`
+                : message || 'The task request failed. Try again in a moment.'}
               action={
                 <Button asChild variant="outline" size="sm">
                   <Link to="/tasks">
@@ -267,6 +269,12 @@ export function TaskDetail({ taskId }: { taskId: string }) {
   // not fall through to "Task not found" just because `task` is undefined.
   if (taskForbidden) {
     return <TaskAccessError message={taskError.message} />
+  }
+
+  // Any other failure before the task ever loaded is an error, not a
+  // missing task; a failed refetch keeps showing the task already loaded.
+  if (taskError && !taskMissing && !task) {
+    return <TaskAccessError forbidden={false} message={taskError instanceof Error ? taskError.message : ''} />
   }
 
   // A 404 wins over cached data: React Query keeps the last successful `data`

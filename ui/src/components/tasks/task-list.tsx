@@ -119,7 +119,7 @@ export function TaskList() {
               <TableHead>Phase</TableHead>
               <TableHead className="hidden md:table-cell">Namespace</TableHead>
               <TableHead className="hidden sm:table-cell">Age</TableHead>
-              <TableHead className="w-12"></TableHead>
+              <TableHead className="w-12"><span className="sr-only">Actions</span></TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>

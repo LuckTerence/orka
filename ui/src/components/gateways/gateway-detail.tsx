@@ -10,7 +10,7 @@ import { GatewayLedgerPagination } from './gateway-pagination'
 import { ListAccessError } from '@/components/ui/list-access-error'
 import { Button } from '@/components/ui/button'
 import { AccessErrorView, NotFoundView } from '@/components/common/not-found-page'
-import { isNotFoundError } from '@/lib/api-client'
+import { isForbiddenError, isNotFoundError } from '@/lib/api-client'
 import { isGatewayResourceReady, isGatewayStatusFresh } from './gateway-readiness'
 import { GatewaySessionQueue } from './gateway-session-queue'
 import { GatewayBindingsTable, GatewayDeliveriesTable, GatewayEventsTable, GatewayStatusBadge } from './gateway-tables'
@@ -27,7 +27,7 @@ export function GatewayDetail({ name }: { name: string }) {
 
   if (gateway.isLoading) return <Skeleton className="h-96 rounded-xl" />
   const backToGateways = <Button asChild variant="outline"><Link to="/gateways"><ArrowLeft className="mr-1 h-4 w-4" />Back to Gateways</Link></Button>
-  if (gateway.error && !isNotFoundError(gateway.error)) {
+  if (gateway.error && !isNotFoundError(gateway.error) && (isForbiddenError(gateway.error) || !gateway.data)) {
     return <AccessErrorView title="Could not load Gateway" resource={`Gateway ${name}`} error={gateway.error} action={backToGateways} />
   }
   if (isNotFoundError(gateway.error) || !gateway.data) {

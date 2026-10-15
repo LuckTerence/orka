@@ -97,6 +97,7 @@ export function ActivitySpotlight({ task, latestEvent, following, eventError = f
           <Link
             to="/tasks/$taskId"
             params={{ taskId: task.metadata.name }}
+            title={task.metadata.name}
             className="truncate font-mono text-lg font-semibold hover:underline"
           >
             {task.metadata.name}
