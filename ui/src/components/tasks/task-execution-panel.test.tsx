@@ -62,6 +62,37 @@ describe('TaskExecutionPanel', () => {
     expect(circles[2].textContent).toBe('3')
   })
 
+  it.each([
+    ['Succeeded', '✓', 'bg-status-succeeded-bg'],
+    ['Failed', '✕', 'bg-status-failed-bg'],
+    ['Cancelled', '✕', 'bg-muted'],
+  ])('marks the final step done for a %s task', (phase, mark, tone) => {
+    const { container } = render(
+      <TaskExecutionPanel task={makeTask({ status: { phase: phase as 'Succeeded', attempts: 1 } })} />,
+    )
+    const circles = container.querySelector('[data-testid="progress-steps"]')!.querySelectorAll('.rounded-full')
+    expect(circles[0].textContent).toBe('✓')
+    expect(circles[1].textContent).toBe('✓')
+    expect(circles[2].textContent).toBe(mark)
+    expect(circles[2].className).toContain(tone)
+    expect(circles[2].className).not.toContain('bg-status-running-bg')
+  })
+
+  it('says usage is unavailable when model requests carry no token counts', () => {
+    render(
+      <TaskExecutionPanel
+        task={makeTask({ status: { phase: 'Succeeded', attempts: 1 } })}
+        events={[
+          { id: 'e1', seq: 1, type: 'ModelRequestCompleted', summary: 'model call', createdAt: '2026-01-01T00:00:00Z', model: 'opencode-model' } as never,
+        ]}
+      />,
+    )
+    const rollup = screen.getByLabelText('GenAI token rollup')
+    expect(rollup).toHaveTextContent('Usage unavailable')
+    expect(rollup).not.toHaveTextContent('0 total')
+    expect(rollup).toHaveTextContent('opencode-model')
+  })
+
   it('renders with Running phase', () => {
     render(
       <TaskExecutionPanel
