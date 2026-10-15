@@ -146,8 +146,19 @@ func TestListAgentsTool_Execute(t *testing.T) {
 						},
 					},
 				},
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "external-agent",
+						Namespace: defaultNamespace,
+					},
+					Spec: corev1alpha1.AgentSpec{
+						Runtime: &corev1alpha1.AgentCLIRuntime{
+							RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "byo-harness"},
+						},
+					},
+				},
 			},
-			wantCount: 1,
+			wantCount: 2,
 		},
 		{
 			name: testCustomNamespaceCaseName,
@@ -248,10 +259,19 @@ func TestListAgentsTool_Execute(t *testing.T) {
 			}
 
 			// Verify runtime field
-			if tt.name == "agent with runtime" && len(data) > 0 {
-				agent := data[0].(map[string]any)
-				if agent[runtimeField] != runtimeTypeClaude {
-					t.Errorf("agent runtime = %q, want %q", agent[runtimeField], runtimeTypeClaude)
+			if tt.name == "agent with runtime" {
+				byName := map[string]map[string]any{}
+				for _, item := range data {
+					agent := item.(map[string]any)
+					byName[agent[nameField].(string)] = agent
+				}
+				if got := byName["cli-agent"]; got[runtimeField] != runtimeTypeClaude {
+					t.Errorf("cli-agent = %v, want runtime %q", got, runtimeTypeClaude)
+				} else if ref, ok := got[runtimeRefField]; ok {
+					t.Errorf("cli-agent runtimeRef = %v, want it omitted", ref)
+				}
+				if got := byName["external-agent"]; got[runtimeField] != "external" || got[runtimeRefField] != "byo-harness" {
+					t.Errorf("external-agent = %v, want runtime external and runtimeRef byo-harness", got)
 				}
 			}
 		})
