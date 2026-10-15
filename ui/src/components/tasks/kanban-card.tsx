@@ -5,7 +5,7 @@ import { Badge } from '@/components/ui/badge'
 import { phaseStyle, typeStyle } from '@/lib/task-status'
 import { cn } from '@/lib/utils'
 import type { Task } from '@/schemas/task'
-import { TaskStateBadges } from './task-state'
+import { TaskStateBadges } from './task-state-badges'
 
 function elapsed(startTime?: string): string {
   if (!startTime) return ''

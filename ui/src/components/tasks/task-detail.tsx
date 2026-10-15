@@ -31,7 +31,8 @@ import { useNavigate, useSearch } from '@tanstack/react-router'
 import type { ExecutionEvent, PlanState } from '@/schemas/task'
 import { timeAgo } from '@/lib/time'
 import { actionErrorMessage } from './action-error'
-import { isTaskDeleting, isWaitingForApproval, TaskStateBadges } from './task-state'
+import { isTaskDeleting, isWaitingForApproval } from './task-state'
+import { TaskStateBadges } from './task-state-badges'
 
 function latestEventPlan(events: ExecutionEvent[]): PlanState | undefined {
   let latest: ExecutionEvent | undefined

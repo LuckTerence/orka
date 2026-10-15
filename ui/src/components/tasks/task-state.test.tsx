@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { render, screen } from '@/test/test-utils'
-import { isScheduleSuspended, isTaskDeleting, isWaitingForApproval, TaskStateBadges } from './task-state'
+import { isScheduleSuspended, isTaskDeleting, isWaitingForApproval } from './task-state'
+import { TaskStateBadges } from './task-state-badges'
 import type { Task } from '@/schemas/task'
 
 function task(o: { metadata?: Partial<Task['metadata']>; spec?: Partial<Task['spec']>; status?: Task['status'] } = {}): Task {

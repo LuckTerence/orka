@@ -23,7 +23,8 @@ import { taskTypeLabel } from '@/lib/task-status'
 import { compareTasksNewestFirst, matchesTaskFilter } from '@/lib/task-filter'
 import { timeAgo } from '@/lib/time'
 import { actionErrorMessage } from './action-error'
-import { isTaskDeleting, TaskStateBadges } from './task-state'
+import { isTaskDeleting } from './task-state'
+import { TaskStateBadges } from './task-state-badges'
 
 export function TaskList() {
   const { data, isLoading, error, fetchNextPage, hasNextPage, isFetchingNextPage } = useTaskListPages()

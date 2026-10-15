@@ -6,7 +6,7 @@ import { EmptyState } from '@/components/ui/empty-state'
 import { ListTodo } from 'lucide-react'
 import type { Task } from '@/schemas/task'
 import { timeAgo } from '@/lib/time'
-import { TaskStateBadges } from '@/components/tasks/task-state'
+import { TaskStateBadges } from '@/components/tasks/task-state-badges'
 
 export function RecentTasks({
   tasks,
