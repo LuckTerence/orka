@@ -29,7 +29,8 @@ function threatModel(version: number, content: string) {
 }
 
 describe('ThreatModelEditor', () => {
-  let stored: ReturnType<typeof threatModel>
+  // undefined: no threat model exists yet (GET answers 404).
+  let stored: ReturnType<typeof threatModel> | undefined
   let puts: Array<{ content: string; expectedVersion?: number }>
 
   beforeEach(() => {
@@ -39,14 +40,18 @@ describe('ThreatModelEditor', () => {
     stored = threatModel(3, 'Generated model v3')
     puts = []
     server.use(
-      http.get(threatModelPath, () => HttpResponse.json(stored)),
+      http.get(threatModelPath, () => stored
+        ? HttpResponse.json(stored)
+        : HttpResponse.json({ error: { code: 404, message: 'threat model not found' } }, { status: 404 })),
       http.put(threatModelPath, async ({ request }) => {
         const body = await request.json() as { content: string; expectedVersion?: number }
         puts.push(body)
-        if (body.expectedVersion && body.expectedVersion !== stored.version) {
+        // expectedVersion 0 expects no model yet; a positive one expects that version.
+        const current = stored?.version ?? 0
+        if (body.expectedVersion !== undefined && body.expectedVersion !== current) {
           return HttpResponse.json({ error: { code: 409, message: 'threat model changed since it was loaded' } }, { status: 409 })
         }
-        stored = { ...threatModel(stored.version + 1, body.content), source: 'edited' }
+        stored = { ...threatModel(current + 1, body.content), source: 'edited' }
         return HttpResponse.json(stored)
       }),
     )
@@ -97,6 +102,56 @@ describe('ThreatModelEditor', () => {
     await user.click(screen.getByRole('button', { name: 'Save' }))
     await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Threat model saved'))
     expect(puts[1]).toMatchObject({ content: 'Teammate model v4 + mine', expectedVersion: 4 })
+  })
+
+  it('creates the first threat model expecting that none exists yet', async () => {
+    stored = undefined
+    const user = userEvent.setup()
+    render(<ThreatModelEditor repositoryName="payments" />)
+
+    await screen.findByText(/No threat model has been generated yet/)
+    const editor = screen.getByRole('textbox', { name: 'Threat model' })
+    await user.type(editor, 'Initial notes')
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Threat model saved'))
+
+    // Sent explicitly, not omitted: 0 is the "no model yet" precondition.
+    expect(puts[0]).toEqual({ content: 'Initial notes', source: 'edited', expectedVersion: 0 })
+    await user.type(editor, ' + more')
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(puts).toHaveLength(2))
+    expect(puts[1]).toMatchObject({ content: 'Initial notes + more', expectedVersion: 1 })
+  })
+
+  it('keeps first-create edits when a model appeared meanwhile and reloads it on request', async () => {
+    stored = undefined
+    const user = userEvent.setup()
+    render(<ThreatModelEditor repositoryName="payments" />)
+
+    await screen.findByText(/No threat model has been generated yet/)
+    const editor = screen.getByRole('textbox', { name: 'Threat model' })
+    // A scan generates the first model while this editor still holds none.
+    stored = threatModel(1, 'Generated model v1')
+    await user.type(editor, 'My first notes')
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('The threat model changed since you loaded it')
+    expect(editor).toHaveValue('My first notes')
+    expect(puts[0]).toEqual({ content: 'My first notes', source: 'edited', expectedVersion: 0 })
+    expect(toast.success).not.toHaveBeenCalled()
+    expect(toast.error).not.toHaveBeenCalled()
+
+    await user.click(screen.getByRole('button', { name: 'Reload latest' }))
+    // With no model loaded before, the reload shows the loading state, so the
+    // editor is a new element afterwards.
+    const reloaded = await screen.findByDisplayValue('Generated model v1')
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+
+    await user.type(reloaded, ' + mine')
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Threat model saved'))
+    expect(puts[1]).toMatchObject({ content: 'Generated model v1 + mine', expectedVersion: 1 })
   })
 
   it('reports other save failures with the server message', async () => {

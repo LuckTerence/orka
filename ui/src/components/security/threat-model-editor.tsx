@@ -12,7 +12,9 @@ export function ThreatModelEditor({ repositoryName }: { repositoryName: string }
   const [content, setContent] = useState('')
   const [initialized, setInitialized] = useState(false)
   // The version the text in the editor is based on. Background refetches
-  // must not move it, or a save would overwrite changes it never saw.
+  // must not move it, or a save would overwrite changes it never saw. It
+  // stays 0 while no model has loaded, and a save sends that 0 too: it asks
+  // the server to create the first model only if none exists yet.
   const [baseVersion, setBaseVersion] = useState(0)
   const [conflict, setConflict] = useState(false)
   const [reloading, setReloading] = useState(false)
