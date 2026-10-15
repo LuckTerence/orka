@@ -547,7 +547,12 @@ export function TaskCreateForm() {
                     }}
                     disabled={inlineAgents.length === 0}
                   >
-                    <SelectTrigger id="ai-agent" aria-label="AI agent"><SelectValue placeholder="Select an agent (optional)" /></SelectTrigger>
+                    {/* Capped at the field width so a long agent label (or the
+                        "No agent" choice on a phone) truncates instead of
+                        widening the card. */}
+                    <SelectTrigger id="ai-agent" aria-label="AI agent" className="max-w-full">
+                      <span className="min-w-0 truncate"><SelectValue placeholder="Select an agent (optional)" /></span>
+                    </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="__none__">No agent — configure provider inline</SelectItem>
                       {inlineAgents.map((agent) => (
@@ -644,7 +649,9 @@ export function TaskCreateForm() {
                 <div className="space-y-2">
                   <label htmlFor="agent-ref" className="text-sm font-medium">Agent Reference</label>
                   <Select value={agentRef} onValueChange={setAgentRef} disabled={dispatchableAgents.length === 0}>
-                    <SelectTrigger id="agent-ref"><SelectValue placeholder="Select an agent" /></SelectTrigger>
+                    <SelectTrigger id="agent-ref" className="max-w-full">
+                      <span className="min-w-0 truncate"><SelectValue placeholder="Select an agent" /></span>
+                    </SelectTrigger>
                     <SelectContent>
                       {dispatchableAgents.map((agent) => (
                         <SelectItem key={agent.metadata.name} value={agent.metadata.name}>

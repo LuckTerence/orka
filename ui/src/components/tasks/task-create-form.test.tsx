@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { render, screen, waitFor, fireEvent } from '@/test/test-utils'
+import { render, screen, waitFor, fireEvent, within } from '@/test/test-utils'
 import { act } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
@@ -1351,6 +1351,22 @@ describe('TaskCreateForm', () => {
     render(<TaskCreateForm />)
     expect(screen.getByLabelText('Agent', { selector: 'button' })).toHaveAttribute('id', 'ai-agent')
     expect(screen.getByLabelText('Provider', { selector: 'button' })).toHaveAttribute('id', 'ai-provider')
+  })
+
+  it('caps the agent selects at the field width and truncates a long label', async () => {
+    useStateTypeOverride = 'ai'
+    const { unmount } = render(<TaskCreateForm />)
+    const aiAgent = screen.getByRole('combobox', { name: 'AI agent' })
+    expect(aiAgent).toHaveClass('max-w-full')
+    const aiValue = within(aiAgent).getByText('No agent — configure provider inline')
+    expect(aiValue.closest('span.truncate')).toHaveClass('min-w-0')
+    unmount()
+
+    useStateTypeOverride = 'agent'
+    render(<TaskCreateForm />)
+    const agentRef = screen.getByLabelText('Agent Reference')
+    expect(agentRef).toHaveClass('max-w-full')
+    expect(within(agentRef).getByText('Select an agent').closest('span.truncate')).toHaveClass('min-w-0')
   })
 
   it('uses the singular for an agent with one tool', async () => {
