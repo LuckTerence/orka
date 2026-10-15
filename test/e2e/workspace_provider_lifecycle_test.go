@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -211,7 +212,9 @@ var _ = Describe("Workspace Provider Lifecycle", Ordered, Label("workspace-provi
 		suspend    string // Session-scoped class that suspends on detach
 		deleting   string // per-Task class that deletes on detach
 		dataWS     workspaceIdentity
-		checkpoint workspacev1alpha1.ExecutionWorkspaceCheckpoint
+		// checkpoints reports whether the provider advertises export and restore.
+		checkpoints bool
+		checkpoint  workspacev1alpha1.ExecutionWorkspaceCheckpoint
 		// Every workspace UID the specs bound, for the final leftover check.
 		workspaceUIDs []string
 	)
@@ -246,7 +249,9 @@ var _ = Describe("Workspace Provider Lifecycle", Ordered, Label("workspace-provi
 		By("installing the " + backend.name + " backend and provider")
 		source := workspaceProviderSource()
 		backend.prepare(source)
-		installWorkspaceProvider(backend, source)
+		features := installWorkspaceProvider(backend, source)
+		checkpoints = slices.Contains(features, workspacev1alpha1.WorkspaceFeatureCheckpoint) &&
+			slices.Contains(features, workspacev1alpha1.WorkspaceFeatureRestore)
 
 		By("deploying the fake forge and letting the publisher reach it")
 		DeferCleanup(deleteE2EObjects, "deployment,service,secret", fakeForgeName)
@@ -356,6 +361,9 @@ var _ = Describe("Workspace Provider Lifecycle", Ordered, Label("workspace-provi
 	})
 
 	It("exports a checkpoint and restores its data into a new workspace", func() {
+		if !checkpoints {
+			Skip(backend.name + " does not advertise checkpoint export and restore")
+		}
 		checkpoint = exportCheckpoint(name("wsp-save"), dataWS, false)
 		restore := name("wsp-restore")
 		Expect(applyManifestJSON(wspTask(restore, agent, suspend, "", false,
@@ -587,7 +595,7 @@ func workspaceProviderSource() string {
 
 // installWorkspaceProvider builds the provider from orka-workspace source and
 // applies its bundled registration, RBAC, and Deployment.
-func installWorkspaceProvider(backend workspaceBackend, source string) {
+func installWorkspaceProvider(backend workspaceBackend, source string) []workspacev1alpha1.ExecutionWorkspaceFeature {
 	image := "orka-workspace-" + backend.name + ":e2e"
 	_, err := utils.Run(exec.Command("docker", "build", "-t", image,
 		"-f", filepath.Join(source, "providers", backend.name, "Dockerfile"), source))
@@ -640,11 +648,12 @@ func installWorkspaceProvider(backend workspaceBackend, source string) {
 	_, err = utils.Run(exec.Command("kubectl", "-n", wspProviderNS, "rollout", "status",
 		"deployment/"+backend.deployment, "--timeout=5m"))
 	Expect(err).NotTo(HaveOccurred())
+	var provider workspacev1alpha1.ExecutionWorkspaceProvider
 	Eventually(func(g Gomega) {
-		var provider workspacev1alpha1.ExecutionWorkspaceProvider
 		kubectlJSON(g, &provider, "get", "executionworkspaceprovider", backend.name)
 		g.Expect(provider.Status.SupportedContracts).To(ContainElement("orka.workspace.lifecycle.v1"))
 	}, 3*time.Minute, 2*time.Second).Should(Succeed())
+	return provider.Status.SupportedFeatures
 }
 
 type workspaceClassOptions struct {
