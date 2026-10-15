@@ -1860,6 +1860,16 @@ func applyScanRunProgress(run *store.ScanRun, progress scanRunProgress) {
 	run.Summary = "Threat model generated successfully"
 }
 
+// stampFailedScanRunCompletion dates a failed run that no Task completion time
+// dated (for example, when its failed Tasks carry none) at the moment the
+// failure is observed, so status.lastScanAt records the attempt.
+func stampFailedScanRunCompletion(run *store.ScanRun) {
+	if run.Phase == scanRunPhaseFailed && run.CompletedAt == nil {
+		now := time.Now().UTC()
+		run.CompletedAt = &now
+	}
+}
+
 func (r *RepositoryScanReconciler) refreshScanRunStatus(
 	ctx context.Context,
 	scan *corev1alpha1.RepositoryScan,
@@ -1880,6 +1890,7 @@ func (r *RepositoryScanReconciler) refreshScanRunStatus(
 		if run.ErrorMessage != "" {
 			run.Phase = scanRunPhaseFailed
 			run.Summary = run.ErrorMessage
+			stampFailedScanRunCompletion(run)
 		} else if run.Phase == "" {
 			run.Phase = scanRunPhaseRunning
 		}
@@ -1903,6 +1914,7 @@ func (r *RepositoryScanReconciler) refreshScanRunStatus(
 	previousPhase := run.Phase
 	progress := r.collectScanRunProgress(ctx, tasks.Items)
 	applyScanRunProgress(run, progress)
+	stampFailedScanRunCompletion(run)
 	if err := r.keepScanRunningForPendingReviewSlices(ctx, scan, run, progress); err != nil {
 		return err
 	}

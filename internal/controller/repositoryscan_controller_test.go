@@ -358,6 +358,73 @@ func TestRepositoryScanReconcileTreatsCancelledPipelineTasksAsTerminalFailures(t
 	}
 }
 
+func TestRepositoryScanReconcileDatesFailedRunWithoutTaskCompletionTime(t *testing.T) {
+	ctx := context.Background()
+	securityStore := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	const scanName, runID = "uncloneable", "scan_uncloneable"
+	taskName := scanName + "-" + security.StageThreatModel
+	scan := &corev1alpha1.RepositoryScan{
+		TypeMeta:   metav1.TypeMeta{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "RepositoryScan"},
+		ObjectMeta: metav1.ObjectMeta{Name: scanName, Namespace: defaultNS},
+		Spec: corev1alpha1.RepositoryScanSpec{
+			RepoURL:          "https://github.com/example/repo",
+			AnalysisAgentRef: corev1alpha1.AgentReference{Name: "scan-reviewer"},
+		},
+		Status: corev1alpha1.RepositoryScanStatus{Phase: repositoryScanPhaseScanning, LastScanID: runID, LastScanTaskName: taskName},
+	}
+	// The failed Task carries no completion time.
+	task := &corev1alpha1.Task{
+		TypeMeta: metav1.TypeMeta{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "Task"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: taskName, Namespace: defaultNS,
+			Labels: map[string]string{
+				labels.LabelSecurityTarget: labels.SelectorValue(scanName),
+				labels.LabelSecurityScanID: runID,
+				labels.LabelSecurityMode:   scanModeManual,
+				labels.LabelSecurityStage:  security.StageThreatModel,
+			},
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseFailed, Message: "failed to clone repository"},
+	}
+	if err := securityStore.CreateScanRun(ctx, &storepkg.ScanRun{
+		ID: runID, Namespace: defaultNS, RepositoryScan: scanName, TaskName: taskName,
+		Mode: scanModeManual, Phase: scanRunPhaseRunning, StartedAt: time.Now().Add(-time.Minute),
+	}); err != nil {
+		t.Fatalf("CreateScanRun() error = %v", err)
+	}
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.RepositoryScan{}).
+		WithObjects(repositoryScanTestObjects(scan, task)...).Build()
+	reconciler := &RepositoryScanReconciler{Client: cl, Scheme: scheme, SecurityStore: securityStore}
+
+	before := time.Now().Add(-time.Second)
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(scan)}); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	run, err := securityStore.GetScanRun(ctx, defaultNS, runID)
+	if err != nil {
+		t.Fatalf("GetScanRun() error = %v", err)
+	}
+	if run.Phase != scanRunPhaseFailed || run.CompletedAt == nil || run.CompletedAt.Before(before) {
+		t.Fatalf("run phase/completedAt = %q/%v, want failed and dated at observation", run.Phase, run.CompletedAt)
+	}
+	current := &corev1alpha1.RepositoryScan{}
+	if err := cl.Get(ctx, client.ObjectKeyFromObject(scan), current); err != nil {
+		t.Fatalf("Get(RepositoryScan) error = %v", err)
+	}
+	if current.Status.Phase != repositoryScanPhaseError || current.Status.LastScanAt == nil ||
+		!current.Status.LastScanAt.Time.Equal(run.CompletedAt.Truncate(time.Second)) {
+		t.Fatalf("scan phase/lastScanAt = %q/%v, want Error at %v", current.Status.Phase, current.Status.LastScanAt, run.CompletedAt)
+	}
+	if current.Status.LastSuccessfulScanAt != nil {
+		t.Fatalf("scan.Status.LastSuccessfulScanAt = %v, want nil after a failed run", current.Status.LastSuccessfulScanAt)
+	}
+}
+
 func TestTrustedFindingsRepositoryScopesCheckoutTarget(t *testing.T) {
 	run := &storepkg.ScanRun{
 		BaseCommit: "base",
