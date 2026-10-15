@@ -1493,9 +1493,16 @@ func TestExecuteListTools_WithTools(t *testing.T) {
 	if !r.Success {
 		t.Fatalf("expected success: %s", r.Error)
 	}
+	// list_tools also reports the built-in tools; count only the Tool CRDs.
 	toolsData := r.Data.([]any)
-	if len(toolsData) != 1 {
-		t.Fatalf("expected 1 tool, got %d", len(toolsData))
+	custom := 0
+	for _, item := range toolsData {
+		if item.(map[string]any)["builtin"] == false {
+			custom++
+		}
+	}
+	if custom != 1 {
+		t.Fatalf("expected 1 custom tool, got %d of %d tools", custom, len(toolsData))
 	}
 }
 
