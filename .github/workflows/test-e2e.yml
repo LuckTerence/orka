@@ -37,6 +37,7 @@ jobs:
             idle_ttl: 5s
             job_timeout: 90
             test_timeout: 75m
+            ginkgo_timeout: 70m
           # The built-in runtime lifecycle specs restart the controller and
           # park, replace, and scale RuntimePools, so they get their own
           # cluster.
@@ -47,6 +48,7 @@ jobs:
             idle_ttl: 15m
             job_timeout: 90
             test_timeout: 75m
+            ginkgo_timeout: 70m
           # Real out-of-tree workspace providers, built from the orka-workspace
           # revision Core pins, run the same lifecycle specs.
           - name: Workspace provider (agent-sandbox)
@@ -55,16 +57,18 @@ jobs:
             labels: workspace-provider
             provider: sandbox
             idle_ttl: 15m
-            job_timeout: 90
-            test_timeout: 75m
+            job_timeout: 120
+            test_timeout: 100m
+            ginkgo_timeout: 95m
           - name: Workspace provider (Substrate)
             suite: workspace-substrate
             cluster: orka-test-e2e-wsp-substrate
             labels: workspace-provider
             provider: substrate
             idle_ttl: 15m
-            job_timeout: 120
-            test_timeout: 90m
+            job_timeout: 150
+            test_timeout: 120m
+            ginkgo_timeout: 115m
     env:
       KIND_CLUSTER: ${{ matrix.cluster }}
       E2E_CLEANUP_REPORT_DIR: ${{ github.workspace }}/bin/e2e-cleanup/${{ matrix.suite }}
@@ -72,7 +76,7 @@ jobs:
       E2E_WORKSPACE_PROVIDER: ${{ matrix.provider }}
       E2E_ACP_IDLE_POOL_TTL: ${{ matrix.idle_ttl }}
       E2E_GO_TEST_TIMEOUT: ${{ matrix.test_timeout }}
-      E2E_GINKGO_TIMEOUT: 70m
+      E2E_GINKGO_TIMEOUT: ${{ matrix.ginkgo_timeout }}
       E2E_GINKGO_GRACE_PERIOD: 2m
     steps:
       - name: Clone the code

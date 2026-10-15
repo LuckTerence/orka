@@ -23,6 +23,7 @@ import (
 	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 
+	"github.com/orka-agents/orka/test/fixtures/fakeforge"
 	"github.com/orka-agents/orka/test/utils"
 )
 
@@ -54,6 +55,9 @@ type workspaceBackend struct {
 	// lostWorkspaceFails reports whether losing the instance fails the
 	// workspace (native process) rather than replacing its Pod.
 	lostWorkspaceFails bool
+	// unbootable is a profile whose instance can never start, for the boot
+	// time limit; nil skips that check.
+	unbootable map[string]any
 }
 
 func sandboxWorkspaceBackend() workspaceBackend {
@@ -155,13 +159,15 @@ func substrateWorkspaceBackend() workspaceBackend {
 			for _, arg := range container["args"].([]any) {
 				value := arg.(string)
 				if !strings.HasPrefix(value, "--native-ca-file=") && !strings.HasPrefix(value, "--native-token-file=") &&
-					!strings.HasPrefix(value, "--native-direct-egress=") {
+					!strings.HasPrefix(value, "--native-direct-egress=") && !strings.HasPrefix(value, "--native-boot-timeout=") {
 					args = append(args, value)
 				}
 			}
+			// A shorter boot limit keeps the never-starting boot check short.
 			container["args"] = append(args, "--native-ca-file=/native/server/trust-bundle.pem",
 				"--native-cert-file=/native/client/credential-bundle.pem",
-				"--native-key-file=/native/client/credential-bundle.pem", "--native-direct-egress=true")
+				"--native-key-file=/native/client/credential-bundle.pem", "--native-direct-egress=true",
+				"--native-boot-timeout=4m")
 		},
 		loseInstance: func(string) {
 			var actors []string
@@ -182,6 +188,8 @@ func substrateWorkspaceBackend() workspaceBackend {
 			return append(left, utils.GetNonEmptyLines(output)...)
 		},
 		lostWorkspaceFails: true,
+		// No worker carries this template's selector; see the cluster script.
+		unbootable: map[string]any{"templateRef": map[string]any{"namespace": wspAtespace, "name": "orka-acp-unschedulable"}},
 	}
 }
 
@@ -195,6 +203,7 @@ var _ = Describe("Workspace Provider Lifecycle", Ordered, Label("workspace-provi
 		runID      string
 		agent      string
 		suspend    string // Session-scoped class that suspends on detach
+		deleting   string // per-Task class that deletes on detach
 		dataWS     workspaceIdentity
 		checkpoint workspacev1alpha1.ExecutionWorkspaceCheckpoint
 		// Every workspace UID the specs bound, for the final leftover check.
@@ -232,10 +241,17 @@ var _ = Describe("Workspace Provider Lifecycle", Ordered, Label("workspace-provi
 		backend.prepare()
 		installWorkspaceProvider(backend)
 
+		By("deploying the fake forge and letting the publisher reach it")
+		DeferCleanup(deleteE2EObjects, "deployment,service,secret", fakeForgeName)
+		caPEM := deployFakeForge()
+		DeferCleanup(deleteE2EObjects, "networkpolicy", fakeForgeNetworkPolicy)
+		trustFakeForgeInPublisher(caPEM)
+
 		agent = name("wsp-agent")
-		Expect(applyManifestJSON(runtimeAgentManifest(agent, "codex", runtimeMatrixMockCodexModel, 2, nil))).To(Succeed())
-		suspend = name("wsp-suspend")
-		applyWorkspaceClass(backend, suspend, true)
+		Expect(applyManifestJSON(runtimeAgentManifest(agent, "codex", runtimeMatrixMockCodexModel, 4, nil))).To(Succeed())
+		suspend, deleting = name("wsp-suspend"), name("wsp-delete")
+		applyWorkspaceClass(backend, suspend, workspaceClassOptions{suspend: true})
+		applyWorkspaceClass(backend, deleting, workspaceClassOptions{})
 	})
 
 	AfterEach(func() {
@@ -245,8 +261,7 @@ var _ = Describe("Workspace Provider Lifecycle", Ordered, Label("workspace-provi
 	})
 
 	It("runs a Task through the workspace class and removes the workspace on detach", func() {
-		class := name("wsp-delete")
-		applyWorkspaceClass(backend, class, false)
+		class := deleting
 		task := name("wsp-read")
 		manifest := externalCodexReadTaskManifest(task, agent, class)
 		Expect(applyManifestJSON(manifest)).To(Succeed())
@@ -255,6 +270,59 @@ var _ = Describe("Workspace Provider Lifecycle", Ordered, Label("workspace-provi
 
 		Expect(waitForTaskCompletion(task, 10*time.Minute)).To(Equal("Succeeded"))
 		Expect(strings.TrimSpace(fetchTaskResultSummaryViaAPI(apiBaseURL, token, task))).To(HaveSuffix(liveRuntimeRepoSentinel))
+		deleteE2ETasks(apiBaseURL, token, task)
+		waitWorkspaceGone(backend, ws)
+	})
+
+	It("clones, edits, and publishes a branch with a pull request from the workspace", func() {
+		const pushBranch, file = "orka/e2e-wsp", "WSP_PUBLISH.md"
+		repoURL := "https://" + fakeForgeHost() + "/" + fakeForgeRepository + ".git"
+		credentials := map[string]any{}
+		for _, role := range fakeforge.Roles {
+			DeferCleanup(deleteE2EObjects, "secret", fakeForgeCredential(role))
+			Expect(createK8sSecret(fakeForgeCredential(role), namespace,
+				map[string]string{"token": fakeForgeToken(role)})).To(Succeed())
+			credentials[role] = map[string]any{"name": fakeForgeCredential(role), "key": "token"}
+		}
+		task := name("wsp-publish")
+		manifest := wspTask(task, agent, deleting, "", false, "Create "+file+", then report it. "+marker("publish"), "15m", nil)
+		manifest["spec"].(map[string]any)["workspace"] = map[string]any{
+			"intent": "write", "gitRepo": repoURL, "branch": "main",
+			"readCredentialRef":            credentials[fakeforge.RoleRead],
+			"publicationGitRepo":           repoURL,
+			"publicationReadCredentialRef": credentials[fakeforge.RolePublicationRead],
+			"publicationCredentialRef":     credentials[fakeforge.RolePush],
+			"forgeCredentialRef":           credentials[fakeforge.RoleForge],
+			"pushBranch":                   pushBranch, "prBaseBranch": "main",
+			"prTitle": "E2E workspace provider publication", "createPR": true,
+		}
+		Expect(applyManifestJSON(manifest)).To(Succeed())
+		ws := waitTaskWorkspace(task, deleting, backend)
+		workspaceUIDs = append(workspaceUIDs, ws.uid)
+		Expect(waitForTaskCompletion(task, 15*time.Minute)).To(Equal("Succeeded"))
+		var delivery corev1alpha1.TaskDeliveryStatus
+		Eventually(func(g Gomega) {
+			current := fetchTaskForACPAssertion(g, task)
+			g.Expect(current.Status.Delivery).NotTo(BeNil())
+			delivery = *current.Status.Delivery
+			g.Expect(delivery.Outcome).To(Equal(corev1alpha1.TaskDeliveryOutcomeVerifiedExact))
+			g.Expect(delivery.PRReceipt).NotTo(BeNil())
+		}, 2*time.Minute, 2*time.Second).Should(Succeed())
+		Expect(fakeForgeState().Branches[fakeForgeRepository]).To(HaveKeyWithValue(pushBranch, delivery.VerifiedRemoteSHA))
+		Expect(fakeForgeFile(pushBranch, file)).To(Equal("ORKA_WSP_PUBLISHED\n"))
+		deleteE2ETasks(apiBaseURL, token, task)
+		waitWorkspaceGone(backend, ws)
+	})
+
+	It("lets the workspace reach the provider proxy but not other destinations", func() {
+		task := name("wsp-egress")
+		Expect(applyManifestJSON(wspTask(task, agent, deleting, "", false,
+			"Check the workspace network. "+marker("egress"), "15m", nil))).To(Succeed())
+		ws := waitTaskWorkspace(task, deleting, backend)
+		workspaceUIDs = append(workspaceUIDs, ws.uid)
+		waitTaskExecution(task, corev1alpha1.TaskExecutionStateSucceeded)
+		Expect(fetchTaskResultViaAPI(apiBaseURL, token, task)).To(ContainSubstring("ORKA_WSP_EGRESS_OK"),
+			"the workspace must reach only the provider proxy")
 		deleteE2ETasks(apiBaseURL, token, task)
 		waitWorkspaceGone(backend, ws)
 	})
@@ -293,6 +361,31 @@ var _ = Describe("Workspace Provider Lifecycle", Ordered, Label("workspace-provi
 		waitWorkspaceGone(backend, ws)
 	})
 
+	It("finishes a suspension across a provider restart", func() {
+		task := name("wsp-provider-restart")
+		Expect(applyManifestJSON(wspTask(task, agent, suspend, session("data"), false,
+			"Read the durable workspace file. "+marker("provider-restart"), "15m", nil))).To(Succeed())
+		waitTaskExecution(task, corev1alpha1.TaskExecutionStateSucceeded)
+		Eventually(func(g Gomega) {
+			var workspace workspacev1alpha1.ExecutionWorkspace
+			kubectlJSON(g, &workspace, "get", "executionworkspace", dataWS.name, "-n", namespace)
+			g.Expect(workspace.Spec.DesiredState).To(Equal(workspacev1alpha1.ExecutionWorkspaceDesiredSuspended))
+		}, 5*time.Minute, time.Second).Should(Succeed())
+
+		By("restarting the provider while it suspends the workspace")
+		for _, args := range [][]string{{"rollout", "restart"}, {"rollout", "status", "--timeout=5m"}} {
+			_, err := utils.Run(exec.Command("kubectl", append([]string{"-n", wspProviderNS}, append(args, "deployment/"+backend.deployment)...)...))
+			Expect(err).NotTo(HaveOccurred())
+		}
+		waitWorkspaceState(dataWS.name, workspacev1alpha1.ExecutionWorkspaceStateSuspended)
+		next := name("wsp-after-provider-restart")
+		Expect(applyManifestJSON(wspTask(next, agent, suspend, session("data"), false,
+			"Read the durable workspace file. "+marker("after-provider-restart"), "15m", nil))).To(Succeed())
+		waitTaskExecution(next, corev1alpha1.TaskExecutionStateSucceeded)
+		Expect(fetchTaskResultViaAPI(apiBaseURL, token, next)).To(ContainSubstring("ORKA_WSP_READ_OK"))
+		waitWorkspaceState(dataWS.name, workspacev1alpha1.ExecutionWorkspaceStateSuspended)
+	})
+
 	It("cancels a held prompt at its Task timeout without replaying it", func() {
 		task := name("wsp-timeout")
 		Expect(applyManifestJSON(wspTask(task, agent, suspend, session("timeout"), true,
@@ -303,6 +396,25 @@ var _ = Describe("Workspace Provider Lifecycle", Ordered, Label("workspace-provi
 		Expect(final.Status.Execution.Reason).To(Equal(corev1alpha1.TaskExecutionReason("TaskTimeout")))
 		expectServedOnce(marker("timeout"))
 		waitWorkspaceState(ws.name, workspacev1alpha1.ExecutionWorkspaceStateSuspended)
+	})
+
+	It("cancels a held prompt when its Task is deleted", func() {
+		task := name("wsp-cancel")
+		Expect(applyManifestJSON(wspTask(task, agent, deleting, "", false,
+			"Wait for the model. "+marker("cancel"), "1h", nil))).To(Succeed())
+		ws := waitTaskWorkspace(task, deleting, backend)
+		workspaceUIDs = append(workspaceUIDs, ws.uid)
+		waitHeldPrompt(task, marker("cancel"))
+		uid := string(fetchTaskForACPAssertion(Default, task).UID)
+		addTaskObserverFinalizer(task, uid)
+		_, err := utils.Run(exec.Command("kubectl", "delete", "task", task, "-n", namespace, "--wait=false"))
+		Expect(err).NotTo(HaveOccurred())
+		waitTaskExecution(task, corev1alpha1.TaskExecutionStateCancelled)
+		expectServedOnce(marker("cancel"))
+		waitTaskObserverReleaseReady(task, uid)
+		releaseTaskObserverFinalizer(task, uid)
+		waitTaskAbsent(task)
+		waitWorkspaceGone(backend, ws)
 	})
 
 	It("settles a held prompt once across a controller restart and continues the Session", func() {
@@ -360,6 +472,45 @@ var _ = Describe("Workspace Provider Lifecycle", Ordered, Label("workspace-provi
 		workspaceUIDs = append(workspaceUIDs, ws.uid)
 		waitTaskExecution(restore, corev1alpha1.TaskExecutionStateSucceeded)
 		Expect(fetchTaskResultViaAPI(apiBaseURL, token, restore)).To(ContainSubstring("ORKA_WSP_READ_OK"))
+		waitWorkspaceGone(backend, ws)
+	})
+
+	It("cancels a running Task when its workspace reaches maxLifetime", func() {
+		class := name("wsp-lifetime")
+		applyWorkspaceClass(backend, class, workspaceClassOptions{maxLifetime: "120s"})
+		task := name("wsp-lifetime")
+		Expect(applyManifestJSON(wspTask(task, agent, class, "", false,
+			"Wait for the model. "+marker("lifetime"), "15m", nil))).To(Succeed())
+		ws := waitTaskWorkspace(task, class, backend)
+		workspaceUIDs = append(workspaceUIDs, ws.uid)
+		waitHeldPrompt(task, marker("lifetime"))
+		final := waitTaskExecution(task, corev1alpha1.TaskExecutionStateCancelled)
+		Expect(final.Status.Execution.Reason).To(Equal(corev1alpha1.TaskExecutionReason("TaskTimeout")))
+		expectServedOnce(marker("lifetime"))
+		deleteE2ETasks(apiBaseURL, token, task)
+		waitWorkspaceGone(backend, ws)
+	})
+
+	It("fails a workspace whose instance never starts and leaves nothing behind", func() {
+		if backend.unbootable == nil {
+			Skip(backend.name + " has no provider boot time limit")
+		}
+		class := name("wsp-unbootable")
+		applyWorkspaceClass(backend, class, workspaceClassOptions{profile: backend.unbootable})
+		task := name("wsp-unbootable")
+		Expect(applyManifestJSON(wspTask(task, agent, class, "", false,
+			"This instance never starts. "+marker("unbootable"), "15m", nil))).To(Succeed())
+		ws := waitTaskWorkspace(task, class, backend)
+		workspaceUIDs = append(workspaceUIDs, ws.uid)
+		waitWorkspaceState(ws.name, workspacev1alpha1.ExecutionWorkspaceStateFailed)
+		Eventually(func(g Gomega) {
+			current := fetchTaskForACPAssertion(g, task)
+			g.Expect(current.Status.Phase).To(BeElementOf(corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskPhaseCancelled))
+		}, 5*time.Minute, 2*time.Second).Should(Succeed())
+		requests, err := providerProxyMockLLM.requestsFor(marker("unbootable"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(requests).To(BeEmpty(), "a never-started instance must not reach the model")
+		deleteE2ETasks(apiBaseURL, token, task)
 		waitWorkspaceGone(backend, ws)
 	})
 
@@ -470,10 +621,23 @@ func installWorkspaceProvider(backend workspaceBackend) {
 	}, 3*time.Minute, 2*time.Second).Should(Succeed())
 }
 
-func applyWorkspaceClass(backend workspaceBackend, name string, suspend bool) {
+type workspaceClassOptions struct {
+	suspend     bool
+	maxLifetime string         // default 2h
+	profile     map[string]any // default backend.profileSpec(suspend)
+}
+
+func applyWorkspaceClass(backend workspaceBackend, name string, options workspaceClassOptions) {
+	suspend, maxLifetime, profile := options.suspend, options.maxLifetime, options.profile
+	if maxLifetime == "" {
+		maxLifetime = "2h"
+	}
+	if profile == nil {
+		profile = backend.profileSpec(suspend)
+	}
 	lifecycle := map[string]any{
 		"defaultOnDetach": "Delete", "allowedOnDetach": []string{"Delete"},
-		"detachTimeout": "5m", "maxLifetime": "2h",
+		"detachTimeout": "5m", "maxLifetime": maxLifetime,
 		"deletionPolicy": map[string]any{"providerResources": "Delete", "persistentVolumes": "Delete", "checkpoints": "Delete"},
 	}
 	reuse := []string{"None"}
@@ -485,7 +649,7 @@ func applyWorkspaceClass(backend workspaceBackend, name string, suspend bool) {
 		map[string]any{
 			"apiVersion": backend.profileGroup + "/v1alpha1", "kind": backend.profileKind,
 			"metadata": map[string]any{"name": name, "namespace": namespace},
-			"spec":     backend.profileSpec(suspend),
+			"spec":     profile,
 		},
 		map[string]any{
 			"apiVersion": "workspace.orka.ai/v1alpha1", "kind": "ExecutionWorkspaceClass",

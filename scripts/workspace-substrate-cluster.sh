@@ -46,6 +46,11 @@ jq -n --arg image "${worker/localhost:${KIND_REGISTRY_PORT}/${registry_ip}:5000}
    sandboxConfig:{sandboxClass:"SANDBOX_CLASS_GVISOR",configName:"gvisor-default"}}' >"${RUN_DIR}/orka-acp-infra.json"
 kubectl_ate get actor-template orka-acp-infra --atespace orka-system >/dev/null 2>&1 ||
   kubectl_ate create actor-template -f "${RUN_DIR}/orka-acp-infra.json"
+# No worker carries this selector, so its Actors never boot (boot time limit check).
+jq '.metadata.name = "orka-acp-unschedulable" | .workerSelector.matchLabels["orka.ai/native-pool"] = "none"' \
+  "${RUN_DIR}/orka-acp-infra.json" >"${RUN_DIR}/orka-acp-unschedulable.json"
+kubectl_ate get actor-template orka-acp-unschedulable --atespace orka-system >/dev/null 2>&1 ||
+  kubectl_ate create actor-template -f "${RUN_DIR}/orka-acp-unschedulable.json"
 
 # Core reads worker Pod identity in the provider's worker namespace.
 kubectl -n ate-demo apply -f - <<'YAML'
