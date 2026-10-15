@@ -1,6 +1,8 @@
 import { describe, it, expect, vi } from 'vitest'
 import { render, screen, within } from '@/test/test-utils'
 import userEvent from '@testing-library/user-event'
+import { http, HttpResponse } from 'msw'
+import { server } from '@/test/mocks/server'
 
 const navigateMock = vi.fn()
 vi.mock('@tanstack/react-router', async () => {
@@ -194,5 +196,53 @@ describe('ExecutionGraph', () => {
     expect(chip).toHaveClass('text-status-failed')
     expect(chip).not.toHaveClass('text-status-succeeded')
     expect(chip).toHaveAttribute('title', 'tests did not pass')
+  })
+
+  it("shows a failed child's own status message when it reported no result", async () => {
+    const requested: string[] = []
+    server.use(
+      http.get('/api/v1/tasks/:id/children', ({ params }) => {
+        requested.push(String(params.id))
+        return HttpResponse.json({
+          items: [
+            { metadata: { name: 'c3', namespace: 'default' }, spec: { type: 'container' }, status: { phase: 'Failed', message: 'pod waiting: ErrImagePull - not found' } },
+            { metadata: { name: 'c4', namespace: 'default' }, spec: { type: 'container' }, status: { phase: 'Succeeded', message: 'Job completed' } },
+          ],
+          metadata: {},
+        })
+      }),
+    )
+    const task = makeTask({
+      status: {
+        phase: 'Running',
+        childTasks: [
+          { name: 'c3', agent: 'r', phase: 'Failed' },
+          { name: 'c4', agent: 'r', phase: 'Succeeded' },
+        ],
+      },
+    })
+    render(<ExecutionGraph task={task} />)
+    const chip = await screen.findByText('Failed: pod waiting: ErrImagePull - not found')
+    expect(chip).toHaveClass('text-status-failed')
+    // A succeeded child's message is not a result.
+    expect(screen.queryByText('Job completed')).not.toBeInTheDocument()
+    expect(requested).toEqual(['parent-task'])
+  })
+
+  it('does not read the children list when every failed child reported a result', async () => {
+    const requested: string[] = []
+    server.use(
+      http.get('/api/v1/tasks/:id/children', ({ params }) => {
+        requested.push(String(params.id))
+        return HttpResponse.json({ items: [], metadata: {} })
+      }),
+    )
+    const task = makeTask({
+      status: { phase: 'Running', childTasks: [{ name: 'c5', agent: 'r', phase: 'Failed', result: 'lint failed' }] },
+    })
+    render(<ExecutionGraph task={task} />)
+    expect(screen.getByText('Failed: lint failed')).toBeInTheDocument()
+    await new Promise((r) => setTimeout(r, 50))
+    expect(requested).toEqual([])
   })
 })
