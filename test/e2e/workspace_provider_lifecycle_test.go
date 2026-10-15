@@ -57,6 +57,9 @@ type workspaceBackend struct {
 	patchProvider                    func(deployment map[string]any)
 	loseInstance                     func(workspaceUID string)
 	leftovers                        func(g Gomega, workspaceUID string) []string
+	// nativeLeftovers lists backend objects that carry no workspace label,
+	// checked once every workspace is gone; nil when there are none.
+	nativeLeftovers func(g Gomega) []string
 	// lostWorkspaceFails reports whether losing the instance fails the
 	// workspace (native process) rather than replacing its Pod.
 	lostWorkspaceFails bool
@@ -188,11 +191,15 @@ func substrateWorkspaceBackend() workspaceBackend {
 				"--atespace", wspAtespace, "--any-state")
 		},
 		leftovers: func(g Gomega, workspaceUID string) []string {
-			left := append(nativeNames(g, "actors"), nativeNames(g, "tags")...)
 			output, err := utils.Run(exec.Command("kubectl", "-n", wspNativePool, "get", "workerpools,pods,networkpolicies",
 				"-l", wspNativeOwner+"="+workspaceUID, "-o", "name"))
 			g.Expect(err).NotTo(HaveOccurred())
-			return append(left, utils.GetNonEmptyLines(output)...)
+			return utils.GetNonEmptyLines(output)
+		},
+		// Actors and checkpoint Tags are atespace-wide; suspended workspaces
+		// keep theirs until deleted.
+		nativeLeftovers: func(g Gomega) []string {
+			return append(nativeNames(g, "actors"), nativeNames(g, "tags")...)
 		},
 		lostWorkspaceFails: true,
 		// No worker carries this template's selector; see the cluster script.
@@ -560,6 +567,9 @@ var _ = Describe("Workspace Provider Lifecycle", Ordered, Label("workspace-provi
 			g.Expect(output).NotTo(ContainSubstring("acp-ws-"))
 			for _, uid := range workspaceUIDs {
 				g.Expect(backend.leftovers(g, uid)).To(BeEmpty(), "workspace %s left backend resources", uid)
+			}
+			if backend.nativeLeftovers != nil {
+				g.Expect(backend.nativeLeftovers(g)).To(BeEmpty(), "deleted workspaces left native resources")
 			}
 		}, 10*time.Minute, 5*time.Second).Should(Succeed())
 	})
