@@ -465,6 +465,7 @@ export const findings: SecurityFinding[] = [
     minimumFixScope: 'internal/reports/settlement.go',
     evidence: [
       { kind: 'code', path: 'internal/reports/settlement.go', startLine: 138, endLine: 144, symbol: 'buildSettlementQuery', quote: 'if dir != "asc" && dir != "desc" {\n    dir = "desc"\n}\nq += fmt.Sprintf(" ORDER BY %s %s", sort, dir)' },
+      { kind: 'artifact', taskName: 'security-scan-checkout-t3y8u', name: 'semgrep.sarif.json', label: 'Semgrep SARIF report' },
     ],
     validationJSON: validation({
       summary: 'Boolean-based injection confirmed on the reports replica; the replica user can read every merchant\'s settlements.',

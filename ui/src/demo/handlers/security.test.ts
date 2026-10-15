@@ -21,6 +21,7 @@ import {
 } from '@/schemas/security'
 import { statusProblem } from '@/components/common/status-problem'
 import { items, workActions } from '../data/monitors'
+import { findings } from '../data/security'
 import { handleDemoRequest } from '../server'
 import { TASKS } from '../world'
 import { createDemoTask } from './tasks'
@@ -125,6 +126,15 @@ describe('demo security repositories', () => {
 describe('demo security findings', () => {
   const findingsOf = async (repo: string, params = '') =>
     listOf(securityFindingSchema).parse(await json(`/security/repositories/${repo}/findings?namespace=default${params}`))
+
+  it('points artifact evidence at artifacts its task serves', async () => {
+    const refs = findings.flatMap((finding) => (finding.evidence ?? []).filter((evidence) => evidence.kind === 'artifact'))
+    expect(refs.length).toBeGreaterThan(0)
+    for (const ref of refs) {
+      const response = await call(`/tasks/${encodeURIComponent(ref.taskName ?? '')}/artifacts/${encodeURIComponent(ref.name ?? '')}?namespace=default`)
+      expect(response.status, `${ref.taskName}/${ref.name}`).toBe(200)
+    }
+  })
 
   it('pages findings with the cursor the dashboard follows', async () => {
     const all = await findingsOf('checkout-service')
