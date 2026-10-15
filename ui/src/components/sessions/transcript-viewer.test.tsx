@@ -56,6 +56,22 @@ describe('TranscriptViewer', () => {
     expect(rows[1].className).toContain('justify-start')
   })
 
+  it('pads message bubbles evenly on every side', () => {
+    const jsonl = [
+      JSON.stringify({ role: 'user', content: 'User msg' }),
+      JSON.stringify({ role: 'assistant', content: 'Bot msg' }),
+    ].join('\n')
+
+    render(<TranscriptViewer transcript={jsonl} />)
+    for (const text of ['User msg', 'Bot msg']) {
+      const bubble = screen.getByText(text).closest('[data-slot="card"]') as HTMLElement
+      // The Card's own py-6 would stack on the content's p-3.
+      expect(bubble).toHaveClass('py-0')
+      expect(bubble).not.toHaveClass('py-6')
+      expect(bubble.querySelector('[data-slot="card-content"]')).toHaveClass('p-3')
+    }
+  })
+
   it('shows metadata (model, tokens) when present', () => {
     const jsonl = JSON.stringify({
       role: 'assistant',
