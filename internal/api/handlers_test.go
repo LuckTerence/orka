@@ -2539,30 +2539,47 @@ func TestHandlers_DeleteTask_NotFound(t *testing.T) {
 }
 
 func TestHandlers_GetTaskLogs_NoJob(t *testing.T) {
-	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-task",
-			Namespace: "default",
-		},
-		Spec: corev1alpha1.TaskSpec{
-			Type: corev1alpha1.TaskTypeContainer,
-		},
-		Status: corev1alpha1.TaskStatus{
-			JobName: "", // No job
-		},
-	}
+	for _, tt := range []struct {
+		name     string
+		schedule string
+		phase    corev1alpha1.TaskPhase
+		want     string
+	}{
+		{name: "pending task", phase: corev1alpha1.TaskPhasePending, want: "task is pending, no logs available yet"},
+		{name: "scheduled parent", schedule: "0 * * * *", phase: corev1alpha1.TaskPhaseScheduled, want: "each scheduled run is a child task with its own logs"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-task",
+					Namespace: "default",
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:     corev1alpha1.TaskTypeContainer,
+					Schedule: tt.schedule,
+				},
+				Status: corev1alpha1.TaskStatus{
+					Phase:   tt.phase,
+					JobName: "", // No job
+				},
+			}
 
-	handlers, app := setupTestHandlersWithObjects(task)
-	app.Get("/tasks/:id/logs", handlers.GetTaskLogs)
+			handlers, app := setupTestHandlersWithObjects(task)
+			app.Get("/tasks/:id/logs", handlers.GetTaskLogs)
 
-	req := httptest.NewRequest(http.MethodGet, "/tasks/test-task/logs", nil)
-	resp, err := app.Test(req)
-	if err != nil {
-		t.Fatalf("Test request failed: %v", err)
-	}
+			req := httptest.NewRequest(http.MethodGet, "/tasks/test-task/logs", nil)
+			resp, err := app.Test(req)
+			if err != nil {
+				t.Fatalf("Test request failed: %v", err)
+			}
 
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("StatusCode = %d, want %d", resp.StatusCode, http.StatusNotFound)
+			if resp.StatusCode != http.StatusNotFound {
+				t.Errorf("StatusCode = %d, want %d", resp.StatusCode, http.StatusNotFound)
+			}
+			if body := readRespBody(t, resp); !strings.Contains(body, tt.want) {
+				t.Errorf("body = %q, want it to contain %q", body, tt.want)
+			}
+		})
 	}
 }
 

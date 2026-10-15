@@ -811,7 +811,11 @@ func (h *Handlers) GetTaskLogs(c fiber.Ctx) error {
 		})
 	}
 
-	// For pending/scheduled tasks with no job yet
+	// A scheduled parent never runs itself; each run is a child Task.
+	if task.Spec.Schedule != "" {
+		return fiber.NewError(fiber.StatusNotFound, "task runs on a schedule and has no logs of its own; each scheduled run is a child task with its own logs")
+	}
+	// For pending tasks with no job yet
 	if task.Status.JobName == "" {
 		return fiber.NewError(fiber.StatusNotFound, "task is pending, no logs available yet")
 	}
