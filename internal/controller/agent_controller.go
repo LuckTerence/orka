@@ -114,6 +114,10 @@ func (r *AgentReconciler) validateAgent(ctx context.Context, agent *corev1alpha1
 		return fmt.Errorf("runtime and providerRef are mutually exclusive")
 	}
 
+	if err := validateAgentModelLimits(agent.Spec.Model); err != nil {
+		return err
+	}
+
 	// For non-runtime agents, validate model config
 	if agent.Spec.Runtime == nil {
 		if agent.Spec.ProviderRef == nil && (agent.Spec.Model == nil || agent.Spec.Model.Provider == "") {
@@ -159,6 +163,22 @@ func (r *AgentReconciler) validateAgent(ctx context.Context, agent *corev1alpha1
 		return err
 	}
 	return r.validateCoordination(ctx, agent)
+}
+
+// validateAgentModelLimits rejects token limits that Agents admitted before
+// the CRD bounds existed can still carry. Workers otherwise silently replace
+// a non-positive maxTokens with their default.
+func validateAgentModelLimits(model *corev1alpha1.ModelConfig) error {
+	if model == nil {
+		return nil
+	}
+	if model.MaxTokens != nil && *model.MaxTokens < 0 {
+		return fmt.Errorf("spec.model.maxTokens must not be negative")
+	}
+	if model.ContextWindow != nil && *model.ContextWindow < 1 {
+		return fmt.Errorf("spec.model.contextWindow must be positive")
+	}
+	return nil
 }
 
 func isBuiltInACPProviderRuntime(runtimeType corev1alpha1.AgentRuntimeType) bool {

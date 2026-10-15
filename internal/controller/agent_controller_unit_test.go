@@ -290,6 +290,38 @@ func TestValidateAgent_ModelControlsRemainValidOutsideBuiltInACPRuntimes(t *test
 	}
 }
 
+func TestValidateAgent_ModelTokenLimits(t *testing.T) {
+	for _, tt := range []struct {
+		name          string
+		maxTokens     *int32
+		contextWindow *int32
+		wantError     string
+	}{
+		{name: "positive limits", maxTokens: new(int32(1024)), contextWindow: new(int32(8192))},
+		{name: "legacy zero max tokens", maxTokens: new(int32(0))},
+		{name: "negative max tokens", maxTokens: new(int32(-1)), wantError: "spec.model.maxTokens must not be negative"},
+		{name: "zero context window", contextWindow: new(int32(0)), wantError: "spec.model.contextWindow must be positive"},
+		{name: "negative context window", contextWindow: new(int32(-5)), wantError: "spec.model.contextWindow must be positive"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			agent := baseAgent("token-limits")
+			agent.Spec.Model.MaxTokens = tt.maxTokens
+			agent.Spec.Model.ContextWindow = tt.contextWindow
+
+			err := setupAgentReconciler().validateAgent(context.Background(), agent)
+			if tt.wantError == "" {
+				if err != nil {
+					t.Fatalf("validateAgent() error = %v", err)
+				}
+				return
+			}
+			if err == nil || err.Error() != tt.wantError {
+				t.Fatalf("validateAgent() error = %v, want %q", err, tt.wantError)
+			}
+		})
+	}
+}
+
 func TestValidateAgent_RuntimeRefRequiresName(t *testing.T) {
 	agent := baseAgent("missing-runtime-ref-name")
 	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{
