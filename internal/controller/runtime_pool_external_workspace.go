@@ -108,7 +108,12 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 	if err := uncachedReader(r.APIReader, r.Client).Get(ctx, types.NamespacedName{Name: w.Spec.ProviderBinding.Name}, provider); err != nil {
 		return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleDegraded, "workspace provider is unavailable")
 	}
-	if provider.UID != w.Spec.ProviderBinding.UID || provider.Spec.LifecycleState == workspacev1alpha1.ExecutionWorkspaceProviderDisabled || !externalProviderUsable(provider) {
+	// Like Task dispatch, an Active provider must still be the frozen
+	// generation; Draining keeps serving the workspace it already bound.
+	bound := w.Spec.ProviderBinding.Generation
+	generationMatches := provider.Generation == bound ||
+		provider.Spec.LifecycleState == workspacev1alpha1.ExecutionWorkspaceProviderDraining && bound > 0 && bound <= provider.Generation
+	if provider.UID != w.Spec.ProviderBinding.UID || !generationMatches || provider.Spec.LifecycleState == workspacev1alpha1.ExecutionWorkspaceProviderDisabled || !externalProviderUsable(provider) {
 		return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleDegraded, "workspace provider is not usable")
 	}
 	cfg, err := r.runtimePoolConfig(pool)
