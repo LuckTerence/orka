@@ -1,5 +1,6 @@
 import { http, HttpResponse } from 'msw'
-import { api, ago, DEMO_NAMESPACE, inDemoNamespace, list, uid } from '../shared'
+import { api, ago, apiError, DEMO_NAMESPACE, inDemoNamespace, list, uid } from '../shared'
+import { DEMO_TOKEN } from '../token'
 import { PROVIDERS } from '../world'
 
 const providers = Object.values(PROVIDERS).map((provider, index) => ({
@@ -23,8 +24,13 @@ const secrets = [
 
 /** Sign-in, chat configuration, providers, and secrets. */
 export const coreHandlers = [
-  // Any token signs in to the demo.
-  http.get(api('/auth/validate'), () => HttpResponse.json({ valid: true, subject: 'demo-user' })),
+  // Only the demo credential signs in, so the demo never stores a real token
+  // a visitor pastes or links in.
+  http.get(api('/auth/validate'), ({ request }) =>
+    request.headers.get('Authorization') === `Bearer ${DEMO_TOKEN}`
+      ? HttpResponse.json({ valid: true, subject: 'demo-user' })
+      : apiError(401, 'the demo signs in only with its own sample credential'),
+  ),
 
   http.get(api('/chat/config'), () =>
     HttpResponse.json({
