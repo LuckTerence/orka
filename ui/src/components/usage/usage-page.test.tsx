@@ -83,6 +83,16 @@ describe('UsagePage', () => {
     expect(within(task).getByText('Input 500,000 · Output 100,000 · Cached reads 50,000 · Cached writes Unavailable')).toBeInTheDocument()
   })
 
+  it('lets the keyboard reach and scroll the wide Team summary table', async () => {
+    server.use(http.get('/api/v1/usage', () => HttpResponse.json(reportFixture())))
+    render(<UsagePage />)
+    const region = await screen.findByRole('region', { name: 'Team summary' })
+    expect(region).toHaveAttribute('tabindex', '0')
+    expect(within(region).getByRole('columnheader', { name: 'Tokens / merged PR' })).toBeInTheDocument()
+    region.focus()
+    expect(region).toHaveFocus()
+  })
+
   it('pins the report time when paging work summaries', async () => {
     const report = reportFixture()
     const requests: URL[] = []

@@ -92,7 +92,7 @@ function UsagePageContent({ namespace }: { namespace: string }) {
         <OutcomeSummary summary={data.summary} />
         <Card>
           <CardHeader><CardTitle>Team summary</CardTitle></CardHeader>
-          <CardContent><Table>
+          <CardContent><Table scrollRegionLabel="Team summary">
             <TableHeader><TableRow>
               <TableHead>Team</TableHead><TableHead>Requests</TableHead><TableHead>Recorded tokens</TableHead>
               <TableHead>PRs opened</TableHead><TableHead>Ready now</TableHead><TableHead>Merged</TableHead><TableHead>Tokens / merged PR</TableHead>
