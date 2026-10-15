@@ -84,25 +84,21 @@ type taskTokenUsageReader interface {
 	TaskTokenUsage(ctx context.Context, namespace, taskUID string) (int64, int64, error)
 }
 
-// recordSessionTokenUsage adds a Job-backed Task's final usage to the Session
-// whose transcript it appended. Agent Tasks run as ACP Session turns, whose
-// finalization adds the turn's usage in the same transaction, so they are
-// skipped here. Chat Sessions count only their chat turns: Tasks a chat
-// creates have no spec.sessionRef and are not added, so chat tokens are never
-// double counted.
-func (r *TaskReconciler) recordSessionTokenUsage(ctx context.Context, task *corev1alpha1.Task) error {
+// sessionTokenUsage returns a Job-backed Task's final usage to add to the
+// Session whose transcript it appended; the caller adds it while releasing
+// the Session lock. Agent Tasks run as ACP Session turns, whose finalization
+// adds the turn's usage in the same transaction, so they report none here.
+// Chat Sessions count only their chat turns: Tasks a chat creates have no
+// spec.sessionRef, so chat tokens are never double counted.
+func (r *TaskReconciler) sessionTokenUsage(ctx context.Context, task *corev1alpha1.Task) (int64, int64, error) {
 	if r.SessionManager == nil || task.Spec.SessionRef == nil || task.Spec.Type == corev1alpha1.TaskTypeAgent {
-		return nil
+		return 0, 0, nil
 	}
 	reader, ok := r.ExecutionEventStore.(taskTokenUsageReader)
 	if !ok || task.UID == "" {
-		return nil
+		return 0, 0, nil
 	}
-	inputTokens, outputTokens, err := reader.TaskTokenUsage(ctx, task.Namespace, string(task.UID))
-	if err != nil {
-		return err
-	}
-	return r.SessionManager.RecordTokenUsage(ctx, task, inputTokens, outputTokens)
+	return reader.TaskTokenUsage(ctx, task.Namespace, string(task.UID))
 }
 
 func (r *RepositoryMonitorReconciler) prepareMonitorUsageWork(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, repository, kind string, number int64) (string, error) {

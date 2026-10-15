@@ -2822,18 +2822,22 @@ func (r *TaskReconciler) completeTaskWithOutcome(
 	}
 
 	// Update session if configured
+	var inputTokens, outputTokens int64
 	if task.Spec.SessionRef != nil && task.Spec.SessionRef.Append {
 		if err := r.SessionManager.AppendMessages(ctx, task, r.ResultStore); err != nil {
 			log.Error(err, "failed to append session messages")
 			// Continue anyway
 		}
-		if err := r.recordSessionTokenUsage(ctx, task); err != nil {
-			log.Error(err, "failed to record session token usage")
+		var err error
+		if inputTokens, outputTokens, err = r.sessionTokenUsage(ctx, task); err != nil {
+			log.Error(err, "failed to read session token usage")
+			inputTokens, outputTokens = 0, 0
 		}
 	}
-	// Release session lock regardless of Append setting
+	// Release session lock regardless of Append setting, adding the Task's
+	// usage in the same write so a replayed completion counts nothing twice.
 	if task.Spec.SessionRef != nil {
-		if err := r.SessionManager.ReleaseLock(ctx, task); err != nil {
+		if err := r.SessionManager.ReleaseLockWithTokenUsage(ctx, task, inputTokens, outputTokens); err != nil {
 			log.Error(err, "failed to release session lock")
 		}
 	}

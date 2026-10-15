@@ -4361,24 +4361,23 @@ func TestCompleteTask_RecordsSessionTokenUsage(t *testing.T) {
 	}
 	requireTokens(150, 25)
 
-	// The Session lock is released at completion, so a repeated completion
-	// cannot count the Task again.
-	if err := r.recordSessionTokenUsage(ctx, task); err != nil {
-		t.Fatalf("recordSessionTokenUsage() error = %v", err)
+	// The usage is added in the same write that releases the Session lock, so
+	// a completion replayed after a crash finds no lock and counts nothing.
+	if _, err := r.completeTask(ctx, task, corev1alpha1.TaskPhaseSucceeded, "done"); err != nil {
+		t.Fatalf("replayed completeTask() error = %v", err)
+	}
+	if err := r.SessionManager.ReleaseLockWithTokenUsage(ctx, task, 150, 25); err != nil {
+		t.Fatalf("replayed ReleaseLockWithTokenUsage() error = %v", err)
 	}
 	requireTokens(150, 25)
 
 	// Agent Tasks are ACP Session turns, counted when the turn finalizes, so
-	// a held lock still records nothing here.
+	// they report no usage to add here.
 	agentTask := task.DeepCopy()
 	agentTask.Spec.Type = corev1alpha1.TaskTypeAgent
-	if err := sessions.AcquireLock(ctx, "default", "token-session", agentTask.Name, string(agentTask.UID)); err != nil {
-		t.Fatalf("AcquireLock: %v", err)
+	if input, output, err := r.sessionTokenUsage(ctx, agentTask); err != nil || input != 0 || output != 0 {
+		t.Fatalf("sessionTokenUsage(agent) = %d/%d, %v; want 0/0", input, output, err)
 	}
-	if err := r.recordSessionTokenUsage(ctx, agentTask); err != nil {
-		t.Fatalf("recordSessionTokenUsage(agent) error = %v", err)
-	}
-	requireTokens(150, 25)
 }
 
 // ---------------------------------------------------------------------------

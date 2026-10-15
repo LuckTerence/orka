@@ -138,6 +138,10 @@ type SessionTurnCommitter interface {
 type FencedSessionWriteStore interface {
 	AppendMessagesWithLock(ctx context.Context, namespace, name, ownerName, ownerUID string, messages []SessionMessage) error
 	UpdateTokenCountsWithLock(ctx context.Context, namespace, name, ownerName, ownerUID string, inputTokens, outputTokens int) error
+	// ReleaseLockWithTokenUsage adds a finished owner's token usage and
+	// releases its lock in one write, so a replayed completion cannot count the
+	// usage twice: either nothing was written or the lock is already gone.
+	ReleaseLockWithTokenUsage(ctx context.Context, namespace, name, ownerName, ownerUID string, inputTokens, outputTokens int) error
 }
 
 // GatewayEventStore handles durable normalized ingress records and atomic Session projection.

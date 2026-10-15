@@ -1209,6 +1209,34 @@ func (s *Store) UpdateTokenCountsWithLock(
 	return nil
 }
 
+// ReleaseLockWithTokenUsage releases the owner's lock and, while that lock is
+// still current and the session is not being cleaned up, adds the owner's
+// token usage in the same statement. A replay after the lock was released
+// matches no row and counts nothing.
+func (s *Store) ReleaseLockWithTokenUsage(
+	ctx context.Context,
+	namespace, name, ownerName, ownerUID string,
+	inputTokens, outputTokens int,
+) error {
+	now := time.Now().UTC()
+	// SET expressions see the row as it was before this UPDATE, so the lock
+	// expiry test reads the lock being released.
+	counted := `(active_task_expires_at IS NULL OR active_task_expires_at > ?)
+		AND NOT EXISTS (SELECT 1 FROM session_cleanup_intents WHERE namespace = ? AND session_name = ?)`
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE sessions
+		 SET input_tokens = input_tokens + CASE WHEN `+counted+` THEN ? ELSE 0 END,
+		     output_tokens = output_tokens + CASE WHEN `+counted+` THEN ? ELSE 0 END,
+		     updated_at = ?,
+		     active_task = '', active_task_uid = '', active_task_expires_at = NULL
+		 WHERE namespace = ? AND name = ? AND active_task = ? AND active_task_uid = ?`,
+		now, namespace, name, inputTokens,
+		now, namespace, name, outputTokens,
+		now, namespace, name, ownerName, ownerUID,
+	)
+	return err
+}
+
 // nilIfEmpty returns nil if s is empty, otherwise returns a pointer to s.
 func nilIfEmpty(s string) *string {
 	if s == "" {
