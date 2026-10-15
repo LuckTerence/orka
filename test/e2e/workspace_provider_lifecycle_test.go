@@ -600,12 +600,21 @@ func installWorkspaceProvider(backend workspaceBackend, source string) {
 	cmd.Stdin = strings.NewReader(rendered)
 	output, err := utils.Run(cmd)
 	Expect(err).NotTo(HaveOccurred())
-	var list struct {
-		Items []map[string]any `json:"items"`
+	// kubectl prints one object per document, or a List for several.
+	var objects []map[string]any
+	for decoder := json.NewDecoder(strings.NewReader(output)); decoder.More(); {
+		var object map[string]any
+		Expect(decoder.Decode(&object)).To(Succeed())
+		if nested, ok := object["items"].([]any); ok && object["kind"] == "List" {
+			for _, item := range nested {
+				objects = append(objects, item.(map[string]any))
+			}
+			continue
+		}
+		objects = append(objects, object)
 	}
-	Expect(json.Unmarshal([]byte(output), &list)).To(Succeed())
 	var items []any
-	for _, item := range list.Items {
+	for _, item := range objects {
 		switch item["kind"] {
 		case backend.profileKind:
 			continue // the bundle's sample profile targets the default namespace
