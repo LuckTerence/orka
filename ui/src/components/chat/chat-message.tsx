@@ -40,25 +40,25 @@ export function ChatMessage({ message }: { message: ChatMessageType }) {
     return <ChatToolCall message={message} />
   }
 
-  // Status messages
+  // Status and error pills wrap within the transcript: a long model name or
+  // a provider's raw JSON error body must not widen it into a sideways scroll.
   if (message.role === 'status') {
     return (
       <div className="flex justify-center py-1">
-        <span className="flex items-center gap-1.5 rounded-full bg-muted px-3 py-1 text-xs text-muted-foreground">
-          <Info className="h-3 w-3" />
-          {message.content}
+        <span className="flex min-w-0 max-w-full items-center gap-1.5 rounded-2xl bg-muted px-3 py-1 text-xs text-muted-foreground">
+          <Info className="h-3 w-3 shrink-0" />
+          <span className="min-w-0 wrap-anywhere">{message.content}</span>
         </span>
       </div>
     )
   }
 
-  // Error messages
   if (message.role === 'error') {
     return (
       <div className="flex justify-center py-1">
-        <span className="flex items-center gap-1.5 rounded-full bg-destructive/10 px-3 py-1 text-xs text-destructive">
-          <AlertCircle className="h-3 w-3" />
-          {message.content}
+        <span className="flex min-w-0 max-w-full items-center gap-1.5 rounded-2xl bg-destructive/10 px-3 py-1 text-xs text-destructive">
+          <AlertCircle className="h-3 w-3 shrink-0" />
+          <span className="min-w-0 wrap-anywhere">{message.content}</span>
         </span>
       </div>
     )

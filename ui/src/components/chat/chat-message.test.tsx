@@ -138,6 +138,25 @@ describe('ChatMessage', () => {
     expect(screen.getByText(long).className).toContain('wrap-anywhere')
   })
 
+  it('wraps long status and error pills instead of widening the transcript', () => {
+    const model = `Connected to vekil/${'m'.repeat(200)}`
+    const body = `Error 502: {"error":{"message":"${'x'.repeat(300)}"}}`
+    const expectWrappingPill = (content: string) => {
+      const text = screen.getByText(content)
+      expect(text.className).toContain('wrap-anywhere')
+      expect(text.className).toContain('min-w-0')
+      const pill = text.parentElement as HTMLElement
+      expect(pill.className).toContain('max-w-full')
+      expect(pill.className).toContain('min-w-0')
+      // A fully rounded box would clip the corners of a wrapped line.
+      expect(pill.className).not.toMatch(/(^|\s)rounded-full(\s|$)/)
+    }
+    const { rerender } = render(<ChatMessage message={{ ...statusMsg, content: model }} />)
+    expectWrappingPill(model)
+    rerender(<ChatMessage message={{ ...errorMsg, content: body }} />)
+    expectWrappingPill(body)
+  })
+
   it('task chips show the live task phase and stop polling once terminal', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     try {
