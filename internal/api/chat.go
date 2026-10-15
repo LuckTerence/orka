@@ -213,6 +213,7 @@ type chatStreamRequest struct {
 	turnDeadline   time.Time
 	finalizeTurn   func()
 	provider       llm.Provider
+	providerName   string // the Provider resource's name; provider.Name() is only its type
 	messages       []llm.Message
 	systemPrompt   string
 	tools          []llm.Tool
@@ -546,6 +547,7 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 		turnDeadline:   activeChat.turnDeadline,
 		finalizeTurn:   activeChat.finish,
 		provider:       provider,
+		providerName:   providerInfo.Name,
 		messages:       messages,
 		systemPrompt:   systemPrompt,
 		tools:          tools,
@@ -611,9 +613,13 @@ func (ch *ChatHandler) sendChatStream(c fiber.Ctx, req chatStreamRequest) error 
 		emitSSE := func(event, data string) {
 			_ = writeSSE(w, event, data)
 		}
+		providerName := req.providerName
+		if providerName == "" {
+			providerName = req.provider.Name()
+		}
 		statusData, _ := json.Marshal(map[string]string{
 			"sessionId":     req.sessionID,
-			chatProviderKey: req.provider.Name(),
+			chatProviderKey: providerName,
 			chatModelKey:    req.model,
 		})
 		emitSSE("status", string(statusData))
