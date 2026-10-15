@@ -303,6 +303,41 @@ describe('AgentDetail', () => {
     vi.mocked(window.confirm).mockRestore()
   })
 
+  it('keeps keyboard focus on Delete while a refused delete is in flight', async () => {
+    const user = userEvent.setup()
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    let deletes = 0
+    server.use(
+      http.get('/api/v1/agents/:name', () => HttpResponse.json(fullAgent)),
+      http.delete('/api/v1/agents/:name', async () => {
+        deletes += 1
+        await gate
+        return HttpResponse.json({ error: { code: 403, message: 'not authorized' } }, { status: 403 })
+      }),
+    )
+    render(<AgentDetail agentId="test-agent" />)
+    const button = await screen.findByRole('button', { name: /delete/i })
+    button.focus()
+    await user.keyboard('{Enter}')
+
+    // Pending: marked unavailable but never disabled, so focus stays put.
+    await waitFor(() => expect(button).toHaveAttribute('aria-disabled', 'true'))
+    expect(button).not.toBeDisabled()
+    expect(button).toHaveFocus()
+    await user.keyboard('{Enter}')
+    expect(confirmSpy).toHaveBeenCalledTimes(1)
+    expect(deletes).toBe(1)
+
+    release()
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Failed to delete agent: not authorized'))
+    await waitFor(() => expect(button).not.toHaveAttribute('aria-disabled'))
+    expect(button).toHaveFocus()
+    expect(mockNavigate).not.toHaveBeenCalled()
+    confirmSpy.mockRestore()
+  })
+
   it('renders agent with maxTokens in model', async () => {
     const agentWithMaxTokens = {
       ...fullAgent,

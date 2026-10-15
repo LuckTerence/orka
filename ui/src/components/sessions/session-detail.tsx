@@ -66,7 +66,7 @@ export function SessionDetail({ sessionId }: { sessionId: string }) {
   }
 
   const handleDelete = async (name: string) => {
-    if (!confirm(`Delete session "${name}"?`)) return
+    if (deleteSession.isPending || !confirm(`Delete session "${name}"?`)) return
     try {
       await deleteSession.mutateAsync(name)
       toast.success('Session deleted')
@@ -132,7 +132,10 @@ export function SessionDetail({ sessionId }: { sessionId: string }) {
               variant="destructive"
               size="sm"
               onClick={() => handleDelete(session.name)}
-              disabled={deleteSession.isPending}
+              // aria-disabled, not disabled: disabling the focused button would drop
+              // keyboard focus to <body> when the delete fails.
+              aria-disabled={deleteSession.isPending || undefined}
+              className="aria-disabled:opacity-50"
             >
               <Trash2 className="mr-2 h-4 w-4" /> {deleteSession.isPending ? 'Deleting...' : 'Delete'}
             </Button>

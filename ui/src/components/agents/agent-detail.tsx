@@ -50,7 +50,7 @@ export function AgentDetail({ agentId }: { agentId: string }) {
   const navigate = useNavigate()
 
   const handleDelete = async () => {
-    if (!confirm(`Delete agent "${agentId}"?`)) return
+    if (deleteAgent.isPending || !confirm(`Delete agent "${agentId}"?`)) return
     try {
       await deleteAgent.mutateAsync(agentId)
       toast.success('Agent deleted')
@@ -114,7 +114,15 @@ export function AgentDetail({ agentId }: { agentId: string }) {
           title={agent.metadata.name}
           description={agent.metadata.namespace}
           action={
-            <Button variant="destructive" size="sm" onClick={handleDelete} disabled={deleteAgent.isPending}>
+            // aria-disabled, not disabled: disabling the focused button would drop
+            // keyboard focus to <body> when the delete fails.
+            <Button
+              variant="destructive"
+              size="sm"
+              onClick={handleDelete}
+              aria-disabled={deleteAgent.isPending || undefined}
+              className="aria-disabled:opacity-50"
+            >
               <Trash2 className="mr-2 h-4 w-4" />{deleteAgent.isPending ? 'Deleting...' : 'Delete'}
             </Button>
           }

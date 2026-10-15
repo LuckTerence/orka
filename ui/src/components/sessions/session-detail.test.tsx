@@ -272,6 +272,40 @@ describe('SessionDetail', () => {
     expect(mockNavigate).not.toHaveBeenCalled()
   })
 
+  it('keeps keyboard focus on Delete while a refused delete is in flight', async () => {
+    const user = userEvent.setup()
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    let deletes = 0
+    server.use(
+      http.get('/api/v1/sessions/:id', () => HttpResponse.json({ name: 'ro-session', namespace: 'default' })),
+      http.delete('/api/v1/sessions/:id', async () => {
+        deletes += 1
+        await gate
+        return HttpResponse.json({ error: { code: 403, message: 'not authorized' } }, { status: 403 })
+      }),
+    )
+    render(<SessionDetail sessionId="ro-session" />)
+    const button = await screen.findByRole('button', { name: /delete/i })
+    button.focus()
+    await user.keyboard('{Enter}')
+
+    // Pending: marked unavailable but never disabled, so focus stays put.
+    await waitFor(() => expect(button).toHaveAttribute('aria-disabled', 'true'))
+    expect(button).not.toBeDisabled()
+    expect(button).toHaveFocus()
+    await user.keyboard('{Enter}')
+    expect(confirmSpy).toHaveBeenCalledTimes(1)
+    expect(deletes).toBe(1)
+
+    release()
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Failed to delete session: not authorized'))
+    await waitFor(() => expect(button).not.toHaveAttribute('aria-disabled'))
+    expect(button).toHaveFocus()
+    expect(mockNavigate).not.toHaveBeenCalled()
+  })
+
   it('opens the tab named in the URL and records tab changes there', async () => {
     const user = userEvent.setup()
     mockSearch.current = { tab: 'timeline' }
