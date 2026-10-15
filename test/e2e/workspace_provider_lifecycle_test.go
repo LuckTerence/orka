@@ -250,9 +250,7 @@ var _ = Describe("Workspace Provider Lifecycle", Ordered, Label("workspace-provi
 	// teardown deletes this run's Sessions, Tasks, checkpoints, and workspaces
 	// and waits until the backend holds nothing for them. It is idempotent.
 	teardown := func() {
-		for _, s := range []string{session("data"), session("timeout")} {
-			deleteSessionViaAPI(apiBaseURL, token, s)
-		}
+		// Tasks go first: an active Task holds its Session's mutation lease.
 		output, err := utils.Run(exec.Command("kubectl", "-n", namespace, "get", "tasks", "-o", "name"))
 		Expect(err).NotTo(HaveOccurred())
 		var tasks []string
@@ -262,6 +260,9 @@ var _ = Describe("Workspace Provider Lifecycle", Ordered, Label("workspace-provi
 			}
 		}
 		deleteE2ETasks(apiBaseURL, token, tasks...)
+		for _, s := range []string{session("data"), session("timeout")} {
+			deleteSessionViaAPI(apiBaseURL, token, s)
+		}
 		for _, args := range [][]string{
 			{"delete", "executionworkspacecheckpoints", "--all"},
 			{"delete", "executionworkspaces", "--all"},
@@ -513,6 +514,9 @@ var _ = Describe("Workspace Provider Lifecycle", Ordered, Label("workspace-provi
 		waitHeldPrompt(task, marker("cancel"))
 		uid := string(fetchTaskForACPAssertion(Default, task).UID)
 		addTaskObserverFinalizer(task, uid)
+		// A failed assertion skips the release below and would leave the
+		// Task terminating, which teardown cannot clean up.
+		DeferCleanup(releaseHeldTaskObserverFinalizer, task, uid)
 		_, err := utils.Run(exec.Command("kubectl", "delete", "task", task, "-n", namespace, "--wait=false"))
 		Expect(err).NotTo(HaveOccurred())
 		waitTaskExecution(task, corev1alpha1.TaskExecutionStateCancelled)
@@ -894,6 +898,28 @@ func deleteE2ETasks(apiBaseURL, token string, tasks ...string) {
 	cleanup, err := newE2ECleanup(apiBaseURL, token)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred())
 	ExpectWithOffset(1, cleanup.tasks(ctx, tasks, false)).To(Succeed())
+}
+
+// releaseHeldTaskObserverFinalizer removes the test observer finalizer if the
+// exact Task still holds it.
+func releaseHeldTaskObserverFinalizer(name, uid string) {
+	output, err := utils.Run(exec.Command("kubectl", "get", "task", name, "-n", namespace,
+		"--ignore-not-found", "-o", "json"))
+	Expect(err).NotTo(HaveOccurred())
+	if strings.TrimSpace(output) == "" {
+		return
+	}
+	var task corev1alpha1.Task
+	Expect(json.Unmarshal([]byte(output), &task)).To(Succeed())
+	index := slices.Index(task.Finalizers, agentRuntimeObserverFinalizer)
+	if string(task.UID) != uid || index < 0 {
+		return
+	}
+	patch := fmt.Sprintf(`[{"op":"test","path":"/metadata/uid","value":%q},`+
+		`{"op":"test","path":"/metadata/finalizers/%d","value":%q},{"op":"remove","path":"/metadata/finalizers/%d"}]`,
+		uid, index, agentRuntimeObserverFinalizer, index)
+	_, err = utils.Run(exec.Command("kubectl", "patch", "task", name, "-n", namespace, "--type=json", "-p", patch))
+	Expect(err).NotTo(HaveOccurred())
 }
 
 func deleteSessionViaAPI(apiBaseURL, token, session string) {
