@@ -3479,6 +3479,109 @@ func TestHandleRunning_JobFailed_WithRetry(t *testing.T) {
 	}
 }
 
+func TestHandleRunning_SurfacesPodWaitingReason(t *testing.T) {
+	ctx := context.Background()
+	scheme := newTestScheme()
+	startTime := metav1.NewTime(time.Now().Add(-10 * time.Second))
+	timeout := metav1.Duration{Duration: time.Hour}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "run-bad-image", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer, Image: "does-not-exist:latest", Timeout: &timeout},
+		Status: corev1alpha1.TaskStatus{
+			Phase:     corev1alpha1.TaskPhaseRunning,
+			StartTime: &startTime,
+			JobName:   "run-bad-image-job",
+		},
+	}
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "run-bad-image-job", Namespace: "default"},
+		Status:     batchv1.JobStatus{Active: 1},
+	}
+	const pullMessage = `Back-off pulling image "does-not-exist:latest"`
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "run-bad-image-pod", Namespace: "default",
+			Labels: map[string]string{labels.LabelTask: labels.SelectorValue(task.Name), batchv1.JobNameLabel: job.Name},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodPending,
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name:  "worker",
+				State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ImagePullBackOff", Message: pullMessage}},
+			}},
+		},
+	}
+	r := newUnitReconciler(scheme, task, job, pod)
+	const want = "pod waiting: ImagePullBackOff - " + pullMessage
+
+	if _, err := r.handleRunning(ctx, task); err != nil {
+		t.Fatalf("handleRunning() error = %v", err)
+	}
+	if task.Status.Phase != corev1alpha1.TaskPhaseRunning || task.Status.Message != want {
+		t.Fatalf("status = %s %q, want Running %q", task.Status.Phase, task.Status.Message, want)
+	}
+
+	// Once the image pulls, the stale waiting message is cleared.
+	pod.Status = corev1.PodStatus{Phase: corev1.PodRunning}
+	if err := r.Status().Update(ctx, pod); err != nil {
+		t.Fatalf("update pod status: %v", err)
+	}
+	if _, err := r.handleRunning(ctx, task); err != nil {
+		t.Fatalf("handleRunning() error = %v", err)
+	}
+	if task.Status.Phase != corev1alpha1.TaskPhaseRunning || task.Status.Message != "" {
+		t.Fatalf("status = %s %q, want Running with no message", task.Status.Phase, task.Status.Message)
+	}
+
+	// A Task that times out while its image cannot be pulled reports why.
+	task.Status.Message = want
+	task.Status.StartTime = &metav1.Time{Time: time.Now().Add(-2 * time.Hour)}
+	if err := r.Status().Update(ctx, task); err != nil {
+		t.Fatalf("update task status: %v", err)
+	}
+	if _, err := r.handleRunning(ctx, task); err != nil {
+		t.Fatalf("handleRunning() error = %v", err)
+	}
+	if task.Status.Phase != corev1alpha1.TaskPhaseFailed || task.Status.Message != "task timed out; "+want {
+		t.Fatalf("status = %s %q, want Failed with the pull failure", task.Status.Phase, task.Status.Message)
+	}
+}
+
+func TestPodWaitingMessage(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		status corev1.PodStatus
+		want   string
+	}{
+		{
+			name: "invalid image name",
+			status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
+				State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "InvalidImageName", Message: `couldn't parse image name "Bad:Image"`}},
+			}}},
+			want: `pod waiting: InvalidImageName - couldn't parse image name "Bad:Image"`,
+		},
+		{
+			name: "init container config error",
+			status: corev1.PodStatus{InitContainerStatuses: []corev1.ContainerStatus{{
+				State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CreateContainerConfigError"}},
+			}}},
+			want: "pod waiting: CreateContainerConfigError",
+		},
+		{
+			name: "creating containers is not surfaced",
+			status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
+				State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ContainerCreating"}},
+			}}},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := podWaitingMessage(&corev1.Pod{Status: tt.status}); got != tt.want {
+				t.Fatalf("podWaitingMessage() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestHandleRunning_PodFailedMountFailsTask(t *testing.T) {
 	scheme := newTestScheme()
 	now := time.Now()

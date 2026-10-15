@@ -1752,9 +1752,9 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 				return ctrl.Result{}, err
 			}
 			if validationCommandStarted {
-				return r.completeExecutedTask(ctx, task, corev1alpha1.TaskPhaseFailed, "task timed out")
+				return r.completeExecutedTask(ctx, task, corev1alpha1.TaskPhaseFailed, timedOutTaskMessage(task))
 			}
-			return r.failTask(ctx, task, "task timed out")
+			return r.failTask(ctx, task, timedOutTaskMessage(task))
 		}
 	}
 
@@ -1899,9 +1899,9 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 		}
 		if task.Spec.Timeout != nil && jobFailedDueToActiveDeadline(job) {
 			if !validationCommandFailed {
-				return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, "task timed out")
+				return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, timedOutTaskMessage(task))
 			}
-			return r.completeExecutedTask(ctx, task, corev1alpha1.TaskPhaseFailed, "task timed out")
+			return r.completeExecutedTask(ctx, task, corev1alpha1.TaskPhaseFailed, timedOutTaskMessage(task))
 		}
 		// Job failed, check retry policy
 		if r.shouldRetry(task) {
@@ -1924,10 +1924,14 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 	var podList corev1.PodList
 	if err := r.List(ctx, &podList, client.InNamespace(task.Namespace),
 		client.MatchingLabels{labels.LabelTask: labels.SelectorValue(task.Name)}); err == nil {
+		podWaiting := ""
 		for i := range podList.Items {
 			pod := &podList.Items[i]
 			if pod.Status.Phase != corev1.PodPending {
 				continue
+			}
+			if podWaiting == "" && podBelongsToJob(pod, task.Status.JobName) {
+				podWaiting = podWaitingMessage(pod)
 			}
 			// Check waiting container statuses for unrecoverable errors
 			for _, cs := range pod.Status.ContainerStatuses {
@@ -1966,10 +1970,67 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 				}
 			}
 		}
+		if err := r.syncPodWaitingMessage(ctx, task, podWaiting); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
 	// Job still running, requeue
 	return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+}
+
+// podWaitingMessagePrefix marks a Running Task message that reports why its
+// Pod cannot start, so the controller can clear it once the Pod moves on.
+const podWaitingMessagePrefix = "pod waiting: "
+
+// podWaitingMessage reports a container waiting state that keeps the Pod from
+// starting, such as an image pull failure.
+func podWaitingMessage(pod *corev1.Pod) string {
+	for _, statuses := range [][]corev1.ContainerStatus{pod.Status.InitContainerStatuses, pod.Status.ContainerStatuses} {
+		for _, cs := range statuses {
+			waiting := cs.State.Waiting
+			if waiting == nil {
+				continue
+			}
+			switch waiting.Reason {
+			case "ErrImagePull", "ImagePullBackOff", "InvalidImageName", "CreateContainerConfigError":
+				message := podWaitingMessagePrefix + waiting.Reason
+				if detail := strings.TrimSpace(waiting.Message); detail != "" {
+					message += " - " + detail
+				}
+				return sanitizeStatusMessage(message)
+			}
+		}
+	}
+	return ""
+}
+
+// syncPodWaitingMessage publishes the current Pod waiting reason as the
+// Running Task's message, and clears a previously published one after the
+// Pod stops waiting on it.
+func (r *TaskReconciler) syncPodWaitingMessage(ctx context.Context, task *corev1alpha1.Task, message string) error {
+	if message == task.Status.Message || (message == "" && !strings.HasPrefix(task.Status.Message, podWaitingMessagePrefix)) {
+		return nil
+	}
+	jobName := task.Status.JobName
+	return r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
+		if t.Status.Phase != corev1alpha1.TaskPhaseRunning || t.Status.JobName != jobName {
+			return
+		}
+		if message == "" && !strings.HasPrefix(t.Status.Message, podWaitingMessagePrefix) {
+			return
+		}
+		t.Status.Message = message
+	})
+}
+
+// timedOutTaskMessage keeps the last published Pod waiting reason, such as an
+// image pull failure, in the timeout failure so the cause is not lost.
+func timedOutTaskMessage(task *corev1alpha1.Task) string {
+	if strings.HasPrefix(task.Status.Message, podWaitingMessagePrefix) {
+		return "task timed out; " + task.Status.Message
+	}
+	return "task timed out"
 }
 
 func taskManagedByHarnessV1(task *corev1alpha1.Task) bool {
