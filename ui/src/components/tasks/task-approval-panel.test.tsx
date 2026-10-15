@@ -197,6 +197,14 @@ describe('TaskApprovalPanel', () => {
     expect(screen.queryByText(/approval is already declined/i)).not.toBeInTheDocument()
   })
 
+  it('does not double the card top padding', async () => {
+    server.use(http.get(`${API}/tasks/:id/approvals`, () => HttpResponse.json(listResponse([approval()]))))
+    render(<TaskApprovalPanel taskId="tk" />)
+    const card = await screen.findByTestId('approval-card')
+    // Card supplies py-6; a pt-6 on its first CardContent doubled it.
+    expect(card.querySelector('[data-slot="card-content"]')).not.toHaveClass('pt-6')
+  })
+
   it('confirms a decision in plain words', async () => {
     server.use(
       http.get(`${API}/tasks/:id/approvals`, () => HttpResponse.json(listResponse([approval()]))),

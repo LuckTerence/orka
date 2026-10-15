@@ -36,7 +36,7 @@ export function AgentList() {
           ))}
         </div>
       ) : error ? (
-        <Card><CardContent className="pt-6"><ListAccessError error={error} resource="agents" /></CardContent></Card>
+        <Card><CardContent><ListAccessError error={error} resource="agents" /></CardContent></Card>
       ) : agents.length === 0 ? (
         <div className="text-center py-12 text-muted-foreground">No agents registered.</div>
       ) : (

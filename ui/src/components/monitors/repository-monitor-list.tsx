@@ -44,7 +44,7 @@ export function RepositoryMonitorList() {
           ))}
         </div>
       ) : error ? (
-        <Card><CardContent className="pt-6"><ListAccessError error={error} resource="repository monitors" /></CardContent></Card>
+        <Card><CardContent><ListAccessError error={error} resource="repository monitors" /></CardContent></Card>
       ) : monitors.length === 0 ? (
         <Card>
           <CardContent className="space-y-4 py-12 text-center">

@@ -281,7 +281,7 @@ function RuntimeAPIError({ error, resource }: { error: unknown; resource: string
   const forbidden = isForbiddenError(error)
   return (
     <Card>
-      <CardContent className="pt-6">
+      <CardContent>
         <EmptyState
           icon={forbidden ? ShieldCheck : Activity}
           headline={forbidden

@@ -94,7 +94,7 @@ function ApprovalCard({
 
   return (
     <Card data-testid="approval-card">
-      <CardContent className="space-y-3 pt-6">
+      <CardContent className="space-y-3">
         <div className="flex flex-wrap items-center gap-2">
           <ApprovalStatusBadge status={approval.status} />
           <span className="font-medium">{approval.action || 'Action'}</span>
@@ -215,7 +215,7 @@ export function TaskApprovalPanel({ taskId, taskPhase, taskUid }: { taskId: stri
   if (isLoading) {
     return (
       <Card>
-        <CardContent className="space-y-3 pt-6">
+        <CardContent className="space-y-3">
           <Skeleton className="h-6 w-40" />
           <Skeleton className="h-24 w-full" />
         </CardContent>
@@ -227,7 +227,7 @@ export function TaskApprovalPanel({ taskId, taskPhase, taskUid }: { taskId: stri
     const notImplemented = error instanceof ApiError && error.status === 501
     return (
       <Card>
-        <CardContent className="pt-6">
+        <CardContent>
           <EmptyState
             icon={ShieldCheck}
             headline={
@@ -251,7 +251,7 @@ export function TaskApprovalPanel({ taskId, taskPhase, taskUid }: { taskId: stri
   if (approvals.length === 0) {
     return (
       <Card>
-        <CardContent className="pt-6">
+        <CardContent>
           <EmptyState
             icon={ShieldCheck}
             headline="No approvals requested."

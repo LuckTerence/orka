@@ -41,7 +41,7 @@ export function RepositoryList() {
           ))}
         </div>
       ) : error ? (
-        <Card><CardContent className="pt-6"><ListAccessError error={error} resource="security repositories" /></CardContent></Card>
+        <Card><CardContent><ListAccessError error={error} resource="security repositories" /></CardContent></Card>
       ) : repositories.length === 0 ? (
         <Card>
           <CardContent className="py-12 text-center text-muted-foreground">

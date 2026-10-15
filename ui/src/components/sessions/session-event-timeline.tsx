@@ -78,7 +78,7 @@ export function SessionEventTimeline({ sessionId }: SessionEventTimelineProps) {
 
   return (
     <Card>
-      <CardContent className="pt-6">
+      <CardContent>
         {sessionDeleted && (
           <div className="mb-3 rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive">
             This session was deleted. The timeline below shows its final recorded events.
