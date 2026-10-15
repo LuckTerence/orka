@@ -1300,6 +1300,26 @@ describe('TaskCreateForm', () => {
     expect(screen.getByText('Timeout must be a duration such as 90s, 30m, or 1h30m.')).toBeInTheDocument()
   })
 
+  it.each(['0', '0s', '0h0m'])('rejects a zero timeout (%s) inline instead of creating a task that times out at once', async (zero) => {
+    let posted = false
+    server.use(
+      http.post('/api/v1/tasks', () => {
+        posted = true
+        return HttpResponse.json({}, { status: 201 })
+      }),
+    )
+    const user = userEvent.setup()
+    render(<TaskCreateForm />)
+    await user.type(screen.getByPlaceholderText('my-task'), 'zero-timeout')
+    await user.type(screen.getByPlaceholderText('alpine:latest'), 'alpine')
+    await user.click(screen.getByRole('button', { name: /Advanced Options/ }))
+    await user.type(screen.getByLabelText('Timeout'), zero)
+    await user.click(screen.getByRole('button', { name: 'Create Task' }))
+    expect(posted).toBe(false)
+    expect(screen.getByLabelText('Timeout')).toHaveAttribute('aria-invalid', 'true')
+    expect(screen.getByRole('alert')).toHaveTextContent('Timeout must be greater than zero, such as 90s, 30m, or 1h30m.')
+  })
+
   it('submits valid advanced values as a number and a duration', async () => {
     let submitted: Record<string, unknown> | undefined
     server.use(

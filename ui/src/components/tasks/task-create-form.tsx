@@ -44,8 +44,12 @@ const goDuration = /^(?:(?:\d+(?:\.\d*)?|\.\d+)(?:ns|us|µs|μs|ms|s|m|h))+$/
 
 function timeoutError(value: string): string | undefined {
   const trimmed = value.trim()
-  if (!trimmed || trimmed === '0' || goDuration.test(trimmed)) return undefined
-  return 'Timeout must be a duration such as 90s, 30m, or 1h30m.'
+  if (!trimmed) return undefined
+  if (trimmed !== '0' && !goDuration.test(trimmed)) return 'Timeout must be a duration such as 90s, 30m, or 1h30m.'
+  // A zero timeout has elapsed the moment the task starts, so the API
+  // rejects it; units carry no digits, so no nonzero digit means zero.
+  if (!/[1-9]/.test(trimmed)) return 'Timeout must be greater than zero, such as 90s, 30m, or 1h30m.'
+  return undefined
 }
 
 function countLabel(count: number, noun: string) {
