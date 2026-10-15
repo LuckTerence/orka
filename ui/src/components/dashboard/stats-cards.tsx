@@ -23,7 +23,14 @@ interface StatsCardsProps {
   toolCount?: number
   /** Set when the tools list failed with 403; the card shows this instead of "0". */
   toolsForbiddenMessage?: string
+  /** Every list is still loading: render skeleton cards only. */
   isLoading?: boolean
+  /** Per-list loading, so each card fills in as its own data arrives. */
+  loading?: { tasks?: boolean; sessions?: boolean; agents?: boolean; tools?: boolean }
+}
+
+function ValueSkeleton() {
+  return <Skeleton className="h-8 w-16" />
 }
 
 /** The "Not authorized" body a stat card renders instead of a fabricated count. */
@@ -91,6 +98,7 @@ export function StatsCards({
   toolCount,
   toolsForbiddenMessage,
   isLoading,
+  loading = {},
 }: StatsCardsProps) {
   if (isLoading) {
     return (
@@ -152,7 +160,9 @@ export function StatsCards({
             <Icon className={`h-4 w-4 ${color}`} />
           </CardHeader>
           <CardContent>
-            {tasksForbiddenMessage ? (
+            {loading.tasks ? (
+              <ValueSkeleton />
+            ) : tasksForbiddenMessage ? (
               <ForbiddenStat resource="tasks" message={tasksForbiddenMessage} />
             ) : (
               <div className="flex items-end justify-between gap-2">
@@ -174,7 +184,9 @@ export function StatsCards({
           <MessageSquare className="h-4 w-4 text-muted-foreground" />
         </CardHeader>
         <CardContent>
-          {sessionsForbiddenMessage ? (
+          {loading.sessions ? (
+            <ValueSkeleton />
+          ) : sessionsForbiddenMessage ? (
             <ForbiddenStat resource="sessions" message={sessionsForbiddenMessage} />
           ) : (
             <div className="text-2xl font-bold tabular-nums">{sessionCount ?? 0}</div>
@@ -187,7 +199,9 @@ export function StatsCards({
           <Bot className="h-4 w-4 text-muted-foreground" />
         </CardHeader>
         <CardContent>
-          {agentsForbiddenMessage ? (
+          {loading.agents ? (
+            <ValueSkeleton />
+          ) : agentsForbiddenMessage ? (
             <ForbiddenStat resource="agents" message={agentsForbiddenMessage} />
           ) : (
             <div className="text-2xl font-bold tabular-nums">{agentCount ?? 0}</div>
@@ -200,7 +214,9 @@ export function StatsCards({
           <Wrench className="h-4 w-4 text-muted-foreground" />
         </CardHeader>
         <CardContent>
-          {toolsForbiddenMessage ? (
+          {loading.tools ? (
+            <ValueSkeleton />
+          ) : toolsForbiddenMessage ? (
             <ForbiddenStat resource="tools" message={toolsForbiddenMessage} />
           ) : (
             <div className="text-2xl font-bold tabular-nums">{toolCount ?? 0}</div>

@@ -24,7 +24,6 @@ export function Overview() {
   const { data: agentsData, isLoading: agentsLoading, error: agentsError } = useAgentListAll()
   const { data: toolsData, isLoading: toolsLoading, error: toolsError } = useToolListAll()
 
-  const isLoading = tasksLoading || sessionsLoading || agentsLoading || toolsLoading
   // A 403 leaves `data` undefined; surface it per resource instead of letting
   // the missing collection render as a fabricated zero.
   const forbidden = (error: unknown) => (isForbiddenError(error) ? error.message : undefined)
@@ -57,10 +56,12 @@ export function Overview() {
         agentsForbiddenMessage={forbidden(agentsError)}
         toolCount={toolsData?.items?.length}
         toolsForbiddenMessage={forbidden(toolsError)}
-        isLoading={isLoading}
+        // Each card renders as soon as its own list arrives.
+        loading={{ tasks: tasksLoading, sessions: sessionsLoading, agents: agentsLoading, tools: toolsLoading }}
       />
       <div className="grid gap-6 lg:grid-cols-3">
-        <Card className="lg:col-span-1">
+        {/* Sized to its content instead of stretching to the Recent Tasks height. */}
+        <Card className="lg:col-span-1 lg:self-start">
           <CardHeader>
             <CardTitle className="text-sm font-medium">
               {tasksTruncated ? 'Loaded Phase Distribution' : 'Phase Distribution'}

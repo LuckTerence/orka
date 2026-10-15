@@ -33,6 +33,12 @@ describe('Overview', () => {
     expect(screen.getByText('Dashboard')).toBeInTheDocument()
   })
 
+  it('sizes the phase distribution card to its content instead of the recent-tasks column', async () => {
+    render(<Overview />)
+    const title = await screen.findByText('Phase Distribution')
+    expect(title.closest('[data-slot="card"]')).toHaveClass('lg:self-start')
+  })
+
   it('renders without crashing', () => {
     render(<Overview />)
     expect(screen.getByText('Overview of your Orka workspace')).toBeInTheDocument()
