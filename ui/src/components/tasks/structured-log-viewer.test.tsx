@@ -61,6 +61,34 @@ describe('StructuredLogViewer', () => {
     expect(screen.getByText('(3 lines)')).toBeInTheDocument()
   })
 
+  it('scrolls only the log container to the newest line, never the page', () => {
+    mockedUseTaskLogs.mockReturnValue({
+      logs: ['line one', 'line two'],
+      isStreaming: false,
+      isLive: false,
+      error: null,
+      refetch: vi.fn(),
+      clear: vi.fn(),
+    })
+    // scrollIntoView would also scroll every ancestor, moving the page.
+    const originalScrollIntoView = Element.prototype.scrollIntoView
+    const scrollIntoView = vi.fn()
+    Element.prototype.scrollIntoView = scrollIntoView
+    const scrollHeight = vi.spyOn(Element.prototype, 'scrollHeight', 'get').mockReturnValue(2000)
+    try {
+      render(<StructuredLogViewer taskId="task-1" />)
+      const output = screen.getByRole('region', { name: 'Log output' })
+      expect(output).toHaveAttribute('tabindex', '0')
+      expect(output).toHaveClass('overflow-auto')
+      expect(output).toContainElement(screen.getAllByTestId('log-line')[1])
+      expect(output.scrollTop).toBe(2000)
+      expect(scrollIntoView).not.toHaveBeenCalled()
+    } finally {
+      scrollHeight.mockRestore()
+      Element.prototype.scrollIntoView = originalScrollIntoView
+    }
+  })
+
   it('filters logs based on search input', async () => {
     mockedUseTaskLogs.mockReturnValue({
       logs: ['[INFO] Starting process', '[ERROR] Something failed', '[DEBUG] Trace info'],

@@ -2,7 +2,6 @@ import { useRef, useEffect, useState, useCallback } from 'react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
-import { ScrollArea } from '@/components/ui/scroll-area'
 import { useTaskLogs } from '@/hooks/use-task-logs'
 import { ArrowDown, Search, X, RefreshCw, ScrollText } from 'lucide-react'
 import { EmptyState } from '@/components/ui/empty-state'
@@ -46,7 +45,6 @@ export function StructuredLogViewer({ taskId, taskPhase }: { taskId: string; tas
   const { logs, isStreaming, isLive, error, unavailable, refetch, clear } = useTaskLogs(taskId, true, taskPhase as import('@/schemas/task').TaskPhase | undefined)
   const [search, setSearch] = useState('')
   const [pinToBottom, setPinToBottom] = useState(true)
-  const bottomRef = useRef<HTMLDivElement>(null)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
 
   const indexedLogs = logs.map((line, index) => ({ index: index + 1, line }))
@@ -57,10 +55,11 @@ export function StructuredLogViewer({ taskId, taskPhase }: { taskId: string; tas
     ? indexedLogs.filter(({ line }) => line.toLowerCase().includes(search.toLowerCase()))
     : indexedLogs
 
+  // Scroll the log container itself: scrollIntoView on a bottom marker also
+  // scrolls every ancestor, which moved the whole page when the tab opened.
   const scrollToBottom = useCallback(() => {
-    if (bottomRef.current?.scrollIntoView) {
-      bottomRef.current.scrollIntoView({ behavior: 'smooth' })
-    }
+    const el = scrollContainerRef.current
+    if (el) el.scrollTop = el.scrollHeight
   }, [])
 
   useEffect(() => {
@@ -194,29 +193,32 @@ export function StructuredLogViewer({ taskId, taskPhase }: { taskId: string; tas
         </div>
       </CardHeader>
       <CardContent>
-        <ScrollArea className="h-[500px] w-full rounded-md border">
-          <div
-            ref={scrollContainerRef}
-            onScroll={handleScroll}
-            className="p-4 font-mono text-xs"
-          >
-            {search && filteredLogs.length === 0 && (
-              <div className="py-4 text-sm text-muted-foreground" data-testid="log-no-matches">
-                {`No matching lines for "${search}".`}
+        {/* A native scroller, so the ref and onScroll sit on the element
+            that actually scrolls; it takes focus so the keyboard can
+            scroll it too. */}
+        <div
+          ref={scrollContainerRef}
+          onScroll={handleScroll}
+          tabIndex={0}
+          role="region"
+          aria-label="Log output"
+          className="h-[500px] w-full overflow-auto rounded-md border p-4 font-mono text-xs"
+        >
+          {search && filteredLogs.length === 0 && (
+            <div className="py-4 text-sm text-muted-foreground" data-testid="log-no-matches">
+              {`No matching lines for "${search}".`}
+            </div>
+          )}
+          {filteredLogs.map(row => {
+            const level = parseLogLevel(row.line)
+            return (
+              <div key={`log-${row.index}`} className={`py-0.5 ${levelColors[level]}`} data-testid="log-line">
+                <span className="mr-3 inline-block select-none text-right tabular-nums text-muted-foreground" style={{ width: lineNumberWidth }}>{row.index}</span>
+                <HighlightedText text={row.line} search={search} />
               </div>
-            )}
-            {filteredLogs.map(row => {
-              const level = parseLogLevel(row.line)
-              return (
-                <div key={`log-${row.index}`} className={`py-0.5 ${levelColors[level]}`} data-testid="log-line">
-                  <span className="mr-3 inline-block select-none text-right tabular-nums text-muted-foreground" style={{ width: lineNumberWidth }}>{row.index}</span>
-                  <HighlightedText text={row.line} search={search} />
-                </div>
-              )
-            })}
-            <div ref={bottomRef} />
-          </div>
-        </ScrollArea>
+            )
+          })}
+        </div>
       </CardContent>
     </Card>
   )
