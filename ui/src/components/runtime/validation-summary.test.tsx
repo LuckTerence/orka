@@ -99,7 +99,7 @@ describe('ValidationSummary', () => {
   it('keeps the failing rollup badge foreground readable', () => {
     render(<ValidationSummary task={task('Failed')} trace={trace({ errors: [{ message: 'boom' }] })} />)
     const badge = screen.getByText('Derived checks failing').closest('[data-slot="badge"]')
-    expect(badge?.className).toContain('text-white')
+    expect(badge?.className).toContain('text-destructive-foreground')
     expect(badge?.className).not.toContain('text-status-failed')
   })
 

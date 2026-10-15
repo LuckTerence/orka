@@ -1,5 +1,8 @@
 @import "tailwindcss";
 
+/* dark: utilities follow the app theme (the .dark class), not the OS setting. */
+@custom-variant dark (&:where(.dark, .dark *));
+
 /*
  * Orka design tokens — deep-ocean identity.
  *
