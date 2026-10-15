@@ -377,6 +377,11 @@ var _ = AfterSuite(func() {
 	step("deleting Tools before execution workspaces and actor pools", func() error {
 		return deleteAllE2EResources("tools.core.orka.ai", true, 45*time.Second)
 	})
+	// A routed checkpoint blocks its provider's deletion, and only a running
+	// provider releases its native data.
+	step("deleting execution workspace checkpoints while their providers run", func() error {
+		return deleteAllE2EResources("executionworkspacecheckpoints.workspace.orka.ai", true, 2*time.Minute)
+	})
 	step("deleting execution workspaces before workspace classes and providers", func() error {
 		return deleteAllE2EResources("executionworkspaces.workspace.orka.ai", true, 45*time.Second)
 	})
