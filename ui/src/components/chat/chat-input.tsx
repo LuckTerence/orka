@@ -36,6 +36,13 @@ export function ChatInput({ onSend, disabled = false, disabledHint }: ChatInputP
     setInput('')
   }
 
+  // Pressing Stop disables it and then swaps it for Send, either of which
+  // would drop focus to <body>; the composer takes it instead.
+  const handleStop = () => {
+    requestStop()
+    textareaRef.current?.focus()
+  }
+
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
@@ -61,7 +68,7 @@ export function ChatInput({ onSend, disabled = false, disabledHint }: ChatInputP
           <Button
             size="icon"
             variant="outline"
-            onClick={requestStop}
+            onClick={handleStop}
             disabled={stopRequested}
             aria-label={stopRequested ? 'Stopping and ending chat' : 'Stop and end this chat'}
             title={stopRequested ? 'Stopping…' : 'Stop and end this chat (its history is deleted)'}

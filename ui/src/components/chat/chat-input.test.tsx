@@ -7,6 +7,7 @@ vi.mock('zustand/middleware', async () => {
 
 import { act } from 'react'
 import { render, screen, fireEvent } from '@/test/test-utils'
+import userEvent from '@testing-library/user-event'
 import { ChatInput } from './chat-input'
 import { useChatStore } from '@/stores/chat'
 import { useUIStore } from '@/stores/ui'
@@ -65,6 +66,19 @@ describe('ChatInput', () => {
     fireEvent.keyDown(textarea, { key: 'Enter', shiftKey: false })
     expect(document.activeElement).toBe(textarea)
     act(() => useChatStore.setState({ isStreaming: false }))
+    expect(document.activeElement).toBe(textarea)
+  })
+
+  it('moves focus to the composer when Stop is pressed, so it is not lost when Send replaces Stop', async () => {
+    const user = userEvent.setup()
+    useChatStore.setState({ isStreaming: true })
+    render(<ChatInput onSend={vi.fn()} />)
+    const textarea = screen.getByPlaceholderText('Message the meta agent...')
+    await user.click(screen.getByRole('button', { name: 'Stop and end this chat' }))
+    expect(useChatStore.getState().stopRequested).toBe(true)
+    expect(document.activeElement).toBe(textarea)
+    act(() => useChatStore.getState().setStreaming(false))
+    expect(screen.getByRole('button', { name: 'Send message' })).toBeInTheDocument()
     expect(document.activeElement).toBe(textarea)
   })
 
