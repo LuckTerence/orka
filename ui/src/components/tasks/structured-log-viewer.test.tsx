@@ -154,6 +154,47 @@ describe('StructuredLogViewer', () => {
     expect(screen.getByRole('button', { name: /retry/i })).toBeInTheDocument()
   })
 
+  it('explains a task with no pod logs instead of showing an error with Retry', async () => {
+    const refetchFn = vi.fn()
+    mockedUseTaskLogs.mockReturnValue({
+      logs: [],
+      isStreaming: false,
+      isLive: false,
+      error: null,
+      unavailable: 'no pods found for task job',
+      refetch: refetchFn,
+      clear: vi.fn(),
+    })
+
+    render(<StructuredLogViewer taskId="task-1" />)
+    expect(screen.getByText('No pod logs for this task')).toBeInTheDocument()
+    expect(screen.getByText(/No pods found for task job\. Logs appear once the task's pod starts/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /retry/i })).not.toBeInTheDocument()
+    screen.getByRole('button', { name: /check again/i }).click()
+    expect(refetchFn).toHaveBeenCalled()
+  })
+
+  it('gives line numbers a fixed width so text does not shift as numbers grow', () => {
+    mockedUseTaskLogs.mockReturnValue({
+      logs: Array.from({ length: 120 }, (_, i) => (i === 3 ? '' : `line ${i + 1}`)),
+      isStreaming: false,
+      isLive: false,
+      error: null,
+      unavailable: null,
+      refetch: vi.fn(),
+      clear: vi.fn(),
+    })
+
+    render(<StructuredLogViewer taskId="task-1" />)
+    const rows = screen.getAllByTestId('log-line')
+    // Blank lines are rendered as rows too.
+    expect(rows).toHaveLength(120)
+    const firstNumber = rows[0].querySelector('span')!
+    const lastNumber = rows[119].querySelector('span')!
+    expect(firstNumber).toHaveStyle({ width: '3ch' })
+    expect(lastNumber).toHaveStyle({ width: '3ch' })
+  })
+
   it('shows streaming indicator', () => {
     mockedUseTaskLogs.mockReturnValue({
       logs: ['[INFO] Running...'],

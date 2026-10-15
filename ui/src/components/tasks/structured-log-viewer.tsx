@@ -43,13 +43,15 @@ function HighlightedText({ text, search }: { text: string; search: string }) {
 }
 
 export function StructuredLogViewer({ taskId, taskPhase }: { taskId: string; taskPhase?: string }) {
-  const { logs, isStreaming, isLive, error, refetch, clear } = useTaskLogs(taskId, true, taskPhase as import('@/schemas/task').TaskPhase | undefined)
+  const { logs, isStreaming, isLive, error, unavailable, refetch, clear } = useTaskLogs(taskId, true, taskPhase as import('@/schemas/task').TaskPhase | undefined)
   const [search, setSearch] = useState('')
   const [pinToBottom, setPinToBottom] = useState(true)
   const bottomRef = useRef<HTMLDivElement>(null)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
 
   const indexedLogs = logs.map((line, index) => ({ index: index + 1, line }))
+  // Sized for the widest row number so text does not shift at 10, 100, ...
+  const lineNumberWidth = `${String(logs.length).length}ch`
 
   const filteredLogs = search
     ? indexedLogs.filter(({ line }) => line.toLowerCase().includes(search.toLowerCase()))
@@ -71,6 +73,29 @@ export function StructuredLogViewer({ taskId, taskPhase }: { taskId: string; tas
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40
     if (!atBottom && pinToBottom) setPinToBottom(false)
   }, [pinToBottom])
+
+  // No Job or pod yet (pending, scheduled parents, runtime-pool agents) is
+  // expected, not a failure: explain it with the server's reason instead of
+  // an error and Retry. Running tasks keep polling, so logs replace this.
+  if (!logs.length && unavailable && !error) {
+    return (
+      <Card>
+        <CardHeader><CardTitle>Logs</CardTitle></CardHeader>
+        <CardContent>
+          <EmptyState
+            headline="No pod logs for this task"
+            hint={`${unavailable.charAt(0).toUpperCase()}${unavailable.slice(1)}. Logs appear once the task's pod starts; tasks that only schedule child tasks or run on an agent runtime pool may have none. The Runtime and Timeline tabs show their activity.`}
+            icon={ScrollText}
+            action={
+              <Button variant="outline" size="sm" onClick={refetch} disabled={isStreaming}>
+                <RefreshCw className="mr-1 h-3 w-3" /> Check again
+              </Button>
+            }
+          />
+        </CardContent>
+      </Card>
+    )
+  }
 
   if (!logs.length && !isStreaming && !error) {
     return (
@@ -184,7 +209,7 @@ export function StructuredLogViewer({ taskId, taskPhase }: { taskId: string; tas
               const level = parseLogLevel(row.line)
               return (
                 <div key={`log-${row.index}`} className={`py-0.5 ${levelColors[level]}`} data-testid="log-line">
-                  <span className="mr-3 select-none text-muted-foreground">{row.index}</span>
+                  <span className="mr-3 inline-block select-none text-right tabular-nums text-muted-foreground" style={{ width: lineNumberWidth }}>{row.index}</span>
                   <HighlightedText text={row.line} search={search} />
                 </div>
               )
