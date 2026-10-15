@@ -9,7 +9,7 @@ import { SecretNameField } from '@/components/ui/secret-name-field'
 import { PageHeader } from '@/components/layout/page-header'
 import { useAgentList } from '@/hooks/use-agents'
 import { useCreateRepositoryMonitor } from '@/hooks/use-monitors'
-import { isCredentialFreeGitHubRepositoryURL, isCronSchedule } from '@/lib/repository-form-validation'
+import { everyScheduleError, isCredentialFreeGitHubRepositoryURL, isCronSchedule } from '@/lib/repository-form-validation'
 import { useUIStore } from '@/stores/ui'
 
 const REVIEW_EVENTS = ['COMMENT', 'APPROVE', 'REQUEST_CHANGES'] as const
@@ -93,7 +93,7 @@ export function RepositoryMonitorCreateForm() {
       return 'Reviewer Agent name is required.'
     }
     if (trimmedSchedule && !isCronSchedule(trimmedSchedule)) {
-      return 'Schedule must be a five-field cron expression with in-range values, such as */30 * * * *.'
+      return everyScheduleError(trimmedSchedule) ?? 'Schedule must be a five-field cron expression with in-range values, such as */30 * * * *.'
     }
     if (!/^\d+$/.test(maxPRsPerRun)) {
       return 'Max PRs per run must be a whole number from 1 to 100.'

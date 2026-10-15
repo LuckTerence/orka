@@ -55,7 +55,7 @@ function installPointerPolyfills() {
 
 function withDefaultNamespaceAgents() {
   mockUseAgentList.mockImplementation(() => ({
-    data: { items: [{ metadata: { name: 'security-agent' } }] },
+    data: { items: [{ metadata: { name: 'security-agent' }, spec: { runtime: { type: 'claude' } } }] },
     isLoading: false,
   }))
 }
@@ -85,7 +85,7 @@ describe('RepositoryCreateForm', () => {
       const namespace = options?.namespace ?? useUIStore.getState().namespace
       if (namespace === 'orka-system') {
         return {
-          data: { items: [{ metadata: { name: 'gpt54-assistant' } }] },
+          data: { items: [{ metadata: { name: 'gpt54-assistant' }, spec: { runtime: { type: 'codex' } } }, { metadata: { name: 'assistant' }, spec: {} }] },
           isLoading: false,
         }
       }
@@ -101,13 +101,53 @@ describe('RepositoryCreateForm', () => {
     const user = userEvent.setup()
     render(<RepositoryCreateForm />)
 
-    expect(screen.getByText(/Showing agents from the/i)).toBeInTheDocument()
+    expect(screen.getByText(/Showing agents with a runtime from the/i)).toBeInTheDocument()
     expect(screen.getByText(/No agents are available in this namespace/i)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Register Repository' })).toBeDisabled()
 
+    // Only the orka-system agent with a runtime counts.
+    expect(screen.getByText(/1 agent\(s\) with a runtime are available in/)).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Switch to orka-system' }))
 
     expect(useUIStore.getState().namespace).toBe('orka-system')
+  })
+
+  it('offers only agents with a runtime for analysis and patching', async () => {
+    mockUseAgentList.mockImplementation(() => ({
+      data: {
+        items: [
+          { metadata: { name: 'assistant' }, spec: {} },
+          { metadata: { name: 'claude-scanner' }, spec: { runtime: { type: 'claude' } } },
+          { metadata: { name: 'external-scanner' }, spec: { runtime: { runtimeRef: { name: 'agentkit' } } } },
+        ],
+      },
+      isLoading: false,
+    }))
+    const user = userEvent.setup()
+    render(<RepositoryCreateForm />)
+
+    await user.click(screen.getByRole('combobox', { name: 'Analysis Agent' }))
+    expect(await screen.findByRole('option', { name: 'claude-scanner' })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: 'external-scanner' })).toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: 'assistant' })).not.toBeInTheDocument()
+    await user.keyboard('{Escape}')
+
+    await user.click(screen.getByRole('combobox', { name: 'Patch Agent' }))
+    expect(await screen.findByRole('option', { name: 'external-scanner' })).toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: 'assistant' })).not.toBeInTheDocument()
+  })
+
+  it('explains why native agents are not offered when none has a runtime', () => {
+    mockUseAgentList.mockImplementation((options?: { namespace?: string; enabled?: boolean }) => {
+      if (options?.enabled === false) return { data: undefined, isLoading: false }
+      return { data: { items: [{ metadata: { name: 'assistant' }, spec: {} }] }, isLoading: false }
+    })
+    render(<RepositoryCreateForm />)
+
+    expect(screen.getByText(/None of the 1 agent\(s\) in this namespace has a runtime/)).toBeInTheDocument()
+    expect(screen.queryByText(/No agents are available in this namespace/)).not.toBeInTheDocument()
+    expect(screen.getByRole('combobox', { name: 'Analysis Agent' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Register Repository' })).toBeDisabled()
   })
 
   it('names every field for assistive technology', () => {
@@ -151,6 +191,25 @@ describe('RepositoryCreateForm', () => {
     await user.click(screen.getByRole('button', { name: 'Register Repository' }))
 
     expect(toast.error).toHaveBeenCalledWith(expect.stringContaining('five-field cron expression'))
+    expect(mockMutateAsync).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['@every 30s', 'needs an interval of at least 1m'],
+    ['@every -5m', 'needs an interval of at least 1m'],
+    ['@every 5 minutes', 'needs a Go duration after @every'],
+  ])('refuses the @every schedule %s', async (value, message) => {
+    withDefaultNamespaceAgents()
+    const user = userEvent.setup()
+    render(<RepositoryCreateForm />)
+
+    await fillRequiredFields(user, 'https://github.com/org/repo')
+    const schedule = screen.getByLabelText('Schedule')
+    await user.clear(schedule)
+    await user.type(schedule, value)
+    await user.click(screen.getByRole('button', { name: 'Register Repository' }))
+
+    expect(toast.error).toHaveBeenCalledWith(expect.stringContaining(message))
     expect(mockMutateAsync).not.toHaveBeenCalled()
   })
 

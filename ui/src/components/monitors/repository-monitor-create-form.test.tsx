@@ -203,6 +203,23 @@ describe('RepositoryMonitorCreateForm', () => {
     expect(mockMutateAsync).not.toHaveBeenCalled()
   })
 
+  it('rejects an @every schedule shorter than a minute before submitting', async () => {
+    const user = userEvent.setup()
+    render(<RepositoryMonitorCreateForm />)
+
+    await user.type(screen.getByLabelText(/Monitor name/i), 'example-app')
+    await user.type(screen.getByLabelText(/GitHub repository URL/i), 'https://github.com/example/app')
+    await user.type(screen.getByLabelText(/Reviewer Agent name/i), 'repo-reviewer')
+    await user.clear(screen.getByLabelText(/Schedule/i))
+    await user.type(screen.getByLabelText(/Schedule/i), '@every 1s')
+
+    await user.click(screen.getByRole('button', { name: /Create Monitor/i }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Schedule "@every 1s" needs an interval of at least 1m')
+    expect(screen.getByLabelText(/Schedule/i)).toHaveAttribute('aria-invalid', 'true')
+    expect(mockMutateAsync).not.toHaveBeenCalled()
+  })
+
   it('accepts an empty schedule for manual runs only', async () => {
     const user = userEvent.setup()
     render(<RepositoryMonitorCreateForm />)

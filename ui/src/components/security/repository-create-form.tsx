@@ -9,11 +9,19 @@ import { SecretNameField } from '@/components/ui/secret-name-field'
 import { PageHeader } from '@/components/layout/page-header'
 import { useCreateRepositoryScan } from '@/hooks/use-security'
 import { useAgentList } from '@/hooks/use-agents'
-import { isCredentialFreeGitHubRepositoryURL, isCronSchedule } from '@/lib/repository-form-validation'
+import { everyScheduleError, isCredentialFreeGitHubRepositoryURL, isCronSchedule } from '@/lib/repository-form-validation'
 import { useUIStore } from '@/stores/ui'
+import type { Agent } from '@/schemas/agent'
 
 // Radix Select items cannot use an empty value, so clearing uses a sentinel.
 const noPatchAgent = '__none__'
+
+// Scans run as agent Tasks, which need a runtime (a built-in type or an
+// external runtimeRef); every scan with a native Agent would fail.
+function hasRuntime(agent: Agent) {
+  const runtime = agent.spec.runtime
+  return Boolean(runtime && ('type' in runtime ? runtime.type : runtime.runtimeRef))
+}
 
 export function RepositoryCreateForm() {
   const navigate = useNavigate()
@@ -21,10 +29,11 @@ export function RepositoryCreateForm() {
   const setNamespace = useUIStore((s) => s.setNamespace)
   const createRepository = useCreateRepositoryScan()
   const { data: agents, isLoading: agentsLoading } = useAgentList()
-  const currentAgents = agents?.items ?? []
+  const namespaceAgentCount = agents?.items.length ?? 0
+  const currentAgents = (agents?.items ?? []).filter(hasRuntime)
   const shouldCheckSystemAgents = namespace !== 'orka-system' && currentAgents.length === 0
   const { data: systemAgents } = useAgentList({ namespace: 'orka-system', enabled: shouldCheckSystemAgents })
-  const systemAgentCount = systemAgents?.items.length ?? 0
+  const systemAgentCount = (systemAgents?.items ?? []).filter(hasRuntime).length
   const noAgentsInNamespace = !agentsLoading && currentAgents.length === 0
 
   const [name, setName] = useState('')
@@ -48,7 +57,7 @@ export function RepositoryCreateForm() {
       return
     }
     if (trimmedSchedule && !isCronSchedule(trimmedSchedule)) {
-      toast.error('Schedule must be a five-field cron expression with in-range values, such as 0 */6 * * *')
+      toast.error(everyScheduleError(trimmedSchedule) ?? 'Schedule must be a five-field cron expression with in-range values, such as 0 */6 * * *')
       return
     }
     if (!analysisAgentRef) {
@@ -137,14 +146,21 @@ export function RepositoryCreateForm() {
 
             <div className="space-y-2 rounded-md border border-dashed border-border p-3">
               <p className="text-sm text-muted-foreground">
-                Showing agents from the <span className="font-medium text-foreground">{namespace}</span> namespace.
+                Showing agents with a runtime from the <span className="font-medium text-foreground">{namespace}</span> namespace; scans run as agent Tasks.
               </p>
               {noAgentsInNamespace ? (
                 <div className="space-y-2 text-sm text-muted-foreground">
-                  <p>No agents are available in this namespace.</p>
+                  {namespaceAgentCount > 0 ? (
+                    <p>
+                      None of the {namespaceAgentCount} agent(s) in this namespace has a runtime. Give one a built-in runtime
+                      (claude, codex, copilot, or opencode) or an external runtimeRef to use it here.
+                    </p>
+                  ) : (
+                    <p>No agents are available in this namespace.</p>
+                  )}
                   {systemAgentCount > 0 ? (
                     <div className="flex items-center gap-2">
-                      <span>{systemAgentCount} agent(s) are available in <span className="font-medium text-foreground">orka-system</span>.</span>
+                      <span>{systemAgentCount} agent(s) with a runtime are available in <span className="font-medium text-foreground">orka-system</span>.</span>
                       <Button type="button" variant="outline" size="sm" onClick={() => setNamespace('orka-system')}>
                         Switch to orka-system
                       </Button>
