@@ -48,6 +48,8 @@ function DialogContent({
   // Radix returns focus to a DialogTrigger on close. A dialog opened from
   // state has no trigger, so focus fell to <body>; remember what had focus
   // when the dialog opened and return it there while it is still on the page.
+  // When nothing had focus (Safari does not focus a clicked button), Radix's
+  // own handling stays in charge.
   const openerRef = React.useRef<HTMLElement | null>(null)
   return (
     <DialogPortal data-slot="dialog-portal">
@@ -66,7 +68,7 @@ function DialogContent({
           onCloseAutoFocus?.(event)
           const opener = openerRef.current
           openerRef.current = null
-          if (event.defaultPrevented || !opener?.isConnected) return
+          if (event.defaultPrevented || !opener?.isConnected || opener === document.body) return
           event.preventDefault()
           opener.focus()
         }}
