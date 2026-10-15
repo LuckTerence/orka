@@ -245,12 +245,23 @@ const NOT_READY_REASONS = [
 function generateHistory(ledger: UsageLedger) {
   const random = mulberry32(0x0a17)
   const pick = <T,>(items: readonly T[]) => items[Math.floor(random() * items.length)]
+  // GitHub numbers a repository's issues and pull requests from one sequence,
+  // so each takes the first number at or after its draw that is still unused.
+  const taken = new Map<RepoKey, Set<number>>()
+  const claim = (repo: RepoKey, from: number) => {
+    const used = taken.get(repo) ?? new Set<number>()
+    taken.set(repo, used)
+    let number = from
+    while (used.has(number)) number++
+    used.add(number)
+    return number
+  }
   const nextIssue = { ...FIRST_ISSUE }
   const days = 42
   const count = Math.round(days * 1.7)
   for (let i = 0; i < count; i++) {
     const repo = REPO_ROTATION[i % REPO_ROTATION.length]
-    const number = (nextIssue[repo] += 1 + Math.floor(random() * 4))
+    const number = (nextIssue[repo] = claim(repo, nextIssue[repo] + 1 + Math.floor(random() * 4)))
     const ageMin = ((count - i) / count) * days * 24 * 60 + 300 + random() * 240
     const startMs = NOW - ageMin * MINUTE
     const request = work(repo, number, startMs)
@@ -299,7 +310,7 @@ function generateHistory(ledger: UsageLedger) {
       )
     }
 
-    const pr = number + 2 + Math.floor(random() * 3)
+    const pr = claim(repo, number + 2 + Math.floor(random() * 3))
     const recent = NOW - implemented < 36 * 60 * MINUTE
     const outcome = recent
       ? (random() < 0.55 ? 'ready' : 'waiting')
@@ -329,7 +340,7 @@ function generateHistory(ledger: UsageLedger) {
     ledger.links.push({ workID: request.id, repository: request.repository, number: pr, origin: 'created', linkedAt: at(implemented) })
     // A developer sometimes opens their own follow-up PR that cites the agent's analysis.
     if (random() < 0.12) {
-      const assisted = pr + 1
+      const assisted = claim(repo, pr + 1)
       ledger.pullRequests.push({
         namespace: DEMO_NAMESPACE, repository: request.repository, number: assisted, url: `${REPOS[repo].url}/pull/${assisted}`,
         state: merged ? 'merged' : 'open', headSHA: digest(`pr:${request.repository}#${assisted}`, 40), ready: false,
