@@ -5,7 +5,10 @@ import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useGatewayBinding } from '@/hooks/use-gateways'
+import { Button } from '@/components/ui/button'
 import { ListAccessError } from '@/components/ui/list-access-error'
+import { NotFoundView } from '@/components/common/not-found-page'
+import { isNotFoundError } from '@/lib/api-client'
 import { isGatewayResourceReady, isGatewayStatusFresh } from './gateway-readiness'
 import { GatewayStatusBadge } from './gateway-tables'
 import { formatTimestamp } from '@/lib/time'
@@ -15,9 +18,16 @@ export function GatewayBindingDetail({ name }: { name: string }) {
   const binding = useGatewayBinding(name)
 
   if (binding.isLoading) return <Skeleton className="h-96 rounded-xl" />
-  if (binding.error) return <ListAccessError resource={`GatewayBinding ${name}`} error={binding.error} />
-  if (!binding.data) {
-    return <Card><CardContent className="py-12 text-center text-muted-foreground">GatewayBinding not found.</CardContent></Card>
+  if (binding.error && !isNotFoundError(binding.error)) return <ListAccessError resource={`GatewayBinding ${name}`} error={binding.error} />
+  if (isNotFoundError(binding.error) || !binding.data) {
+    return (
+      <NotFoundView
+        title="GatewayBinding not found"
+        headline={`No GatewayBinding named "${name}"`}
+        hint="It may have been deleted, or it belongs to another namespace."
+        action={<Button asChild variant="outline"><Link to="/gateways"><ArrowLeft className="mr-1 h-4 w-4" />Back to Gateways</Link></Button>}
+      />
+    )
   }
 
   const item = binding.data

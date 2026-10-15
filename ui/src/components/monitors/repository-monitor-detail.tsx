@@ -12,7 +12,8 @@ import { StatusProblemAlert } from '@/components/common/status-problem-alert'
 import { statusProblem } from '@/components/common/status-problem'
 import { useCreateRepositoryMonitorCommand, useRepositoryMonitor, useRepositoryMonitorActions, useRepositoryMonitorCommands, useRepositoryMonitorImplementationJobs, useRepositoryMonitorItems, useRepositoryMonitorMutations, useRepositoryMonitorRuns, useRepositoryMonitorWorkActions, useRunRepositoryMonitor } from '@/hooks/use-monitors'
 import { repositoryMonitorDisplayName } from './repository-monitor-display'
-import { isNotFoundError } from '@/lib/api-client'
+import { isForbiddenError, isNotFoundError } from '@/lib/api-client'
+import { ListAccessError } from '@/components/ui/list-access-error'
 import { formatTimestamp } from '@/lib/time'
 import { useUIStore } from '@/stores/ui'
 import type { RepositoryMonitor } from '@/schemas/monitor'
@@ -47,6 +48,12 @@ export function RepositoryMonitorDetail({ monitorName }: { monitorName: string }
         <Skeleton className="h-32 w-full" />
       </div>
     )
+  }
+
+  // A 403 replaces cached data (the token lost access); any other failure
+  // keeps what already loaded and only blocks a page that never loaded.
+  if (isForbiddenError(error) || (error && !isNotFoundError(error) && !monitor)) {
+    return <ListAccessError resource={`repository monitor ${monitorName}`} error={error} />
   }
 
   // A 404 wins over cached data: a monitor deleted after it loaded keeps its

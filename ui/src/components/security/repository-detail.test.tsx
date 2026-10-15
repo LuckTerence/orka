@@ -111,6 +111,16 @@ describe('RepositoryDetail', () => {
     expect(requests).toEqual(['/api/v1/security/repositories/findings'])
   })
 
+  it('says the token cannot read the repository instead of "not found" on 403', async () => {
+    server.use(http.get(repositoryPath, () =>
+      HttpResponse.json({ error: { code: 403, message: 'not authorized' } }, { status: 403 })))
+
+    render(<RepositoryDetail repositoryName="payments-main" />)
+
+    expect(await screen.findByText('Not authorized to view repository payments-main')).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Repository not found' })).not.toBeInTheDocument()
+  })
+
   it('switches to the not-found page when a loaded repository is deleted', async () => {
     let deleted = false
     serveRepository(repository({ phase: 'Ready' }))

@@ -14,7 +14,8 @@ import { ThreatModelEditor } from './threat-model-editor'
 import { RecommendedFindings } from './recommended-findings'
 import { FindingTable } from './finding-table'
 import { FindingCountBadges } from './finding-count-badges'
-import { isNotFoundError } from '@/lib/api-client'
+import { isForbiddenError, isNotFoundError } from '@/lib/api-client'
+import { ListAccessError } from '@/components/ui/list-access-error'
 import { repositoryDisplayName } from '@/lib/repository-name'
 import { timeAgo } from '@/lib/time'
 import { useUIStore } from '@/stores/ui'
@@ -26,6 +27,12 @@ export function RepositoryDetail({ repositoryName }: { repositoryName: string })
 
   if (isLoading) {
     return <Skeleton className="h-96 w-full" />
+  }
+
+  // A 403 replaces cached data (the token lost access); any other failure
+  // keeps what already loaded and only blocks a page that never loaded.
+  if (isForbiddenError(error) || (error && !isNotFoundError(error) && !repo)) {
+    return <ListAccessError resource={`repository ${repositoryName}`} error={error} />
   }
 
   // A 404 wins over cached data: a repository deleted after it loaded keeps

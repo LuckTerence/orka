@@ -66,7 +66,20 @@ describe('GatewayBindingDetail', () => {
     render(<GatewayBindingDetail name="support-binding" />)
 
     expect(await screen.findByText('Could not load GatewayBinding support-binding')).toBeInTheDocument()
-    expect(screen.queryByText('GatewayBinding not found.')).not.toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'GatewayBinding not found' })).not.toBeInTheDocument()
+  })
+
+  it('renders a titled not-found page for a missing binding', async () => {
+    server.use(http.get('/api/v1/gatewaybindings/support-binding', () => HttpResponse.json(
+      { error: { code: 404, message: 'gatewaybinding not found' } },
+      { status: 404 },
+    )))
+
+    render(<GatewayBindingDetail name="support-binding" />)
+
+    expect(await screen.findByRole('heading', { level: 1, name: 'GatewayBinding not found' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Back to Gateways' })).toBeInTheDocument()
+    expect(document.title).toBe('GatewayBinding not found · Orka')
   })
 
   it('shows routing, authorization, Session, Task, and readiness details', async () => {
