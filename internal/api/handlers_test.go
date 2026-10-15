@@ -4102,6 +4102,33 @@ func TestHandlers_CreateAgent_Success(t *testing.T) {
 	require.Equal(t, http.StatusCreated, resp.StatusCode)
 }
 
+func TestHandlers_AgentWritesRejectNegativeTTL(t *testing.T) {
+	handlers, app := setupTestHandlers()
+	app.Post("/agents", handlers.CreateAgent)
+	app.Put("/agents/:name", handlers.UpdateAgent)
+	spec := corev1alpha1.AgentSpec{
+		Model:            &corev1alpha1.ModelConfig{Provider: "anthropic", Name: "claude-3-5-sonnet"},
+		TTLAfterLastTask: &metav1.Duration{Duration: -time.Hour},
+	}
+
+	for _, request := range []struct {
+		method, path string
+		body         any
+	}{
+		{http.MethodPost, "/agents", CreateAgentRequest{Name: "ttl-agent", Namespace: "default", Spec: spec}},
+		{http.MethodPut, "/agents/ttl-agent?namespace=default", UpdateAgentRequest{Spec: spec}},
+	} {
+		bodyBytes, _ := json.Marshal(request.body)
+		req := httptest.NewRequest(request.method, request.path, bytes.NewReader(bodyBytes))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+		require.Equal(t, http.StatusBadRequest, resp.StatusCode, request.method)
+		data, _ := io.ReadAll(resp.Body)
+		require.Contains(t, string(data), "spec.ttlAfterLastTask must not be negative")
+	}
+}
+
 func TestHandlers_CreateAgent_DefaultsBuiltInContractFromExecutionMode(t *testing.T) {
 	tests := []struct {
 		name       string

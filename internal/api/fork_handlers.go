@@ -588,12 +588,17 @@ func listTaskEventsThrough(
 }
 
 // invalidObjectError reports a Kubernetes Invalid rejection of a caller-supplied
-// object as 400 naming the rejected fields. It returns nil for any other error.
+// object as 400 naming the rejected fields, and an admission webhook's denial
+// as 400 with the webhook's reason. It returns nil for any other error, so an
+// authorization failure of the API server's own identity stays a server error.
 func invalidObjectError(kind string, err error) error {
-	if !apierrors.IsInvalid(err) {
-		return nil
+	switch {
+	case apierrors.IsInvalid(err):
+		return fiber.NewError(fiber.StatusBadRequest, invalidObjectMessage(kind+" is invalid", err))
+	case (apierrors.IsForbidden(err) || apierrors.IsBadRequest(err)) && strings.Contains(err.Error(), "denied the request"):
+		return fiber.NewError(fiber.StatusBadRequest, kind+" was rejected: "+err.Error())
 	}
-	return fiber.NewError(fiber.StatusBadRequest, invalidObjectMessage(kind+" is invalid", err))
+	return nil
 }
 
 // invalidObjectMessage names the fields an Invalid create rejected, so the

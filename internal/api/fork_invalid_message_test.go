@@ -36,6 +36,22 @@ func TestInvalidObjectMessageNamesRejectedFields(t *testing.T) {
 	require.Equal(t, "forked task is invalid", invalidObjectMessage("forked task is invalid", errors.New("not a status")))
 }
 
+func TestInvalidObjectErrorMapsAdmissionDenialsOnly(t *testing.T) {
+	gr := schema.GroupResource{Group: "core.orka.ai", Resource: "agents"}
+	denied := apierrors.NewForbidden(gr, "coder", errors.New(`admission webhook "orka-admission.orka.ai" denied the request: harness-v2 built-in Agents require spec.model.name`))
+	mapped := invalidObjectError("agent", denied)
+	require.Error(t, mapped)
+	var fiberErr *fiber.Error
+	require.ErrorAs(t, mapped, &fiberErr)
+	require.Equal(t, fiber.StatusBadRequest, fiberErr.Code)
+	require.Contains(t, fiberErr.Message, "require spec.model.name")
+
+	// The API server's own RBAC denial is not the caller's mistake.
+	rbac := apierrors.NewForbidden(gr, "coder", errors.New(`User "system:serviceaccount:orka-system:orka-controller-manager" cannot create resource "agents"`))
+	require.NoError(t, invalidObjectError("agent", rbac))
+	require.NoError(t, invalidObjectError("agent", errors.New("boom")))
+}
+
 func TestKubernetesInvalidWritesReturnBadRequest(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1alpha1.AddToScheme(scheme))

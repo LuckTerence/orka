@@ -1490,6 +1490,9 @@ func (h *Handlers) CreateAgent(c fiber.Ctx) error {
 		return err
 	}
 
+	if err := validateAgentSpec(req.Spec); err != nil {
+		return err
+	}
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: objectMetaFromRequest(name, namespace, req.Metadata),
 		Spec:       req.Spec,
@@ -1534,6 +1537,9 @@ func (h *Handlers) UpdateAgent(c fiber.Ctx) error {
 	var req UpdateAgentRequest
 	if err := c.Bind().JSON(&req); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
+	}
+	if err := validateAgentSpec(req.Spec); err != nil {
+		return err
 	}
 
 	ctx := c.Context()
@@ -2013,4 +2019,13 @@ func (h *Handlers) DownloadTaskArtifact(c fiber.Ctx) error {
 // handleAuthValidate returns success if the request passes auth middleware
 func (s *Server) handleAuthValidate(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{"authenticated": true})
+}
+
+// validateAgentSpec rejects Agent fields the CRD schema cannot express. A
+// negative ttlAfterLastTask would otherwise be stored and read as expired.
+func validateAgentSpec(spec corev1alpha1.AgentSpec) error {
+	if spec.TTLAfterLastTask != nil && spec.TTLAfterLastTask.Duration < 0 {
+		return fiber.NewError(fiber.StatusBadRequest, "spec.ttlAfterLastTask must not be negative")
+	}
+	return nil
 }

@@ -502,7 +502,8 @@ func (r *AgentReconciler) updateStatus(ctx context.Context, agent *corev1alpha1.
 
 // checkTTLExpiry deletes the agent if its TTL has expired and no tasks are active.
 func (r *AgentReconciler) checkTTLExpiry(ctx context.Context, agent *corev1alpha1.Agent, activeTasks int32) (ctrl.Result, bool) {
-	if agent.Spec.TTLAfterLastTask == nil || agent.Spec.TTLAfterLastTask.Duration == 0 {
+	// Zero means permanent; a negative TTL is invalid and must never delete.
+	if agent.Spec.TTLAfterLastTask == nil || agent.Spec.TTLAfterLastTask.Duration <= 0 {
 		return ctrl.Result{}, false
 	}
 	if activeTasks > 0 {

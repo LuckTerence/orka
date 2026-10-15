@@ -1197,6 +1197,15 @@ func TestCheckTTLExpiry(t *testing.T) {
 			}(),
 		},
 		{
+			name: "negative TTL never deletes",
+			agent: func() *corev1alpha1.Agent {
+				a := baseAgent("negative-ttl")
+				a.Spec.TTLAfterLastTask = &metav1.Duration{Duration: -time.Hour}
+				a.CreationTimestamp = metav1.NewTime(time.Now().Add(-time.Hour))
+				return a
+			}(),
+		},
+		{
 			name: "active tasks prevent deletion",
 			agent: func() *corev1alpha1.Agent {
 				a := baseAgent("active-ttl")
