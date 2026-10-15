@@ -31,6 +31,7 @@ import { ApiError, isForbiddenError, isNotFoundError } from '@/lib/api-client'
 import { useNavigate, useSearch } from '@tanstack/react-router'
 import type { ExecutionEvent, PlanState } from '@/schemas/task'
 import { timeAgo } from '@/lib/time'
+import { formatShellCommand } from '@/lib/task-command'
 import { actionErrorMessage } from './action-error'
 import { isTaskDeleting, isWaitingForApproval } from './task-state'
 import { TaskStateBadges } from './task-state-badges'
@@ -438,13 +439,13 @@ export function TaskDetail({ taskId }: { taskId: string }) {
                 {task.spec.command && (
                   <div>
                     <span className="text-muted-foreground">Command:</span>{' '}
-                    {task.spec.command.join(' ')}
+                    {formatShellCommand(task.spec.command)}
                   </div>
                 )}
                 {task.spec.args && (
                   <div>
                     <span className="text-muted-foreground">Args:</span>{' '}
-                    {task.spec.args.join(' ')}
+                    {formatShellCommand(task.spec.args)}
                   </div>
                 )}
               </CardContent>

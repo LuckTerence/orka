@@ -249,6 +249,21 @@ describe('TaskDetail', () => {
     expect(screen.getByText('echo hello')).toBeInTheDocument()
   })
 
+  it('shows a container command and args shell-quoted so each argument reads unambiguously', async () => {
+    server.use(
+      http.get('/api/v1/tasks/:id', () =>
+        HttpResponse.json({
+          metadata: { name: 'retry', namespace: 'default', uid: 'uid-retry' },
+          spec: { type: 'container', image: 'alpine', command: ['sh', '-c', 'echo attempt; exit 1'], args: ['--name', "it's here"] },
+          status: { phase: 'Failed' },
+        }),
+      ),
+    )
+    render(<TaskDetail taskId="retry" />)
+    expect(await screen.findByText(`sh -c 'echo attempt; exit 1'`)).toBeInTheDocument()
+    expect(screen.getByText(`--name 'it'\\''s here'`)).toBeInTheDocument()
+  })
+
   it('shows AI config for ai type', async () => {
     server.use(
       http.get('/api/v1/tasks/:id', () =>
