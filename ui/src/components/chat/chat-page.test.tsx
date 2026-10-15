@@ -84,6 +84,68 @@ describe('ChatPage', () => {
     expect(screen.getByText('New Chat')).toBeInTheDocument()
   })
 
+  it('New Chat resets an idle chat at once, without asking', () => {
+    const confirmSpy = vi.spyOn(window, 'confirm')
+    try {
+      const epoch = useChatStore.getState().turnEpoch
+      useChatStore.setState({
+        messages: [{ id: 'msg-1', role: 'user', content: 'Hello', timestamp: new Date().toISOString() }],
+        currentSessionId: 'chat-idle',
+      })
+      render(<ChatPage />)
+      fireEvent.click(screen.getByRole('button', { name: /New Chat/ }))
+      expect(confirmSpy).not.toHaveBeenCalled()
+      expect(useChatStore.getState().messages).toEqual([])
+      expect(useChatStore.getState().currentSessionId).toBeNull()
+      expect(useChatStore.getState().turnEpoch).toBe(epoch + 1)
+    } finally {
+      confirmSpy.mockRestore()
+    }
+  })
+
+  it('New Chat during a reply asks first and keeps the running chat when declined', () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    try {
+      const epoch = useChatStore.getState().turnEpoch
+      useChatStore.setState({
+        messages: [{ id: 'msg-1', role: 'user', content: 'Hello', timestamp: new Date().toISOString() }],
+        currentSessionId: 'chat-running',
+        isStreaming: true,
+      })
+      render(<ChatPage />)
+      fireEvent.click(screen.getByRole('button', { name: /New Chat/ }))
+      expect(confirmSpy).toHaveBeenCalledWith('Stop the current reply and delete this chat?')
+      expect(useChatStore.getState().messages).toHaveLength(1)
+      expect(useChatStore.getState().currentSessionId).toBe('chat-running')
+      expect(useChatStore.getState().isStreaming).toBe(true)
+      // The epoch is what orphans (and so cancels and deletes) the turn.
+      expect(useChatStore.getState().turnEpoch).toBe(epoch)
+    } finally {
+      confirmSpy.mockRestore()
+    }
+  })
+
+  it('New Chat during a reply resets once confirmed', () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    try {
+      const epoch = useChatStore.getState().turnEpoch
+      useChatStore.setState({
+        messages: [{ id: 'msg-1', role: 'user', content: 'Hello', timestamp: new Date().toISOString() }],
+        currentSessionId: 'chat-running',
+        isStreaming: true,
+      })
+      render(<ChatPage />)
+      fireEvent.click(screen.getByRole('button', { name: /New Chat/ }))
+      expect(confirmSpy).toHaveBeenCalledTimes(1)
+      expect(useChatStore.getState().messages).toEqual([])
+      expect(useChatStore.getState().currentSessionId).toBeNull()
+      expect(useChatStore.getState().isStreaming).toBe(false)
+      expect(useChatStore.getState().turnEpoch).toBe(epoch + 1)
+    } finally {
+      confirmSpy.mockRestore()
+    }
+  })
+
   it('offers the server default plus Provider CRDs and prefills the model on pick', async () => {
     render(<ChatPage />)
     expect(screen.getByRole('combobox', { name: 'Chat provider' })).toHaveTextContent('Server default (anthropic / claude-sonnet-4-20250514)')

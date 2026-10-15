@@ -95,6 +95,14 @@ export function ChatPage() {
   // and when there is none to pin to the input is disabled.
   const modelNeedsProvider = !provider && !config?.provider
 
+  // New Chat during a reply also cancels the server-side turn (the orphaned
+  // turn sends DELETE /chat/{sessionId}), which deletes the chat and its
+  // history like Stop does, so it asks first. An idle chat resets at once.
+  const handleNewChat = () => {
+    if (useChatStore.getState().isStreaming && !confirm('Stop the current reply and delete this chat?')) return
+    newSession()
+  }
+
   const handleProviderChange = (value: string) => {
     const next = value === SERVER_DEFAULT ? '' : value
     setProvider(next)
@@ -151,10 +159,8 @@ export function ChatPage() {
               disabled={isStreaming || modelNeedsProvider}
               className="h-7 min-w-0 flex-1 text-xs sm:w-48 sm:flex-none"
             />
-            {/* New Chat during a reply also cancels the server-side turn
-                (the orphaned turn sends DELETE /chat/{sessionId}). */}
             {messages.length > 0 && (
-              <Button variant="ghost" size="sm" onClick={newSession} className="h-7 shrink-0 text-xs">
+              <Button variant="ghost" size="sm" onClick={handleNewChat} className="h-7 shrink-0 text-xs">
                 <Plus className="mr-1 h-3 w-3" /> New Chat
               </Button>
             )}
