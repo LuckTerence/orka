@@ -471,7 +471,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
         </TabsContent>
 
         <TabsContent value="result">
-          <TaskResultViewer taskId={taskId} />
+          <TaskResultViewer taskId={taskId} taskPhase={task.status?.phase} taskUid={task.metadata.uid} />
         </TabsContent>
 
         <TabsContent value="execution">

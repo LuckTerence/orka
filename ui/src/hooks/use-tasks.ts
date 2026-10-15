@@ -80,13 +80,15 @@ export function useTask(id: string, refetchInterval: number | false = 5000) {
   })
 }
 
-export function useTaskResult(id: string) {
+// The result loads on its own once `enabled` (the Result tab passes "task is
+// terminal"); otherwise it waits for an explicit refetch.
+export function useTaskResult(id: string, enabled = false, taskUID?: string) {
   const namespace = useUIStore((s) => s.namespace)
   return useQuery({
-    queryKey: ['taskResult', id, namespace],
+    queryKey: ['taskResult', id, namespace, taskUID ?? ''],
     queryFn: () =>
       api.get<{ result: string }>(`/tasks/${id}/result`, { namespace }),
-    enabled: false,
+    enabled: enabled && Boolean(id),
   })
 }
 
