@@ -63,8 +63,8 @@ export function ChatInput({ onSend, disabled = false, disabledHint }: ChatInputP
             variant="outline"
             onClick={requestStop}
             disabled={stopRequested}
-            aria-label={stopRequested ? 'Stopping response' : 'Stop response'}
-            title={stopRequested ? 'Stopping…' : 'Stop response'}
+            aria-label={stopRequested ? 'Stopping and ending chat' : 'Stop and end this chat'}
+            title={stopRequested ? 'Stopping…' : 'Stop and end this chat (its history is deleted)'}
             className="h-10 w-10 shrink-0 rounded-xl"
           >
             <Square className="h-4 w-4" />

@@ -127,7 +127,7 @@ export function useSendMessage() {
             addMessage({
               id: generateMessageId(),
               role: 'status',
-              content: 'Stopped. This chat session was ended; your next message starts a new session.',
+              content: 'Stopped. This chat and its history were deleted; your next message starts a new chat.',
               timestamp: new Date().toISOString(),
             })
           },

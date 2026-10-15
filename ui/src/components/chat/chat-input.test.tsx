@@ -52,9 +52,9 @@ describe('ChatInput', () => {
   it('Stop requests the turn to stop and then shows it is stopping', () => {
     useChatStore.setState({ isStreaming: true })
     render(<ChatInput onSend={vi.fn()} />)
-    fireEvent.click(screen.getByRole('button', { name: 'Stop response' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Stop and end this chat' }))
     expect(useChatStore.getState().stopRequested).toBe(true)
-    expect(screen.getByRole('button', { name: 'Stopping response' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Stopping and ending chat' })).toBeDisabled()
   })
 
   it('keeps focus in the composer when a turn starts and ends', () => {
