@@ -138,18 +138,20 @@ describe('ThreatModelEditor', () => {
 
     const alert = await screen.findByRole('alert')
     expect(alert).toHaveTextContent('The threat model changed since you loaded it')
+    // The conflict refetches, so the "none yet" note stops contradicting it
+    // while the edits stay put.
+    await waitFor(() => expect(screen.queryByText(/No threat model has been generated yet/)).not.toBeInTheDocument())
+    expect(editor).toBe(screen.getByRole('textbox', { name: 'Threat model' }))
     expect(editor).toHaveValue('My first notes')
     expect(puts[0]).toEqual({ content: 'My first notes', source: 'edited', expectedVersion: 0 })
     expect(toast.success).not.toHaveBeenCalled()
     expect(toast.error).not.toHaveBeenCalled()
 
     await user.click(screen.getByRole('button', { name: 'Reload latest' }))
-    // With no model loaded before, the reload shows the loading state, so the
-    // editor is a new element afterwards.
-    const reloaded = await screen.findByDisplayValue('Generated model v1')
+    await waitFor(() => expect(editor).toHaveValue('Generated model v1'))
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
 
-    await user.type(reloaded, ' + mine')
+    await user.type(editor, ' + mine')
     await user.click(screen.getByRole('button', { name: 'Save' }))
     await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Threat model saved'))
     expect(puts[1]).toMatchObject({ content: 'Generated model v1 + mine', expectedVersion: 1 })
@@ -173,6 +175,32 @@ describe('ThreatModelEditor', () => {
 
     expect(screen.getByRole('textbox', { name: 'Threat model' })).toHaveValue('Draft notes')
     focusManager.setFocused(undefined)
+  })
+
+  it.each([
+    [500, 'Could not load the threat model'],
+    [403, 'Not authorized to view the threat model'],
+  ])('shows a %i load failure and keeps the editor locked until the model loads', async (status, headline) => {
+    let failing = true
+    server.use(http.get(threatModelPath, () => failing
+      ? HttpResponse.json({ error: { code: status, message: 'threat model store unavailable' } }, { status })
+      : HttpResponse.json(stored)))
+    const user = userEvent.setup()
+    render(<ThreatModelEditor repositoryName="payments" />)
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent(headline)
+    expect(alert).toHaveTextContent('threat model store unavailable')
+    expect(screen.queryByText(/No threat model has been generated yet/)).not.toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: 'Threat model' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()
+
+    failing = false
+    await user.click(screen.getByRole('button', { name: 'Retry' }))
+    expect(await screen.findByDisplayValue('Generated model v3')).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(puts).toHaveLength(0)
   })
 
   it('reports other save failures with the server message', async () => {

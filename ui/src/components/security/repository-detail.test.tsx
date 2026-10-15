@@ -94,6 +94,22 @@ describe('RepositoryDetail', () => {
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   })
 
+  it('shows a failed findings load instead of "No findings to display"', async () => {
+    serveRepository(repository({ phase: 'Ready' }))
+    server.use(http.get(`${repositoryPath}/findings`, ({ request }) =>
+      new URL(request.url).searchParams.get('recommended')
+        ? HttpResponse.json({ items: [] })
+        : HttpResponse.json({ error: { code: 500, message: 'findings store unavailable' } }, { status: 500 })))
+
+    render(<RepositoryDetail repositoryName="payments-main" />)
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('Could not load findings')
+    expect(alert).toHaveTextContent('findings store unavailable')
+    // Only the recommended list, which did load, may say it is empty.
+    expect(screen.getAllByText('No findings to display.')).toHaveLength(1)
+  })
+
   it('renders a titled not-found page and sends no detail requests for a missing repository', async () => {
     const requests: string[] = []
     server.use(http.all('/api/v1/security/*', ({ request }) => {

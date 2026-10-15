@@ -25,6 +25,8 @@ vi.mock('@tanstack/react-router', async () => {
 })
 
 const mockDetailQuery = vi.fn()
+// Overrides the runs query result; null keeps the empty default.
+const mockRunsResult: { current: unknown } = { current: null }
 
 vi.mock('@/hooks/use-monitors', () => {
   const empty = (name: string) => {
@@ -33,7 +35,7 @@ vi.mock('@/hooks/use-monitors', () => {
   }
   return {
     useRepositoryMonitor: () => mockUseRepositoryMonitor(),
-    useRepositoryMonitorRuns: empty,
+    useRepositoryMonitorRuns: (name: string) => mockRunsResult.current ?? empty(name),
     useRepositoryMonitorItems: (name: string, kind?: string) =>
       kind === 'issue' ? { data: { items: [{ itemKey: 'issue-7', number: 7, title: 'Flaky test' }] } } : empty(name),
     useRepositoryMonitorActions: empty,
@@ -58,6 +60,7 @@ describe('RepositoryMonitorDetail', () => {
     mockMutateAsync.mockReset()
     mockCommandMutate.mockReset()
     mockDetailQuery.mockReset()
+    mockRunsResult.current = null
     useUIStore.setState({ namespace: 'default', sidebarCollapsed: false, theme: 'light' })
     mockUseRepositoryMonitor.mockReturnValue({ isLoading: false, data: readyMonitor })
     vi.mocked(toast.success).mockClear()
@@ -135,6 +138,28 @@ describe('RepositoryMonitorDetail', () => {
     render(<RepositoryMonitorDetail monitorName="repo-monitor" />)
 
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('shows a failed runs request instead of claiming no runs were recorded', () => {
+    mockRunsResult.current = { error: new ApiError(500, '{"error":{"code":500,"message":"run store unavailable"}}'), isLoading: false }
+    render(<RepositoryMonitorDetail monitorName="repo-monitor" />)
+
+    const alert = screen.getByRole('alert')
+    expect(alert).toHaveTextContent('Could not load monitor runs')
+    expect(alert).toHaveTextContent('run store unavailable')
+    expect(screen.queryByText('No runs recorded yet.')).not.toBeInTheDocument()
+  })
+
+  it('keeps loaded runs when a later poll fails', () => {
+    mockRunsResult.current = {
+      data: { items: [{ id: 'run-1', phase: 'succeeded', trigger: 'schedule', startedAt: '2026-10-01T00:00:00Z' }] },
+      error: new ApiError(500, 'blip'),
+      isLoading: false,
+    }
+    render(<RepositoryMonitorDetail monitorName="repo-monitor" />)
+
+    expect(screen.getByText('run-1')).toBeInTheDocument()
+    expect(screen.queryByText('Could not load monitor runs')).not.toBeInTheDocument()
   })
 
   it('confirms a started run', async () => {

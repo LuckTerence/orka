@@ -3,8 +3,9 @@ import { toast } from 'sonner'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
+import { ListAccessError } from '@/components/ui/list-access-error'
 import { useThreatModel, useUpdateThreatModel } from '@/hooks/use-security'
-import { ApiError, isConflictError } from '@/lib/api-client'
+import { isConflictError, isNotFoundError } from '@/lib/api-client'
 
 export function ThreatModelEditor({ repositoryName }: { repositoryName: string }) {
   const { data, isLoading, error, refetch } = useThreatModel(repositoryName)
@@ -25,7 +26,12 @@ export function ThreatModelEditor({ repositoryName }: { repositoryName: string }
     setInitialized(true)
   }
 
-  const notFound = error instanceof ApiError && error.status === 404
+  const notFound = isNotFoundError(error)
+  // Editing needs a known base: a loaded model, a confirmed "none yet" (404),
+  // or text already edited against one. Without it (a 500 or 403 before
+  // anything loaded) a save could only conflict, so the editor stays locked.
+  const baseKnown = data !== undefined || notFound || initialized
+  const loadFailed = !baseKnown && error != null
 
   const save = async () => {
     try {
@@ -36,6 +42,9 @@ export function ThreatModelEditor({ repositoryName }: { repositoryName: string }
     } catch (saveError) {
       if (isConflictError(saveError)) {
         setConflict(true)
+        // Learn what changed (for example that a model now exists) without
+        // touching the edits; Reload latest is what replaces them.
+        void refetch()
         return
       }
       toast.error(`Failed to save threat model: ${saveError instanceof Error ? saveError.message : 'Unknown error'}`)
@@ -64,13 +73,21 @@ export function ThreatModelEditor({ repositoryName }: { repositoryName: string }
             Edit the generated threat model to guide future scans and patch prioritization.
           </p>
         </div>
-        <Button onClick={save} disabled={updateThreatModel.isPending}>Save</Button>
+        <Button onClick={save} disabled={updateThreatModel.isPending || !baseKnown}>Save</Button>
       </CardHeader>
       <CardContent>
-        {isLoading ? (
+        {/* Text being edited stays on screen while a refetch runs. */}
+        {isLoading && !initialized ? (
           <Skeleton className="h-72 w-full" />
         ) : (
           <div className="space-y-2">
+            {loadFailed && (
+              <ListAccessError
+                error={error}
+                resource="the threat model"
+                action={<Button type="button" variant="outline" size="sm" onClick={() => void refetch()}>Retry</Button>}
+              />
+            )}
             {notFound && (
               <div className="rounded-md border border-dashed border-border bg-muted/40 p-3 text-sm text-muted-foreground">
                 No threat model has been generated yet. You can save your own notes now or wait for the first scan to produce one.
@@ -90,13 +107,14 @@ export function ThreatModelEditor({ repositoryName }: { repositoryName: string }
             <textarea
               aria-label="Threat model"
               value={content}
+              disabled={!baseKnown}
               onChange={(event) => {
                 setContent(event.target.value)
                 // Once the user types, a model that loads later must not
                 // replace the text; saving it then reports the conflict.
                 setInitialized(true)
               }}
-              className="min-h-72 w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring"
+              className="min-h-72 w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
               placeholder="Document trust boundaries, auth assumptions, key assets, external integrations, and the attack surfaces worth prioritizing."
             />
           </div>

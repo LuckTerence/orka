@@ -7,6 +7,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { PageHeader } from '@/components/layout/page-header'
 import { AccessErrorView, NotFoundView } from '@/components/common/not-found-page'
+import { ListAccessError } from '@/components/ui/list-access-error'
 import { StatusProblemAlert } from '@/components/common/status-problem-alert'
 import { statusProblem } from '@/components/common/status-problem'
 import { useAllFindings, useDroppedFindings, useRepositoryScan, useReviewSlices, useRunSecurityScan, useScanRuns } from '@/hooks/use-security'
@@ -191,7 +192,14 @@ function RepositoryDetailContent({ repositoryName, repo }: { repositoryName: str
           <CardTitle>All Findings</CardTitle>
         </CardHeader>
         <CardContent>
-          <FindingTable findings={findings.data?.items ?? []} />
+          {/* A failed load must not read as "No findings"; a later failed poll keeps what loaded. */}
+          {findings.error && (isForbiddenError(findings.error) || !findings.data) ? (
+            <ListAccessError error={findings.error} resource="findings" />
+          ) : findings.isLoading ? (
+            <Skeleton className="h-32 w-full" />
+          ) : (
+            <FindingTable findings={findings.data?.items ?? []} />
+          )}
         </CardContent>
       </Card>
 

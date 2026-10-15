@@ -8,6 +8,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { PageHeader } from '@/components/layout/page-header'
 import { AccessErrorView, NotFoundView } from '@/components/common/not-found-page'
+import { ListAccessError } from '@/components/ui/list-access-error'
 import { StatusProblemAlert } from '@/components/common/status-problem-alert'
 import { statusProblem } from '@/components/common/status-problem'
 import { useCreateRepositoryMonitorCommand, useRepositoryMonitor, useRepositoryMonitorActions, useRepositoryMonitorCommands, useRepositoryMonitorImplementationJobs, useRepositoryMonitorItems, useRepositoryMonitorMutations, useRepositoryMonitorRuns, useRepositoryMonitorWorkActions, useRunRepositoryMonitor } from '@/hooks/use-monitors'
@@ -389,7 +390,12 @@ function RepositoryMonitorDetailContent({ monitorName, monitor }: { monitorName:
               <CardTitle>Recent Runs</CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
-              {(runs.data?.items ?? []).length === 0 ? (
+              {/* A failed load must not read as "No runs"; a later failed poll keeps what loaded. */}
+              {runs.error && (isForbiddenError(runs.error) || !runs.data) ? (
+                <ListAccessError error={runs.error} resource="monitor runs" />
+              ) : runs.isLoading ? (
+                <Skeleton className="h-24 w-full" />
+              ) : (runs.data?.items ?? []).length === 0 ? (
                 <div className="py-8 text-center text-sm text-muted-foreground">No runs recorded yet.</div>
               ) : (
                 (runs.data?.items ?? []).slice(0, 8).map((run) => (
