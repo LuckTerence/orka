@@ -95,6 +95,15 @@ describe('ChatToolCall', () => {
     expect(screen.getByText(/"success": true/)).toBeInTheDocument()
   })
 
+  it('makes a long result a named, keyboard-scrollable region', () => {
+    render(<ChatToolCall message={toolResultSuccess} />)
+    fireEvent.click(screen.getByRole('button'))
+    const result = screen.getByRole('region', { name: 'create_task result' })
+    expect(result).toHaveAttribute('tabindex', '0')
+    expect(result).toHaveClass('max-h-64', 'overflow-auto')
+    expect(result).toHaveTextContent('"success": true')
+  })
+
   it('stays within a phone-width transcript', () => {
     const longArg = { url: `https://example.com/${'a'.repeat(200)}`, digest: 'f'.repeat(128) }
     const { container } = render(<ChatToolCall message={{ ...toolCallMsg, toolName: 'mcp__github__create_pull_request_review_comment', toolArgs: longArg }} />)

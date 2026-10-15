@@ -50,7 +50,12 @@ export function ChatToolCall({ message }: { message: ChatMessage }) {
           {isResult && message.toolResult != null && (
             <div>
               <span className="text-[10px] font-medium uppercase text-muted-foreground">Result</span>
-              <pre className="mt-0.5 max-h-64 overflow-auto whitespace-pre-wrap wrap-anywhere text-xs font-mono text-foreground">
+              <pre
+                tabIndex={0}
+                role="region"
+                aria-label={`${message.toolName ?? 'Tool'} result`}
+                className="mt-0.5 max-h-64 overflow-auto whitespace-pre-wrap wrap-anywhere text-xs font-mono text-foreground"
+              >
                 {JSON.stringify(message.toolResult, null, 2)}
               </pre>
             </div>
