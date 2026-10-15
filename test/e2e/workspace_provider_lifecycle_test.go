@@ -46,9 +46,10 @@ const (
 // asserted through Orka's provider-neutral Task and workspace objects.
 type workspaceBackend struct {
 	name, deployment, controllerName string
+	apiPort                          int // distinct per provider so both lanes can share a host
 	profileGroup, profileKind        string
 	profileSpec                      func(suspend bool) map[string]any
-	prepare                          func()
+	prepare                          func(source string)
 	patchProvider                    func(deployment map[string]any)
 	loseInstance                     func(workspaceUID string)
 	leftovers                        func(g Gomega, workspaceUID string) []string
@@ -62,7 +63,7 @@ type workspaceBackend struct {
 
 func sandboxWorkspaceBackend() workspaceBackend {
 	return workspaceBackend{
-		name: "sandbox", deployment: "orka-workspace-sandbox", controllerName: "sandbox.workspace.orka.ai",
+		name: "sandbox", deployment: "orka-workspace-sandbox", controllerName: "sandbox.workspace.orka.ai", apiPort: 18096,
 		profileGroup: "sandbox.workspace.orka.ai", profileKind: "SandboxWorkspaceProfile",
 		profileSpec: func(suspend bool) map[string]any {
 			if !suspend {
@@ -70,8 +71,10 @@ func sandboxWorkspaceBackend() workspaceBackend {
 			}
 			return map[string]any{"suspend": map[string]any{"mode": "DataOnly", "volume": map[string]any{"capacity": "1Gi"}}}
 		},
-		prepare: func() {
-			version, err := utils.Run(exec.Command("go", "list", "-m", "-f", "{{.Version}}", "sigs.k8s.io/agent-sandbox"))
+		// Install the agent-sandbox release the provider is built against.
+		prepare: func(source string) {
+			version, err := utils.Run(exec.Command("go", "-C", filepath.Join(source, "providers"),
+				"list", "-m", "-f", "{{.Version}}", "sigs.k8s.io/agent-sandbox"))
 			Expect(err).NotTo(HaveOccurred())
 			base := "https://github.com/kubernetes-sigs/agent-sandbox/releases/download/" + strings.TrimSpace(version)
 			for _, args := range [][]string{
@@ -123,7 +126,7 @@ func substrateWorkspaceBackend() workspaceBackend {
 		return names
 	}
 	return workspaceBackend{
-		name: "substrate", deployment: "orka-workspace-substrate", controllerName: "v1.substrate.workspace.orka.ai",
+		name: "substrate", deployment: "orka-workspace-substrate", controllerName: "v1.substrate.workspace.orka.ai", apiPort: 18097,
 		profileGroup: "substrate.workspace.orka.ai", profileKind: "SubstrateWorkspaceProfile",
 		profileSpec: func(suspend bool) map[string]any {
 			spec := map[string]any{"templateRef": map[string]any{"namespace": wspAtespace, "name": "orka-acp-infra"}}
@@ -132,7 +135,7 @@ func substrateWorkspaceBackend() workspaceBackend {
 			}
 			return spec
 		},
-		prepare: func() {},
+		prepare: func(string) {},
 		// The provider authenticates to Substrate with a PodCertificate and
 		// dials Actors directly.
 		patchProvider: func(deployment map[string]any) {
@@ -225,7 +228,7 @@ var _ = Describe("Workspace Provider Lifecycle", Ordered, Label("workspace-provi
 		}
 		runID = fmt.Sprintf("%x", time.Now().Unix()%0xfffff)
 		var err error
-		apiBaseURL, cancelPF, pfCmd, err = startControllerAPIPortForward(18096)
+		apiBaseURL, cancelPF, pfCmd, err = startControllerAPIPortForward(backend.apiPort)
 		Expect(err).NotTo(HaveOccurred())
 		DeferCleanup(func() { stopPortForward(cancelPF, pfCmd) })
 		token, err = serviceAccountToken()
@@ -238,8 +241,9 @@ var _ = Describe("Workspace Provider Lifecycle", Ordered, Label("workspace-provi
 		providerProxyMockLLM.deploy(projectDir)
 
 		By("installing the " + backend.name + " backend and provider")
-		backend.prepare()
-		installWorkspaceProvider(backend)
+		source := workspaceProviderSource()
+		backend.prepare(source)
+		installWorkspaceProvider(backend, source)
 
 		By("deploying the fake forge and letting the publisher reach it")
 		DeferCleanup(deleteE2EObjects, "deployment,service,secret", fakeForgeName)
@@ -431,7 +435,7 @@ var _ = Describe("Workspace Provider Lifecycle", Ordered, Label("workspace-provi
 			_, err := utils.Run(exec.Command("kubectl", append([]string{"-n", namespace}, append(args, "deployment/"+deployment)...)...))
 			Expect(err).NotTo(HaveOccurred())
 		}
-		apiBaseURL, cancelPF, pfCmd, err = startControllerAPIPortForward(18096)
+		apiBaseURL, cancelPF, pfCmd, err = startControllerAPIPortForward(backend.apiPort)
 		Expect(err).NotTo(HaveOccurred())
 
 		waitTaskExecution(task, terminalExecutionStates...)
@@ -566,17 +570,21 @@ func wspTask(name, agent, class, session string, create bool, prompt, timeout st
 	return manifest
 }
 
+// workspaceProviderSource returns the orka-workspace checkout to build from.
+func workspaceProviderSource() string {
+	if source := os.Getenv(workspaceSourceEnv); source != "" {
+		return source
+	}
+	dir, err := os.MkdirTemp("", "orka-e2e-workspace-source-")
+	Expect(err).NotTo(HaveOccurred())
+	DeferCleanup(os.RemoveAll, dir)
+	Expect(fetchPinnedOrkaWorkspaceSource(dir)).To(Succeed())
+	return dir
+}
+
 // installWorkspaceProvider builds the provider from orka-workspace source and
 // applies its bundled registration, RBAC, and Deployment.
-func installWorkspaceProvider(backend workspaceBackend) {
-	source := os.Getenv(workspaceSourceEnv)
-	if source == "" {
-		dir, err := os.MkdirTemp("", "orka-e2e-workspace-source-")
-		Expect(err).NotTo(HaveOccurred())
-		DeferCleanup(os.RemoveAll, dir)
-		Expect(fetchPinnedOrkaWorkspaceSource(dir)).To(Succeed())
-		source = dir
-	}
+func installWorkspaceProvider(backend workspaceBackend, source string) {
 	image := "orka-workspace-" + backend.name + ":e2e"
 	_, err := utils.Run(exec.Command("docker", "build", "-t", image,
 		"-f", filepath.Join(source, "providers", backend.name, "Dockerfile"), source))
