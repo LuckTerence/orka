@@ -15,6 +15,8 @@ vi.mock('@tanstack/react-router', async () => {
   }
 })
 
+vi.mock('sonner', () => ({ toast: { success: vi.fn(), error: vi.fn() } }))
+
 vi.mock('@/hooks/use-monitors', () => ({
   useRepositoryMonitors: () => mockUseRepositoryMonitors(),
   useRunRepositoryMonitor: (...args: unknown[]) => mockUseRunRepositoryMonitor(...args),
@@ -22,6 +24,8 @@ vi.mock('@/hooks/use-monitors', () => ({
 
 import { render, screen } from '@/test/test-utils'
 import { fireEvent } from '@testing-library/react'
+import { toast } from 'sonner'
+import { ApiError } from '@/lib/api-client'
 import type { RepositoryMonitor } from '@/schemas/monitor'
 import { RepositoryMonitorList } from './repository-monitor-list'
 
@@ -53,6 +57,8 @@ describe('RepositoryMonitorList', () => {
     mockUseRepositoryMonitors.mockReset()
     mockUseRunRepositoryMonitor.mockReset()
     mockUseRunRepositoryMonitor.mockReturnValue({ mutate: vi.fn(), isPending: false })
+    vi.mocked(toast.success).mockClear()
+    vi.mocked(toast.error).mockClear()
   })
 
   afterEach(() => {
@@ -113,5 +119,29 @@ describe('RepositoryMonitorList', () => {
 
     expect(mutate).toHaveBeenCalledTimes(1)
     expect(mockUseRunRepositoryMonitor).toHaveBeenCalledWith('repo-monitor')
+  })
+
+  it('confirms a started run', () => {
+    const mutate = vi.fn((_vars: unknown, options: { onSuccess: () => void }) => options.onSuccess())
+    mockUseRunRepositoryMonitor.mockReturnValue({ mutate, isPending: false })
+    mockUseRepositoryMonitors.mockReturnValue({ isLoading: false, data: { items: [monitor()] } })
+
+    render(<RepositoryMonitorList />)
+    fireEvent.click(screen.getByRole('button', { name: /run/i }))
+
+    expect(toast.success).toHaveBeenCalledWith('Run of repo-monitor started')
+  })
+
+  it('reports a refused run with the server message', () => {
+    const forbidden = new ApiError(403, '{"error":{"code":403,"message":"not authorized to run monitors"}}')
+    const mutate = vi.fn((_vars: unknown, options: { onError: (error: unknown) => void }) => options.onError(forbidden))
+    mockUseRunRepositoryMonitor.mockReturnValue({ mutate, isPending: false })
+    mockUseRepositoryMonitors.mockReturnValue({ isLoading: false, data: { items: [monitor()] } })
+
+    render(<RepositoryMonitorList />)
+    fireEvent.click(screen.getByRole('button', { name: /run/i }))
+
+    expect(toast.error).toHaveBeenCalledWith('Failed to start monitor run: not authorized to run monitors')
+    expect(toast.success).not.toHaveBeenCalled()
   })
 })

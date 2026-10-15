@@ -1,4 +1,5 @@
 import { Play } from 'lucide-react'
+import { toast } from 'sonner'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -65,7 +66,18 @@ export function RepositoryMonitorDetail({ monitorName }: { monitorName: string }
         action={
           <>
             <Badge variant={status?.phase === 'Ready' ? 'default' : 'secondary'}>{status?.phase || 'Pending'}</Badge>
-            <Button variant="secondary" onClick={() => runMonitor.mutate()} disabled={runMonitor.isPending}>
+            <Button
+              variant="secondary"
+              onClick={async () => {
+                try {
+                  await runMonitor.mutateAsync()
+                  toast.success('Monitor run started')
+                } catch (error) {
+                  toast.error(`Failed to start monitor run: ${error instanceof Error ? error.message : 'Unknown error'}`)
+                }
+              }}
+              disabled={runMonitor.isPending}
+            >
               <Play className="mr-2 h-4 w-4" />
               Run
             </Button>
