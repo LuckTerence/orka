@@ -3,6 +3,7 @@ import { ChatMessageList } from './chat-message-list'
 import { ChatInput } from './chat-input'
 import { useSendMessage, useChatConfig } from '@/hooks/use-chat'
 import { useProviderList } from '@/hooks/use-providers'
+import { useDocumentTitle } from '@/hooks/use-document-title'
 import { useChatStore } from '@/stores/chat'
 import { useUIStore } from '@/stores/ui'
 import { isForbiddenError } from '@/lib/api-client'
@@ -15,6 +16,7 @@ import { Plus } from 'lucide-react'
 const SERVER_DEFAULT = '__default__'
 
 export function ChatPage() {
+  useDocumentTitle('Chat')
   const sendMessage = useSendMessage()
   const { data: config } = useChatConfig()
   const { data: providersData, error: providersError } = useProviderList()

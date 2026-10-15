@@ -63,6 +63,13 @@ describe('ChatPage', () => {
     expect(screen.getByText('Chat')).toBeInTheDocument()
   })
 
+  it('names the page in the browser tab', () => {
+    const { unmount } = render(<ChatPage />)
+    expect(document.title).toBe('Chat · Orka')
+    unmount()
+    expect(document.title).toBe('Orka')
+  })
+
   it('renders without crashing', () => {
     const { container } = render(<ChatPage />)
     expect(container).toBeTruthy()
