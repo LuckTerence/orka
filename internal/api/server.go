@@ -10,9 +10,9 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io/fs"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -33,7 +33,6 @@ import (
 	"github.com/orka-agents/orka/internal/gateway/protocol"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/store"
-	"github.com/orka-agents/orka/internal/uiembed"
 )
 
 var log = logf.Log.WithName("api-server")
@@ -639,31 +638,21 @@ func routeLookupPath(path string) string {
 	return folded
 }
 
+// staticAssetRoot holds the hashed build output. A missing file under it is a
+// stale or mistyped chunk reference: answering with index.html would hand the
+// browser HTML where it expects JavaScript or CSS, so it stays a 404.
+const staticAssetRoot = "/assets"
+
 // spaFallbackEligible reports whether a 404 for path is served as the SPA
 // index page instead of a JSON error. Telemetry middleware uses the same
 // predicate so the recorded status matches what the client receives.
 func spaFallbackEligible(path string) bool {
 	folded := routeLookupPath(path)
-	for _, root := range apiPathRoots {
-		if folded == root || strings.HasPrefix(folded, root+"/") {
-			return false
-		}
+	underRoot := func(root string) bool { return folded == root || strings.HasPrefix(folded, root+"/") }
+	if slices.ContainsFunc(apiPathRoots, underRoot) || underRoot(staticAssetRoot) {
+		return false
 	}
 	return folded != "/healthz" && folded != "/readyz"
-}
-
-// spaIndexHTML returns the embedded SPA index page, or false when the UI
-// assets are unavailable.
-func spaIndexHTML() ([]byte, bool) {
-	distFS, err := uiembed.FS()
-	if err != nil {
-		return nil, false
-	}
-	data, err := fs.ReadFile(distFS, "index.html")
-	if err != nil {
-		return nil, false
-	}
-	return data, true
 }
 
 // customErrorHandler handles errors returned by handlers and produces a
@@ -696,9 +685,8 @@ func customErrorHandler(c fiber.Ctx, err error) error {
 
 	// For 404s on non-API paths, serve the SPA index.html
 	if code == fiber.StatusNotFound && spaFallbackEligible(c.Path()) {
-		if data, ok := spaIndexHTML(); ok {
-			c.Set("Content-Type", "text/html; charset=utf-8")
-			return c.Status(fiber.StatusOK).Send(data)
+		if page, ok := embeddedSPAIndexPage(); ok {
+			return page.send(c)
 		}
 	}
 
