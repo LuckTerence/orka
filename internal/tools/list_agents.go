@@ -51,8 +51,20 @@ func (t *ListAgentsTool) Execute(ctx context.Context, args json.RawMessage) (str
 	for _, agent := range agentList.Items {
 		info := map[string]any{nameField: agent.Name}
 
-		if agent.Spec.Model != nil {
-			info[modelField] = fmt.Sprintf("%s/%s", agent.Spec.Model.Provider, agent.Spec.Model.Name)
+		// A referenced Provider is authoritative over model.provider.
+		provider := ""
+		if agent.Spec.ProviderRef != nil {
+			provider = agent.Spec.ProviderRef.Name
+			info[providerRefField] = provider
+		} else if agent.Spec.Model != nil {
+			provider = agent.Spec.Model.Provider
+		}
+		if agent.Spec.Model != nil && agent.Spec.Model.Name != "" {
+			model := agent.Spec.Model.Name
+			if provider != "" {
+				model = provider + "/" + model
+			}
+			info[modelField] = model
 		}
 
 		if len(agent.Spec.Tools) > 0 {
