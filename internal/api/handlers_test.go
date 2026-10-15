@@ -440,6 +440,26 @@ func TestHandlers_Readyz_UsesUncachedNamedNamespaceRead(t *testing.T) {
 	}
 }
 
+func TestHandlers_CreateTaskRejectsNonPositiveTimeout(t *testing.T) {
+	handlers, app := setupTestHandlers()
+	app.Post("/tasks", handlers.CreateTask)
+
+	for _, timeout := range []string{"0", "0s", "-5m"} {
+		body := CreateTaskRequest{
+			Name: "zero-timeout", Namespace: "default", Type: corev1alpha1.TaskTypeContainer,
+			Image: "busybox", Command: []string{"true"}, Timeout: timeout,
+		}
+		bodyBytes, _ := json.Marshal(body)
+		req := httptest.NewRequest(http.MethodPost, "/tasks", bytes.NewReader(bodyBytes))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+		require.Equal(t, http.StatusBadRequest, resp.StatusCode, timeout)
+	}
+	err := handlers.client.Get(context.Background(), types.NamespacedName{Name: "zero-timeout", Namespace: "default"}, &corev1alpha1.Task{})
+	require.True(t, apierrors.IsNotFound(err), "no Task may be created with a non-positive timeout")
+}
+
 func TestHandlers_CreateTask_Valid(t *testing.T) {
 	handlers, app := setupTestHandlers()
 	app.Post("/tasks", handlers.CreateTask)

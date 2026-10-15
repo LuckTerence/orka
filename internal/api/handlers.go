@@ -576,6 +576,11 @@ func (h *Handlers) CreateTask(c fiber.Ctx) error {
 		if err != nil {
 			return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("invalid timeout: %v", err))
 		}
+		// A zero or negative timeout has always elapsed: the Task would fail
+		// as timed out the moment it started.
+		if duration.Duration <= 0 {
+			return fiber.NewError(fiber.StatusBadRequest, "invalid timeout: must be greater than zero")
+		}
 		task.Spec.Timeout = duration
 	}
 
