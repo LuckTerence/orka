@@ -76,11 +76,15 @@ export function useUpdateThreatModel(name: string) {
     // (or, for 0, when one has been created meanwhile).
     mutationFn: (body: { content: string; source?: string; expectedVersion: number }) =>
       api.put<ThreatModel>(`/security/repositories/${name}/threat-model`, body, { namespace }),
-    onSuccess: (saved) => {
+    // The callbacks run with the latest render's options, so keep the target
+    // the PUT was sent for: a namespace or repository switch while the save is
+    // pending must not file the saved model under the new one.
+    onMutate: () => ({ namespace, name }),
+    onSuccess: (saved, _body, target) => {
       // The saved version is the base for the next edit, even before the refetch lands.
-      if (saved) queryClient.setQueryData(['security', 'threat-model', namespace, name], saved)
-      queryClient.invalidateQueries({ queryKey: ['security', 'threat-model', namespace, name] })
-      queryClient.invalidateQueries({ queryKey: ['security', 'repository', namespace, name] })
+      if (saved) queryClient.setQueryData(['security', 'threat-model', target.namespace, target.name], saved)
+      queryClient.invalidateQueries({ queryKey: ['security', 'threat-model', target.namespace, target.name] })
+      queryClient.invalidateQueries({ queryKey: ['security', 'repository', target.namespace, target.name] })
     },
   })
 }

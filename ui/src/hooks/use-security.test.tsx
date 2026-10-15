@@ -20,6 +20,7 @@ import {
   useReopenFinding,
   useRepositoryScan,
   useRunSecurityScan,
+  useUpdateThreatModel,
   useValidateFinding,
 } from './use-security'
 
@@ -86,6 +87,31 @@ function expectNamespaceQuery(requests: CapturedRequest[]) {
 describe('security mutations', () => {
   beforeEach(() => {
     useUIStore.setState({ namespace: 'team-blue' })
+  })
+
+  it('files a saved threat model under the repository it was saved for', async () => {
+    let release: () => void = () => {}
+    server.use(http.put('/api/v1/security/repositories/:name/threat-model', ({ params }) =>
+      new Promise<Response>((resolve) => {
+        release = () => resolve(HttpResponse.json({ namespace: 'team-blue', repositoryScan: params.name, version: 2, content: 'saved', source: 'edited' }))
+      })))
+    const queryClient = createQueryClient()
+    const { result } = renderHook(() => useUpdateThreatModel('repo'), { wrapper: createWrapper(queryClient) })
+
+    let save: Promise<unknown> = Promise.resolve()
+    act(() => {
+      save = result.current.mutateAsync({ content: 'saved', expectedVersion: 1 })
+    })
+    // The user switches namespace while the PUT is still in flight.
+    act(() => useUIStore.setState({ namespace: 'team-red' }))
+    await waitFor(() => expect(release).not.toBe(undefined))
+    await act(async () => {
+      release()
+      await save
+    })
+
+    expect(queryClient.getQueryData(['security', 'threat-model', 'team-blue', 'repo'])).toMatchObject({ version: 2 })
+    expect(queryClient.getQueryData(['security', 'threat-model', 'team-red', 'repo'])).toBeUndefined()
   })
 
   it('runs a repository scan with the selected namespace in the query', async () => {
