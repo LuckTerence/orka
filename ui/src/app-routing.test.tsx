@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
+import { delay, http, HttpResponse } from 'msw'
+import { server } from '@/test/mocks/server'
 
 vi.mock('zustand/middleware', async () => {
   const actual = await vi.importActual('zustand/middleware')
@@ -34,6 +36,16 @@ describe('App routing', () => {
   })
 
   it('signs in from a #token= deep link and lands on the deep link', async () => {
+    // While the router moves to /login, the deep-link page still renders and
+    // asks for its data without a token. Those 401s answer after the token
+    // is validated and must not sign the new session out.
+    server.use(http.get('/api/v1/security/repositories', async ({ request }) => {
+      if (request.headers.get('Authorization') !== 'Bearer deep-link-token') {
+        await delay(150)
+        return HttpResponse.json({ error: { code: 401, message: 'unauthorized' } }, { status: 401 })
+      }
+      return HttpResponse.json({ items: [] })
+    }))
     const { App, useAuthStore } = await loadApp('/security?view=all#token=deep-link-token')
     render(<App />)
 
@@ -42,6 +54,9 @@ describe('App routing', () => {
     expect(window.location.search).toBe('?view=all')
     expect(window.location.hash).toBe('')
     expect(await screen.findByRole('heading', { level: 1, name: 'Security' })).toBeInTheDocument()
+    await delay(300)
+    expect(useAuthStore.getState().token).toBe('deep-link-token')
+    expect(window.location.pathname).toBe('/security')
   })
 
   it('renders unknown addresses as a not-found page inside the layout', async () => {
