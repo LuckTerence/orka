@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link } from '@tanstack/react-router'
+import { toast } from 'sonner'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Badge } from '@/components/ui/badge'
@@ -27,6 +28,7 @@ import { ApiError, isForbiddenError, isNotFoundError } from '@/lib/api-client'
 import { useNavigate, useSearch } from '@tanstack/react-router'
 import type { ExecutionEvent, PlanState } from '@/schemas/task'
 import { timeAgo } from '@/lib/time'
+import { actionErrorMessage } from './action-error'
 
 function latestEventPlan(events: ExecutionEvent[]): PlanState | undefined {
   let latest: ExecutionEvent | undefined
@@ -99,6 +101,24 @@ export function TaskDetail({ taskId }: { taskId: string }) {
   // delete a different task than the one armed.
   const deleteIdentity = `${task?.metadata.namespace ?? ''}/${task?.metadata.uid ?? ''}/${taskId}`
   const deleteArmed = confirmDelete === deleteIdentity
+  // isPending lands a render later; a double click on Confirm must send a
+  // single DELETE.
+  const deletingRef = useRef(false)
+  const confirmTaskDelete = async (name: string) => {
+    if (deletingRef.current) return
+    deletingRef.current = true
+    try {
+      await deleteTask.mutateAsync(name)
+      toast.success(`Task ${name} deleted`)
+      navigate({ to: '/tasks' })
+    } catch (err) {
+      // Disarm so the header is usable again; the toast carries the reason.
+      setConfirmDelete(null)
+      toast.error(actionErrorMessage('Failed to delete task', err))
+    } finally {
+      deletingRef.current = false
+    }
+  }
   // Runtime-tab data: fetched only when that tab is active so other tabs don't
   // pay for trace/approvals/artifacts. Each hook is namespace+uid scoped.
   const runtimeActive = activeTab === 'runtime' && !taskUnavailable
@@ -194,19 +214,22 @@ export function TaskDetail({ taskId }: { taskId: string }) {
               <Button
                 variant="destructive"
                 size="sm"
-                onClick={async () => {
-                  await deleteTask.mutateAsync(task.metadata.name)
-                  navigate({ to: '/tasks' })
-                }}
+                disabled={deleteTask.isPending}
+                onClick={() => confirmTaskDelete(task.metadata.name)}
               >
-                Confirm delete
+                {deleteTask.isPending ? 'Deleting…' : 'Confirm delete'}
               </Button>
-              <Button variant="ghost" size="sm" onClick={() => setConfirmDelete(null)}>
+              <Button variant="ghost" size="sm" onClick={() => setConfirmDelete(null)} disabled={deleteTask.isPending}>
                 Cancel
               </Button>
             </span>
           ) : (
-            <Button variant="destructive" size="sm" onClick={() => setConfirmDelete(deleteIdentity)}>
+            <Button
+              variant="destructive"
+              size="sm"
+              onClick={() => setConfirmDelete(deleteIdentity)}
+              title={['Succeeded', 'Failed', 'Cancelled'].includes(task.status?.phase ?? '') ? 'Delete task' : 'Delete (cancels a running task)'}
+            >
               <Trash2 className="mr-2 h-4 w-4" /> Delete
             </Button>
           )}

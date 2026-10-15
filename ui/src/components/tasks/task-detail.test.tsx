@@ -8,6 +8,8 @@ vi.mock('zustand/middleware', () => ({
   persist: (fn: unknown) => fn,
 }))
 
+vi.mock('sonner', () => ({ toast: { success: vi.fn(), error: vi.fn() } }))
+
 const mockNavigate = vi.fn()
 const mockSearch: { current: { tab?: string } } = { current: { tab: 'overview' } }
 vi.mock('@tanstack/react-router', async () => {
@@ -21,6 +23,7 @@ vi.mock('@tanstack/react-router', async () => {
   }
 })
 
+import { toast } from 'sonner'
 import { useUIStore } from '@/stores/ui'
 import { useAuthStore } from '@/stores/auth'
 import { TaskDetail } from './task-detail'
@@ -33,6 +36,8 @@ describe('TaskDetail', () => {
     useAuthStore.setState({ token: 'test-token' })
     mockNavigate.mockClear()
     mockSearch.current = { tab: 'overview' }
+    vi.mocked(toast.success).mockClear()
+    vi.mocked(toast.error).mockClear()
   })
 
   it('loading state shows skeletons', () => {
@@ -380,6 +385,37 @@ describe('TaskDetail', () => {
     await waitFor(() => {
       expect(mockNavigate).toHaveBeenCalledWith({ to: '/tasks' })
     })
+  })
+
+  it('keeps the page and explains a failed delete instead of hanging on Confirm', async () => {
+    const user = userEvent.setup()
+    server.use(
+      http.get('/api/v1/tasks/:id', () =>
+        HttpResponse.json({
+          metadata: { name: 'locked-task', namespace: 'default', uid: 'uid-locked' },
+          spec: { type: 'container', image: 'alpine' },
+          status: { phase: 'Succeeded' },
+        }),
+      ),
+      http.delete('/api/v1/tasks/:id', () =>
+        HttpResponse.json({ error: { code: 403, message: 'not authorized to delete tasks' } }, { status: 403 }),
+      ),
+    )
+    render(<TaskDetail taskId="locked-task" />)
+    await user.click(await screen.findByRole('button', { name: /^delete/i }))
+    await user.click(screen.getByRole('button', { name: /confirm delete/i }))
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Failed to delete task: not authorized to delete tasks'))
+    expect(mockNavigate).not.toHaveBeenCalled()
+    // The confirm is disarmed so the header is usable again.
+    expect(screen.queryByRole('button', { name: /confirm delete/i })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^delete/i })).toBeEnabled()
+  })
+
+  it('has a single Delete control on the Runtime tab', async () => {
+    mockSearch.current = { tab: 'runtime' }
+    render(<TaskDetail taskId="test-task" />)
+    expect(await screen.findByText('Task flow')).toBeInTheDocument()
+    expect(screen.getAllByRole('button', { name: /delete/i })).toHaveLength(1)
   })
 
   it('shows conditions when present', async () => {

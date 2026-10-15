@@ -31,6 +31,28 @@ describe('ForkDialog', () => {
     useUIStore.setState({ namespace: 'default' })
   })
 
+  it('uses an explicit checkpoint when launched without an event row', () => {
+    render(<ForkDialog taskId="tk" event={null} afterSeq={17} open onOpenChange={() => {}} />)
+    expect(screen.getByText(/#17/)).toBeInTheDocument()
+  })
+
+  it('explains an invalid name inline and does not send it', async () => {
+    let posted = false
+    server.use(
+      http.post(`${API}/tasks/:id/fork`, () => {
+        posted = true
+        return HttpResponse.json({}, { status: 201 })
+      }),
+    )
+    const user = userEvent.setup()
+    render(<ForkDialog taskId="tk" event={makeEvent({ seq: 5 })} open onOpenChange={() => {}} />)
+    await user.type(screen.getByLabelText(/New task name/), 'Bad_Name')
+    expect(screen.getByRole('alert')).toHaveTextContent('Use lowercase letters, numbers')
+    expect(screen.getByLabelText(/New task name/)).toHaveAttribute('aria-invalid', 'true')
+    expect(screen.getByRole('button', { name: /create fork/i })).toBeDisabled()
+    expect(posted).toBe(false)
+  })
+
   it('seeds afterSeq from the selected event', () => {
     render(
       <ForkDialog taskId="tk" event={makeEvent({ seq: 5 })} open onOpenChange={() => {}} />,
