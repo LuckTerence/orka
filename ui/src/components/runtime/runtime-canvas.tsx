@@ -103,7 +103,7 @@ export function RuntimeCanvas() {
     <div className="space-y-4">
       <PageHeader
         title="Runtime Canvas"
-        description={`${runningTasks.length} active · namespace ${namespace}`}
+        description={taskListError ? `namespace ${namespace}` : `${runningTasks.length} active · namespace ${namespace}`}
         action={controls}
       />
 

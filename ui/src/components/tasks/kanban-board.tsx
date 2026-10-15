@@ -1,5 +1,6 @@
 import { Card, CardContent } from '@/components/ui/card'
 import { ListAccessError } from '@/components/ui/list-access-error'
+import { isForbiddenError } from '@/lib/api-client'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useTaskListAll } from '@/hooks/use-tasks'
 import { phaseStyle } from '@/lib/task-status'
@@ -39,7 +40,10 @@ export function KanbanBoard() {
   // Walk every page up to the shared summary cap (like the Dashboard) so
   // column counts cover the namespace instead of the first 100 names; the
   // walk is heavier than one page, so it polls at the Live view's cadence.
-  const { data, isLoading, error } = useTaskListAll('100', 10000)
+  const { data, isLoading, error: listError } = useTaskListAll('100', 10000)
+  // A 403 always replaces the board; any other failure only blocks a board
+  // that never loaded, so a failed background refresh keeps the last one.
+  const error = listError && (isForbiddenError(listError) || !data) ? listError : null
   const tasks = data?.items ?? []
   const truncated = Boolean(data?.truncated)
   const grouped = groupByPhase(tasks)

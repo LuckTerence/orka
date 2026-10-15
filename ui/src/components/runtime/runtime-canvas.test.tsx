@@ -50,6 +50,8 @@ describe('RuntimeCanvas', () => {
       HttpResponse.json({ error: { code: 403, message: 'not authorized' } }, { status: 403 })))
     render(<RuntimeCanvas />)
     expect(await screen.findByText('Not authorized to view tasks')).toBeInTheDocument()
+    // No task count while the list cannot be read.
+    expect(screen.queryByText(/\d+ active ·/)).not.toBeInTheDocument()
     expect(screen.getByRole('alert')).toHaveTextContent('not authorized')
     expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument()
     expect(screen.queryByText(/No tasks in namespace/)).not.toBeInTheDocument()
