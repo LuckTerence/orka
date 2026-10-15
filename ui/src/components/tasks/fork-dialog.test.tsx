@@ -167,6 +167,33 @@ describe('ForkDialog', () => {
     expect(screen.queryByRole('link', { name: /tk-fork-xyz/ })).not.toBeInTheDocument()
   })
 
+  it('returns focus to the button that opened it on Cancel and on Escape', async () => {
+    // Opened from state, like the timeline and runtime controls: no DialogTrigger.
+    function Harness() {
+      const [open, setOpen] = useState(false)
+      return (
+        <>
+          <button onClick={() => setOpen(true)}>Fork</button>
+          <ForkDialog taskId="tk" event={makeEvent({ seq: 4 })} open={open} onOpenChange={setOpen} />
+        </>
+      )
+    }
+    const user = userEvent.setup()
+    render(<Harness />)
+    const opener = screen.getByRole('button', { name: 'Fork' })
+
+    await user.click(opener)
+    await user.click(await screen.findByRole('button', { name: 'Cancel' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    await waitFor(() => expect(opener).toHaveFocus())
+
+    await user.click(opener)
+    await screen.findByRole('dialog')
+    await user.keyboard('{Escape}')
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    await waitFor(() => expect(opener).toHaveFocus())
+  })
+
   it('sends an Idempotency-Key header and reuses it across retries of one submission', async () => {
     const keys: string[] = []
     let attempts = 0

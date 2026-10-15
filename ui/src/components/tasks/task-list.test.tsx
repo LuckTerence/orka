@@ -153,6 +153,24 @@ describe('TaskList', () => {
     expect(deletes).toEqual([])
   })
 
+  it('returns focus to the row delete button when the confirmation closes', async () => {
+    const user = userEvent.setup()
+    serveDeletableTask()
+    render(<TaskList />)
+    const trash = await screen.findByRole('button', { name: 'Delete task del-task' })
+
+    await user.click(trash)
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    await waitFor(() => expect(trash).toHaveFocus())
+
+    await user.click(trash)
+    await screen.findByRole('dialog')
+    await user.keyboard('{Escape}')
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    await waitFor(() => expect(trash).toHaveFocus())
+  })
+
   it('shows the server message without a repeated prefix when the delete fails', async () => {
     const user = userEvent.setup()
     serveDeletableTask()
