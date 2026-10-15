@@ -9,7 +9,9 @@ package e2e
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -22,6 +24,7 @@ import (
 
 	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	k8syaml "k8s.io/apimachinery/pkg/util/yaml"
 
 	"github.com/orka-agents/orka/test/fixtures/fakeforge"
 	"github.com/orka-agents/orka/test/utils"
@@ -596,26 +599,26 @@ func installWorkspaceProvider(backend workspaceBackend, source string) {
 	Expect(err).NotTo(HaveOccurred())
 	rendered, err := utils.Run(exec.Command("kubectl", "kustomize", filepath.Join(source, "providers", backend.name, "config")))
 	Expect(err).NotTo(HaveOccurred())
-	cmd := exec.Command("kubectl", "create", "--dry-run=client", "-o", "json", "-f", "-")
-	cmd.Stdin = strings.NewReader(rendered)
-	output, err := utils.Run(cmd)
-	Expect(err).NotTo(HaveOccurred())
-	// kubectl prints one object per document, or a List for several.
 	var objects []map[string]any
-	for decoder := json.NewDecoder(strings.NewReader(output)); decoder.More(); {
+	decoder := k8syaml.NewYAMLOrJSONDecoder(strings.NewReader(rendered), 4096)
+	for {
 		var object map[string]any
-		Expect(decoder.Decode(&object)).To(Succeed())
-		if nested, ok := object["items"].([]any); ok && object["kind"] == "List" {
-			for _, item := range nested {
-				objects = append(objects, item.(map[string]any))
-			}
-			continue
+		if err := decoder.Decode(&object); errors.Is(err, io.EOF) {
+			break
+		} else {
+			Expect(err).NotTo(HaveOccurred())
 		}
-		objects = append(objects, object)
+		if object != nil {
+			objects = append(objects, object)
+		}
 	}
-	var items []any
+	// Provider CRDs must be established before their custom resources apply.
+	var crds, items []any
 	for _, item := range objects {
 		switch item["kind"] {
+		case "CustomResourceDefinition":
+			crds = append(crds, item)
+			continue
 		case backend.profileKind:
 			continue // the bundle's sample profile targets the default namespace
 		case "Deployment":
@@ -626,6 +629,12 @@ func installWorkspaceProvider(backend workspaceBackend, source string) {
 			}
 		}
 		items = append(items, item)
+	}
+	Expect(applyManifestJSON(map[string]any{"apiVersion": "v1", "kind": "List", "items": crds})).To(Succeed())
+	for _, crd := range crds {
+		_, err := utils.Run(exec.Command("kubectl", "wait", "--for=condition=Established", "--timeout=90s",
+			"crd/"+crd.(map[string]any)["metadata"].(map[string]any)["name"].(string)))
+		Expect(err).NotTo(HaveOccurred())
 	}
 	Expect(applyManifestJSON(map[string]any{"apiVersion": "v1", "kind": "List", "items": items})).To(Succeed())
 	_, err = utils.Run(exec.Command("kubectl", "-n", wspProviderNS, "rollout", "status",
