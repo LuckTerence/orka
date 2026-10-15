@@ -225,10 +225,12 @@ describe('TaskApprovalPanel', () => {
     await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Decision recorded: Approved'))
   })
 
-  it('disables the action buttons while a decision is in flight', async () => {
+  it('blocks repeat decisions while one is in flight without dropping focus', async () => {
+    let posts = 0
     server.use(
       http.get(`${API}/tasks/:id/approvals`, () => HttpResponse.json(listResponse([approval()]))),
       http.post(`${API}/tasks/:id/approvals/:approvalID/decision`, async () => {
+        posts += 1
         await delay(100)
         return HttpResponse.json(approval({ status: 'approved' }))
       }),
@@ -238,9 +240,35 @@ describe('TaskApprovalPanel', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: 'Approve' })).toBeInTheDocument())
     const approveBtn = screen.getByRole('button', { name: 'Approve' })
     await user.click(approveBtn)
-    // While the request is in flight, both buttons are disabled.
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Decline' })).toBeDisabled())
-    expect(screen.getByRole('button', { name: 'Approve' })).toBeDisabled()
+    // While the request is in flight, both buttons read as disabled but the
+    // pressed one keeps focus (a disabled element would drop it).
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Decline' })).toHaveAttribute('aria-disabled', 'true'))
+    expect(approveBtn).toHaveAttribute('aria-disabled', 'true')
+    expect(approveBtn).toHaveFocus()
+    await user.click(approveBtn)
+    await user.click(screen.getByRole('button', { name: 'Decline' }))
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Decision recorded: Approved'))
+    expect(posts).toBe(1)
+  })
+
+  it('moves keyboard focus to the decided card instead of dropping it', async () => {
+    let listCalls = 0
+    server.use(
+      http.get(`${API}/tasks/:id/approvals`, () => {
+        listCalls += 1
+        return HttpResponse.json(listResponse([approval({ status: listCalls > 1 ? 'approved' : 'pending' })]))
+      }),
+      http.post(`${API}/tasks/:id/approvals/:approvalID/decision`, () =>
+        HttpResponse.json(approval({ status: 'approved' }))),
+    )
+    const user = userEvent.setup()
+    render(<TaskApprovalPanel taskId="tk" />)
+    const approveBtn = await screen.findByRole('button', { name: 'Approve' })
+    approveBtn.focus()
+    await user.keyboard('{Enter}')
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument())
+    expect(screen.getByRole('heading', { level: 3, name: 'web_fetch' })).toHaveFocus()
+    expect(document.body).not.toHaveFocus()
   })
 
   it('shows an empty state when there are no approvals', async () => {

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { toast } from 'sonner'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -60,6 +60,7 @@ function ApprovalCard({
   const decide = useDecideApproval(taskId)
   const [reason, setReason] = useState('')
   const [conflict, setConflict] = useState<string | null>(null)
+  const headingRef = useRef<HTMLHeadingElement>(null)
   const isPending = approval.status === 'pending'
   // A pending approval on a completed task can't be decided — show it read-only.
   const actionable = isPending && !taskTerminal
@@ -75,6 +76,9 @@ function ApprovalCard({
         reason: reason.trim() || undefined,
       })
       toast.success(`Decision recorded: ${statusStyle(updated.status).label}`)
+      // The decided card drops its buttons; keep keyboard focus on the card
+      // instead of letting it fall back to the page.
+      headingRef.current?.focus()
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
         // The approval changed underneath us (decided elsewhere, expired, or
@@ -84,6 +88,8 @@ function ApprovalCard({
         setConflict(err.message || 'This approval was already decided.')
         toast.error('Approval already decided')
         onConflict?.()
+        // The refetch settles the card, which can remove its buttons.
+        headingRef.current?.focus()
       } else {
         const message = err instanceof Error ? err.message : 'Unknown error'
         setConflict(message)
@@ -97,7 +103,13 @@ function ApprovalCard({
       <CardContent className="space-y-3">
         <div className="flex flex-wrap items-center gap-2">
           <ApprovalStatusBadge status={approval.status} />
-          <span className="font-medium">{approval.action || 'Action'}</span>
+          <h3
+            ref={headingRef}
+            tabIndex={-1}
+            className="rounded-sm font-medium outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
+          >
+            {approval.action || 'Action'}
+          </h3>
           {approval.toolCallID && (
             <Badge variant="outline" className="font-mono text-[10px]" title={approval.toolCallID}>
               call: {approval.toolCallID.length > 12 ? approval.toolCallID.slice(0, 12) + '…' : approval.toolCallID}
@@ -178,11 +190,15 @@ function ApprovalCard({
               aria-label="Decision reason"
               disabled={submitting}
             />
+            {/* aria-disabled, not disabled, while a decision is in flight:
+                disabling the focused button would drop keyboard focus, and
+                submit() already ignores repeat presses. */}
             <div className="flex gap-2">
               <Button
                 size="sm"
                 onClick={() => submit('approve')}
-                disabled={submitting}
+                aria-disabled={submitting || undefined}
+                className="aria-disabled:opacity-50"
                 aria-label="Approve"
               >
                 <Check className="mr-1 h-4 w-4" /> Approve
@@ -191,7 +207,8 @@ function ApprovalCard({
                 size="sm"
                 variant="destructive"
                 onClick={() => submit('decline')}
-                disabled={submitting}
+                aria-disabled={submitting || undefined}
+                className="aria-disabled:opacity-50"
                 aria-label="Decline"
               >
                 <X className="mr-1 h-4 w-4" /> Decline
