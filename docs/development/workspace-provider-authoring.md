@@ -128,7 +128,7 @@ reuse and finalization until an operator verifies and reconciles the exact
 creation outcome. Core never reconstructs a child UID from public metadata.
 
 The shared repository contains the [provider installation and retirement
-guide](https://github.com/orka-agents/orka-workspace/blob/a735442d1b4090e18554a6384ff5bf8798e6aa98/docs/external-providers.md),
+guide](https://github.com/orka-agents/orka-workspace/blob/c10e4ee498903ce1ae6b79df64e0ccde43b81eb4/docs/external-providers.md),
 provider-specific prerequisites, and conformance/live proof scripts. External ACP
 providers use the generic workspace API and ACP dispatch flags. Legacy ACP
 cleanup belongs to the previous release; the removal release retains only pooled
@@ -265,7 +265,7 @@ implementations must also preserve the data-plane protocol described above.
 
 The external provider API and binaries are installed from the same
 `orka-workspace` revision that Orka pins in its Go module. The [shared installation
-and compatibility guide](https://github.com/orka-agents/orka-workspace/blob/a735442d1b4090e18554a6384ff5bf8798e6aa98/docs/external-providers.md)
+and compatibility guide](https://github.com/orka-agents/orka-workspace/blob/c10e4ee498903ce1ae6b79df64e0ccde43b81eb4/docs/external-providers.md)
 lists the supported Kubernetes and backend versions and the provider-owned schemas.
 
 Before replacing Orka or applying the new RuntimePool CRD, drain every legacy ACP
