@@ -4,7 +4,7 @@
 # out-of-tree Substrate provider into it:
 #   bash scripts/workspace-substrate-cluster.sh
 #   E2E_WORKSPACE_PROVIDER=substrate E2E_GINKGO_LABEL_FILTER=workspace-provider make test-e2e
-# It prints the environment the suite needs (KUBECONFIG, kubectl-ate).
+# It prints the environment the suite needs (KUBECONFIG, kind, kubectl-ate).
 set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 KIND_CLUSTER="${KIND_CLUSTER:?set KIND_CLUSTER}"
@@ -13,6 +13,8 @@ source "${ROOT_DIR}/scripts/lib/substrate-upstream.sh"
 
 substrate_prepare_upstream "${ROOT_DIR}" "${RUN_DIR}" "${KIND_CLUSTER}"
 (cd "${SUBSTRATE_DIR}" && go build -o "${RUN_DIR}/kubectl-ate" ./cmd/kubectl-ate)
+# Substrate's node image needs the kind release that created it to load images.
+kind_bin="$(cd "${SUBSTRATE_DIR}" && hack/run-tool.sh --print-bin-path kind)"
 kubectl_ate() { "${RUN_DIR}/kubectl-ate" --context "kind-${KIND_CLUSTER}" "$@"; }
 
 worker="$(cd "${SUBSTRATE_DIR}" && ko build --platform="linux/$(go env GOARCH)" ./cmd/ateom-gvisor)"
@@ -104,6 +106,6 @@ fi
 kubectl -n kube-system rollout status deployment/coredns --timeout=2m
 kubectl -n ate-demo wait --for=jsonpath='{.status.readyReplicas}'=2 workerpool/orka-native --timeout=5m
 
-printf 'KUBECONFIG=%s\nE2E_SUBSTRATE_KUBECTL_ATE=%s\nE2E_KIND_REGISTRY=kind-registry\nE2E_RUNTIME_REGISTRY_HOST=%s:5000\n' \
-  "${RUN_DIR}/kubeconfig" "${RUN_DIR}/kubectl-ate" "${registry_ip}" >"${RUN_DIR}/e2e.env"
+printf 'KUBECONFIG=%s\nKIND=%s\nE2E_SUBSTRATE_KUBECTL_ATE=%s\nE2E_KIND_REGISTRY=kind-registry\nE2E_RUNTIME_REGISTRY_HOST=%s:5000\n' \
+  "${RUN_DIR}/kubeconfig" "${kind_bin}" "${RUN_DIR}/kubectl-ate" "${registry_ip}" >"${RUN_DIR}/e2e.env"
 cat "${RUN_DIR}/e2e.env"
