@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { RouterProvider, createRouter } from '@tanstack/react-router'
 import { routeTree } from './routeTree.gen'
+import { NotFoundPage } from './components/common/not-found-page'
 import { captureHashToken } from './lib/login-return'
 import { useAuthStore } from './stores/auth'
 import { useChatStore } from './stores/chat'
@@ -45,7 +46,8 @@ useUIStore.subscribe((state) => {
 // Before the router reads the URL: see captureHashToken.
 captureHashToken()
 
-const router = createRouter({ routeTree })
+// Unknown addresses render inside the root layout's Outlet.
+const router = createRouter({ routeTree, defaultNotFoundComponent: NotFoundPage })
 
 declare module '@tanstack/react-router' {
   interface Register {

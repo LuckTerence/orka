@@ -43,4 +43,16 @@ describe('App routing', () => {
     expect(window.location.hash).toBe('')
     expect(await screen.findByRole('heading', { level: 1, name: 'Security' })).toBeInTheDocument()
   })
+
+  it('renders unknown addresses as a not-found page inside the layout', async () => {
+    const { App, useAuthStore } = await loadApp('/no-such-page')
+    useAuthStore.setState({ token: 'test-token' })
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { level: 1, name: 'Page not found' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Go to Dashboard' })).toHaveAttribute('href', '/')
+    // Inside the layout: the namespace selector and sidebar render around it.
+    expect(screen.getByRole('combobox', { name: 'Namespace' })).toBeInTheDocument()
+    expect(screen.getByRole('main')).toContainElement(screen.getByRole('heading', { level: 1, name: 'Page not found' }))
+  })
 })
