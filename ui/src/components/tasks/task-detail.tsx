@@ -218,6 +218,9 @@ export function TaskDetail({ taskId }: { taskId: string }) {
   // hashed selector value for long names.
   const parentTaskName = task.metadata.annotations?.['orka.ai/parent-task-name']?.trim() ||
     task.metadata.labels?.['orka.ai/parent-task']?.trim()
+  // A fork is labeled as a child of its source; name the relation it has.
+  const forkSourceName = task.metadata.annotations?.['orka.ai/fork-source-task']?.trim()
+  const relatedTaskName = forkSourceName || parentTaskName
 
   return (
     <div className="space-y-4">
@@ -235,11 +238,11 @@ export function TaskDetail({ taskId }: { taskId: string }) {
           <TaskStatusBadge phase={task.status?.phase} />
           <TaskStateBadges task={task} />
           <PRStatusBadge annotations={task.metadata.annotations} />
-          {parentTaskName && (
+          {relatedTaskName && (
             <p className="w-full text-sm text-muted-foreground">
-              Child of{' '}
-              <Link to="/tasks/$taskId" params={{ taskId: parentTaskName }} className="font-mono text-foreground hover:underline">
-                {parentTaskName}
+              {forkSourceName ? 'Forked from' : 'Child of'}{' '}
+              <Link to="/tasks/$taskId" params={{ taskId: relatedTaskName }} className="font-mono text-foreground hover:underline">
+                {relatedTaskName}
               </Link>
             </p>
           )}

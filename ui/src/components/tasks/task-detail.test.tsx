@@ -476,6 +476,29 @@ describe('TaskDetail', () => {
     expect(link.closest('p')).toHaveTextContent('Child of the-parent')
   })
 
+  it('says a fork was forked from its source instead of calling it a child', async () => {
+    server.use(
+      http.get('/api/v1/tasks/:id', () =>
+        HttpResponse.json({
+          metadata: {
+            name: 'fork-task',
+            namespace: 'default',
+            uid: 'uid-fork',
+            labels: { 'orka.ai/parent-task': 'source-task' },
+            annotations: { 'orka.ai/parent-task-name': 'source-task', 'orka.ai/fork-source-task': 'source-task' },
+          },
+          spec: { type: 'agent', agentRef: { name: 'a' } },
+          status: { phase: 'Running' },
+        }),
+      ),
+    )
+    render(<TaskDetail taskId="fork-task" />)
+    await screen.findByTestId('fork-provenance')
+    const header = screen.getAllByRole('link', { name: 'source-task' }).map((link) => link.closest('p')).find(Boolean)
+    expect(header).toHaveTextContent('Forked from source-task')
+    expect(screen.queryByText(/Child of/)).not.toBeInTheDocument()
+  })
+
   it('has a single Delete control on the Runtime tab', async () => {
     mockSearch.current = { tab: 'runtime' }
     render(<TaskDetail taskId="test-task" />)
