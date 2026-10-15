@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { render, screen } from '@/test/test-utils'
+import { render, screen, within } from '@/test/test-utils'
 
 vi.mock('zustand/middleware', () => ({
   persist: (fn: unknown) => fn,
@@ -41,6 +41,11 @@ describe('TaskExecutionPanel', () => {
     expect(screen.getAllByText('Pending').length).toBeGreaterThanOrEqual(1)
     expect(screen.getByText('Execution')).toBeInTheDocument()
     expect(screen.getByTestId('progress-steps')).toBeInTheDocument()
+  })
+
+  it('wraps the step bar so the final step stays inside a narrow card', () => {
+    render(<TaskExecutionPanel task={makeTask({ status: { phase: 'Running', attempts: 1 } })} />)
+    expect(screen.getByTestId('progress-steps')).toHaveClass('flex', 'flex-wrap')
   })
 
   it('treats a Scheduled task as not-yet-started (Completed step is not current)', () => {
@@ -272,6 +277,27 @@ describe('TaskExecutionPanel', () => {
     expect(rollup).toHaveTextContent('openai')
     expect(screen.getByLabelText('GenAI context window')).toHaveTextContent('53 / 200 tokens used')
     expect(screen.getByLabelText('GenAI context window')).toHaveTextContent('27%')
+  })
+
+  it('attributes native AI usage to the request model, without an "unknown model" chip', () => {
+    const native = { namespace: 'default', streamType: 'task', streamID: 'test-task', severity: 'info', createdAt: new Date().toISOString() }
+    render(
+      <TaskExecutionPanel
+        task={makeTask({ status: { phase: 'Succeeded', attempts: 1 } })}
+        events={[
+          // The native worker nests its usage observation in content; the
+          // event itself carries no model or token fields.
+          { ...native, id: 'usage-1', seq: 1, type: 'ModelUsageUpdated', content: { usage: { model: 'gpt-4.1', inputTokens: 100, outputTokens: 20 } } },
+          { ...native, id: 'done-1', seq: 2, type: 'ModelRequestCompleted', provider: 'openai', model: 'gpt-4.1', inputTokens: 100, outputTokens: 20, stopReason: 'tool_calls' },
+          { ...native, id: 'usage-2', seq: 3, type: 'ModelUsageUpdated', content: { usage: { model: 'gpt-4.1', inputTokens: 150, outputTokens: 30 } } },
+          { ...native, id: 'done-2', seq: 4, type: 'ModelRequestCompleted', provider: 'openai', model: 'gpt-4.1', inputTokens: 150, outputTokens: 30, stopReason: 'stop' },
+        ]}
+      />,
+    )
+    const rollup = screen.getByLabelText('GenAI token rollup')
+    expect(rollup).toHaveTextContent('300 total · 250 input · 50 output')
+    expect(rollup).not.toHaveTextContent('unknown model')
+    expect(within(rollup).getByText('gpt-4.1 · openai · stop')).toBeInTheDocument()
   })
 
   it('renders exact runtime pool identity and never-replay unknown outcome guidance', () => {

@@ -213,7 +213,8 @@ export function TaskExecutionPanel({ task, events = [] }: { task: Task; events?:
         <CardTitle>Execution</CardTitle>
       </CardHeader>
       <CardContent className="space-y-6">
-        <div className="flex items-center gap-2" data-testid="progress-steps">
+        {/* Steps wrap on narrow cards instead of running past the edge. */}
+        <div className="flex flex-wrap items-center gap-2" data-testid="progress-steps">
           {steps.map((step, index) => {
             const marker = stepMarker(index, current, phase)
             return (
