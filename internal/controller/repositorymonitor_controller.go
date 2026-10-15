@@ -200,11 +200,7 @@ func ParseRepositoryMonitorSchedule(monitor *corev1alpha1.RepositoryMonitor) (cr
 	if schedule == "" {
 		return nil, nil
 	}
-	parsed, err := cron.ParseStandard(schedule)
-	if err == nil {
-		return parsed, nil
-	}
-	return nil, err
+	return parseRepositorySchedule(schedule)
 }
 
 const repositoryMonitorReasonUnsupportedReviewerAgent = "UnsupportedReviewerAgent"

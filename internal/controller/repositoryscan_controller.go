@@ -300,7 +300,23 @@ func (r *RepositoryScanReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 // ParseRepositoryScanSchedule parses spec.schedule the way scheduled scans run it.
 func ParseRepositoryScanSchedule(schedule string) (cron.Schedule, error) {
-	return cron.ParseStandard(schedule)
+	return parseRepositorySchedule(schedule)
+}
+
+// parseRepositorySchedule parses a standard cron schedule for repository scans
+// and monitors. The cron parser clamps @every intervals below one second
+// (including zero and negative ones) to one second, so it rejects any @every
+// interval shorter than the one-minute granularity of five-field cron;
+// otherwise every reconcile would start another run.
+func parseRepositorySchedule(schedule string) (cron.Schedule, error) {
+	parsed, err := cron.ParseStandard(schedule)
+	if err != nil {
+		return nil, err
+	}
+	if every, ok := parsed.(cron.ConstantDelaySchedule); ok && every.Delay < time.Minute {
+		return nil, errors.New("@every interval must be at least 1 minute")
+	}
+	return parsed, nil
 }
 
 func taskSecurityStage(task *corev1alpha1.Task) string {

@@ -411,6 +411,10 @@ func TestRepositoryMonitorMutationsRejectInvalidValues(t *testing.T) {
 		{name: "not a cron expression", field: `"schedule":"every day"`, want: "spec.schedule is invalid"},
 		{name: "minute out of range", field: `"schedule":"61 * * * *"`, want: "spec.schedule is invalid"},
 		{name: "unknown time zone", field: `"schedule":"0 * * * *","timeZone":"Mars/Olympus"`, want: "spec.schedule is invalid"},
+		{name: "zero every interval", field: `"schedule":"@every 0s"`, want: "@every interval must be at least 1 minute"},
+		{name: "negative every interval", field: `"schedule":"@every -5m"`, want: "@every interval must be at least 1 minute"},
+		{name: "sub-minute every interval", field: `"schedule":"@every 30s"`, want: "@every interval must be at least 1 minute"},
+		{name: "sub-minute every interval in a time zone", field: `"schedule":"@every 1s","timeZone":"America/Los_Angeles"`, want: "@every interval must be at least 1 minute"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			existing := &corev1alpha1.RepositoryMonitor{
@@ -438,7 +442,7 @@ func TestRepositoryMonitorMutationsRejectInvalidValues(t *testing.T) {
 
 func TestCreateRepositoryMonitor_AcceptsStandardSchedules(t *testing.T) {
 	app, _ := setupRepositoryMonitorHandlers(t, ContextTokenConfig{}, ContextTokenAuthorizationModeOff)
-	for i, schedule := range []string{"*/15 * * * *", "@hourly"} {
+	for i, schedule := range []string{"*/15 * * * *", "@hourly", "@every 5m"} {
 		body := fmt.Sprintf(`{"name":"monitor-%d","namespace":"demo","spec":{"repoURL":%q,"schedule":%q,"timeZone":"America/Los_Angeles","agents":{"reviewer":{"name":"reviewer"}}}}`, i, monitorTestRepoURL, schedule)
 		req := httptest.NewRequest(http.MethodPost, "/monitors/repositories", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")

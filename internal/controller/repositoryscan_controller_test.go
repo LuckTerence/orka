@@ -1727,6 +1727,10 @@ func TestRepositoryScanReconcileRejectsInvalidScheduleBeforeInitialRun(t *testin
 	}{
 		{name: "valid schedule starts the initial scan", schedule: "0 * * * *", wantTasks: 1},
 		{name: "invalid schedule starts nothing", schedule: "61 * * * *"},
+		{name: "five minute every interval starts the initial scan", schedule: "@every 5m", wantTasks: 1},
+		{name: "zero every interval starts nothing", schedule: "@every 0s"},
+		{name: "negative every interval starts nothing", schedule: "@every -5m"},
+		{name: "sub-minute every interval starts nothing", schedule: "@every 30s"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()

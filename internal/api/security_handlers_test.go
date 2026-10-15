@@ -1013,6 +1013,11 @@ func TestRepositoryScanMutationsRejectInvalidValues(t *testing.T) {
 		{name: "minute out of range", spec: `"schedule":"61 * * * *"`, want: "spec.schedule is invalid"},
 		{name: "minute far out of range", spec: `"schedule":"99 * * * *"`, want: "spec.schedule is invalid"},
 		{name: "not a cron expression", spec: `"schedule":"every day"`, want: "spec.schedule is invalid"},
+		{name: "zero every interval", spec: `"schedule":"@every 0s"`, want: "@every interval must be at least 1 minute"},
+		{name: "negative every interval", spec: `"schedule":"@every -5m"`, want: "@every interval must be at least 1 minute"},
+		{name: "one second every interval", spec: `"schedule":"@every 1s"`, want: "@every interval must be at least 1 minute"},
+		{name: "sub-minute every interval", spec: `"schedule":"@every 30s"`, want: "@every interval must be at least 1 minute"},
+		{name: "malformed every interval", spec: `"schedule":"@every soon"`, want: "spec.schedule is invalid"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -1045,7 +1050,7 @@ func TestCreateRepositoryScanAcceptsStandardSchedules(t *testing.T) {
 	ctxTokenConfig := testContextTokenConfig(t, provider, "")
 	token := issueTestContextToken(t, provider, nil, map[string]any{"scope": ContextTokenScopeSecurityWrite})
 	app, _ := setupSecurityHandlersWithAuthzFixture(t, ctxTokenConfig, ContextTokenAuthorizationModeOff)
-	for i, schedule := range []string{"*/15 * * * *", "0 3 * * 1-5", "@daily"} {
+	for i, schedule := range []string{"*/15 * * * *", "0 3 * * 1-5", "@daily", "@every 1m", "@every 5m", "@every 1h30m"} {
 		body := fmt.Sprintf(`{"name":"scan-%d","namespace":"demo","spec":{"repoURL":%q,"analysisAgentRef":{"name":"analysis"},"schedule":%q}}`, i, securityTestRepoURL, schedule)
 		req := httptest.NewRequest(http.MethodPost, "/security/repositories", strings.NewReader(body))
 		req.Header.Set(TransactionTokenHeaderName, token)
