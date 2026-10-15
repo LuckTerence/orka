@@ -23,6 +23,7 @@ import { taskTypeLabel } from '@/lib/task-status'
 import { matchesTaskFilter } from '@/lib/task-filter'
 import { timeAgo } from '@/lib/time'
 import { actionErrorMessage } from './action-error'
+import { TaskStateBadges } from './task-state'
 
 export function TaskList() {
   const { data, isLoading, error, fetchNextPage, hasNextPage, isFetchingNextPage } = useTaskListPages()
@@ -145,7 +146,12 @@ export function TaskList() {
                     </Link>
                   </TableCell>
                   <TableCell>{taskTypeLabel(task.spec.type)}</TableCell>
-                  <TableCell><TaskStatusBadge phase={task.status?.phase} /></TableCell>
+                  <TableCell>
+                    <span className="flex flex-wrap items-center gap-1">
+                      <TaskStatusBadge phase={task.status?.phase} />
+                      <TaskStateBadges task={task} />
+                    </span>
+                  </TableCell>
                   <TableCell>{task.metadata.namespace}</TableCell>
                   <TableCell>{timeAgo(task.metadata.creationTimestamp, { compact: true })}</TableCell>
                   <TableCell>

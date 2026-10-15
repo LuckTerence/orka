@@ -5,6 +5,7 @@ import { Badge } from '@/components/ui/badge'
 import { phaseStyle, typeStyle } from '@/lib/task-status'
 import { cn } from '@/lib/utils'
 import type { Task } from '@/schemas/task'
+import { TaskStateBadges } from './task-state'
 
 function elapsed(startTime?: string): string {
   if (!startTime) return ''
@@ -37,6 +38,7 @@ export function KanbanCard({ task }: { task: Task }) {
               {type.label}
             </Badge>
           </div>
+          <TaskStateBadges task={task} />
           <div className="flex items-center gap-2 text-xs text-muted-foreground flex-wrap">
             <span>{task.metadata.namespace}</span>
             {task.spec.agentRef?.name && (

@@ -7,6 +7,7 @@ import { useFreshness } from '@/hooks/use-freshness'
 import { cn } from '@/lib/utils'
 import { elapsedSeconds, formatElapsed, UNASSIGNED_AGENT } from '@/lib/runtime-activity'
 import { isTerminal } from '@/lib/runtime-validation'
+import { isWaitingForApproval, TaskStateBadges } from '@/components/tasks/task-state'
 import type { Task } from '@/schemas/task'
 import type { ExecutionEvent } from '@/schemas/execution-event'
 
@@ -29,7 +30,10 @@ export function ActivitySpotlight({ task, latestEvent, following, eventError = f
   const [now, setNow] = useState(() => Date.now())
   const phase = task?.status?.phase
   const running = phase === 'Running'
-  const headline = running
+  // A task parked on an approval says so in status.message; the last event
+  // ("AI worker completed") would read as if it were still progressing.
+  const waitingForApproval = task ? isWaitingForApproval(task) : false
+  const headline = running && !waitingForApproval
     ? latestEvent?.summary ?? task?.status?.message
     : task?.status?.message ?? latestEvent?.summary
   const justUpdated = useFreshness(headline)
@@ -99,6 +103,7 @@ export function ActivitySpotlight({ task, latestEvent, following, eventError = f
           <span>{agent}</span>
           <span aria-hidden="true">·</span>
           <span className="tabular-nums">{elapsed}</span>
+          <TaskStateBadges task={task} />
         </div>
         {eventError && (
           <p className="text-sm text-destructive" role="alert">Unable to load events</p>

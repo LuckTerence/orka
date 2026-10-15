@@ -36,6 +36,20 @@ describe('ActivitySpotlight', () => {
     expect(screen.getByText('Paused')).toBeInTheDocument()
   })
 
+  it('shows the waiting status message instead of the last event while parked on an approval', () => {
+    const ev = { summary: 'AI worker completed' } as ExecutionEvent
+    render(
+      <ActivitySpotlight
+        task={task('w1', { status: { phase: 'Running', startTime: new Date(0).toISOString(), message: 'waiting for approval ap-7 for bash at iteration 1' } })}
+        latestEvent={ev}
+        following
+      />,
+    )
+    expect(screen.getByText('waiting for approval ap-7 for bash at iteration 1')).toBeInTheDocument()
+    expect(screen.queryByText('AI worker completed')).not.toBeInTheDocument()
+    expect(screen.getByText('Waiting for approval')).toBeInTheDocument()
+  })
+
   it('prefers latest event summary over a running status message', () => {
     const ev = { summary: 'tool call completed' } as ExecutionEvent
     render(<ActivitySpotlight task={task('r-status', { status: { phase: 'Running', message: 'generic running status' } })} latestEvent={ev} following />)

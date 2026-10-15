@@ -6,6 +6,7 @@ import { EmptyState } from '@/components/ui/empty-state'
 import { ListTodo } from 'lucide-react'
 import type { Task } from '@/schemas/task'
 import { timeAgo } from '@/lib/time'
+import { TaskStateBadges } from '@/components/tasks/task-state'
 
 export function RecentTasks({
   tasks,
@@ -84,8 +85,11 @@ export function RecentTasks({
                 params={{ taskId: task.metadata.name }}
                 className="flex items-center justify-between rounded-md p-2 hover:bg-accent"
               >
-                <div className="space-y-1">
-                  <p className="text-sm font-medium">{task.metadata.name}</p>
+                <div className="min-w-0 space-y-1">
+                  <p className="flex flex-wrap items-center gap-2 text-sm font-medium">
+                    <span>{task.metadata.name}</span>
+                    <TaskStateBadges task={task} />
+                  </p>
                   <p className="text-xs text-muted-foreground tabular-nums">
                     {task.spec.type} · {task.metadata.namespace} · {timeAgo(task.metadata.creationTimestamp)}
                   </p>

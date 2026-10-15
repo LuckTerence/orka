@@ -167,6 +167,31 @@ describe('TaskList', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
   })
 
+  it('flags waiting, deleting, and suspended tasks without extra requests', async () => {
+    const requests: string[] = []
+    server.use(
+      http.get('/api/v1/tasks/:id/approvals', ({ params }) => {
+        requests.push(String(params.id))
+        return HttpResponse.json({ approvals: [] })
+      }),
+      http.get('/api/v1/tasks', () =>
+        HttpResponse.json({
+          items: [
+            { metadata: { name: 'gated', namespace: 'default', uid: 'g' }, spec: { type: 'agent' }, status: { phase: 'Running', conditions: [{ type: 'WaitingForApproval', status: 'True' }] } },
+            { metadata: { name: 'going', namespace: 'default', uid: 'd', deletionTimestamp: new Date().toISOString() }, spec: { type: 'container' }, status: { phase: 'Running' } },
+            { metadata: { name: 'nightly', namespace: 'default', uid: 's' }, spec: { type: 'container', schedule: '0 2 * * *', suspend: true }, status: { phase: 'Scheduled' } },
+          ],
+          metadata: {},
+        }),
+      ),
+    )
+    render(<TaskList />)
+    expect(await screen.findByText('Waiting for approval')).toBeInTheDocument()
+    expect(screen.getByText('Deleting')).toBeInTheDocument()
+    expect(screen.getByText('Suspended')).toBeInTheDocument()
+    expect(requests).toEqual([])
+  })
+
   it('navigates when any part of a row is clicked', async () => {
     const user = userEvent.setup()
     serveDeletableTask()

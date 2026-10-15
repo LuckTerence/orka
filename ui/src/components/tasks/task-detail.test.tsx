@@ -411,6 +411,32 @@ describe('TaskDetail', () => {
     expect(screen.getByRole('button', { name: /^delete/i })).toBeEnabled()
   })
 
+  it('counts pending approvals on the Approvals tab while the task waits', async () => {
+    server.use(
+      http.get('/api/v1/tasks/:id', () =>
+        HttpResponse.json({
+          metadata: { name: 'gated', namespace: 'default', uid: 'uid-gated' },
+          spec: { type: 'agent', agentRef: { name: 'a' } },
+          status: { phase: 'Running', conditions: [{ type: 'WaitingForApproval', status: 'True' }] },
+        }),
+      ),
+      http.get('/api/v1/tasks/:id/approvals', () =>
+        HttpResponse.json({
+          namespace: 'default',
+          taskName: 'gated',
+          approvals: [
+            { id: 'a1', action: 'bash', status: 'pending', createdAt: '2026-01-01T00:00:00Z' },
+            { id: 'a2', action: 'write', status: 'pending', createdAt: '2026-01-01T00:00:00Z' },
+            { id: 'a3', action: 'read', status: 'approved', createdAt: '2026-01-01T00:00:00Z' },
+          ],
+        }),
+      ),
+    )
+    render(<TaskDetail taskId="gated" />)
+    expect(await screen.findByRole('tab', { name: 'Approvals 2 pending' })).toBeInTheDocument()
+    expect(screen.getAllByText('Waiting for approval').length).toBeGreaterThan(0)
+  })
+
   it('has a single Delete control on the Runtime tab', async () => {
     mockSearch.current = { tab: 'runtime' }
     render(<TaskDetail taskId="test-task" />)

@@ -29,6 +29,7 @@ import { useNavigate, useSearch } from '@tanstack/react-router'
 import type { ExecutionEvent, PlanState } from '@/schemas/task'
 import { timeAgo } from '@/lib/time'
 import { actionErrorMessage } from './action-error'
+import { isWaitingForApproval, TaskStateBadges } from './task-state'
 
 function latestEventPlan(events: ExecutionEvent[]): PlanState | undefined {
   let latest: ExecutionEvent | undefined
@@ -135,14 +136,19 @@ export function TaskDetail({ taskId }: { taskId: string }) {
   )
   // Poll approvals while live and until execution recovery settles after termination.
   const approvalRefetchInterval = following ? 5000 : undefined
+  // A task parked on an approval also loads approvals off the Runtime tab so
+  // the Approvals tab can show how many are pending.
+  const waitingForApproval = task !== undefined && !taskUnavailable && isWaitingForApproval(task)
   const { data: approvalsResp } = useTaskApprovals(
     taskId,
-    runtimeActive,
+    runtimeActive || waitingForApproval,
     approvalRefetchInterval,
     taskRunning,
     taskTerminal,
     task?.metadata.uid,
   )
+  // Terminal tasks reject decisions, so their leftovers are not "pending".
+  const pendingApprovals = taskTerminal ? 0 : (approvalsResp?.approvals ?? []).filter((a) => a.status === 'pending').length
   const artifactRefetchInterval = runtimeActive && taskRunning && following ? 5000 : false
   const { data: artifactsResp, refetch: refetchArtifacts } = useTaskArtifacts(
     taskId,
@@ -206,6 +212,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
             description={`${task.metadata.namespace} · ${task.spec.type}`}
           />
           <TaskStatusBadge phase={task.status?.phase} />
+          <TaskStateBadges task={task} />
           <PRStatusBadge annotations={task.metadata.annotations} />
         </div>
         <div className="flex items-center gap-2">
@@ -246,7 +253,18 @@ export function TaskDetail({ taskId }: { taskId: string }) {
           <TabsTrigger value="execution">Execution</TabsTrigger>
           <TabsTrigger value="timeline">Timeline</TabsTrigger>
           <TabsTrigger value="trace">Trace</TabsTrigger>
-          <TabsTrigger value="approvals">Approvals</TabsTrigger>
+          <TabsTrigger value="approvals">
+            Approvals
+            {pendingApprovals > 0 && (
+              <>
+                {' '}
+                <span className="rounded-full bg-status-running-bg px-1.5 text-xs tabular-nums text-status-running">
+                  <span aria-hidden="true">{pendingApprovals}</span>
+                  <span className="sr-only">{pendingApprovals} pending</span>
+                </span>
+              </>
+            )}
+          </TabsTrigger>
           <TabsTrigger value="result">Result</TabsTrigger>
           <TabsTrigger value="logs">Logs</TabsTrigger>
           {hasPlanHistory && (
