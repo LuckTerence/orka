@@ -1061,6 +1061,70 @@ func TestCreateRepositoryScanAcceptsStandardSchedules(t *testing.T) {
 	}
 }
 
+func TestRepositoryScanMutationsRequireAgentRuntime(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	token := issueTestContextToken(t, provider, nil, map[string]any{"scope": ContextTokenScopeSecurityWrite})
+	agent := func(name string, cli *corev1alpha1.AgentCLIRuntime) *corev1alpha1.Agent {
+		return &corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "demo"}, Spec: corev1alpha1.AgentSpec{Runtime: cli}}
+	}
+	agents := []runtime.Object{
+		agent("assistant", nil),
+		agent("empty-runtime", &corev1alpha1.AgentCLIRuntime{}),
+		agent("claude", &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeClaude}),
+		agent("external", &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "byo"}}),
+	}
+	for _, tt := range []struct {
+		name string
+		refs string
+		want string
+	}{
+		{name: "native analysis agent", refs: `"analysisAgentRef":{"name":"assistant"}`, want: `spec.analysisAgentRef agent "assistant" has no runtime configured`},
+		{name: "analysis agent with empty runtime", refs: `"analysisAgentRef":{"name":"empty-runtime"}`, want: `spec.analysisAgentRef agent "empty-runtime" has no runtime configured`},
+		{name: "native patch agent", refs: `"analysisAgentRef":{"name":"claude"},"patchAgentRef":{"name":"assistant"}`, want: `spec.patchAgentRef agent "assistant" has no runtime configured`},
+		{name: "built-in runtime agent", refs: `"analysisAgentRef":{"name":"claude"}`},
+		{name: "external runtime agent", refs: `"analysisAgentRef":{"name":"external"},"patchAgentRef":{"name":"claude"}`},
+		{name: "missing agent", refs: `"analysisAgentRef":{"name":"not-created-yet"},"patchAgentRef":{"name":"also-missing"}`},
+		{name: "agent in another namespace", refs: `"analysisAgentRef":{"name":"assistant","namespace":"other"}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			existing := securityAuthzTestRepositoryScan("scan-1", securityTestRepoURL)
+			app, handlers := setupSecurityHandlersWithAuthzFixture(t, ctxTokenConfig, ContextTokenAuthorizationModeOff, append([]runtime.Object{existing}, agents...)...)
+			spec := fmt.Sprintf(`{"repoURL":%q,%s}`, securityTestRepoURL, tt.refs)
+			for _, req := range []struct {
+				method, path, body string
+				success            int
+			}{
+				{http.MethodPost, "/security/repositories", `{"name":"new-scan","namespace":"demo","spec":` + spec + `}`, http.StatusCreated},
+				{http.MethodPut, "/security/repositories/scan-1?namespace=demo", `{"spec":` + spec + `}`, http.StatusOK},
+			} {
+				httpReq := httptest.NewRequest(req.method, req.path, strings.NewReader(req.body))
+				httpReq.Header.Set(TransactionTokenHeaderName, token)
+				httpReq.Header.Set("Content-Type", "application/json")
+				resp, err := app.Test(httpReq)
+				require.NoError(t, err)
+				message := readRespBody(t, resp)
+				if tt.want == "" {
+					require.Equal(t, req.success, resp.StatusCode, message)
+					continue
+				}
+				require.Equal(t, http.StatusBadRequest, resp.StatusCode, req.method)
+				require.Contains(t, message, tt.want)
+				require.Contains(t, message, "spec.runtime.type or spec.runtime.runtimeRef")
+			}
+			if tt.want == "" {
+				return
+			}
+			err := handlers.client.Get(ctx, client.ObjectKey{Namespace: "demo", Name: "new-scan"}, &corev1alpha1.RepositoryScan{})
+			require.True(t, apierrors.IsNotFound(err), "a scan with a runtime-less agent must not be created")
+			var got corev1alpha1.RepositoryScan
+			require.NoError(t, handlers.client.Get(ctx, client.ObjectKey{Namespace: "demo", Name: "scan-1"}, &got))
+			require.Equal(t, existing.Spec, got.Spec)
+		})
+	}
+}
+
 func TestListRepositoryScans_ContextTokenFiltersMismatchedScansInEnforceMode(t *testing.T) {
 	provider := newTestOIDCProvider(t)
 	ctxTokenConfig := testContextTokenConfig(t, provider, "")

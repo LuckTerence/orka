@@ -100,6 +100,39 @@ func validateRepositoryScanSpecValues(spec corev1alpha1.RepositoryScanSpec) erro
 	return nil
 }
 
+// validateRepositoryScanAgentRuntimes rejects analysis and patch agents in the
+// scan namespace that have no runtime, because every scan Task they run is a
+// type: agent Task. A missing Agent stays allowed so it can be created later.
+func (h *Handlers) validateRepositoryScanAgentRuntimes(ctx context.Context, namespace string, spec corev1alpha1.RepositoryScanSpec) error {
+	refs := []struct {
+		field string
+		ref   *corev1alpha1.AgentReference
+	}{
+		{field: "spec.analysisAgentRef", ref: &spec.AnalysisAgentRef},
+		{field: "spec.patchAgentRef", ref: spec.PatchAgentRef},
+	}
+	for _, candidate := range refs {
+		if candidate.ref == nil || strings.TrimSpace(candidate.ref.Name) == "" {
+			continue
+		}
+		if agentNamespace := strings.TrimSpace(candidate.ref.Namespace); agentNamespace != "" && agentNamespace != namespace {
+			continue
+		}
+		var agent corev1alpha1.Agent
+		if err := h.client.Get(ctx, types.NamespacedName{Name: candidate.ref.Name, Namespace: namespace}, &agent); err != nil {
+			if apierrors.IsNotFound(err) {
+				continue
+			}
+			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get agent %q: %v", candidate.ref.Name, err))
+		}
+		agentRuntime := agent.Spec.Runtime
+		if agentRuntime == nil || (strings.TrimSpace(string(agentRuntime.Type)) == "" && (agentRuntime.RuntimeRef == nil || strings.TrimSpace(agentRuntime.RuntimeRef.Name) == "")) {
+			return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("%s agent %q has no runtime configured; repository scans run type: agent tasks, so the Agent must set spec.runtime.type or spec.runtime.runtimeRef", candidate.field, candidate.ref.Name))
+		}
+	}
+	return nil
+}
+
 func (h *Handlers) ensureSecurityStore() error {
 	if h.securityStore == nil {
 		return fiber.NewError(fiber.StatusNotImplemented, "security store not configured")
@@ -762,6 +795,9 @@ func (h *Handlers) CreateRepositoryScan(c fiber.Ctx) error {
 	); err != nil {
 		return err
 	}
+	if err := h.validateRepositoryScanAgentRuntimes(c.Context(), namespace, scan.Spec); err != nil {
+		return err
+	}
 	if err := h.client.Create(c.Context(), scan); err != nil {
 		if apierrors.IsAlreadyExists(err) {
 			return fiber.NewError(fiber.StatusConflict, "repository scan already exists")
@@ -830,6 +866,9 @@ func (h *Handlers) UpdateRepositoryScan(c fiber.Ctx) error {
 		namespace,
 		repositoryScanConfiguredCredentialRefs(updated),
 	); err != nil {
+		return err
+	}
+	if err := h.validateRepositoryScanAgentRuntimes(c.Context(), namespace, updated.Spec); err != nil {
 		return err
 	}
 	if err := h.client.Update(c.Context(), updated); err != nil {
