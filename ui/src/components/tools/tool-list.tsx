@@ -56,10 +56,12 @@ export function ToolList() {
                         {tool.builtin ? 'Built-in' : 'Custom'}
                       </Badge>
                     </TableCell>
-                    <TableCell className="max-w-xs truncate">{tool.description}</TableCell>
+                    <TableCell className="max-w-xs truncate" title={tool.description}>{tool.description}</TableCell>
                     <TableCell>
+                      {/* Built-in tools have no availability check, so they
+                          report no status rather than a fixed "Available". */}
                       {tool.builtin ? (
-                        <Badge className="bg-status-succeeded-bg text-status-succeeded" variant="secondary">Available</Badge>
+                        <span className="text-muted-foreground" title="Built-in tools have no availability check">—</span>
                       ) : tool.available ? (
                         <Badge className="bg-status-succeeded-bg text-status-succeeded" variant="secondary">Available</Badge>
                       ) : (
