@@ -194,7 +194,9 @@ export function TaskDetail({ taskId }: { taskId: string }) {
   }, [refetchArtifacts, refetchTrace, runtimeActive, task?.metadata.uid, task?.status?.phase, taskTerminal])
 
   // On narrow screens the tab bar scrolls sideways; keep the active tab in
-  // view when it changes (or first renders) without scrolling the page.
+  // view when it changes (or first renders) without scrolling the page. The
+  // Approvals pending badge arrives with a later fetch and widens its tab and
+  // shifts the ones after it, so a count change re-checks too.
   const tabsScrollRef = useRef<HTMLDivElement>(null)
   const tabsShown = Boolean(task) && !taskMissing && !taskForbidden
   useEffect(() => {
@@ -206,7 +208,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
     const tab = active.getBoundingClientRect()
     if (tab.left < bounds.left) container.scrollLeft -= bounds.left - tab.left
     else if (tab.right > bounds.right) container.scrollLeft += tab.right - bounds.right
-  }, [activeTab, tabsShown])
+  }, [activeTab, tabsShown, pendingApprovals])
 
   if (isLoading) {
     return (

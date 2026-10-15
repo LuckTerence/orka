@@ -512,6 +512,59 @@ describe('TaskDetail', () => {
     }
   })
 
+  it('keeps the Approvals tab in view once its pending badge widens it', async () => {
+    mockSearch.current = { tab: 'approvals' }
+    const rect = (left: number, right: number) => ({ left, right, top: 0, bottom: 20, width: right - left, height: 20, x: left, y: 0, toJSON: () => ({}) }) as DOMRect
+    const scrollWidth = vi.spyOn(Element.prototype, 'scrollWidth', 'get').mockReturnValue(600)
+    const clientWidth = vi.spyOn(Element.prototype, 'clientWidth', 'get').mockReturnValue(300)
+    // The tab bar spans 0-300px. The Approvals tab fits until the "2 pending"
+    // badge renders and pushes its right edge to 340px.
+    const bounds = vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) {
+      if (this.getAttribute('role') === 'tab') {
+        if (!this.textContent?.startsWith('Approvals')) return rect(10, 70)
+        return this.textContent.includes('pending') ? rect(250, 340) : rect(250, 290)
+      }
+      return rect(0, 300)
+    })
+    let releaseApprovals!: () => void
+    const approvalsReady = new Promise<void>((resolve) => { releaseApprovals = resolve })
+    server.use(
+      http.get('/api/v1/tasks/:id', () =>
+        HttpResponse.json({
+          metadata: { name: 'gated', namespace: 'default', uid: 'uid-gated' },
+          spec: { type: 'agent', agentRef: { name: 'a' } },
+          status: { phase: 'Running', conditions: [{ type: 'WaitingForApproval', status: 'True' }] },
+        }),
+      ),
+      http.get('/api/v1/tasks/:id/approvals', async () => {
+        await approvalsReady
+        return HttpResponse.json({
+          namespace: 'default',
+          taskName: 'gated',
+          approvals: [
+            { id: 'a1', action: 'bash', status: 'pending', createdAt: '2026-01-01T00:00:00Z' },
+            { id: 'a2', action: 'write', status: 'pending', createdAt: '2026-01-01T00:00:00Z' },
+          ],
+        })
+      }),
+    )
+    try {
+      render(<TaskDetail taskId="gated" />)
+      await screen.findByRole('tab', { name: 'Approvals' })
+      const scroller = screen.getByRole('tablist').parentElement!
+      // Without the badge the selected tab is already in view.
+      expect(scroller.scrollLeft).toBe(0)
+      releaseApprovals()
+      await screen.findByRole('tab', { name: 'Approvals 2 pending' })
+      await waitFor(() => expect(scroller.scrollLeft).toBe(40))
+    } finally {
+      releaseApprovals()
+      scrollWidth.mockRestore()
+      clientWidth.mockRestore()
+      bounds.mockRestore()
+    }
+  })
+
   it('links a child task back to its parent', async () => {
     server.use(
       http.get('/api/v1/tasks/:id', () =>
