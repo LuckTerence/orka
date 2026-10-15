@@ -9,6 +9,13 @@ describe('PageHeader', () => {
     expect(screen.getByRole('heading', { level: 1, name: 'Tasks' })).toBeInTheDocument()
   })
 
+  it('names the page in the browser tab until it unmounts', () => {
+    const { unmount } = render(<PageHeader title="Tasks" />)
+    expect(document.title).toBe('Tasks · Orka')
+    unmount()
+    expect(document.title).toBe('Orka')
+  })
+
   it('renders the description when provided', () => {
     render(<PageHeader title="Tasks" description="Manage your task execution" />)
     expect(screen.getByText('Manage your task execution')).toBeInTheDocument()

@@ -1,7 +1,8 @@
 import { cn } from '@/lib/utils'
+import { useDocumentTitle } from '@/hooks/use-document-title'
 
 interface PageHeaderProps {
-  /** Primary page title (rendered as an h1). */
+  /** Primary page title (rendered as an h1, and named in the browser tab). */
   title: string
   /** Optional supporting description below the title. */
   description?: string
@@ -27,6 +28,7 @@ export function PageHeader({
   action,
   className,
 }: PageHeaderProps) {
+  useDocumentTitle(title)
   return (
     <div
       className={cn(
