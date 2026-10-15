@@ -6,7 +6,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
-import { ArrowLeft, SearchX, Trash2 } from 'lucide-react'
+import { ArrowLeft, SearchX, ShieldCheck, Trash2 } from 'lucide-react'
 import { EmptyState } from '@/components/ui/empty-state'
 import { PageHeader } from '@/components/layout/page-header'
 import { useDocumentTitle } from '@/hooks/use-document-title'
@@ -74,6 +74,35 @@ function TaskNotFound({ taskId }: { taskId: string }) {
         </Button>
       }
     />
+  )
+}
+
+// A forbidden task gets a titled page like the session, agent, and tool
+// detail views: the header names the browser tab, and the card says why and
+// links back to the list.
+function TaskAccessError({ message }: { message: string }) {
+  return (
+    <div className="space-y-4">
+      <PageHeader title="Could not load task" />
+      <Card>
+        <CardContent>
+          <div role="alert">
+            <EmptyState
+              icon={ShieldCheck}
+              headline="Not authorized to view this task"
+              hint={`Your token lacks tasks read permission${message ? ` (${message})` : ''}.`}
+              action={
+                <Button asChild variant="outline" size="sm">
+                  <Link to="/tasks">
+                    <ArrowLeft className="mr-1 h-4 w-4" /> Back to Tasks
+                  </Link>
+                </Button>
+              }
+            />
+          </div>
+        </CardContent>
+      </Card>
+    </div>
   )
 }
 
@@ -237,14 +266,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
   // A 403 is an actionable permission failure, not a missing task; it must
   // not fall through to "Task not found" just because `task` is undefined.
   if (taskForbidden) {
-    return (
-      <div role="alert" className="space-y-1">
-        <p className="text-sm font-medium">Not authorized to view this task</p>
-        <p className="text-sm text-muted-foreground">
-          Your token lacks <code>tasks</code> read permission ({taskError.message}).
-        </p>
-      </div>
-    )
+    return <TaskAccessError message={taskError.message} />
   }
 
   // A 404 wins over cached data: React Query keeps the last successful `data`

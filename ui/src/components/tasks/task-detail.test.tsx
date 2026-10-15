@@ -72,6 +72,10 @@ describe('TaskDetail', () => {
     })
     expect(screen.getByText(/scope missing/)).toBeInTheDocument()
     expect(screen.queryByText('Task not found')).not.toBeInTheDocument()
+    // A titled page like the other detail views: heading, tab title, back link.
+    expect(screen.getByRole('heading', { level: 1, name: 'Could not load task' })).toBeInTheDocument()
+    expect(document.title).toBe('Could not load task · Orka')
+    expect(screen.getByRole('link', { name: /back to tasks/i })).toHaveAttribute('href', '/tasks')
     // Nothing keeps polling once access is forbidden: no task retries and no
     // hidden dependent 403 traffic beyond a single request that raced the lookup.
     await new Promise((resolve) => setTimeout(resolve, 300))
