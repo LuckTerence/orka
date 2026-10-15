@@ -339,6 +339,62 @@ func TestRepositoryScanReconcileUsesLiveCompletionForSchedule(t *testing.T) {
 	require.Greater(t, result.RequeueAfter, 59*time.Minute)
 }
 
+func TestRepositoryScanReconcileFailedRunsAdvanceSchedule(t *testing.T) {
+	for _, tt := range []struct {
+		name                string
+		publishedCompletion bool
+	}{
+		{name: "failed completion published", publishedCompletion: true},
+		{name: "failed completion not yet published"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			db := setupControllerSQLiteStore(t)
+			scheme := runtime.NewScheme()
+			require.NoError(t, corev1alpha1.AddToScheme(scheme))
+			started := time.Now().Add(-5 * time.Second).UTC()
+			completed := started.Add(4 * time.Second)
+			scan := &corev1alpha1.RepositoryScan{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "failing-scan", Namespace: defaultNS, UID: "scan-uid", Generation: 1,
+					CreationTimestamp: metav1.NewTime(time.Now().Add(-3 * time.Hour)),
+					Finalizers:        []string{security.RepositoryScanRunFinalizer},
+				},
+				Spec: corev1alpha1.RepositoryScanSpec{
+					RepoURL: "https://github.com/example/repo", Schedule: "@every 1h",
+					AnalysisAgentRef: corev1alpha1.AgentReference{Name: "analysis"},
+				},
+				// No scan has ever succeeded, so LastSuccessfulScanAt stays unset.
+				Status: corev1alpha1.RepositoryScanStatus{Phase: repositoryScanPhaseError, LastScanID: "scan_failed"},
+			}
+			if tt.publishedCompletion {
+				scan.Status.LastScanAt = &metav1.Time{Time: completed}
+			}
+			require.NoError(t, db.CreateScanRun(ctx, &store.ScanRun{
+				ID: scan.Status.LastScanID, Namespace: scan.Namespace, RepositoryScan: scan.Name,
+				RepositoryScanUID: string(scan.UID), RepositoryScanGeneration: scan.Generation,
+				Mode: scanModeIncremental, Phase: scanRunPhaseFailed, StartedAt: started, CompletedAt: &completed,
+				ErrorMessage: "clone failed",
+			}))
+			cl := repositoryScanRunTestClient(t, scan, repositoryScanTestAgent(scan.Spec.AnalysisAgentRef.Name))
+			r := &RepositoryScanReconciler{Client: cl, Scheme: scheme, SecurityStore: db}
+			request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(scan)}
+
+			for range 3 {
+				result, err := r.Reconcile(ctx, request)
+				require.NoError(t, err)
+				require.Greater(t, result.RequeueAfter, 59*time.Minute)
+			}
+			runs, _, err := db.ListScanRuns(ctx, scan.Namespace, scan.Name, 10, "")
+			require.NoError(t, err)
+			require.Len(t, runs, 1, "a failed run must not admit another run in the same schedule slot")
+			tasks := &corev1alpha1.TaskList{}
+			require.NoError(t, cl.List(ctx, tasks))
+			require.Empty(t, tasks.Items)
+		})
+	}
+}
+
 func TestCreateScanRunRollsBackChangedIdentity(t *testing.T) {
 	ctx := context.Background()
 	db := setupControllerSQLiteStore(t)

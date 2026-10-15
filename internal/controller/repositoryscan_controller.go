@@ -258,9 +258,9 @@ func (r *RepositoryScanReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, nil
 	}
 
-	base := scan.CreationTimestamp.Time
-	if scan.Status.LastSuccessfulScanAt != nil {
-		base = scan.Status.LastSuccessfulScanAt.Time
+	base, err := r.scheduleCursor(ctx, scan)
+	if err != nil {
+		return ctrl.Result{}, err
 	}
 	nextRun := sched.Next(base)
 	if time.Now().Before(nextRun) {
@@ -352,6 +352,31 @@ func latestOwnedScanPipelineRunID(tasks []corev1alpha1.Task) string {
 		}
 	}
 	return scanTaskRunID(latest)
+}
+
+// scheduleCursor returns the instant the next scheduled run is computed from.
+// Every admitted run advances it, failed ones included, so a scan that never
+// succeeds still fires at most once per schedule slot.
+func (r *RepositoryScanReconciler) scheduleCursor(ctx context.Context, scan *corev1alpha1.RepositoryScan) (time.Time, error) {
+	base := scan.CreationTimestamp.Time
+	for _, at := range []*metav1.Time{scan.Status.LastSuccessfulScanAt, scan.Status.LastScanAt} {
+		if at != nil && at.After(base) {
+			base = at.Time
+		}
+	}
+	if r.SecurityStore == nil {
+		return base, nil
+	}
+	// The newest run record is written before its Task, so its start time
+	// holds even when the failed run's completion has not reached status.
+	runs, _, err := r.SecurityStore.ListScanRuns(ctx, scan.Namespace, scan.Name, 1, "")
+	if err != nil {
+		return time.Time{}, err
+	}
+	if len(runs) > 0 && runs[0].StartedAt.After(base) {
+		base = runs[0].StartedAt
+	}
+	return base, nil
 }
 
 func (r *RepositoryScanReconciler) hasActiveScanPipelineTask(ctx context.Context, scan *corev1alpha1.RepositoryScan) (bool, error) {
