@@ -224,7 +224,7 @@ export function AgentDetail({ agentId }: { agentId: string }) {
           <Card className="md:col-span-2">
             <CardHeader><CardTitle>System Prompt</CardTitle></CardHeader>
             <CardContent>
-              <pre className="max-h-64 overflow-auto rounded-md bg-muted p-4 text-sm whitespace-pre-wrap">
+              <pre tabIndex={0} role="region" aria-label="System prompt" className="max-h-64 overflow-auto rounded-md bg-muted p-4 text-sm whitespace-pre-wrap">
                 {agent.spec.systemPrompt.inline || (agent.spec.systemPrompt.configMapRef ? `ConfigMap: ${agent.spec.systemPrompt.configMapRef.name}/${agent.spec.systemPrompt.configMapRef.key}` : '-')}
               </pre>
             </CardContent>

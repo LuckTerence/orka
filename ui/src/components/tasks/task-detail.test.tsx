@@ -141,7 +141,9 @@ describe('TaskDetail', () => {
       expect(screen.getByText('Task not found')).toBeInTheDocument()
     })
     expect(screen.getByText(/No task named "nonexistent" exists in this namespace/)).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /back to tasks/i }).closest('a')).toHaveAttribute('href', '/tasks')
+    const back = screen.getByRole('link', { name: /back to tasks/i })
+    expect(back).toHaveAttribute('href', '/tasks')
+    expect(back.querySelector('button')).toBeNull()
   })
 
   it('renders not-found once a loaded task 404s on refetch, ignoring the cached copy', async () => {
@@ -220,6 +222,10 @@ describe('TaskDetail', () => {
     await waitFor(() => {
       expect(screen.getByText('my-task')).toBeInTheDocument()
     })
+    // One named link, not a button nested in a link.
+    const back = screen.getByRole('link', { name: 'Back to tasks' })
+    expect(back).toHaveAttribute('href', '/tasks')
+    expect(back.querySelector('button')).toBeNull()
     expect(screen.getByText('Metadata')).toBeInTheDocument()
     expect(screen.getByText('uid-123')).toBeInTheDocument()
     expect(screen.getByText('2')).toBeInTheDocument() // attempts

@@ -66,11 +66,11 @@ function TaskNotFound({ taskId }: { taskId: string }) {
       headline="Task not found"
       hint={`No task named "${taskId}" exists in this namespace. It may have been deleted, or it belongs to another namespace.`}
       action={
-        <Link to="/tasks">
-          <Button variant="outline" size="sm">
+        <Button asChild variant="outline" size="sm">
+          <Link to="/tasks">
             <ArrowLeft className="mr-1 h-4 w-4" /> Back to Tasks
-          </Button>
-        </Link>
+          </Link>
+        </Button>
       }
     />
   )
@@ -248,11 +248,11 @@ export function TaskDetail({ taskId }: { taskId: string }) {
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex min-w-0 flex-wrap items-center gap-4">
-          <Link to="/tasks">
-            <Button variant="ghost" size="icon" aria-label="Back to tasks">
+          <Button asChild variant="ghost" size="icon">
+            <Link to="/tasks" aria-label="Back to tasks">
               <ArrowLeft className="h-4 w-4" />
-            </Button>
-          </Link>
+            </Link>
+          </Button>
           <PageHeader
             title={task.metadata.name}
             description={`${task.metadata.namespace} · ${task.spec.type}`}

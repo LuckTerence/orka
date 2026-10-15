@@ -127,7 +127,7 @@ export function ToolDetail({ toolName }: { toolName: string }) {
                 {httpConfig.headers && Object.keys(httpConfig.headers).length > 0 && (
                   <div>
                     <span className="text-muted-foreground">Headers:</span>
-                    <pre className="mt-1 rounded-md bg-muted p-2 text-xs">{JSON.stringify(httpConfig.headers, null, 2)}</pre>
+                    <pre tabIndex={0} role="region" aria-label="HTTP headers" className="mt-1 max-h-64 overflow-auto rounded-md bg-muted p-2 text-xs">{JSON.stringify(httpConfig.headers, null, 2)}</pre>
                   </div>
                 )}
               </CardContent>
