@@ -21,7 +21,7 @@ vi.mock('sonner', () => ({ toast: { success: vi.fn(), error: vi.fn() } }))
 import { focusManager } from '@tanstack/react-query'
 import { http, HttpResponse } from 'msw'
 import { server } from '@/test/mocks/server'
-import { act, render, screen } from '@/test/test-utils'
+import { act, render, screen, waitFor } from '@/test/test-utils'
 import { useUIStore } from '@/stores/ui'
 import type { RepositoryScan } from '@/schemas/security'
 import { RepositoryDetail } from './repository-detail'
@@ -109,6 +109,17 @@ describe('RepositoryDetail', () => {
     // Only the recommended list, which did load, may say it is empty.
     expect(screen.getAllByText('No findings to display.')).toHaveLength(1)
   })
+
+  it('shows a dash, not zero, for stat cards whose request failed', async () => {
+    serveRepository(repository({ phase: 'Ready' }))
+    server.use(http.get(`${repositoryPath}/slices`, () =>
+      HttpResponse.json({ error: { code: 500, message: 'slice store unavailable' } }, { status: 500 })))
+
+    render(<RepositoryDetail repositoryName="payments-main" />)
+
+    const card = (await screen.findByText('Review Slices')).closest('[data-slot="card"]') as HTMLElement
+    await waitFor(() => expect(card).toHaveTextContent('—'), { timeout: 10_000 })
+  }, 15_000)
 
   it('renders a titled not-found page and sends no detail requests for a missing repository', async () => {
     const requests: string[] = []

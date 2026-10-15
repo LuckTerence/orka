@@ -132,21 +132,22 @@ function RepositoryDetailContent({ repositoryName, repo }: { repositoryName: str
         <Card>
           <CardHeader><CardTitle className="text-base">Review Slices</CardTitle></CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">{reviewSlices.data?.items?.length ?? 0}</div>
+            {/* A failed request is not zero; show a dash instead of a count. */}
+            <div className="text-2xl font-bold">{reviewSlices.error && !reviewSlices.data ? '—' : reviewSlices.data?.items?.length ?? 0}</div>
             <div className="mt-1 text-xs text-muted-foreground">Deterministic repository review units</div>
           </CardContent>
         </Card>
         <Card>
           <CardHeader><CardTitle className="text-base">Accepted Output</CardTitle></CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">{scanRuns.data?.items?.[0]?.acceptedFindings ?? 0}</div>
+            <div className="text-2xl font-bold">{scanRuns.error && !scanRuns.data ? '—' : scanRuns.data?.items?.[0]?.acceptedFindings ?? 0}</div>
             <div className="mt-1 text-xs text-muted-foreground">Latest scan v2 findings accepted</div>
           </CardContent>
         </Card>
         <Card>
           <CardHeader><CardTitle className="text-base">Dropped Output</CardTitle></CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">{droppedFindings.data?.items?.length ?? scanRuns.data?.items?.[0]?.droppedFindings ?? 0}</div>
+            <div className="text-2xl font-bold">{droppedFindings.error && !droppedFindings.data && !scanRuns.data ? '—' : droppedFindings.data?.items?.length ?? scanRuns.data?.items?.[0]?.droppedFindings ?? 0}</div>
             <div className="mt-1 text-xs text-muted-foreground">Rejected model findings with diagnostics</div>
             <div className="mt-2 flex flex-wrap gap-1 text-xs">
               {Object.entries(droppedByLayer).map(([layer, count]) => (

@@ -94,7 +94,12 @@ describe('GatewayPage', () => {
     const tabs = await screen.findByRole('tablist', { name: 'Gateway operator views' })
     // The tab strip scrolls horizontally instead of pushing tabs past the viewport.
     expect(tabs.parentElement).toHaveClass('overflow-x-auto')
-    expect(screen.getByRole('tab', { name: 'Delivery outbox' })).toBeInTheDocument()
+    const outbox = screen.getByRole('tab', { name: 'Delivery outbox' })
+    // Reaching a tab with the keyboard scrolls it fully into the strip.
+    const scrollIntoView = vi.fn()
+    outbox.scrollIntoView = scrollIntoView
+    outbox.focus()
+    expect(scrollIntoView).toHaveBeenCalledWith({ block: 'nearest', inline: 'nearest' })
   })
 
   it('does not present a stale Gateway status as Ready', async () => {

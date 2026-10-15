@@ -44,7 +44,7 @@ export function GatewayPage() {
       <Tabs defaultValue="gateways" className="gap-4">
         {/* pb-1 leaves room for the active-tab underline so the scroller never scrolls vertically. */}
         <div className="overflow-x-auto pb-1">
-          <TabsList variant="line" aria-label="Gateway operator views">
+          <TabsList variant="line" aria-label="Gateway operator views" onFocusCapture={(event) => (event.target as HTMLElement).scrollIntoView?.({ block: 'nearest', inline: 'nearest' })}>
             <TabsTrigger value="gateways">Gateways</TabsTrigger>
             <TabsTrigger value="bindings">Bindings</TabsTrigger>
             <TabsTrigger value="queues">Session queues</TabsTrigger>

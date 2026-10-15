@@ -87,7 +87,7 @@ export function GatewayDetail({ name }: { name: string }) {
       <Tabs defaultValue="events" className="gap-4">
         {/* pb-1 leaves room for the active-tab underline so the scroller never scrolls vertically. */}
         <div className="overflow-x-auto pb-1">
-          <TabsList variant="line">
+          <TabsList variant="line" onFocusCapture={(event) => (event.target as HTMLElement).scrollIntoView?.({ block: 'nearest', inline: 'nearest' })}>
             <TabsTrigger value="queues">Session queues</TabsTrigger>
             <TabsTrigger value="events">Event timeline</TabsTrigger>
             <TabsTrigger value="deliveries">Deliveries</TabsTrigger>
