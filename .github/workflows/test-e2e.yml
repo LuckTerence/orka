@@ -35,6 +35,8 @@ jobs:
             cluster: orka-test-e2e
             labels: "!agent-runtime && !workspace-provider"
             idle_ttl: 5s
+            # The go test timeout also covers BeforeSuite's ~21m image build;
+            # passing runs already take up to ~50m in total.
             job_timeout: 90
             test_timeout: 75m
             ginkgo_timeout: 70m
