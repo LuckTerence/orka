@@ -41,7 +41,7 @@ if (typeof globalThis.ResizeObserver === 'undefined') {
 
 import userEvent from '@testing-library/user-event'
 import { toast } from 'sonner'
-import { render, screen } from '@/test/test-utils'
+import { render, screen, within } from '@/test/test-utils'
 import { ApiError } from '@/lib/api-client'
 import { useUIStore } from '@/stores/ui'
 import { RepositoryCreateForm } from './repository-create-form'
@@ -161,6 +161,26 @@ describe('RepositoryCreateForm', () => {
     for (const label of ['Analysis Agent', 'Patch Agent', 'Git Secret', 'Validation Mode']) {
       expect(screen.getByRole('combobox', { name: label })).toBeInTheDocument()
     }
+  })
+
+  it('keeps a long agent name inside its field instead of widening the card', async () => {
+    const longName = 'repository-security-analysis-agent-with-a-very-long-name'
+    mockUseAgentList.mockImplementation(() => ({
+      data: { items: [{ metadata: { name: longName }, spec: { runtime: { type: 'claude' } } }] },
+      isLoading: false,
+    }))
+    const user = userEvent.setup()
+    render(<RepositoryCreateForm />)
+
+    for (const label of ['Analysis Agent', 'Patch Agent']) {
+      await user.click(screen.getByRole('combobox', { name: label }))
+      await user.click(await screen.findByRole('option', { name: longName }))
+      const trigger = screen.getByRole('combobox', { name: label })
+      expect(trigger).toHaveClass('w-full', 'max-w-full')
+      expect(within(trigger).getByText(longName).closest('span.truncate')).toHaveClass('min-w-0')
+    }
+    // minmax(0, 1fr) on phones too, so the single column cannot grow to the name.
+    expect(screen.getByRole('combobox', { name: 'Analysis Agent' }).closest('.grid')).toHaveClass('grid-cols-1', 'md:grid-cols-2')
   })
 
   it.each([

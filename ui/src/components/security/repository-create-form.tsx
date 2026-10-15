@@ -118,11 +118,16 @@ export function RepositoryCreateForm() {
               <Input id="security-repo-url" value={repoURL} onChange={(event) => setRepoURL(event.target.value)} placeholder="https://github.com/org/repo" required />
             </div>
 
-            <div className="grid gap-4 md:grid-cols-2">
+            {/* grid-cols-1 (minmax(0, 1fr)) keeps the phone column from growing to the longest agent name. */}
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
               <div className="space-y-2">
                 <label htmlFor="security-analysis-agent" className="text-sm font-medium">Analysis Agent</label>
                 <Select disabled={agentsLoading || noAgentsInNamespace} value={analysisAgentRef} onValueChange={setAnalysisAgentRef}>
-                  <SelectTrigger id="security-analysis-agent"><SelectValue placeholder={agentsLoading ? 'Loading agents...' : 'Select analysis agent'} /></SelectTrigger>
+                  {/* Field-wide and capped there, so a long agent name truncates
+                      instead of overlapping the next field or leaving the card. */}
+                  <SelectTrigger id="security-analysis-agent" className="w-full max-w-full">
+                    <span className="min-w-0 truncate"><SelectValue placeholder={agentsLoading ? 'Loading agents...' : 'Select analysis agent'} /></span>
+                  </SelectTrigger>
                   <SelectContent>
                     {currentAgents.map((agent) => (
                       <SelectItem key={agent.metadata.name} value={agent.metadata.name}>{agent.metadata.name}</SelectItem>
@@ -133,7 +138,9 @@ export function RepositoryCreateForm() {
               <div className="space-y-2">
                 <label htmlFor="security-patch-agent" className="text-sm font-medium">Patch Agent</label>
                 <Select disabled={agentsLoading || noAgentsInNamespace} value={patchAgentRef} onValueChange={(value) => setPatchAgentRef(value === noPatchAgent ? '' : value)}>
-                  <SelectTrigger id="security-patch-agent"><SelectValue placeholder="Optional patch agent" /></SelectTrigger>
+                  <SelectTrigger id="security-patch-agent" className="w-full max-w-full">
+                    <span className="min-w-0 truncate"><SelectValue placeholder="Optional patch agent" /></span>
+                  </SelectTrigger>
                   <SelectContent>
                     <SelectItem value={noPatchAgent}>Same as analysis agent</SelectItem>
                     {currentAgents.map((agent) => (
