@@ -9,7 +9,6 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { AlertTriangle, ArrowLeft, SearchX, ShieldCheck, Trash2 } from 'lucide-react'
 import { EmptyState } from '@/components/ui/empty-state'
 import { PageHeader } from '@/components/layout/page-header'
-import { useDocumentTitle } from '@/hooks/use-document-title'
 import { TaskStatusBadge } from './task-status-badge'
 import { PRStatusBadge } from './pr-status-badge'
 import { TaskResultViewer } from './task-result-viewer'
@@ -58,22 +57,29 @@ function latestEventPlan(events: ExecutionEvent[]): PlanState | undefined {
   }
 }
 
-// The missing-task page has no PageHeader, so it names the browser tab itself.
+// Titled like the load-error pages: the header is the page's h1 and names
+// the browser tab.
 function TaskNotFound({ taskId }: { taskId: string }) {
-  useDocumentTitle('Task not found')
   return (
-    <EmptyState
-      icon={SearchX}
-      headline="Task not found"
-      hint={`No task named "${taskId}" exists in this namespace. It may have been deleted, or it belongs to another namespace.`}
-      action={
-        <Button asChild variant="outline" size="sm">
-          <Link to="/tasks">
-            <ArrowLeft className="mr-1 h-4 w-4" /> Back to Tasks
-          </Link>
-        </Button>
-      }
-    />
+    <div className="space-y-4">
+      <PageHeader title="Task not found" />
+      <Card>
+        <CardContent>
+          <EmptyState
+            icon={SearchX}
+            headline={`No task named "${taskId}" exists in this namespace.`}
+            hint="It may have been deleted, or it belongs to another namespace."
+            action={
+              <Button asChild variant="outline" size="sm">
+                <Link to="/tasks">
+                  <ArrowLeft className="mr-1 h-4 w-4" /> Back to Tasks
+                </Link>
+              </Button>
+            }
+          />
+        </CardContent>
+      </Card>
+    </div>
   )
 }
 

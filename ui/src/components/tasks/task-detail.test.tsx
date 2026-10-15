@@ -210,6 +210,8 @@ describe('TaskDetail', () => {
       expect(screen.getByText('Task not found')).toBeInTheDocument()
     })
     expect(screen.getByText(/No task named "nonexistent" exists in this namespace/)).toBeInTheDocument()
+    // Like the 403/500 pages, the missing-task page has a top-level heading.
+    expect(screen.getByRole('heading', { level: 1, name: 'Task not found' })).toBeInTheDocument()
     const back = screen.getByRole('link', { name: /back to tasks/i })
     expect(back).toHaveAttribute('href', '/tasks')
     expect(back.querySelector('button')).toBeNull()
