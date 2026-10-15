@@ -73,8 +73,9 @@ export function KanbanBoard() {
               <h2 className="font-semibold text-sm">{label}</h2>
               <span
                 className={cn(
-                  'inline-flex items-center justify-center rounded-full px-2 py-0.5 text-xs font-medium tabular-nums',
-                  style.bgClass,
+                  // On the card surface, not the column's own tint, so the
+                  // status color keeps AA contrast.
+                  'inline-flex items-center justify-center rounded-full border bg-card px-2 py-0.5 text-xs font-medium tabular-nums',
                   style.textClass,
                 )}
               >

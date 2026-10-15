@@ -90,7 +90,12 @@ export function ThreatModelEditor({ repositoryName }: { repositoryName: string }
             <textarea
               aria-label="Threat model"
               value={content}
-              onChange={(event) => setContent(event.target.value)}
+              onChange={(event) => {
+                setContent(event.target.value)
+                // Once the user types, a model that loads later must not
+                // replace the text; saving it then reports the conflict.
+                setInitialized(true)
+              }}
               className="min-h-72 w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring"
               placeholder="Document trust boundaries, auth assumptions, key assets, external integrations, and the attack surfaces worth prioritizing."
             />

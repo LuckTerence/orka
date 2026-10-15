@@ -153,7 +153,7 @@ describe('KanbanBoard', () => {
     }
   })
 
-  it('count chips use token tint/text classes, not pastels', async () => {
+  it('count chips use the status text token on the card surface, not pastels', async () => {
     server.use(
       http.get('/api/v1/tasks', () =>
         HttpResponse.json({
@@ -176,7 +176,9 @@ describe('KanbanBoard', () => {
       expect(chip).toHaveTextContent('1')
     })
     expect(chip).toHaveClass('text-status-running')
-    expect(chip).toHaveClass('bg-status-running-bg')
+    // Not the column's own tint: tint on tint fails AA contrast.
+    expect(chip).toHaveClass('bg-card')
+    expect(chip).not.toHaveClass('bg-status-running-bg')
     expect(chip.className).not.toMatch(/bg-(yellow|blue|green|red)-/)
   })
 

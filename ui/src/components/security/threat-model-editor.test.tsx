@@ -7,10 +7,11 @@ vi.mock('zustand/middleware', () => ({
 vi.mock('sonner', () => ({ toast: { success: vi.fn(), error: vi.fn() } }))
 
 import userEvent from '@testing-library/user-event'
+import { focusManager } from '@tanstack/react-query'
 import { http, HttpResponse } from 'msw'
 import { toast } from 'sonner'
 import { server } from '@/test/mocks/server'
-import { render, screen, waitFor } from '@/test/test-utils'
+import { act, render, screen, waitFor } from '@/test/test-utils'
 import { useUIStore } from '@/stores/ui'
 import { ThreatModelEditor } from './threat-model-editor'
 
@@ -152,6 +153,26 @@ describe('ThreatModelEditor', () => {
     await user.click(screen.getByRole('button', { name: 'Save' }))
     await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Threat model saved'))
     expect(puts[1]).toMatchObject({ content: 'Generated model v1 + mine', expectedVersion: 1 })
+  })
+
+  it('keeps typed text when a model loads in the background before the first save', async () => {
+    stored = undefined
+    const user = userEvent.setup()
+    render(<ThreatModelEditor repositoryName="payments" />)
+
+    await screen.findByText(/No threat model has been generated yet/)
+    const editor = screen.getByRole('textbox', { name: 'Threat model' })
+    await user.type(editor, 'Draft notes')
+    // A scan generates the first model and a window-focus refetch brings it in.
+    stored = threatModel(1, 'Generated model v1')
+    await act(async () => {
+      focusManager.setFocused(false)
+      focusManager.setFocused(true)
+    })
+    await waitFor(() => expect(screen.queryByText(/No threat model has been generated yet/)).not.toBeInTheDocument())
+
+    expect(screen.getByRole('textbox', { name: 'Threat model' })).toHaveValue('Draft notes')
+    focusManager.setFocused(undefined)
   })
 
   it('reports other save failures with the server message', async () => {
