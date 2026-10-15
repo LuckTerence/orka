@@ -6,7 +6,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
-import { ArrowLeft, Trash2 } from 'lucide-react'
+import { ArrowLeft, SearchX, Trash2 } from 'lucide-react'
+import { EmptyState } from '@/components/ui/empty-state'
 import { PageHeader } from '@/components/layout/page-header'
 import { TaskStatusBadge } from './task-status-badge'
 import { PRStatusBadge } from './pr-status-badge'
@@ -57,12 +58,12 @@ function latestEventPlan(events: ExecutionEvent[]): PlanState | undefined {
 export function TaskDetail({ taskId }: { taskId: string }) {
   const [following, setFollowing] = useState(true)
   const { data: task, isLoading, error: taskError } = useTask(taskId, following ? 5000 : false)
-  // Once the primary task query 404s or 403s, every dependent query (events,
-  // trace, approvals, artifacts) is disabled so a missing or forbidden task
-  // stops polling entirely instead of generating hidden 403 traffic.
+  // Dependent queries (events, trace, approvals, artifacts) wait until the
+  // task has loaded, and stay off once the task query 404s or 403s, so a
+  // missing or forbidden task generates no hidden dependent traffic.
   const taskMissing = isNotFoundError(taskError)
   const taskForbidden = isForbiddenError(taskError)
-  const taskUnavailable = taskMissing || taskForbidden
+  const taskUnavailable = taskMissing || taskForbidden || task === undefined
   const { data: taskEventsResponse, error: taskEventsError, failureReason: taskEventsFailureReason } = useTaskEvents(
     taskId,
     following ? 5000 : false,
@@ -196,7 +197,20 @@ export function TaskDetail({ taskId }: { taskId: string }) {
   // when a refetch fails, so a task deleted after it loaded would otherwise
   // keep rendering as if it still existed.
   if (taskMissing || !task) {
-    return <div className="text-muted-foreground">Task not found</div>
+    return (
+      <EmptyState
+        icon={SearchX}
+        headline="Task not found"
+        hint={`No task named "${taskId}" exists in this namespace. It may have been deleted, or it belongs to another namespace.`}
+        action={
+          <Link to="/tasks">
+            <Button variant="outline" size="sm">
+              <ArrowLeft className="mr-1 h-4 w-4" /> Back to Tasks
+            </Button>
+          </Link>
+        }
+      />
+    )
   }
 
   // The controller's parent annotation is authoritative; the label can be a

@@ -124,13 +124,12 @@ describe('TaskDetail', () => {
     await new Promise((resolve) => setTimeout(resolve, 200))
     expect(hits).toEqual(snapshot)
     expect(hits.task).toBe(1)
-    // A 404 is never retried: at most the single in-flight request that
-    // raced the task lookup.
-    expect(hits.events ?? 0).toBeLessThanOrEqual(1)
-    expect(hits.trace ?? 0).toBeLessThanOrEqual(1)
-    expect(hits.artifacts ?? 0).toBeLessThanOrEqual(1)
-    expect(hits.approvals ?? 0).toBeLessThanOrEqual(1)
-    expect(hits.artifacts ?? 0).toBeLessThanOrEqual(1)
+    // Dependent panels wait for the task to load, so a task that never
+    // existed generates no events/trace/approvals/artifacts requests at all.
+    expect(hits.events ?? 0).toBe(0)
+    expect(hits.trace ?? 0).toBe(0)
+    expect(hits.approvals ?? 0).toBe(0)
+    expect(hits.artifacts ?? 0).toBe(0)
   })
 
   it('shows not-found when task does not exist', async () => {
@@ -141,6 +140,8 @@ describe('TaskDetail', () => {
     await waitFor(() => {
       expect(screen.getByText('Task not found')).toBeInTheDocument()
     })
+    expect(screen.getByText(/No task named "nonexistent" exists in this namespace/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /back to tasks/i }).closest('a')).toHaveAttribute('href', '/tasks')
   })
 
   it('renders not-found once a loaded task 404s on refetch, ignoring the cached copy', async () => {
