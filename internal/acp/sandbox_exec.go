@@ -37,6 +37,10 @@ const (
 	SandboxExecDefaultTimeout   = 120 * time.Second
 	SandboxExecMaxTimeout       = 600 * time.Second
 	SandboxExecOutputLimitBytes = 64 << 10
+	// SandboxExecClientTimeout is how long a runtime's MCP client must wait
+	// for a sandbox_exec call: the longest one waits its timeout for the guest
+	// slot, then runs for it. The minute covers starting and stopping the guest.
+	SandboxExecClientTimeout = 2*SandboxExecMaxTimeout + time.Minute
 )
 
 // SandboxExecDescription is the tool description the agent sees.

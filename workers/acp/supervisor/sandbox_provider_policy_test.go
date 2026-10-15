@@ -1,8 +1,11 @@
 package supervisor
 
 import (
+	"encoding/json"
+	"fmt"
 	"maps"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -167,5 +170,62 @@ func TestValidateCopilotHyperlightCommandPolicy(t *testing.T) {
 	request.MCPConfiguration.ToolPolicy.Tools = nil
 	if err := validateCopilotHyperlightCommandPolicy(request); err != nil {
 		t.Fatalf("ordinary read-only session must remain supported: %v", err)
+	}
+}
+
+func TestSandboxExecSessionsWaitForTheLongestCall(t *testing.T) {
+	milliseconds := strconv.FormatInt(acp.SandboxExecClientTimeout.Milliseconds(), 10)
+	for _, granted := range []bool{true, false} {
+		t.Run(fmt.Sprintf("granted=%t", granted), func(t *testing.T) {
+			grant := func(tools ...string) []string {
+				if granted {
+					return append(tools, acp.SandboxExecToolName)
+				}
+				return tools
+			}
+
+			claude, err := claudeSessionProjection(
+				testProviderProjectionRequest(t, providerKindClaude, "claude-test", "", "high", grant(providerToolRead), nil, false),
+				acp.SessionPaths{}, ProviderProxyBinding{}, "claude-test")
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, name := range []string{"MCP_TOOL_TIMEOUT", "CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT"} {
+				if got, want := claude.Environment[name], map[bool]string{true: milliseconds}[granted]; got != want {
+					t.Errorf("Claude %s = %q, want %q", name, got, want)
+				}
+			}
+
+			codex, err := codexSessionProjection(
+				testProviderProjectionRequest(t, providerKindCodex, "gpt-test", "", "", grant(acp.BuiltInRuntimeNativeToolNames(providerKindCodex)...), nil, true),
+				acp.SessionPaths{}, ProviderProxyBinding{}, "gpt-test")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got, want := codex.Environment["ORKA_CODEX_MCP_TOOL_TIMEOUT_SEC"], map[bool]string{true: "1260"}[granted]; got != want {
+				t.Errorf("Codex tool timeout = %q, want %q", got, want)
+			}
+
+			data, err := openCodeSessionConfig("openai/gpt-test", testOpenCodeModelLimits(), harnessv2.WorkspaceIntentRead,
+				testProviderProjectionRequest(t, providerKindOpencode, "openai/gpt-test", "", "", grant(), nil, false),
+				acp.SessionPaths{}, ProviderProxyBinding{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var config struct {
+				Experimental *struct {
+					MCPTimeout int64 `json:"mcp_timeout"`
+				} `json:"experimental"`
+			}
+			if err := json.Unmarshal(data, &config); err != nil {
+				t.Fatal(err)
+			}
+			if granted && (config.Experimental == nil || config.Experimental.MCPTimeout != acp.SandboxExecClientTimeout.Milliseconds()) {
+				t.Errorf("OpenCode experimental = %+v, want mcp_timeout %s", config.Experimental, milliseconds)
+			}
+			if !granted && config.Experimental != nil {
+				t.Errorf("OpenCode without sandbox_exec changed its MCP timeout: %+v", config.Experimental)
+			}
+		})
 	}
 }

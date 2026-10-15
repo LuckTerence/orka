@@ -506,6 +506,12 @@ func codexSessionProjection(
 	if strict {
 		environment["ORKA_CODEX_HYPERLIGHT_ONLY"] = "1"
 	}
+	if sandboxExecGranted(toolPolicy) {
+		// codex-acp gives Orka's MCP server only its URL and headers, so Codex
+		// (0.160.0) would stop waiting for a tool call after 300 s. The patched
+		// adapter adds this as the server's tool_timeout_sec.
+		environment["ORKA_CODEX_MCP_TOOL_TIMEOUT_SEC"] = strconv.FormatInt(int64(acp.SandboxExecClientTimeout.Seconds()), 10)
+	}
 	return ProviderSessionProjection{Environment: environment}, nil
 }
 
@@ -579,6 +585,16 @@ func claudeSessionProjection(
 		// "unset" omits that inferred API field; explicit effort stays in options
 		// because this environment variable takes precedence over SDK options.
 		environment = map[string]string{"CLAUDE_CODE_EFFORT_LEVEL": "unset"}
+	}
+	if sandboxExecGranted(request.MCPConfiguration.ToolPolicy) {
+		// Claude Code (verified on 2.1.293) otherwise aborts an HTTP MCP call
+		// after 60 s without response headers, or 300 s without progress.
+		if environment == nil {
+			environment = map[string]string{}
+		}
+		timeout := strconv.FormatInt(acp.SandboxExecClientTimeout.Milliseconds(), 10)
+		environment["MCP_TOOL_TIMEOUT"] = timeout
+		environment["CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT"] = timeout
 	}
 	if !policy.unrestricted {
 		allowed, disallowed := providerNativePolicyLists(policy)
@@ -950,7 +966,7 @@ func openCodeSessionConfig(
 		permissions[openCodeToolGrep] = openCodePermissionDeny
 		permissions[openCodeToolWrite] = openCodePermissionDeny
 	}
-	return json.Marshal(map[string]any{
+	config := map[string]any{
 		// Native ACP returns before background title inference settles. Titles
 		// must not consume prompt quota or outlive the governed prompt.
 		"agent":             map[string]any{"title": map[string]bool{"disable": true}},
@@ -988,7 +1004,12 @@ func openCodeSessionConfig(
 				},
 			},
 		},
-	})
+	}
+	if sandboxExecGranted(toolPolicy) {
+		// OpenCode (1.19.0) otherwise stops waiting for an MCP tool call after 60 s.
+		config["experimental"] = map[string]any{"mcp_timeout": acp.SandboxExecClientTimeout.Milliseconds()}
+	}
+	return json.Marshal(config)
 }
 
 func openCodeBrokeredPermissions(policy harnessv2.MCPToolPolicy) (map[string]bool, error) {

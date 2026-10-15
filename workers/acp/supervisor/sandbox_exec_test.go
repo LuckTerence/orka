@@ -1,10 +1,12 @@
 package supervisor
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -481,5 +483,67 @@ func TestCreateSessionRejectsDisabledSandboxExec(t *testing.T) {
 				t.Fatal("rejected sandbox policy created resources or consumed a session identity")
 			}
 		})
+	}
+}
+
+type gatedSandboxRunner struct {
+	release chan struct{}
+	result  acp.SandboxExecResult
+}
+
+func (g *gatedSandboxRunner) run(ctx context.Context, _ acp.SandboxExecRequest, _ sandboxWorkspace) (acp.SandboxExecResult, time.Duration, error) {
+	select {
+	case <-g.release:
+		return g.result, 0, nil
+	case <-ctx.Done():
+		return acp.SandboxExecResult{ExitCode: -1}, 0, ctx.Err()
+	}
+}
+
+func TestSandboxExecKeepsALongCallAliveForEventStreamClients(t *testing.T) {
+	keepalive := sandboxExecKeepalive
+	sandboxExecKeepalive = time.Millisecond
+	t.Cleanup(func() { sandboxExecKeepalive = keepalive })
+	runner := &gatedSandboxRunner{release: make(chan struct{}), result: acp.SandboxExecResult{Stdout: "done\n"}}
+	_, server := newSandboxTestSession(t, runner)
+
+	request, err := http.NewRequest(http.MethodPost, server, strings.NewReader(sandboxCall("long", `{"code":"print('done')"}`)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Accept", "application/json, text/event-stream")
+	request.Header.Set("Authorization", "Bearer credential")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close() //nolint:errcheck
+	if got := response.Header.Get("Content-Type"); got != "text/event-stream" {
+		t.Fatalf("Content-Type = %q, want an event stream", got)
+	}
+	// Headers and keepalives arrive while the guest still runs.
+	reader := bufio.NewReader(response.Body)
+	if line, err := reader.ReadString('\n'); err != nil || line != ": keepalive\n" {
+		t.Fatalf("first line = %q, %v; want a keepalive before the result", line, err)
+	}
+	close(runner.release)
+	rest, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := strings.Split(strings.TrimSpace(string(rest)), "\n\n")
+	last := events[len(events)-1]
+	data, found := strings.CutPrefix(last, "event: message\ndata: ")
+	if !found || strings.Contains(data, "\n") {
+		t.Fatalf("last event = %q, want one message event", last)
+	}
+	var decoded mcpJSONRPCResponse
+	if err := json.Unmarshal([]byte(data), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	text, isError := sandboxToolResult(t, decoded)
+	if isError || !strings.Contains(text, `"stdout":"done\n"`) {
+		t.Fatalf("result = %q (isError %t)", text, isError)
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -203,6 +204,14 @@ func (s *mcpProxySession) handleRuntimeLocalCall(w http.ResponseWriter, r *http.
 		writeMCPToolError(w, rpc.ID, "sandbox_exec is not enabled in this runtime: the controller runs it with --acp-sandbox-exec")
 		return
 	}
+	// The call may run for minutes and its result comes only at the end. A
+	// client that accepts an event stream gets one, kept alive meanwhile:
+	// OpenCode's fetch (Bun 1.3.14) drops a response silent for 300 s.
+	out := w
+	if stream := startMCPEventStream(w, r); stream != nil {
+		defer stream.close()
+		out = stream
+	}
 
 	ctx, cancel := context.WithCancel(r.Context())
 	stop := context.AfterFunc(gate, cancel)
@@ -220,7 +229,7 @@ func (s *mcpProxySession) handleRuntimeLocalCall(w http.ResponseWriter, r *http.
 		"stdout_bytes", len(result.Stdout), "stderr_bytes", len(result.Stderr), "uid", workspace.uid, "error", err)
 	if gate.Err() != nil {
 		waitForPromptGateCancellation(r.Context(), gate)
-		writeMCPRPCError(w, rpc.ID, -32001, "MCP tool call is not authorized")
+		writeMCPRPCError(out, rpc.ID, -32001, "MCP tool call is not authorized")
 		return
 	}
 	if err != nil {
@@ -228,19 +237,19 @@ func (s *mcpProxySession) handleRuntimeLocalCall(w http.ResponseWriter, r *http.
 		if errors.Is(err, hyperlight.ErrUnavailable) {
 			message = "sandbox_exec is unavailable in this runtime: " + err.Error()
 		}
-		writeMCPToolError(w, rpc.ID, message)
+		writeMCPToolError(out, rpc.ID, message)
 		return
 	}
 	encoded, err := json.Marshal(result)
 	if err != nil {
-		writeMCPRPCError(w, rpc.ID, -32002, "sandbox_exec result could not be encoded")
+		writeMCPRPCError(out, rpc.ID, -32002, "sandbox_exec result could not be encoded")
 		return
 	}
 	var structured map[string]any
 	_ = json.Unmarshal(encoded, &structured)
 	response := mcpToolTextResult(string(encoded), result.ExitCode != 0 || result.TimedOut)
 	response["structuredContent"] = structured
-	writeMCPRPCResult(w, rpc.ID, response)
+	writeMCPRPCResult(out, rpc.ID, response)
 }
 
 // bindSandboxWorkspace records the session's workspace and user for
@@ -253,6 +262,66 @@ func (s *mcpProxySession) bindSandboxWorkspace(dir string, uid, gid int, intent 
 		dir: dir, uid: uint32(uid), gid: uint32(gid), //nolint:gosec // session IDs come from the bounded UID allocator
 		readOnly: intent != harnessv2.WorkspaceIntentWrite,
 	}
+}
+
+// sandboxExecKeepalive is how often a streamed sandbox_exec call sends a
+// comment while it runs.
+var sandboxExecKeepalive = 30 * time.Second
+
+// mcpEventStream answers one MCP request with an event stream, which the
+// Streamable HTTP transport lets a server choose for any request. It sends a
+// comment every sandboxExecKeepalive; the JSON-RPC response written to it is
+// sent as the stream's one event on close.
+type mcpEventStream struct {
+	w        http.ResponseWriter
+	flusher  http.Flusher
+	header   http.Header
+	response bytes.Buffer
+	stop     chan struct{}
+	stopped  chan struct{}
+}
+
+// startMCPEventStream starts the stream if the client accepts one, and
+// returns nil if not.
+func startMCPEventStream(w http.ResponseWriter, r *http.Request) *mcpEventStream {
+	flusher, ok := w.(http.Flusher)
+	if !ok || !strings.Contains(r.Header.Get("Accept"), "text/event-stream") {
+		return nil
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+	stream := &mcpEventStream{w: w, flusher: flusher, header: http.Header{}, stop: make(chan struct{}), stopped: make(chan struct{})}
+	go stream.keepalive()
+	return stream
+}
+
+func (s *mcpEventStream) keepalive() {
+	defer close(s.stopped)
+	ticker := time.NewTicker(sandboxExecKeepalive)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.stop:
+			return
+		case <-ticker.C:
+			_, _ = io.WriteString(s.w, ": keepalive\n\n")
+			s.flusher.Flush()
+		}
+	}
+}
+
+// Header, WriteHeader and Write collect the JSON-RPC response for close.
+func (s *mcpEventStream) Header() http.Header         { return s.header }
+func (s *mcpEventStream) WriteHeader(int)             {}
+func (s *mcpEventStream) Write(p []byte) (int, error) { return s.response.Write(p) }
+
+func (s *mcpEventStream) close() {
+	close(s.stop)
+	<-s.stopped
+	_, _ = fmt.Fprintf(s.w, "event: message\ndata: %s\n\n", bytes.TrimSpace(s.response.Bytes()))
+	s.flusher.Flush()
 }
 
 func writeMCPToolError(w http.ResponseWriter, id json.RawMessage, text string) {

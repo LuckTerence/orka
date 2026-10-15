@@ -13,9 +13,13 @@ import (
 // session, must not change provider configuration.
 func hyperlightOnlyCommandPolicy(request harnessv2.CreateRuntimeSessionRequest) bool {
 	policy := request.MCPConfiguration.ToolPolicy
-	if policy.AllowBash {
-		return false
-	}
+	return !policy.AllowBash && sandboxExecGranted(policy)
+}
+
+// sandboxExecGranted reports whether the frozen policy grants runtime-local
+// sandbox_exec. Its result comes only when the call ends, so such a session's
+// provider must wait acp.SandboxExecClientTimeout for an MCP tool call.
+func sandboxExecGranted(policy harnessv2.MCPToolPolicy) bool {
 	for _, descriptor := range policy.Tools {
 		if descriptor.Name == acp.SandboxExecToolName && descriptor.Source == harnessv2.MCPToolSourceRuntimeLocal {
 			return true

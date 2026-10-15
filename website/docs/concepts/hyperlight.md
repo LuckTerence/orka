@@ -136,6 +136,12 @@ spec:
   sessions. A call waits for the guest before it starts, at most as long as its
   timeout and never past prompt cancellation; the timeout then bounds its own
   run. A call that never got the guest reports that nothing ran.
+- A call can take 21 minutes: up to 600 s waiting for the guest, then up to
+  600 s running. In a session that can call `sandbox_exec`, Orka makes Claude,
+  Codex and OpenCode wait that long for an MCP tool call; their own limits are
+  60 s (Claude and OpenCode) and 300 s (Codex). Meanwhile it sends a client that
+  accepts an event stream a comment every 30 s, since OpenCode drops a response
+  that is silent for 300 s.
 - Arguments: `code`, `language` (`python`, `javascript` or `bash`; `python` by
   default), and `timeout` in seconds (120 by default, at most 600). The result
   is JSON with `stdout`, `stderr` and `exit_code`, 64 KiB per stream.

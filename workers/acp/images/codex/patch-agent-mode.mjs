@@ -128,4 +128,15 @@ client = client.replace(rootsAnchor, `${rootsAnchor}
                 await files.rm(target, { force: true });
             }
         }`);
+// The adapter gives an HTTP MCP server only its URL and headers. For sessions
+// that can call sandbox_exec, the supervisor sets how long Codex waits for
+// one tool call.
+const httpServerAnchor = `                        "http_headers": Object.fromEntries(mcpServer.headers.map(h => [h.name, h.value])),
+                    }`;
+if (!client.includes(httpServerAnchor)) throw new Error("Codex HTTP MCP server anchor not found");
+client = client.replace(httpServerAnchor, `                        "http_headers": Object.fromEntries(mcpServer.headers.map(h => [h.name, h.value])),
+                        ...(process.env["ORKA_CODEX_MCP_TOOL_TIMEOUT_SEC"]
+                            ? { "tool_timeout_sec": Number(process.env["ORKA_CODEX_MCP_TOOL_TIMEOUT_SEC"]) }
+                            : {}),
+                    }`);
 writeFileSync(clientPath, client);
