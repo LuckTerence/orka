@@ -183,6 +183,37 @@ describe('SessionList', () => {
     expect(deleted).toBe('sess-del')
   })
 
+  it('blocks a repeat delete of a session while another row is deleting', async () => {
+    const user = userEvent.setup()
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const deletes: string[] = []
+    const releases: Array<() => void> = []
+    server.use(
+      http.get('/api/v1/sessions', () =>
+        HttpResponse.json({
+          items: [
+            { name: 'sess-a', namespace: 'default', createdAt: new Date().toISOString() },
+            { name: 'sess-b', namespace: 'default', createdAt: new Date().toISOString() },
+          ],
+          metadata: {},
+        }),
+      ),
+      http.delete('/api/v1/sessions/:id', ({ params }) => {
+        deletes.push(params.id as string)
+        return new Promise<HttpResponse>((resolve) => releases.push(() => resolve(new HttpResponse(null, { status: 204 }))))
+      }),
+    )
+    render(<SessionList />)
+    await user.click(await screen.findByRole('button', { name: 'Delete session sess-a' }))
+    await user.click(screen.getByRole('button', { name: 'Delete session sess-b' }))
+    // sess-b's delete must not re-enable sess-a's pending one.
+    await user.click(screen.getByRole('button', { name: 'Delete session sess-a' }))
+    await waitFor(() => expect(deletes).toEqual(['sess-a', 'sess-b']))
+    releases.forEach((release) => release())
+    await waitFor(() => expect(toast.success).toHaveBeenCalledTimes(2))
+    expect(deletes).toEqual(['sess-a', 'sess-b'])
+  })
+
   it('shows the server message when a delete is refused', async () => {
     const user = userEvent.setup()
     vi.spyOn(window, 'confirm').mockReturnValue(true)

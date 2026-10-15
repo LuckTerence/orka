@@ -44,11 +44,13 @@ function LoginPage() {
   // sent us here. Only while the address is still /login: the token swaps the
   // root layout before the route match changes, so this page mounts again for
   // a moment at the destination, where the return has already been taken.
+  // A rejected sign-in stays here with its error, even when an earlier token
+  // is still stored, instead of silently continuing as the old identity.
   useEffect(() => {
-    if (token && !isValidating && location.pathname === '/login') {
+    if (token && !isValidating && !error && location.pathname === '/login') {
       navigate({ href: takeLoginReturn() })
     }
-  }, [token, isValidating, location.pathname, navigate])
+  }, [token, isValidating, error, location.pathname, navigate])
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()

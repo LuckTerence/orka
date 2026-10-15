@@ -355,6 +355,18 @@ describe('AgentDetail', () => {
     })
   })
 
+  it('labels a legacy zero maxTokens instead of rendering a stray 0', async () => {
+    server.use(
+      http.get('/api/v1/agents/:name', () => HttpResponse.json({
+        ...fullAgent,
+        spec: { ...fullAgent.spec, model: { ...fullAgent.spec.model, maxTokens: 0 } },
+      })),
+    )
+    render(<AgentDetail agentId="test-agent" />)
+    const label = await screen.findByText('Max Tokens:')
+    expect(label.parentElement).toHaveTextContent('Max Tokens: 0')
+  })
+
   it('renders agent with configMapRef system prompt', async () => {
     const agentWithCMPrompt = {
       ...fullAgent,

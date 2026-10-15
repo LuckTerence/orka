@@ -142,8 +142,8 @@ export function AgentDetail({ agentId }: { agentId: string }) {
               )}
               {agent.spec.model?.name && <div><span className="text-muted-foreground">Model:</span> {agent.spec.model.name}</div>}
               {agent.spec.model?.temperature !== undefined && <div><span className="text-muted-foreground">Temperature:</span> {agent.spec.model.temperature}</div>}
-              {agent.spec.model?.contextWindow && <div><span className="text-muted-foreground">Context Window:</span> {agent.spec.model.contextWindow}</div>}
-              {agent.spec.model?.maxTokens && <div><span className="text-muted-foreground">Max Tokens:</span> {agent.spec.model.maxTokens}</div>}
+              {agent.spec.model?.contextWindow !== undefined && <div><span className="text-muted-foreground">Context Window:</span> {agent.spec.model.contextWindow}</div>}
+              {agent.spec.model?.maxTokens !== undefined && <div><span className="text-muted-foreground">Max Tokens:</span> {agent.spec.model.maxTokens}</div>}
             </CardContent>
           </Card>
         )}

@@ -164,6 +164,23 @@ describe('login route', () => {
     window.history.replaceState(null, '', '/')
   })
 
+  it('stays on the error when a captured token is rejected while an earlier one is stored', async () => {
+    server.use(http.get('/api/v1/auth/validate', () => new HttpResponse(null, { status: 401 })))
+    useAuthStore.setState({ token: 'old-token' })
+    window.history.replaceState(null, '', '/login#token=expired-token')
+    captureHashToken()
+
+    const LoginPage = Route.component!
+    render(<LoginPage />)
+
+    expect(await screen.findByText('Token from CLI is invalid or expired. Please generate a new one.')).toBeInTheDocument()
+    // The rejected switch must not continue silently under the old identity.
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(mockNavigate).not.toHaveBeenCalled()
+    expect(useAuthStore.getState().token).toBe('old-token')
+    window.history.replaceState(null, '', '/')
+  })
+
   it('reports a captured token the server rejects', async () => {
     server.use(http.get('/api/v1/auth/validate', () => new HttpResponse(null, { status: 401 })))
     window.history.replaceState(null, '', '/login#token=expired-token')

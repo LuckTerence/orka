@@ -1,3 +1,4 @@
+import { useRef, useState } from 'react'
 import { Link } from '@tanstack/react-router'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Button } from '@/components/ui/button'
@@ -15,14 +16,23 @@ export function SessionList() {
   const deleteSession = useDeleteSession()
   const sessions = error ? [] : (data?.pages ?? []).flatMap((page) => page.items)
 
-  const deletePending = (name: string) => deleteSession.isPending && deleteSession.variables === name
+  // The shared mutation only remembers its latest variables, so track every
+  // in-flight delete by name to block a repeat while an earlier one runs.
+  const [pendingDeletes, setPendingDeletes] = useState<ReadonlySet<string>>(() => new Set())
+  const pendingRef = useRef(new Set<string>())
+  const deletePending = (name: string) => pendingDeletes.has(name)
   const handleDelete = async (name: string) => {
-    if (deletePending(name) || !confirm(`Delete session "${name}"?`)) return
+    if (pendingRef.current.has(name) || !confirm(`Delete session "${name}"?`)) return
+    pendingRef.current.add(name)
+    setPendingDeletes(new Set(pendingRef.current))
     try {
       await deleteSession.mutateAsync(name)
       toast.success('Session deleted')
     } catch (err) {
       toast.error(`Failed to delete session: ${err instanceof Error ? err.message : 'Unknown error'}`)
+    } finally {
+      pendingRef.current.delete(name)
+      setPendingDeletes(new Set(pendingRef.current))
     }
   }
 
