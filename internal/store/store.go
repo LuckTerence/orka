@@ -238,6 +238,9 @@ type SecurityStore interface {
 
 	GetLatestThreatModel(ctx context.Context, namespace, repositoryScan string) (*ThreatModel, error)
 	SaveThreatModel(ctx context.Context, model *ThreatModel) error
+	// SaveThreatModelIfVersion saves model only while the latest stored
+	// version equals expectedVersion, and returns ErrConflict otherwise.
+	SaveThreatModelIfVersion(ctx context.Context, model *ThreatModel, expectedVersion int64) error
 
 	UpsertFinding(ctx context.Context, finding *Finding) error
 	UpsertObservedFinding(ctx context.Context, finding *Finding) error

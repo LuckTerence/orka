@@ -43,6 +43,9 @@ type UpdateRepositoryScanRequest struct {
 type UpdateThreatModelRequest struct {
 	Content string `json:"content"`
 	Source  string `json:"source,omitempty"`
+	// ExpectedVersion, when positive, is the threat model version the edit was
+	// based on; the save is rejected if another edit replaced it since.
+	ExpectedVersion int64 `json:"expectedVersion,omitempty"`
 }
 
 const (
@@ -865,6 +868,9 @@ func (h *Handlers) UpdateThreatModel(c fiber.Ctx) error {
 	if strings.TrimSpace(req.Content) == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "content is required")
 	}
+	if req.ExpectedVersion < 0 {
+		return fiber.NewError(fiber.StatusBadRequest, "expectedVersion must not be negative")
+	}
 
 	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
 	if err != nil {
@@ -890,7 +896,17 @@ func (h *Handlers) UpdateThreatModel(c fiber.Ctx) error {
 	if model.Source == "" {
 		model.Source = "edited"
 	}
-	if err := h.securityStore.SaveThreatModel(c.Context(), model); err != nil {
+	// Without an expected version, the edit replaces whatever is stored, which
+	// keeps older clients working.
+	if req.ExpectedVersion > 0 {
+		err = h.securityStore.SaveThreatModelIfVersion(c.Context(), model, req.ExpectedVersion)
+	} else {
+		err = h.securityStore.SaveThreatModel(c.Context(), model)
+	}
+	if errors.Is(err, store.ErrConflict) {
+		return fiber.NewError(fiber.StatusConflict, "threat model changed since it was loaded")
+	}
+	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to save threat model: %v", err))
 	}
 	return c.JSON(model)

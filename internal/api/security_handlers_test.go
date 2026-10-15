@@ -1151,6 +1151,62 @@ func TestThreatModelRejectsBlankSanitizedEdit(t *testing.T) {
 	}
 }
 
+func TestThreatModelExpectedVersionRejectsLostUpdate(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	app, handlers := setupSecurityHandlersWithAuthzFixture(
+		t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce,
+		securityAuthzTestRepositoryScan("scan-1", securityTestRepoURL),
+	)
+	ctx := context.Background()
+	require.NoError(t, handlers.securityStore.SaveThreatModel(ctx, &store.ThreatModel{
+		Namespace: "demo", RepositoryScan: "scan-1", Content: "Generated model.", Source: "scan",
+	}))
+	token := issueTestContextToken(t, provider, nil, map[string]any{
+		"scope": ContextTokenScopeSecurityWrite,
+		"tctx":  securityAuthzTestTctx(securityTestRepoURL),
+	})
+	put := func(t *testing.T, request UpdateThreatModelRequest) (int, string) {
+		t.Helper()
+		body, err := json.Marshal(request)
+		require.NoError(t, err)
+		req := httptest.NewRequest(http.MethodPut, "/security/repositories/scan-1/threat-model?namespace=demo", strings.NewReader(string(body)))
+		req.Header.Set(TransactionTokenHeaderName, token)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+		defer resp.Body.Close() //nolint:errcheck
+		data, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		return resp.StatusCode, string(data)
+	}
+	requireStored := func(t *testing.T, content string, version int64) {
+		t.Helper()
+		model, err := handlers.securityStore.GetLatestThreatModel(ctx, "demo", "scan-1")
+		require.NoError(t, err)
+		require.Equal(t, content, model.Content)
+		require.Equal(t, version, model.Version)
+	}
+
+	// Two editors load version 1; the first save wins and the second conflicts.
+	status, _ := put(t, UpdateThreatModelRequest{Content: "First editor.", ExpectedVersion: 1})
+	require.Equal(t, http.StatusOK, status)
+	requireStored(t, "First editor.", 2)
+	status, message := put(t, UpdateThreatModelRequest{Content: "Second editor.", ExpectedVersion: 1})
+	require.Equal(t, http.StatusConflict, status)
+	require.Contains(t, message, "threat model changed since it was loaded")
+	requireStored(t, "First editor.", 2)
+
+	status, _ = put(t, UpdateThreatModelRequest{Content: "Negative version.", ExpectedVersion: -1})
+	require.Equal(t, http.StatusBadRequest, status)
+	requireStored(t, "First editor.", 2)
+
+	// Clients that send no expected version keep last-write-wins behavior.
+	status, _ = put(t, UpdateThreatModelRequest{Content: "Legacy client."})
+	require.Equal(t, http.StatusOK, status)
+	requireStored(t, "Legacy client.", 3)
+}
+
 func TestThreatModel_ContextTokenRepositoryScanAuthorizationDenials(t *testing.T) {
 	provider := newTestOIDCProvider(t)
 	ctxTokenConfig := testContextTokenConfig(t, provider, "")
