@@ -133,6 +133,7 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		StreamRequestBody: true,
 		ErrorHandler:      customErrorHandler,
 	})
+	redactRequestParseErrors(app)
 
 	server := &Server{
 		app:                 app,
@@ -253,6 +254,9 @@ func isGatewayIngressPath(path string) bool {
 
 // setupMiddleware configures middleware for the server
 func (s *Server) setupMiddleware() {
+	// Outermost, so it runs after every handler and middleware has returned.
+	s.app.Use(drainUnreadRequestBody)
+
 	// Recovery middleware
 	s.app.Use(recover.New())
 
