@@ -2,20 +2,20 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 
 const mockMutateAsync = vi.fn()
 const mockCommandMutate = vi.fn()
+const mockUseRepositoryMonitor = vi.fn()
+
+const readyMonitor = {
+  metadata: { name: 'repo-monitor', namespace: 'default' },
+  spec: { repoURL: 'https://github.com/orka-agents/orka' },
+  status: { phase: 'Ready' },
+}
 
 vi.mock('sonner', () => ({ toast: { success: vi.fn(), error: vi.fn() } }))
 
 vi.mock('@/hooks/use-monitors', () => {
   const empty = () => ({ data: { items: [] } })
   return {
-    useRepositoryMonitor: () => ({
-      isLoading: false,
-      data: {
-        metadata: { name: 'repo-monitor', namespace: 'default' },
-        spec: { repoURL: 'https://github.com/orka-agents/orka' },
-        status: { phase: 'Ready' },
-      },
-    }),
+    useRepositoryMonitor: () => mockUseRepositoryMonitor(),
     useRepositoryMonitorRuns: empty,
     useRepositoryMonitorItems: (_name: string, kind?: string) =>
       kind === 'issue' ? { data: { items: [{ itemKey: 'issue-7', number: 7, title: 'Flaky test' }] } } : empty(),
@@ -39,8 +39,33 @@ describe('RepositoryMonitorDetail', () => {
   beforeEach(() => {
     mockMutateAsync.mockReset()
     mockCommandMutate.mockReset()
+    mockUseRepositoryMonitor.mockReturnValue({ isLoading: false, data: readyMonitor })
     vi.mocked(toast.success).mockClear()
     vi.mocked(toast.error).mockClear()
+  })
+
+  it('alerts with the Ready=False reason and message of an errored monitor', () => {
+    mockUseRepositoryMonitor.mockReturnValue({
+      isLoading: false,
+      data: {
+        ...readyMonitor,
+        status: {
+          phase: 'Error',
+          conditions: [{ type: 'Ready', status: 'False', reason: 'InvalidRepositoryURL', message: 'repoURL must be a GitHub repository root' }],
+        },
+      },
+    })
+    render(<RepositoryMonitorDetail monitorName="repo-monitor" />)
+
+    const alert = screen.getByRole('alert')
+    expect(alert).toHaveTextContent('InvalidRepositoryURL')
+    expect(alert).toHaveTextContent('repoURL must be a GitHub repository root')
+  })
+
+  it('shows no alert for a ready monitor', () => {
+    render(<RepositoryMonitorDetail monitorName="repo-monitor" />)
+
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   })
 
   it('confirms a started run', async () => {

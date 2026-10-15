@@ -9,6 +9,7 @@ import { ListAccessError } from '@/components/ui/list-access-error'
 import { PageHeader } from '@/components/layout/page-header'
 import { useRepositoryMonitors, useRunRepositoryMonitor } from '@/hooks/use-monitors'
 import type { RepositoryMonitor } from '@/schemas/monitor'
+import { statusProblem } from '@/components/common/status-problem'
 import { repositoryMonitorDisplayName } from './repository-monitor-display'
 import { timeAgo } from '@/lib/time'
 
@@ -75,6 +76,7 @@ function RepositoryMonitorCard({ monitor }: { monitor: RepositoryMonitor }) {
   const runMonitor = useRunRepositoryMonitor(monitor.metadata.name)
   const status = monitor.status
   const displayName = repositoryMonitorDisplayName(monitor)
+  const problem = statusProblem(status)
   const run = () => runMonitor.mutate(undefined, {
     onSuccess: () => toast.success(`Run of ${monitor.metadata.name} started`),
     onError: (error) => toast.error(`Failed to start monitor run: ${error instanceof Error ? error.message : 'Unknown error'}`),
@@ -91,6 +93,7 @@ function RepositoryMonitorCard({ monitor }: { monitor: RepositoryMonitor }) {
             </Link>
           </CardTitle>
           <p className="text-sm text-muted-foreground">{monitor.spec.branch || 'main'} · {monitor.spec.schedule || 'manual'}</p>
+          {problem && <p className="text-sm font-medium text-status-failed" title={problem.message}>{problem.reason}</p>}
         </div>
         <Badge variant={status?.phase === 'Ready' ? 'default' : 'secondary'}>
           {status?.phase || 'Pending'}

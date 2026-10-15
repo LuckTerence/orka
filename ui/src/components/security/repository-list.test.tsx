@@ -114,6 +114,44 @@ describe('RepositoryList', () => {
     expect(screen.getAllByText('https://github.com/example/demo-repo · main')).toHaveLength(2)
   })
 
+  it('names the Ready=False reason on an errored repository card', () => {
+    mockUseRepositoryScans.mockReturnValue({
+      isLoading: false,
+      data: {
+        items: [
+          repository({
+            status: {
+              phase: 'Error',
+              conditions: [{ type: 'Ready', status: 'False', reason: 'InvalidSchedule', message: 'expected exactly 5 fields, found 1: [hourly]' }],
+            },
+          }),
+        ],
+      },
+    })
+
+    render(<RepositoryList />)
+
+    const reason = screen.getByText('InvalidSchedule')
+    expect(reason).toHaveAttribute('title', 'expected exactly 5 fields, found 1: [hourly]')
+    expect(screen.getByText('Error')).toBeInTheDocument()
+  })
+
+  it('adds no reason while a repository is only pending or scanning', () => {
+    mockUseRepositoryScans.mockReturnValue({
+      isLoading: false,
+      data: {
+        items: [
+          repository({ status: { phase: 'Scanning', conditions: [{ type: 'Ready', status: 'False', reason: 'Scanning', message: 'Full scan is running' }] } }),
+        ],
+      },
+    })
+
+    render(<RepositoryList />)
+
+    expect(screen.getAllByText('Scanning')).toHaveLength(1)
+    expect(screen.queryByText('Full scan is running')).not.toBeInTheDocument()
+  })
+
   it('keeps zero severity counts neutral and marks real ones', () => {
     mockUseRepositoryScans.mockReturnValue({
       isLoading: false,

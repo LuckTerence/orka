@@ -6,6 +6,8 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { PageHeader } from '@/components/layout/page-header'
+import { StatusProblemAlert } from '@/components/common/status-problem-alert'
+import { statusProblem } from '@/components/common/status-problem'
 import { useCreateRepositoryMonitorCommand, useRepositoryMonitor, useRepositoryMonitorActions, useRepositoryMonitorCommands, useRepositoryMonitorImplementationJobs, useRepositoryMonitorItems, useRepositoryMonitorMutations, useRepositoryMonitorRuns, useRepositoryMonitorWorkActions, useRunRepositoryMonitor } from '@/hooks/use-monitors'
 import { repositoryMonitorDisplayName } from './repository-monitor-display'
 import { formatTimestamp } from '@/lib/time'
@@ -62,6 +64,7 @@ export function RepositoryMonitorDetail({ monitorName }: { monitorName: string }
 
   const status = monitor.status
   const displayName = repositoryMonitorDisplayName(monitor)
+  const problem = statusProblem(status)
 
   return (
     <div className="space-y-4">
@@ -89,6 +92,8 @@ export function RepositoryMonitorDetail({ monitorName }: { monitorName: string }
           </>
         }
       />
+
+      {problem && <StatusProblemAlert problem={problem} />}
 
       <div className="grid gap-4 md:grid-cols-6">
         <MetricCard title="Open PRs" value={status?.openPullRequests ?? 0} />

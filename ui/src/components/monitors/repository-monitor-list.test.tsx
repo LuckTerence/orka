@@ -105,6 +105,34 @@ describe('RepositoryMonitorList', () => {
     expect(screen.queryByText(/undefined/)).not.toBeInTheDocument()
   })
 
+  it('names the Ready=False reason on an errored monitor card', () => {
+    const errored = monitor({
+      status: {
+        phase: 'Error',
+        conditions: [{ type: 'Ready', status: 'False', reason: 'InvalidSchedule', message: 'end of range (61) above maximum (59): 61' }],
+      } as RepositoryMonitor['status'],
+    })
+    mockUseRepositoryMonitors.mockReturnValue({ isLoading: false, data: { items: [errored] } })
+
+    render(<RepositoryMonitorList />)
+
+    expect(screen.getByText('InvalidSchedule')).toHaveAttribute('title', 'end of range (61) above maximum (59): 61')
+  })
+
+  it('adds no reason to a suspended monitor card', () => {
+    const suspended = monitor({
+      status: {
+        phase: 'Suspended',
+        conditions: [{ type: 'Ready', status: 'False', reason: 'Suspended', message: 'Repository monitor scheduled runs are suspended' }],
+      } as RepositoryMonitor['status'],
+    })
+    mockUseRepositoryMonitors.mockReturnValue({ isLoading: false, data: { items: [suspended] } })
+
+    render(<RepositoryMonitorList />)
+
+    expect(screen.getAllByText('Suspended')).toHaveLength(1)
+  })
+
   it('runs a monitor from the list action', () => {
     const mutate = vi.fn()
     mockUseRunRepositoryMonitor.mockReturnValue({ mutate, isPending: false })

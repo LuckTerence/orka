@@ -10,6 +10,7 @@ import { PageHeader } from '@/components/layout/page-header'
 import { useRepositoryScans, useRunSecurityScan } from '@/hooks/use-security'
 import type { RepositoryScan } from '@/schemas/security'
 import { timeAgo } from '@/lib/time'
+import { statusProblem } from '@/components/common/status-problem'
 import { FindingCountBadges } from './finding-count-badges'
 
 export function RepositoryList() {
@@ -62,6 +63,7 @@ export function RepositoryList() {
 function RepositoryCard({ repo }: { repo: RepositoryScan }) {
   const runScan = useRunSecurityScan(repo.metadata.name)
   const lastScanAt = repo.status?.lastScanAt ?? repo.status?.lastSuccessfulScanAt
+  const problem = statusProblem(repo.status)
   const scanNow = () => runScan.mutate(undefined, {
     onSuccess: () => toast.success(`Manual scan of ${repo.metadata.name} started`),
     onError: (error) => toast.error(`Failed to start scan: ${error instanceof Error ? error.message : 'Unknown error'}`),
@@ -78,6 +80,7 @@ function RepositoryCard({ repo }: { repo: RepositoryScan }) {
             </Link>
           </CardTitle>
           <p className="break-all text-sm text-muted-foreground">{repo.spec.repoURL} · {repo.spec.branch || 'main'}</p>
+          {problem && <p className="text-sm font-medium text-status-failed" title={problem.message}>{problem.reason}</p>}
         </div>
         <Badge variant={repo.status?.phase === 'Ready' ? 'default' : 'secondary'}>
           {repo.status?.phase || 'Pending'}

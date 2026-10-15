@@ -4,6 +4,8 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { PageHeader } from '@/components/layout/page-header'
+import { StatusProblemAlert } from '@/components/common/status-problem-alert'
+import { statusProblem } from '@/components/common/status-problem'
 import { useAllFindings, useDroppedFindings, useRepositoryScan, useReviewSlices, useRunSecurityScan, useScanRuns } from '@/hooks/use-security'
 import { ThreatModelEditor } from './threat-model-editor'
 import { RecommendedFindings } from './recommended-findings'
@@ -38,6 +40,8 @@ export function RepositoryDetail({ repositoryName }: { repositoryName: string })
     return <div className="text-muted-foreground">Repository not found.</div>
   }
 
+  const problem = statusProblem(repo.status)
+
   return (
     <div className="space-y-4">
       <PageHeader
@@ -62,6 +66,8 @@ export function RepositoryDetail({ repositoryName }: { repositoryName: string })
           </>
         }
       />
+
+      {problem && <StatusProblemAlert problem={problem} />}
 
       <div className="grid gap-4 md:grid-cols-4">
         <Card>
