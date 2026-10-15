@@ -197,6 +197,31 @@ describe('SessionList', () => {
     await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Failed to delete session: not authorized'))
   })
 
+  it('renders sessions in the server order (newest first), not sorted by name, across pages', async () => {
+    const user = userEvent.setup()
+    const now = Date.now()
+    server.use(
+      http.get('/api/v1/sessions', ({ request }) => {
+        const page2 = new URL(request.url).searchParams.get('continue') === 'next'
+        return HttpResponse.json(page2
+          ? { items: [{ name: 'sess-bravo', namespace: 'default', createdAt: new Date(now - 300_000).toISOString() }], metadata: {} }
+          : {
+              items: [
+                { name: 'sess-zulu', namespace: 'default', createdAt: new Date(now - 60_000).toISOString() },
+                { name: 'sess-alpha', namespace: 'default', createdAt: new Date(now - 120_000).toISOString() },
+                { name: 'sess-mike', namespace: 'default', createdAt: new Date(now - 180_000).toISOString() },
+              ],
+              metadata: { continue: 'next' },
+            })
+      }),
+    )
+    render(<SessionList />)
+    const rowNames = () => screen.getAllByRole('link').map((link) => link.textContent)
+    await waitFor(() => expect(rowNames()).toEqual(['sess-zulu', 'sess-alpha', 'sess-mike']))
+    await user.click(screen.getByRole('button', { name: 'Load more' }))
+    await waitFor(() => expect(rowNames()).toEqual(['sess-zulu', 'sess-alpha', 'sess-mike', 'sess-bravo']))
+  })
+
   it('timeAgo covers minutes, hours, and days', async () => {
     const now = Date.now()
     server.use(
