@@ -23,7 +23,7 @@ import { taskTypeLabel } from '@/lib/task-status'
 import { matchesTaskFilter } from '@/lib/task-filter'
 import { timeAgo } from '@/lib/time'
 import { actionErrorMessage } from './action-error'
-import { TaskStateBadges } from './task-state'
+import { isTaskDeleting, TaskStateBadges } from './task-state'
 
 export function TaskList() {
   const { data, isLoading, error, fetchNextPage, hasNextPage, isFetchingNextPage } = useTaskListPages()
@@ -159,7 +159,8 @@ export function TaskList() {
                       variant="ghost"
                       size="icon"
                       aria-label={`Delete task ${task.metadata.name}`}
-                      title="Delete task"
+                      title={isTaskDeleting(task) ? 'Deletion in progress' : 'Delete task'}
+                      disabled={isTaskDeleting(task)}
                       onClick={(e) => {
                         e.preventDefault()
                         e.stopPropagation()

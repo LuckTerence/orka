@@ -437,6 +437,22 @@ describe('TaskDetail', () => {
     expect(screen.getAllByText('Waiting for approval').length).toBeGreaterThan(0)
   })
 
+  it('shows a Deleting state instead of an active Delete for a task being deleted', async () => {
+    server.use(
+      http.get('/api/v1/tasks/:id', () =>
+        HttpResponse.json({
+          metadata: { name: 'going', namespace: 'default', uid: 'uid-going', deletionTimestamp: '2026-10-14T00:00:00Z' },
+          spec: { type: 'container', image: 'alpine' },
+          status: { phase: 'Running' },
+        }),
+      ),
+    )
+    render(<TaskDetail taskId="going" />)
+    expect(await screen.findByRole('button', { name: /deleting/i })).toBeDisabled()
+    expect(screen.queryByRole('button', { name: /^delete$/i })).not.toBeInTheDocument()
+    expect(screen.getByText('Deleting', { selector: '[data-slot="badge"]' })).toBeInTheDocument()
+  })
+
   it('links a child task back to its parent', async () => {
     server.use(
       http.get('/api/v1/tasks/:id', () =>

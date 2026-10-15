@@ -190,6 +190,9 @@ describe('TaskList', () => {
     expect(screen.getByText('Deleting')).toBeInTheDocument()
     expect(screen.getByText('Suspended')).toBeInTheDocument()
     expect(requests).toEqual([])
+    // A task already being deleted cannot be deleted again.
+    expect(screen.getByRole('button', { name: 'Delete task going' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Delete task gated' })).toBeEnabled()
   })
 
   it('navigates when any part of a row is clicked', async () => {

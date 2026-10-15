@@ -30,7 +30,7 @@ import { useNavigate, useSearch } from '@tanstack/react-router'
 import type { ExecutionEvent, PlanState } from '@/schemas/task'
 import { timeAgo } from '@/lib/time'
 import { actionErrorMessage } from './action-error'
-import { isWaitingForApproval, TaskStateBadges } from './task-state'
+import { isTaskDeleting, isWaitingForApproval, TaskStateBadges } from './task-state'
 
 function latestEventPlan(events: ExecutionEvent[]): PlanState | undefined {
   let latest: ExecutionEvent | undefined
@@ -230,7 +230,12 @@ export function TaskDetail({ taskId }: { taskId: string }) {
           )}
         </div>
         <div className="flex items-center gap-2">
-          {deleteArmed ? (
+          {isTaskDeleting(task) ? (
+            // The API accepted the delete; finalizers are still running.
+            <Button variant="destructive" size="sm" disabled title="Deletion in progress">
+              <Trash2 className="mr-2 h-4 w-4" /> Deleting…
+            </Button>
+          ) : deleteArmed ? (
             <span className="flex items-center gap-1">
               <Button
                 variant="destructive"
