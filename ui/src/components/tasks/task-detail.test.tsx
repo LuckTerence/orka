@@ -431,6 +431,37 @@ describe('TaskDetail', () => {
     // The confirm is disarmed so the header is usable again.
     expect(screen.queryByRole('button', { name: /confirm delete/i })).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: /^delete/i })).toBeEnabled()
+    // Focus returns to Delete instead of dropping to the page.
+    expect(screen.getByRole('button', { name: /^delete/i })).toHaveFocus()
+  })
+
+  it('moves focus into the inline delete confirm and back out on Cancel or Esc', async () => {
+    const user = userEvent.setup()
+    server.use(
+      http.get('/api/v1/tasks/:id', () =>
+        HttpResponse.json({
+          metadata: { name: 'focus-task', namespace: 'default', uid: 'uid-focus' },
+          spec: { type: 'container', image: 'alpine' },
+          status: { phase: 'Succeeded' },
+        }),
+      ),
+    )
+    render(<TaskDetail taskId="focus-task" />)
+    const deleteButton = await screen.findByRole('button', { name: /^delete/i })
+    // The task loaded with focus on the page, and arming nothing moved it.
+    expect(deleteButton).not.toHaveFocus()
+
+    await user.click(deleteButton)
+    expect(screen.getByRole('button', { name: /confirm delete/i })).toHaveFocus()
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByRole('button', { name: /confirm delete/i })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^delete/i })).toHaveFocus()
+
+    await user.keyboard('{Enter}')
+    expect(screen.getByRole('button', { name: /confirm delete/i })).toHaveFocus()
+    await user.keyboard('{Escape}')
+    expect(screen.queryByRole('button', { name: /confirm delete/i })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^delete/i })).toHaveFocus()
   })
 
   it('counts pending approvals on the Approvals tab while the task waits', async () => {

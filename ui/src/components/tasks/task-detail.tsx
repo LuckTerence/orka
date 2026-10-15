@@ -129,6 +129,21 @@ export function TaskDetail({ taskId }: { taskId: string }) {
   // isPending lands a render later; a double click on Confirm must send a
   // single DELETE.
   const deletingRef = useRef(false)
+  // Arming swaps Delete for Confirm/Cancel and disarming swaps them back, so
+  // the focused button unmounts either way: move focus to Confirm when armed,
+  // and back to Delete after Cancel, Esc, or a failed delete unless focus has
+  // moved elsewhere meanwhile.
+  const deleteButtonRef = useRef<HTMLButtonElement>(null)
+  const confirmDeleteButtonRef = useRef<HTMLButtonElement>(null)
+  const wasDeleteArmedRef = useRef(false)
+  useEffect(() => {
+    if (deleteArmed) {
+      confirmDeleteButtonRef.current?.focus()
+    } else if (wasDeleteArmedRef.current && (!document.activeElement || document.activeElement === document.body)) {
+      deleteButtonRef.current?.focus()
+    }
+    wasDeleteArmedRef.current = deleteArmed
+  }, [deleteArmed])
   const confirmTaskDelete = async (name: string) => {
     if (deletingRef.current) return
     deletingRef.current = true
@@ -279,8 +294,17 @@ export function TaskDetail({ taskId }: { taskId: string }) {
               <Trash2 className="mr-2 h-4 w-4" /> Deleting…
             </Button>
           ) : deleteArmed ? (
-            <span className="flex items-center gap-1">
+            <span
+              className="flex items-center gap-1"
+              onKeyDown={(e) => {
+                if (e.key === 'Escape' && !deleteTask.isPending) {
+                  e.preventDefault()
+                  setConfirmDelete(null)
+                }
+              }}
+            >
               <Button
+                ref={confirmDeleteButtonRef}
                 variant="destructive"
                 size="sm"
                 disabled={deleteTask.isPending}
@@ -294,6 +318,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
             </span>
           ) : (
             <Button
+              ref={deleteButtonRef}
               variant="destructive"
               size="sm"
               onClick={() => setConfirmDelete(deleteIdentity)}
