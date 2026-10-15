@@ -95,16 +95,17 @@ function TreeNode({
             aria-hidden="true"
           />
         )}
-        <span className="truncate font-mono text-xs font-medium">
+        {/* Each truncated label carries its full text as a tooltip. */}
+        <span className="truncate font-mono text-xs font-medium" title={node.name}>
           {node.name}
         </span>
         {node.agent && (
-          <span className="truncate text-xs text-muted-foreground">
+          <span className="truncate text-xs text-muted-foreground" title={node.agent}>
             {node.agent}
           </span>
         )}
         {node.telemetry && (
-          <span className="truncate rounded-full bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">
+          <span className="truncate rounded-full bg-muted px-2 py-0.5 text-[10px] text-muted-foreground" title={node.telemetry}>
             {node.telemetry}
           </span>
         )}

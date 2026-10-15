@@ -48,6 +48,27 @@ describe('ExecutionGraph', () => {
   })
 
 
+  it('gives truncated task, agent, and model labels their full text as a tooltip', () => {
+    const task = makeTask({
+      metadata: { name: 'a-very-long-parent-task-name-that-truncates', namespace: 'default', uid: 'uid-1' },
+      status: {
+        phase: 'Running',
+        childTasks: [{ name: 'a-very-long-child-task-name', agent: 'a-very-long-agent-name', phase: 'Running' }],
+      },
+    })
+    const events: ExecutionEvent[] = [{
+      id: 'event-1', namespace: 'default', streamType: 'task', streamID: 'parent-task', seq: 1,
+      type: 'ModelRequestCompleted', severity: 'info', provider: 'anthropic', model: 'claude-sonnet-4-long-model-id',
+      createdAt: '2026-01-01T00:00:00Z',
+    }]
+    render(<ExecutionGraph task={task} events={events} />)
+    for (const text of ['a-very-long-parent-task-name-that-truncates', 'a-very-long-child-task-name', 'a-very-long-agent-name', 'claude-sonnet-4-long-model-id · anthropic']) {
+      const label = screen.getByText(text)
+      expect(label).toHaveClass('truncate')
+      expect(label).toHaveAttribute('title', text)
+    }
+  })
+
   it('renders GenAI telemetry from model events', () => {
     const task = makeTask()
     const events: ExecutionEvent[] = [{
