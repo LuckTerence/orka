@@ -126,9 +126,9 @@ spec:
 - In sandbox-enabled runtimes, the supervisor owns the session root. The
   session can traverse it and write its workspace, home, temporary and XDG
   directories, but cannot replace the workspace entry with a symlink.
-- `hluk` runs as the session's user, which owns the workspace, and only that
-  process gets the device's group: the agent's own processes never open the
-  hypervisor.
+- `hluk` runs as the session's user and group, which can read the workspace
+  (and write it in a write-intent session), and only that process gets the
+  device's group: the agent's own processes never open the hypervisor.
 - Only a write-intent session's guests can change the workspace. Any other
   session gets it read-only, so a guest's write fails at once with a read-only
   file system error rather than at the workspace check after the turn.
