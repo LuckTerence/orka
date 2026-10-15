@@ -5,6 +5,7 @@ vi.mock('zustand/middleware', async () => {
   return { ...actual, persist: (fn: any) => fn }
 })
 
+import { act } from 'react'
 import { render, screen, fireEvent } from '@/test/test-utils'
 import { ChatInput } from './chat-input'
 import { useChatStore } from '@/stores/chat'
@@ -14,7 +15,7 @@ import { useAuthStore } from '@/stores/auth'
 beforeEach(() => {
   useUIStore.setState({ namespace: 'default', sidebarCollapsed: false, theme: 'light' })
   useAuthStore.setState({ token: 'test-token' })
-  useChatStore.setState({ messages: [], currentSessionId: null, isStreaming: false })
+  useChatStore.setState({ messages: [], currentSessionId: null, isStreaming: false, stopRequested: false })
 })
 
 describe('ChatInput', () => {
@@ -29,13 +30,55 @@ describe('ChatInput', () => {
     expect(screen.getByRole('button')).toBeDisabled()
   })
 
-  it('send button is disabled when streaming', () => {
+  it('names the send button for assistive technology', () => {
+    render(<ChatInput onSend={vi.fn()} />)
+    expect(screen.getByRole('button', { name: 'Send message' })).toBeInTheDocument()
+  })
+
+  it('swaps Send for Stop while streaming and keeps the composer usable', () => {
+    useChatStore.setState({ isStreaming: true })
+    const onSend = vi.fn()
+    render(<ChatInput onSend={onSend} />)
+    const textarea = screen.getByPlaceholderText('Message the meta agent...')
+    expect(textarea).not.toBeDisabled()
+    expect(screen.queryByRole('button', { name: 'Send message' })).not.toBeInTheDocument()
+    fireEvent.change(textarea, { target: { value: 'next question' } })
+    fireEvent.keyDown(textarea, { key: 'Enter', shiftKey: false })
+    // Drafting continues while the reply streams; only sending is blocked.
+    expect(onSend).not.toHaveBeenCalled()
+    expect(textarea).toHaveValue('next question')
+  })
+
+  it('Stop requests the turn to stop and then shows it is stopping', () => {
     useChatStore.setState({ isStreaming: true })
     render(<ChatInput onSend={vi.fn()} />)
-    fireEvent.change(screen.getByPlaceholderText('Message the meta agent...'), {
-      target: { value: 'hello' },
+    fireEvent.click(screen.getByRole('button', { name: 'Stop response' }))
+    expect(useChatStore.getState().stopRequested).toBe(true)
+    expect(screen.getByRole('button', { name: 'Stopping response' })).toBeDisabled()
+  })
+
+  it('keeps focus in the composer when a turn starts and ends', () => {
+    render(<ChatInput onSend={() => useChatStore.setState({ isStreaming: true })} />)
+    const textarea = screen.getByPlaceholderText('Message the meta agent...')
+    textarea.focus()
+    fireEvent.change(textarea, { target: { value: 'hello' } })
+    fireEvent.keyDown(textarea, { key: 'Enter', shiftKey: false })
+    expect(document.activeElement).toBe(textarea)
+    act(() => useChatStore.setState({ isStreaming: false }))
+    expect(document.activeElement).toBe(textarea)
+  })
+
+  it('sends once when Enter is pressed twice in the same tick', () => {
+    // The real onSend starts the turn synchronously by setting isStreaming.
+    const onSend = vi.fn(() => useChatStore.setState({ isStreaming: true }))
+    render(<ChatInput onSend={onSend} />)
+    const textarea = screen.getByPlaceholderText('Message the meta agent...')
+    fireEvent.change(textarea, { target: { value: 'hello' } })
+    act(() => {
+      fireEvent.keyDown(textarea, { key: 'Enter', shiftKey: false })
+      fireEvent.keyDown(textarea, { key: 'Enter', shiftKey: false })
     })
-    expect(screen.getByRole('button')).toBeDisabled()
+    expect(onSend).toHaveBeenCalledTimes(1)
   })
 
   it('typing in textarea updates value', () => {

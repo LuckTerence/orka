@@ -13,7 +13,10 @@ vi.mock('@tanstack/react-router', async () => {
   }
 })
 
-import { render, screen } from '@/test/test-utils'
+import { http, HttpResponse } from 'msw'
+import { act } from 'react'
+import { server } from '@/test/mocks/server'
+import { render, screen, waitFor } from '@/test/test-utils'
 import { ChatMessage } from './chat-message'
 import { useUIStore } from '@/stores/ui'
 import { useAuthStore } from '@/stores/auth'
@@ -115,9 +118,53 @@ describe('ChatMessage', () => {
 
   it('usage metadata is shown when present on assistant messages', () => {
     render(<ChatMessage message={assistantMsg} />)
-    expect(screen.getByText('1 LLM calls')).toBeInTheDocument()
+    expect(screen.getByText('1 LLM call')).toBeInTheDocument()
     expect(screen.getByText('2 tool calls')).toBeInTheDocument()
     expect(screen.getByText('1.5s')).toBeInTheDocument()
+  })
+
+  it('pluralizes usage counts', () => {
+    render(<ChatMessage message={{ ...assistantMsg, usage: { llmCalls: 2, toolCalls: 1, tasksCreated: 1 } }} />)
+    expect(screen.getByText('2 LLM calls')).toBeInTheDocument()
+    expect(screen.getByText('1 tool call')).toBeInTheDocument()
+    expect(screen.getByText('1 task')).toBeInTheDocument()
+  })
+
+  it('wraps long unbroken text inside the bubbles', () => {
+    const long = 'x'.repeat(400)
+    const { rerender } = render(<ChatMessage message={{ ...userMsg, content: long }} />)
+    expect(screen.getByText(long).className).toContain('wrap-anywhere')
+    rerender(<ChatMessage message={{ ...assistantMsg, content: long }} />)
+    expect(screen.getByText(long).className).toContain('wrap-anywhere')
+  })
+
+  it('task chips show the live task phase and stop polling once terminal', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      let requests = 0
+      server.use(http.get('/api/v1/tasks/:id', ({ params }) => {
+        requests += 1
+        return HttpResponse.json({
+          metadata: { name: params.id, namespace: 'default' },
+          spec: { type: 'ai' },
+          status: { phase: requests === 1 ? 'Running' : 'Succeeded' },
+        })
+      }))
+      render(<ChatMessage message={{ ...assistantMsg, tasksCreatedNames: ['task-live'] }} />)
+      const chip = screen.getByRole('link', { name: /task-live/ })
+      await waitFor(() => expect(chip).toHaveTextContent('Running'))
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10_000)
+      })
+      await waitFor(() => expect(chip).toHaveTextContent('Succeeded'))
+      const settled = requests
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(30_000)
+      })
+      expect(requests).toBe(settled)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('renders clickable task chips when the turn created tasks', () => {
