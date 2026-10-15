@@ -104,8 +104,8 @@ the route in the URL fragment so any static host can serve it. Chat replies are 
 and tasks created in the demo run through a simulated lifecycle. Nothing persists past a
 reload. The mode check is static, so `bun run build` contains none of it.
 
-`.github/workflows/dashboard-demo.yml` publishes the demo to GitHub Pages under `/demo/`
-whenever `ui/` changes on `main`. When an API response changes shape, update the matching
+`.github/workflows/website.yml` publishes the demo to GitHub Pages under `/demo/`, next to
+the documentation site, whenever `ui/` or `website/` changes on `main`. When an API response changes shape, update the matching
 fixtures in `src/demo/`; the tests under `src/demo/handlers/` parse them with the real
 schemas.
 
