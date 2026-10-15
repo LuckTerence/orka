@@ -34,7 +34,8 @@ function ToolDetails({ kind, name, id, content }: {
       </summary>
       <div className="space-y-2 border-t border-border p-3">
         {id && <div className="text-xs text-muted-foreground">Call ID: {id}</div>}
-        <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words font-mono text-xs">
+        {/* A named, focusable region, so keyboard users can scroll a long result. */}
+        <pre tabIndex={0} role="region" aria-label={`Tool ${kind} ${name}`} className="max-h-64 overflow-auto whitespace-pre-wrap break-words font-mono text-xs">
           {formatToolContent(content)}
         </pre>
       </div>

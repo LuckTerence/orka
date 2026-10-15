@@ -118,6 +118,9 @@ describe('TranscriptViewer', () => {
     expect(call.closest('details')).toHaveAttribute('open')
     expect(result.closest('details')).toHaveAttribute('open')
     expect(screen.getByText(/"namespace": "default"/)).toBeVisible()
+    // Long tool content scrolls in a named region the keyboard can reach.
+    expect(screen.getByRole('region', { name: 'Tool result list_tasks' })).toHaveAttribute('tabindex', '0')
+    expect(screen.getByRole('region', { name: 'Tool call list_tasks' })).toHaveAttribute('tabindex', '0')
     expect(screen.getByText('{"success":true,"data":[]}')).toBeVisible()
     expect(screen.getAllByText('Call ID: call-1')).toHaveLength(2)
     expect(screen.getByText('No tasks found')).toBeVisible()

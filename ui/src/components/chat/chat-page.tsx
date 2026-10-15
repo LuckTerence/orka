@@ -143,7 +143,7 @@ export function ChatPage() {
           <div className="flex w-full min-w-0 items-center gap-2 sm:w-auto sm:justify-end">
             <Select value={provider || (hasServerDefault ? SERVER_DEFAULT : '')} onValueChange={handleProviderChange} disabled={isStreaming}>
               <SelectTrigger className="h-7 min-w-0 flex-1 text-xs sm:w-auto sm:min-w-40 sm:flex-none" aria-label="Chat provider">
-                <SelectValue placeholder="Provider" />
+                <span className="min-w-0 truncate"><SelectValue placeholder="Provider" /></span>
               </SelectTrigger>
               <SelectContent>
                 {hasServerDefault && <SelectItem value={SERVER_DEFAULT}>{serverDefaultLabel}</SelectItem>}
