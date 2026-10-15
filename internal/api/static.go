@@ -164,14 +164,20 @@ func (s *Server) registerStaticFiles(distFS fs.FS, index spaIndexPage) {
 		return serveFile(c, "favicon.svg", "image/svg+xml")
 	})
 
-	// SPA routes: serve index.html for all UI paths (client-side routing)
+	// SPA routes: serve index.html for every top-level route under
+	// ui/src/routes (client-side routing), so each gets the compressed page.
+	// Unknown paths still reach the error handler's uncompressed fallback.
 	for _, route := range []string{
-		"/", "/login",
+		"/", "/login", "/chat", "/kanban", "/live", "/usage", "/runtime-simulator",
 		"/tasks", "/tasks/*",
 		"/sessions", "/sessions/*",
 		"/agents", "/agents/*",
 		"/runtimes", "/runtimes/*",
 		"/tools", "/tools/*",
+		"/gateways", "/gateways/*",
+		"/monitors", "/monitors/*",
+		"/security", "/security/*",
+		"/settings/*",
 	} {
 		s.app.Get(route, compressStatic, serveIndex)
 	}

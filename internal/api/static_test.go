@@ -12,6 +12,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -329,6 +331,58 @@ func TestStaticFiles_MissingAssetIsNotFound(t *testing.T) {
 			if got := resp.Header.Get("Cache-Control"); got == staticAssetCacheControl {
 				t.Fatalf("a missing asset must not be cached as immutable")
 			}
+			if got := resp.Header.Get("X-Content-Type-Options"); got != "nosniff" {
+				t.Fatalf("X-Content-Type-Options = %q, want nosniff", got)
+			}
+		})
+	}
+}
+
+// TestStaticFiles_EveryUIRouteIsRegistered derives the dashboard's top-level
+// routes from ui/src/routes and checks each is a registered, compressed route
+// rather than the error handler's uncompressed fallback.
+func TestStaticFiles_EveryUIRouteIsRegistered(t *testing.T) {
+	entries, err := os.ReadDir(filepath.Join("..", "..", "ui", "src", "routes"))
+	if err != nil {
+		t.Fatalf("read UI routes: %v", err)
+	}
+	var paths []string
+	for _, entry := range entries {
+		name := entry.Name()
+		if !entry.IsDir() {
+			route, ok := strings.CutSuffix(name, ".tsx")
+			if ok && !strings.HasSuffix(route, ".test") && route != "__root" && route != "index" {
+				paths = append(paths, "/"+route)
+			}
+			continue
+		}
+		if _, err := os.Stat(filepath.Join("..", "..", "ui", "src", "routes", name, "index.tsx")); err == nil {
+			paths = append(paths, "/"+name)
+		}
+		paths = append(paths, "/"+name+"/example")
+	}
+	if len(paths) < 10 {
+		t.Fatalf("derived only %d UI routes: %v", len(paths), paths)
+	}
+
+	server := newStaticTestServer(t, staticTestFS())
+	for _, path := range paths {
+		t.Run(path, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, path, nil)
+			req.Header.Set("Accept-Encoding", "gzip")
+			resp, err := server.app.Test(req)
+			if err != nil {
+				t.Fatalf("Test request failed: %v", err)
+			}
+			if resp.StatusCode != http.StatusOK || !strings.HasPrefix(resp.Header.Get("Content-Type"), "text/html") {
+				t.Fatalf("StatusCode/Content-Type = %d/%q, want the SPA page", resp.StatusCode, resp.Header.Get("Content-Type"))
+			}
+			if got := resp.Header.Get("Content-Encoding"); got != "gzip" {
+				t.Fatalf("Content-Encoding = %q, want gzip from a registered route", got)
+			}
+			if got := resp.Header.Get("Vary"); !strings.Contains(got, "Accept-Encoding") {
+				t.Fatalf("Vary = %q, want Accept-Encoding", got)
+			}
 		})
 	}
 }
@@ -397,9 +451,10 @@ func TestSetupStaticFiles_EmbeddedFallbackHeaders(t *testing.T) {
 	_ = corev1.AddToScheme(scheme)
 	server := NewServer(fake.NewClientBuilder().WithScheme(scheme).Build(), nil, ServerConfig{Port: 8080})
 
-	// /chat has no registered route and is served by the error handler's SPA
-	// fallback; it carries the same document headers as a registered route.
-	for _, path := range []string{"/", "/chat"} {
+	// An unknown path has no registered route and is served by the error
+	// handler's SPA fallback; it carries the same document headers as a
+	// registered route.
+	for _, path := range []string{"/", "/no-such-page"} {
 		resp, err := server.app.Test(httptest.NewRequest(http.MethodGet, path, nil))
 		if err != nil {
 			t.Fatalf("Test request failed: %v", err)

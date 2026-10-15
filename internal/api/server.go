@@ -682,6 +682,8 @@ func customErrorHandler(c fiber.Ctx, err error) error {
 		code = e.Code
 		message = e.Message
 	}
+	// Every error body is JSON or the SPA page; neither may be sniffed.
+	c.Set(fiber.HeaderXContentTypeOptions, "nosniff")
 
 	// For 404s on non-API paths, serve the SPA index.html
 	if code == fiber.StatusNotFound && spaFallbackEligible(c.Path()) {
