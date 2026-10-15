@@ -74,7 +74,7 @@ function RepositoryCard({ repo }: { repo: RepositoryScan }) {
       <CardHeader className="flex flex-row items-start justify-between gap-3 space-y-0">
         <div className="space-y-1">
           <CardTitle className="flex items-center gap-2 text-lg">
-            <Shield className="h-5 w-5 text-primary" />
+            <Shield className="h-5 w-5 shrink-0 text-primary" />
             <Link to="/security/$repoId" params={{ repoId: repo.metadata.name }} className="hover:underline">
               {repo.metadata.name}
             </Link>

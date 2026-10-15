@@ -87,7 +87,7 @@ function RepositoryMonitorCard({ monitor }: { monitor: RepositoryMonitor }) {
       <CardHeader className="flex flex-row items-start justify-between gap-3 space-y-0">
         <div className="space-y-1">
           <CardTitle className="flex items-center gap-2 text-lg">
-            <Activity className="h-5 w-5 text-primary" />
+            <Activity className="h-5 w-5 shrink-0 text-primary" />
             <Link to="/monitors/$monitorId" params={{ monitorId: monitor.metadata.name }} className="hover:underline">
               {monitor.metadata.name}
             </Link>

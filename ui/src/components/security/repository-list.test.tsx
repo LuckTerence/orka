@@ -114,6 +114,19 @@ describe('RepositoryList', () => {
     expect(screen.getAllByText('https://github.com/example/demo-repo · main')).toHaveLength(2)
   })
 
+  it('keeps the card icon full size beside a long repository name', () => {
+    const longName = 'payments-platform-ledger-reconciliation-service-main-branch'
+    mockUseRepositoryScans.mockReturnValue({
+      isLoading: false,
+      data: { items: [repository({ metadata: { name: longName, namespace: 'default' } })] },
+    })
+
+    render(<RepositoryList />)
+
+    const icon = screen.getByRole('link', { name: longName }).parentElement?.querySelector('svg')
+    expect(icon).toHaveClass('h-5', 'w-5', 'shrink-0')
+  })
+
   it('names the Ready=False reason on an errored repository card', () => {
     mockUseRepositoryScans.mockReturnValue({
       isLoading: false,

@@ -124,6 +124,19 @@ describe('RepositoryMonitorList', () => {
     expect(screen.getAllByText('orka-agents/orka · main · */15 * * * *')).toHaveLength(2)
   })
 
+  it('keeps the card icon full size beside a long monitor name', () => {
+    const longName = 'orka-pull-request-review-monitor-for-the-main-branch'
+    mockUseRepositoryMonitors.mockReturnValue({
+      isLoading: false,
+      data: { items: [monitor({ metadata: { name: longName, namespace: 'default' } })] },
+    })
+
+    render(<RepositoryMonitorList />)
+
+    const icon = screen.getByRole('link', { name: longName }).parentElement?.querySelector('svg')
+    expect(icon).toHaveClass('h-5', 'w-5', 'shrink-0')
+  })
+
   it('names the Ready=False reason on an errored monitor card', () => {
     const errored = monitor({
       status: {
