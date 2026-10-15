@@ -4,14 +4,48 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Separator } from '@/components/ui/separator'
+import { EmptyState } from '@/components/ui/empty-state'
 import { PageHeader } from '@/components/layout/page-header'
-import { ArrowLeft, Bot, Trash2 } from 'lucide-react'
+import { Activity, ArrowLeft, Bot, SearchX, ShieldCheck, Trash2, type LucideIcon } from 'lucide-react'
 import { useAgent, useDeleteAgent } from '@/hooks/use-agents'
+import { isForbiddenError, isNotFoundError } from '@/lib/api-client'
 import { toast } from 'sonner'
 import { agentProviderName, agentReadiness, builtInAgentRuntimeLabel } from '@/lib/agent-runtime'
 
+// A missing or unreadable Agent keeps the page heading (and so the tab
+// title) and a way back to the list.
+function AgentUnavailable({ title, icon, headline, hint, alert = false }: {
+  title: string
+  icon: LucideIcon
+  headline: string
+  hint: string
+  alert?: boolean
+}) {
+  return (
+    <div className="space-y-4">
+      <PageHeader title={title} />
+      <Card>
+        <CardContent>
+          <div role={alert ? 'alert' : undefined}>
+            <EmptyState
+              icon={icon}
+              headline={headline}
+              hint={hint}
+              action={
+                <Button asChild variant="outline" size="sm">
+                  <Link to="/agents"><ArrowLeft className="h-4 w-4" /> Back to agents</Link>
+                </Button>
+              }
+            />
+          </div>
+        </CardContent>
+      </Card>
+    </div>
+  )
+}
+
 export function AgentDetail({ agentId }: { agentId: string }) {
-  const { data: agent, isLoading } = useAgent(agentId)
+  const { data: agent, isLoading, error } = useAgent(agentId)
   const deleteAgent = useDeleteAgent()
   const navigate = useNavigate()
 
@@ -30,8 +64,35 @@ export function AgentDetail({ agentId }: { agentId: string }) {
     return <div className="space-y-4"><Skeleton className="h-8 w-64" /><Skeleton className="h-64 w-full" /></div>
   }
 
-  if (!agent) {
-    return <div className="text-muted-foreground">Agent not found</div>
+  // A 403 or 404 wins over cached data (React Query keeps the last
+  // successful `data` when a refetch fails); any other failure only replaces
+  // the page when nothing was loaded.
+  const missing = isNotFoundError(error)
+  const forbidden = isForbiddenError(error)
+  if (forbidden || (error && !missing && !agent)) {
+    const message = error instanceof Error ? error.message : ''
+    return (
+      <AgentUnavailable
+        alert
+        title="Could not load agent"
+        icon={forbidden ? ShieldCheck : Activity}
+        headline={forbidden ? 'Not authorized to view agents' : `Agent "${agentId}" failed to load`}
+        hint={forbidden
+          ? `Your token lacks agents read permission${message ? ` (${message})` : ''}.`
+          : message || 'The agent request failed.'}
+      />
+    )
+  }
+
+  if (missing || !agent) {
+    return (
+      <AgentUnavailable
+        title="Agent not found"
+        icon={SearchX}
+        headline={`No agent named "${agentId}"`}
+        hint="It may have been deleted, or it belongs to another namespace."
+      />
+    )
   }
 
   const providerName = agentProviderName(agent)

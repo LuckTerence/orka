@@ -33,15 +33,45 @@ describe('ToolDetail', () => {
     expect(skeletons.length).toBeGreaterThan(0)
   })
 
-  it('not found shows "Tool not found"', async () => {
+  it('shows a styled not-found page with a way back when the API returns 404', async () => {
     server.use(
       http.get('/api/v1/tools/:name', () => new HttpResponse(null, { status: 404 }))
     )
 
     render(<ToolDetail toolName="nonexistent" />)
-    await waitFor(() => {
-      expect(screen.getByText('Tool not found')).toBeInTheDocument()
-    })
+    expect(await screen.findByRole('heading', { level: 1, name: 'Tool not found' })).toBeInTheDocument()
+    expect(screen.getByText('No tool named "nonexistent"')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Back to tools' })).toHaveAttribute('href', '/tools')
+    expect(document.title).toBe('Tool not found · Orka')
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('shows a not-authorized state, not "Tool not found", on 403', async () => {
+    server.use(
+      http.get('/api/v1/tools/:name', () =>
+        HttpResponse.json({ error: { code: 403, message: 'not authorized' } }, { status: 403 }),
+      ),
+    )
+
+    render(<ToolDetail toolName="secret-tool" />)
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('Not authorized to view tools')
+    expect(alert).toHaveTextContent('read permission (not authorized)')
+    expect(screen.getByRole('heading', { level: 1, name: 'Could not load tool' })).toBeInTheDocument()
+    expect(screen.queryByText('Tool not found')).not.toBeInTheDocument()
+  })
+
+  it('shows a load error, not "Tool not found", for other failures', async () => {
+    server.use(
+      http.get('/api/v1/tools/:name', () =>
+        HttpResponse.json({ error: { code: 500, message: 'apiserver unavailable' } }, { status: 500 }),
+      ),
+    )
+
+    render(<ToolDetail toolName="broken-tool" />)
+    expect(await screen.findByRole('alert')).toHaveTextContent('apiserver unavailable')
+    expect(screen.getByRole('link', { name: 'Back to tools' })).toHaveAttribute('href', '/tools')
+    expect(screen.queryByText('Tool not found')).not.toBeInTheDocument()
   })
 
   it('custom tool shows name, description, HTTP config, parameters, and status', async () => {

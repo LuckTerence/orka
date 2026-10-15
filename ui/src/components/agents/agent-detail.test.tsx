@@ -53,14 +53,45 @@ describe('AgentDetail', () => {
     expect(skeletons.length).toBeGreaterThan(0)
   })
 
-  it('not found shows message', async () => {
+  it('shows a styled not-found page with a way back when the API returns 404', async () => {
     server.use(
-      http.get('/api/v1/agents/:name', () => HttpResponse.json(null))
+      http.get('/api/v1/agents/:name', () =>
+        HttpResponse.json({ error: { code: 404, message: 'agent not found' } }, { status: 404 }),
+      ),
     )
     render(<AgentDetail agentId="nonexistent" />)
-    await waitFor(() => {
-      expect(screen.getByText('Agent not found')).toBeInTheDocument()
-    })
+    expect(await screen.findByRole('heading', { level: 1, name: 'Agent not found' })).toBeInTheDocument()
+    expect(screen.getByText('No agent named "nonexistent"')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Back to agents' })).toHaveAttribute('href', '/agents')
+    expect(document.title).toBe('Agent not found · Orka')
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /delete/i })).not.toBeInTheDocument()
+  })
+
+  it('shows a not-authorized state, not "Agent not found", on 403', async () => {
+    server.use(
+      http.get('/api/v1/agents/:name', () =>
+        HttpResponse.json({ error: { code: 403, message: 'not authorized' } }, { status: 403 }),
+      ),
+    )
+    render(<AgentDetail agentId="secret-agent" />)
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('Not authorized to view agents')
+    expect(alert).toHaveTextContent('read permission (not authorized)')
+    expect(screen.getByRole('heading', { level: 1, name: 'Could not load agent' })).toBeInTheDocument()
+    expect(screen.queryByText('Agent not found')).not.toBeInTheDocument()
+  })
+
+  it('shows a load error, not "Agent not found", for other failures', async () => {
+    server.use(
+      http.get('/api/v1/agents/:name', () =>
+        HttpResponse.json({ error: { code: 500, message: 'apiserver unavailable' } }, { status: 500 }),
+      ),
+    )
+    render(<AgentDetail agentId="broken-agent" />)
+    expect(await screen.findByRole('alert')).toHaveTextContent('apiserver unavailable')
+    expect(screen.getByRole('link', { name: 'Back to agents' })).toHaveAttribute('href', '/agents')
+    expect(screen.queryByText('Agent not found')).not.toBeInTheDocument()
   })
 
   it('shows agent name and namespace', async () => {

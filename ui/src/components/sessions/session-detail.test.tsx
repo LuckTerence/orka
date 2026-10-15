@@ -60,17 +60,41 @@ describe('SessionDetail', () => {
     expect(skeletons.length).toBeGreaterThan(0)
   })
 
-  it('shows "Session not found" when API returns 404', async () => {
+  it('shows a styled not-found page with a way back when the API returns 404', async () => {
+    let eventRequests = 0
     server.use(
       http.get('/api/v1/sessions/:id', () => {
         return new HttpResponse(null, { status: 404 })
-      })
+      }),
+      http.get('/api/v1/sessions/:id/events', () => {
+        eventRequests += 1
+        return HttpResponse.json({ events: [], latestSeq: 0 })
+      }),
     )
 
     render(<SessionDetail sessionId="missing-session" />)
-    await waitFor(() => {
-      expect(screen.getByText('Session not found')).toBeInTheDocument()
-    })
+    expect(await screen.findByRole('heading', { level: 1, name: 'Session not found' })).toBeInTheDocument()
+    expect(screen.getByText('No session named "missing-session"')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Back to sessions' })).toHaveAttribute('href', '/sessions')
+    expect(document.title).toBe('Session not found · Orka')
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(screen.queryByRole('tab', { name: 'Timeline' })).not.toBeInTheDocument()
+    expect(eventRequests).toBe(0)
+  })
+
+  it('shows a load error, not "Session not found", for other failures', async () => {
+    server.use(
+      // A client error, so useSession does not retry it.
+      http.get('/api/v1/sessions/:id', () =>
+        HttpResponse.json({ error: { code: 400, message: 'invalid session name' } }, { status: 400 }),
+      ),
+    )
+
+    render(<SessionDetail sessionId="broken-session" />)
+    expect(await screen.findByRole('alert')).toHaveTextContent('invalid session name')
+    expect(screen.getByRole('heading', { level: 1, name: 'Could not load session' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Back to sessions' })).toHaveAttribute('href', '/sessions')
+    expect(screen.queryByText('Session not found')).not.toBeInTheDocument()
   })
 
   it('shows a not-authorized message (not "Session not found") on 403', async () => {
@@ -85,6 +109,7 @@ describe('SessionDetail', () => {
       expect(screen.getByText('Not authorized to view sessions')).toBeInTheDocument()
     })
     expect(screen.getByText(/read permission \(not authorized\)/)).toBeInTheDocument()
+    expect(screen.getByRole('alert')).toBeInTheDocument()
     expect(screen.queryByText('Session not found')).not.toBeInTheDocument()
   })
 
