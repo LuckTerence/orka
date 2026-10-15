@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
 import { ChatMessageList } from './chat-message-list'
 import { ChatInput } from './chat-input'
 import { useSendMessage, useChatConfig } from '@/hooks/use-chat'
@@ -21,6 +21,7 @@ export function ChatPage() {
   const { data: config } = useChatConfig()
   const { data: providersData, error: providersError } = useProviderList()
   const namespace = useUIStore((s) => s.namespace)
+  const composerRef = useRef<HTMLTextAreaElement>(null)
   const {
     currentSessionId,
     newSession,
@@ -101,6 +102,9 @@ export function ChatPage() {
   const handleNewChat = () => {
     if (useChatStore.getState().isStreaming && !confirm('Stop the current reply and delete this chat?')) return
     newSession()
+    // New Chat leaves with the transcript it clears, which would drop focus
+    // to <body>; the composer takes it for the next message.
+    composerRef.current?.focus()
   }
 
   const handleProviderChange = (value: string) => {
@@ -121,14 +125,16 @@ export function ChatPage() {
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
             <h1 className="text-sm font-semibold">Chat</h1>
+            {/* A badge is a centered flex box, so long text ellipsizes in an
+                inner span; centering the overflow would show its middle. */}
             {currentSessionId && (
-              <Badge variant="secondary" className="min-w-0 max-w-full truncate font-mono text-[10px]" title={currentSessionId}>
-                {currentSessionId}
+              <Badge variant="secondary" className="min-w-0 max-w-full justify-start font-mono text-[10px]" title={currentSessionId}>
+                <span className="truncate">{currentSessionId}</span>
               </Badge>
             )}
             {effectiveModel && (
-              <Badge variant="outline" className="min-w-0 max-w-full truncate text-[10px]" title={effectiveModel}>
-                {effectiveModel}
+              <Badge variant="outline" className="min-w-0 max-w-full justify-start text-[10px]" title={effectiveModel}>
+                <span className="truncate">{effectiveModel}</span>
               </Badge>
             )}
           </div>
@@ -186,7 +192,7 @@ export function ChatPage() {
       <ChatMessageList />
 
       {/* Input */}
-      <ChatInput onSend={sendMessage} disabled={noProviderSelected} disabledHint={noProviderSelected ? 'Choose a provider before sending.' : undefined} />
+      <ChatInput textareaRef={composerRef} onSend={sendMessage} disabled={noProviderSelected} disabledHint={noProviderSelected ? 'Choose a provider before sending.' : undefined} />
     </div>
   )
 }

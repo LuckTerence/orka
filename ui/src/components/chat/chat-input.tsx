@@ -9,11 +9,14 @@ interface ChatInputProps {
   disabled?: boolean
   /** Shown next to the composer when sending is blocked. */
   disabledHint?: string
+  /** The composer, for a page that hands focus back to it. */
+  textareaRef?: React.RefObject<HTMLTextAreaElement | null>
 }
 
-export function ChatInput({ onSend, disabled = false, disabledHint }: ChatInputProps) {
+export function ChatInput({ onSend, disabled = false, disabledHint, textareaRef: pageTextareaRef }: ChatInputProps) {
   const [input, setInput] = useState('')
-  const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const ownTextareaRef = useRef<HTMLTextAreaElement>(null)
+  const textareaRef = pageTextareaRef ?? ownTextareaRef
   const isStreaming = useChatStore((s) => s.isStreaming)
   const stopRequested = useChatStore((s) => s.stopRequested)
   const requestStop = useChatStore((s) => s.requestStop)
@@ -25,7 +28,7 @@ export function ChatInput({ onSend, disabled = false, disabledHint }: ChatInputP
       el.style.height = 'auto'
       el.style.height = Math.min(el.scrollHeight, 200) + 'px'
     }
-  }, [input])
+  }, [input, textareaRef])
 
   const handleSubmit = () => {
     const trimmed = input.trim()

@@ -49,7 +49,7 @@ export function ChatMessageList() {
       <div className="flex flex-1 items-center justify-center">
         <div className="text-center">
           <OrcaMark className="mx-auto h-12 w-12" />
-          <h3 className="mt-4 text-lg font-semibold">Orka Meta Agent</h3>
+          <h2 className="mt-4 text-lg font-semibold">Orka Meta Agent</h2>
           <p className="mt-1 max-w-sm text-sm text-muted-foreground">
             Chat with the orchestrator to create and manage tasks, agents, and tools using natural language.
           </p>
@@ -58,8 +58,11 @@ export function ChatMessageList() {
     )
   }
 
+  // Radix wraps the viewport's content in a `display: table` box that grows
+  // to its widest unbreakable line, so one long tool argument would widen
+  // and clip the whole transcript; a block wrapper keeps it to the viewport.
   return (
-    <ScrollArea className="min-h-0 flex-1" ref={scrollAreaRef}>
+    <ScrollArea className="min-h-0 flex-1" viewportClassName="[&>div]:block!" ref={scrollAreaRef}>
       <div className="mx-auto max-w-3xl space-y-1 px-4 py-4">
         {messages.map((msg) => (
           <ChatMessage key={msg.id} message={msg} />

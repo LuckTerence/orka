@@ -23,7 +23,8 @@ beforeEach(() => {
 describe('ChatMessageList', () => {
   it('empty state shows welcome text with orca brand mark', () => {
     render(<ChatMessageList />)
-    expect(screen.getByText('Orka Meta Agent')).toBeInTheDocument()
+    // The page title is the h1, so the welcome heading is the next level down.
+    expect(screen.getByRole('heading', { level: 2, name: 'Orka Meta Agent' })).toBeInTheDocument()
     expect(
       screen.getByText(/Chat with the orchestrator/i),
     ).toBeInTheDocument()
@@ -58,6 +59,10 @@ describe('ChatMessageList', () => {
     expect(root.className).toContain('min-h-0')
     expect(root.className).toContain('flex-1')
     const viewport = container.querySelector('[data-slot="scroll-area-viewport"]') as HTMLElement
+    // Radix's content wrapper is a `display: table` box that grows to the
+    // widest unbreakable line; forcing it to a block keeps the transcript
+    // inside the viewport.
+    expect(viewport).toHaveClass('[&>div]:block!')
     let top = 0
     Object.defineProperty(viewport, 'scrollHeight', { configurable: true, get: () => 1000 })
     Object.defineProperty(viewport, 'clientHeight', { configurable: true, get: () => 200 })
