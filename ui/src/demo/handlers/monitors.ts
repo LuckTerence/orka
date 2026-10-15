@@ -14,7 +14,7 @@ import {
 } from '../data/monitors'
 import { api, apiError, DEMO_NAMESPACE, digest, inDemoNamespace, list, notFound, now, query, uid } from '../shared'
 import { REPOS, type AgentKey, type RepoKey } from '../world'
-import { createDemoTask } from './tasks'
+import { cancelDemoTask, createDemoTask } from './tasks'
 
 // Repository monitor API. Runs, commands, and the work they queue progress on
 // timers that are settled lazily on the next request.
@@ -79,8 +79,40 @@ function settle(nowMs = Date.now()) {
       work.phase = entry.intent === 'review' ? 'published' : 'completed'
       work.updatedAt = doneAt
       work.completedAt = doneAt
+      const job = implementationJobs.find((j) => j.workActionID === work.id)
+      if (job) {
+        // A ready patch still waits for its pull request, so the job stays active.
+        Object.assign(job, { phase: 'patch_ready', validationState: 'passed', patchArtifactID: `art_${digest(`${job.id}:patch`, 8)}`, updatedAt: doneAt })
+      }
     }
     completeItem(entry, doneAt, work)
+  }
+}
+
+/** Implementation job phases the controller still treats as in flight. */
+const ACTIVE_JOB_PHASES = new Set(['implementation_queued', 'implementing', 'patch_ready', 'mutation_queued', 'mutating_to_pr'])
+
+/**
+ * Stop fences the item's in-flight work the way the controller does: queued and
+ * running work actions, active implementation jobs, and the work's tasks are
+ * cancelled, so work that would have finished later cannot undo the stop.
+ */
+function cancelItemWork(monitorName: string, kind: string, number: number, nowMs: number) {
+  const at = new Date(nowMs).toISOString()
+  const reason = 'stopped by command'
+  for (const entry of [...pending]) {
+    if (entry.monitorName === monitorName && entry.itemKey === `${kind}/${number}` && entry.workActionID) pending.splice(pending.indexOf(entry), 1)
+  }
+  for (const work of workActions) {
+    if (work.monitorName !== monitorName || work.targetKind !== kind || work.targetNumber !== number) continue
+    if (work.status !== 'queued' && work.status !== 'running') continue
+    Object.assign(work, { status: 'cancelled', phase: 'cancelled', updatedAt: at, completedAt: at })
+    if (work.taskName) cancelDemoTask(work.taskName, `Cancelled: repository monitor ${reason}`)
+  }
+  if (kind !== 'issue') return
+  for (const job of implementationJobs) {
+    if (job.monitorName !== monitorName || job.issueNumber !== number || !ACTIVE_JOB_PHASES.has(job.phase ?? '')) continue
+    Object.assign(job, { phase: 'cancelled', error: reason, updatedAt: at, completedAt: at })
   }
 }
 
@@ -325,6 +357,7 @@ export const monitorHandlers: RequestHandler[] = [
       item.updatedAt = command.createdAt
     }
 
+    if (intent === 'stop') cancelItemWork(monitorName, kind, number, createdMs)
     if (intent === 'stop' || intent === 'resume') {
       if (item) {
         item.workflowPhase = intent === 'stop' ? 'paused' : item.lastActionKind ? DONE_PHASE[item.lastActionKind] ?? 'triaged' : 'triage_queued'

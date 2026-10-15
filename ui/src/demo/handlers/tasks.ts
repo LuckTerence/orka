@@ -361,7 +361,7 @@ function durationMs(duration: string) {
 function startTask(rec: TaskRecord) {
   rec.started = true
   if (rec.type === 'agent') {
-    emit(rec, { type: 'TaskStarted', summary: `Dispatched to RuntimePool acp-${runtimeOf(rec)}` }, rec.start)
+    emit(rec, { type: 'TaskStarted', summary: `Dispatched to RuntimePool ${currentRuntimePool(runtimeOf(rec)).metadata.name}` }, rec.start)
     return
   }
   emit(rec, { type: 'TaskJobCreated', summary: `Created Job ${jobName(rec)}` }, rec.start - 400)
@@ -556,6 +556,30 @@ export function createDemoTask(input: DemoTaskInput): string {
     createdBy: input.createdBy ?? 'chat',
   })
   return name
+}
+
+/**
+ * Cancels a pending or running task now, the way a controller-side
+ * cancellation (such as a repository monitor Stop command) does. Finished and
+ * scheduled tasks are left alone.
+ */
+export function cancelDemoTask(name: string, reason: string) {
+  const rec = tasks.get(name)
+  const now = Date.now()
+  if (!rec) return
+  advance(rec, now)
+  if (rec.finished || rec.schedule) return
+  for (const approval of rec.approvals) {
+    if (approval.status !== 'pending') continue
+    Object.assign(approval, { status: 'cancelled', decisionTime: iso(now), decisionReason: reason })
+    emit(rec, { type: 'ApprovalCancelled', severity: 'warning', summary: `Approval cancelled: ${reason}`, content: { approvalID: approval.id } }, now)
+  }
+  rec.gate = undefined
+  rec.timeline = rec.timeline.slice(0, rec.cursor)
+  if (!rec.started) rec.start = now
+  rec.end = now
+  rec.outcome = { phase: 'Cancelled', message: reason }
+  finishTask(rec)
 }
 
 // ---- views ------------------------------------------------------------------------

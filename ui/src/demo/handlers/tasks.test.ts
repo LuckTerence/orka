@@ -11,7 +11,7 @@ import { sessionListItemSchema, sessionSchema, transcriptMessageSchema } from '@
 import { SSEFrameBuffer } from '@/lib/execution-events'
 import { handleDemoRequest } from '../server'
 import { TASKS } from '../world'
-import { createDemoTask } from './tasks'
+import { cancelDemoTask, createDemoTask } from './tasks'
 
 const BASE = 'http://localhost/api/v1'
 
@@ -151,6 +151,20 @@ describe('demo task API', () => {
     const sessions = await json<{ items: unknown[] }>('/sessions')
     const items = sessions.items.map((item) => sessionListItemSchema.parse(item))
     expect(items.find((s) => s.name === 'chat-demo-session')?.activeTask).toBe(name)
+  })
+
+  it('cancels a running task for other demo domains', async () => {
+    vi.useFakeTimers({ toFake: ['Date'], now: Date.now() })
+    const name = createDemoTask({ agent: 'fixer', prompt: 'Implement issue #2219', repo: 'checkout', createdBy: 'monitor' })
+    advanceClock(10_000)
+    expect(taskSchema.parse(await json(`/tasks/${name}`)).status?.phase).toBe('Running')
+
+    cancelDemoTask(name, 'Cancelled: repository monitor stopped by command')
+    advanceClock(5 * 60_000)
+    const task = taskSchema.parse(await json(`/tasks/${name}`))
+    expect(task.status?.phase).toBe('Cancelled')
+    const { events } = listExecutionEventsResponseSchema.parse(await json(`/tasks/${name}/events`))
+    expect(events.at(-1)).toMatchObject({ type: 'TaskCancelled', summary: 'Cancelled: repository monitor stopped by command' })
   })
 
   it('forks a task into a new one that records its source', async () => {

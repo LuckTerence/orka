@@ -261,6 +261,31 @@ describe('demo repository monitors', () => {
     expect(prs.find((i) => i.number === 1482)?.lastVerdict).toBe('passed')
   })
 
+  const issueCommand = (number: number, intent: string) =>
+    post('/monitors/repositories/checkout-service/commands?namespace=default', { kind: 'issue', number, intent })
+  const jobsFor = async (number: number) =>
+    listOf(monitorImplementationJobSchema).parse(await json('/monitors/implementation-jobs?namespace=default&name=checkout-service')).items.filter((j) => j.issueNumber === number)
+
+  it('settles the implementation job when the implement work finishes', async () => {
+    const command = monitorCommandSchema.parse(await (await issueCommand(2221, 'implement')).json())
+    expect((await jobsFor(2221)).find((j) => j.commandEventID === command.id)).toMatchObject({ phase: 'implementing', validationState: 'pending' })
+
+    advance(60_000)
+    expect((await jobsFor(2221)).find((j) => j.commandEventID === command.id)).toMatchObject({ phase: 'patch_ready', validationState: 'passed' })
+  })
+
+  it('cancels in-flight work on stop so it cannot finish over the stop', async () => {
+    const implement = monitorCommandSchema.parse(await (await issueCommand(2219, 'implement')).json())
+    expect((await issueCommand(2219, 'stop')).status).toBe(201)
+
+    advance(60_000)
+    const issue = listOf(monitorItemSchema).parse(await json('/monitors/repositories/checkout-service/items?namespace=default&kind=issue')).items.find((i) => i.number === 2219)
+    expect(issue).toMatchObject({ workflowPhase: 'paused', skipReason: 'stopped_by_command' })
+    const work = listOf(monitorWorkActionSchema).parse(await json('/monitors/work-actions?namespace=default&name=checkout-service')).items.find((w) => w.commandEventID === implement.id)
+    expect(work).toMatchObject({ status: 'cancelled' })
+    expect((await jobsFor(2219)).find((j) => j.commandEventID === implement.id)).toMatchObject({ phase: 'cancelled', error: 'stopped by command' })
+  })
+
   it('rejects malformed commands', async () => {
     expect((await post('/monitors/repositories/checkout-service/commands?namespace=default', { kind: 'issue', number: 2214, intent: 'fix_ci' })).status).toBe(400)
     expect((await post('/monitors/repositories/checkout-service/commands?namespace=default', { kind: 'pull_request', number: 1482, intent: 'review', targetSHA: 'stale' })).status).toBe(409)
