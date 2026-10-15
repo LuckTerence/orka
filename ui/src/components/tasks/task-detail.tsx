@@ -380,7 +380,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
       <TaskSchedulePanel task={task} />
 
       <Tabs value={activeTab} onValueChange={setTab}>
-        <div ref={tabsScrollRef} className="overflow-x-auto">
+        <div ref={tabsScrollRef} className="overflow-x-auto pb-1">
         <TabsList>
           <TabsTrigger value="runtime">Runtime</TabsTrigger>
           <TabsTrigger value="overview">Overview</TabsTrigger>

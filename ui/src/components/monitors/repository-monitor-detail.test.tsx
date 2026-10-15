@@ -27,6 +27,8 @@ vi.mock('@tanstack/react-router', async () => {
 const mockDetailQuery = vi.fn()
 // Overrides the runs query result; null keeps the empty default.
 const mockRunsResult: { current: unknown } = { current: null }
+// Overrides the PR queue query result; null keeps the empty default.
+const mockItemsResult: { current: unknown } = { current: null }
 
 vi.mock('@/hooks/use-monitors', () => {
   const empty = (name: string) => {
@@ -37,7 +39,7 @@ vi.mock('@/hooks/use-monitors', () => {
     useRepositoryMonitor: () => mockUseRepositoryMonitor(),
     useRepositoryMonitorRuns: (name: string) => mockRunsResult.current ?? empty(name),
     useRepositoryMonitorItems: (name: string, kind?: string) =>
-      kind === 'issue' ? { data: { items: [{ itemKey: 'issue-7', number: 7, title: 'Flaky test' }] } } : empty(name),
+      kind === 'issue' ? { data: { items: [{ itemKey: 'issue-7', number: 7, title: 'Flaky test' }] } } : mockItemsResult.current ?? empty(name),
     useRepositoryMonitorActions: empty,
     useRepositoryMonitorCommands: empty,
     useRepositoryMonitorWorkActions: empty,
@@ -61,6 +63,7 @@ describe('RepositoryMonitorDetail', () => {
     mockCommandMutate.mockReset()
     mockDetailQuery.mockReset()
     mockRunsResult.current = null
+    mockItemsResult.current = null
     useUIStore.setState({ namespace: 'default', sidebarCollapsed: false, theme: 'light' })
     mockUseRepositoryMonitor.mockReturnValue({ isLoading: false, data: readyMonitor })
     vi.mocked(toast.success).mockClear()
@@ -138,6 +141,15 @@ describe('RepositoryMonitorDetail', () => {
     render(<RepositoryMonitorDetail monitorName="repo-monitor" />)
 
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('shows a failed PR queue request instead of claiming no pull requests were recorded', () => {
+    mockItemsResult.current = { error: new ApiError(500, '{"error":{"code":500,"message":"item store unavailable"}}') }
+    render(<RepositoryMonitorDetail monitorName="repo-monitor" />)
+
+    expect(screen.getByText('Could not load pull requests')).toBeInTheDocument()
+    expect(screen.getByText('item store unavailable')).toBeInTheDocument()
+    expect(screen.queryByText('No pull requests recorded yet.')).not.toBeInTheDocument()
   })
 
   it('shows a failed runs request instead of claiming no runs were recorded', () => {

@@ -48,8 +48,8 @@ export function SecretNameField({ id, value, onChange, placeholder = 'Select a S
 
   return (
     <Select value={value} onValueChange={(next) => onChange(next === NONE ? '' : next)} disabled={isLoading}>
-      <SelectTrigger id={id}>
-        <SelectValue placeholder={isLoading ? 'Loading Secrets...' : placeholder} />
+      <SelectTrigger id={id} className="max-w-full">
+        <span className="min-w-0 truncate"><SelectValue placeholder={isLoading ? 'Loading Secrets...' : placeholder} /></span>
       </SelectTrigger>
       <SelectContent>
         <SelectItem value={NONE}>None</SelectItem>

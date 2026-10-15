@@ -145,7 +145,9 @@ function RepositoryMonitorDetailContent({ monitorName, monitor }: { monitorName:
             <CardTitle>PR Queue</CardTitle>
           </CardHeader>
           <CardContent>
-            {(items.data?.items ?? []).length === 0 ? (
+            {items.error && (isForbiddenError(items.error) || !items.data) ? (
+              <ListAccessError error={items.error} resource="pull requests" />
+            ) : (items.data?.items ?? []).length === 0 ? (
               <div className="py-10 text-center text-sm text-muted-foreground">No pull requests recorded yet.</div>
             ) : (
               <Table>
@@ -198,7 +200,9 @@ function RepositoryMonitorDetailContent({ monitorName, monitor }: { monitorName:
             <CardTitle>Issue Inventory</CardTitle>
           </CardHeader>
           <CardContent>
-            {(issueItems.data?.items ?? []).length === 0 ? (
+            {issueItems.error && (isForbiddenError(issueItems.error) || !issueItems.data) ? (
+              <ListAccessError error={issueItems.error} resource="issues" />
+            ) : (issueItems.data?.items ?? []).length === 0 ? (
               <div className="py-10 text-center text-sm text-muted-foreground">No issues recorded yet.</div>
             ) : (
               <Table>
@@ -267,7 +271,9 @@ function RepositoryMonitorDetailContent({ monitorName, monitor }: { monitorName:
               <CardTitle>Actions</CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
-              {(actions.data?.items ?? []).length === 0 ? (
+              {actions.error && (isForbiddenError(actions.error) || !actions.data) ? (
+              <ListAccessError error={actions.error} resource="monitor actions" />
+            ) : (actions.data?.items ?? []).length === 0 ? (
                 <div className="py-8 text-center text-sm text-muted-foreground">No actions recorded yet.</div>
               ) : (
                 (actions.data?.items ?? []).slice(0, 8).map((action) => (
@@ -291,7 +297,9 @@ function RepositoryMonitorDetailContent({ monitorName, monitor }: { monitorName:
               <CardTitle>Commands</CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
-              {(commands.data?.items ?? []).length === 0 ? (
+              {commands.error && (isForbiddenError(commands.error) || !commands.data) ? (
+              <ListAccessError error={commands.error} resource="monitor commands" />
+            ) : (commands.data?.items ?? []).length === 0 ? (
                 <div className="py-8 text-center text-sm text-muted-foreground">No commands recorded yet.</div>
               ) : (
                 (commands.data?.items ?? []).slice(0, 8).map((command) => (
@@ -315,7 +323,9 @@ function RepositoryMonitorDetailContent({ monitorName, monitor }: { monitorName:
               <CardTitle>Workflow Timeline</CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
-              {(workActions.data?.items ?? []).length === 0 ? (
+              {workActions.error && (isForbiddenError(workActions.error) || !workActions.data) ? (
+              <ListAccessError error={workActions.error} resource="work actions" />
+            ) : (workActions.data?.items ?? []).length === 0 ? (
                 <div className="py-8 text-center text-sm text-muted-foreground">No workflow actions queued yet.</div>
               ) : (
                 (workActions.data?.items ?? []).slice(0, 10).map((action) => (
@@ -342,7 +352,9 @@ function RepositoryMonitorDetailContent({ monitorName, monitor }: { monitorName:
               <CardTitle>Implementation Jobs</CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
-              {(implementationJobs.data?.items ?? []).length === 0 ? (
+              {implementationJobs.error && (isForbiddenError(implementationJobs.error) || !implementationJobs.data) ? (
+              <ListAccessError error={implementationJobs.error} resource="implementation jobs" />
+            ) : (implementationJobs.data?.items ?? []).length === 0 ? (
                 <div className="py-8 text-center text-sm text-muted-foreground">No implementation jobs yet.</div>
               ) : (
                 (implementationJobs.data?.items ?? []).slice(0, 8).map((job) => (
@@ -367,7 +379,9 @@ function RepositoryMonitorDetailContent({ monitorName, monitor }: { monitorName:
               <CardTitle>GitHub Mutations</CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
-              {(mutations.data?.items ?? []).length === 0 ? (
+              {mutations.error && (isForbiddenError(mutations.error) || !mutations.data) ? (
+              <ListAccessError error={mutations.error} resource="mutations" />
+            ) : (mutations.data?.items ?? []).length === 0 ? (
                 <div className="py-8 text-center text-sm text-muted-foreground">No GitHub mutations recorded yet.</div>
               ) : (
                 (mutations.data?.items ?? []).slice(0, 8).map((mutation) => (

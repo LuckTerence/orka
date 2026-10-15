@@ -208,7 +208,9 @@ function RepositoryDetailContent({ repositoryName, repo }: { repositoryName: str
           <CardTitle>Recent Scan Runs</CardTitle>
         </CardHeader>
         <CardContent>
-          {scanRuns.isLoading ? (
+          {scanRuns.error && (isForbiddenError(scanRuns.error) || !scanRuns.data) ? (
+            <ListAccessError error={scanRuns.error} resource="scan runs" />
+          ) : scanRuns.isLoading ? (
             <Skeleton className="h-24 w-full" />
           ) : (scanRuns.data?.items ?? []).length === 0 ? (
             <div className="text-sm text-muted-foreground">No scan runs yet.</div>
