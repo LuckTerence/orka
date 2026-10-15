@@ -8,6 +8,7 @@ import { useAllFindings, useDroppedFindings, useRepositoryScan, useReviewSlices,
 import { ThreatModelEditor } from './threat-model-editor'
 import { RecommendedFindings } from './recommended-findings'
 import { FindingTable } from './finding-table'
+import { FindingCountBadges } from './finding-count-badges'
 import { repositoryDisplayName } from '@/lib/repository-name'
 import { timeAgo } from '@/lib/time'
 
@@ -72,10 +73,7 @@ export function RepositoryDetail({ repositoryName }: { repositoryName: string })
           <CardContent>
             <div className="text-2xl font-bold">{repo.status?.findingCounts?.total ?? 0}</div>
             <div className="mt-2 flex flex-wrap gap-2 text-xs">
-              <Badge variant="destructive">{repo.status?.findingCounts?.critical ?? 0} critical</Badge>
-              <Badge variant="destructive">{repo.status?.findingCounts?.high ?? 0} high</Badge>
-              <Badge variant="secondary">{repo.status?.findingCounts?.medium ?? 0} medium</Badge>
-              <Badge variant="outline">{repo.status?.findingCounts?.low ?? 0} low</Badge>
+              <FindingCountBadges counts={repo.status?.findingCounts} />
             </div>
           </CardContent>
         </Card>
