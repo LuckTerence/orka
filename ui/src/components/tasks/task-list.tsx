@@ -20,7 +20,7 @@ import { TaskStatusBadge } from './task-status-badge'
 import { useTaskListPages, useDeleteTask } from '@/hooks/use-tasks'
 import type { Task } from '@/schemas/task'
 import { taskTypeLabel } from '@/lib/task-status'
-import { matchesTaskFilter } from '@/lib/task-filter'
+import { compareTasksNewestFirst, matchesTaskFilter } from '@/lib/task-filter'
 import { timeAgo } from '@/lib/time'
 import { actionErrorMessage } from './action-error'
 import { isTaskDeleting, TaskStateBadges } from './task-state'
@@ -39,7 +39,12 @@ export function TaskList() {
 
   // An errored list must not keep rendering a previous token's or
   // namespace's rows; the access panel replaces it.
-  const tasks = useMemo(() => (error ? [] : (data?.pages ?? []).flatMap((page) => page.items)), [data, error])
+  // Pages arrive in name order; newest-first within what is loaded keeps a
+  // just-created task at the top instead of somewhere by name.
+  const tasks = useMemo(
+    () => (error ? [] : (data?.pages ?? []).flatMap((page) => page.items).sort(compareTasksNewestFirst)),
+    [data, error],
+  )
   const visible = useMemo(() => tasks.filter((task) => matchesTaskFilter(task, filter)), [tasks, filter])
   const lastPage = data?.pages[data.pages.length - 1]
   const remaining = lastPage?.metadata?.remainingItemCount
@@ -93,9 +98,11 @@ export function TaskList() {
           <TableHeader>
             <TableRow>
               <TableHead>Name</TableHead>
-              <TableHead>Type</TableHead>
+              {/* Type and Namespace give way on narrow screens so Name and
+                  Phase stay visible; the list is namespace-scoped anyway. */}
+              <TableHead className="hidden sm:table-cell">Type</TableHead>
               <TableHead>Phase</TableHead>
-              <TableHead>Namespace</TableHead>
+              <TableHead className="hidden md:table-cell">Namespace</TableHead>
               <TableHead>Age</TableHead>
               <TableHead className="w-12"></TableHead>
             </TableRow>
@@ -145,14 +152,14 @@ export function TaskList() {
                       {task.metadata.name}
                     </Link>
                   </TableCell>
-                  <TableCell>{taskTypeLabel(task.spec.type)}</TableCell>
+                  <TableCell className="hidden sm:table-cell">{taskTypeLabel(task.spec.type)}</TableCell>
                   <TableCell>
                     <span className="flex flex-wrap items-center gap-1">
                       <TaskStatusBadge phase={task.status?.phase} />
                       <TaskStateBadges task={task} />
                     </span>
                   </TableCell>
-                  <TableCell>{task.metadata.namespace}</TableCell>
+                  <TableCell className="hidden md:table-cell">{task.metadata.namespace}</TableCell>
                   <TableCell>{timeAgo(task.metadata.creationTimestamp, { compact: true })}</TableCell>
                   <TableCell>
                     <Button

@@ -275,6 +275,48 @@ describe('TaskList paging and access', () => {
     expect(screen.queryByText('alpha-task')).not.toBeInTheDocument()
   })
 
+  it('lists loaded tasks newest first and keeps Name and Phase visible on narrow screens', async () => {
+    server.use(
+      http.get('/api/v1/tasks', () =>
+        HttpResponse.json({
+          items: [
+            { metadata: { name: 'aaa-oldest', namespace: 'default', uid: '1', creationTimestamp: '2026-01-01T00:00:00Z' }, spec: { type: 'container' }, status: { phase: 'Succeeded' } },
+            { metadata: { name: 'zzz-newest', namespace: 'default', uid: '2', creationTimestamp: '2026-03-01T00:00:00Z' }, spec: { type: 'container' }, status: { phase: 'Running' } },
+            { metadata: { name: 'mmm-middle', namespace: 'default', uid: '3', creationTimestamp: '2026-02-01T00:00:00Z' }, spec: { type: 'ai' }, status: { phase: 'Failed' } },
+          ],
+          metadata: {},
+        }),
+      ),
+    )
+    render(<TaskList />)
+    await screen.findByText('zzz-newest')
+    const names = screen.getAllByRole('row').slice(1).map((row) => row.querySelector('a')?.textContent)
+    expect(names).toEqual(['zzz-newest', 'mmm-middle', 'aaa-oldest'])
+    expect(screen.getByRole('columnheader', { name: 'Namespace' })).toHaveClass('hidden', 'md:table-cell')
+    expect(screen.getByRole('columnheader', { name: 'Type' })).toHaveClass('hidden', 'sm:table-cell')
+    expect(screen.getByRole('columnheader', { name: 'Phase' })).not.toHaveClass('hidden')
+  })
+
+  it('filtering by "ai" does not match Container tasks', async () => {
+    const user = userEvent.setup()
+    server.use(
+      http.get('/api/v1/tasks', () =>
+        HttpResponse.json({
+          items: [
+            { metadata: { name: 'build', namespace: 'default', uid: '1' }, spec: { type: 'container' }, status: { phase: 'Succeeded' } },
+            { metadata: { name: 'summarize', namespace: 'default', uid: '2' }, spec: { type: 'ai' }, status: { phase: 'Succeeded' } },
+          ],
+          metadata: {},
+        }),
+      ),
+    )
+    render(<TaskList />)
+    await screen.findByText('build')
+    await user.type(screen.getByLabelText('Filter tasks'), 'ai')
+    expect(screen.getByText('summarize')).toBeInTheDocument()
+    expect(screen.queryByText('build')).not.toBeInTheDocument()
+  })
+
   it('shows a not-authorized panel instead of the empty-state CTA on 403', async () => {
     server.use(
       http.get('/api/v1/tasks', () =>
