@@ -24,6 +24,12 @@ describe('TranscriptViewer', () => {
     expect(screen.getByText('Hi there!')).toBeInTheDocument()
   })
 
+  it('wraps long unbroken message text instead of overflowing the bubble', () => {
+    const long = 'y'.repeat(400)
+    render(<TranscriptViewer transcript={JSON.stringify({ role: 'assistant', content: long })} />)
+    expect(screen.getByText(long).className).toContain('wrap-anywhere')
+  })
+
   it('skips invalid JSON lines gracefully', () => {
     const jsonl = [
       JSON.stringify({ role: 'user', content: 'Good line' }),

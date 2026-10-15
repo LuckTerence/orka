@@ -103,6 +103,23 @@ describe('ChatPage', () => {
     expect(surface.className).toContain('-m-4')
     expect(surface.className).toContain('md:-m-6')
     expect(surface.className).not.toMatch(/(^|\s)-m-6(\s|$)/)
+    // The height adds the cancelled padding back so no band is left under
+    // the input and only the transcript scrolls.
+    expect(surface.className).toContain('h-[calc(100%+2rem)]')
+    expect(surface.className).toContain('md:h-[calc(100%+3rem)]')
+    expect(surface.className).not.toMatch(/(^|\s)h-full(\s|$)/)
+  })
+
+  it('lets the header controls wrap onto their own row on narrow screens', () => {
+    useChatStore.setState({ messages: [{ id: 'msg-1', role: 'user', content: 'Hello', timestamp: new Date().toISOString() }] })
+    render(<ChatPage />)
+    const newChat = screen.getByRole('button', { name: /New Chat/ })
+    const controls = newChat.parentElement as HTMLElement
+    expect(controls.className).toContain('w-full')
+    expect(controls.className).toContain('sm:w-auto')
+    expect(controls.parentElement!.className).toContain('flex-wrap')
+    expect(screen.getByRole('textbox', { name: 'Chat model' }).className).not.toMatch(/(^|\s)w-48(\s|$)/)
+    expect(screen.getByRole('combobox', { name: 'Chat provider' }).className).not.toMatch(/(^|\s)min-w-40(\s|$)/)
   })
 
   it('surfaces a not-authorized state instead of an empty provider list on 403', async () => {

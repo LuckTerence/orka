@@ -102,26 +102,31 @@ export function ChatPage() {
   }
 
   return (
-    <div className="flex h-full flex-col -m-4 md:-m-6">
+    // The negative margins cancel <main>'s padding, so the height adds that
+    // padding back: the surface fills the pane exactly, the transcript is the
+    // only thing that scrolls, and no empty band is left under the input.
+    <div className="-m-4 flex h-[calc(100%+2rem)] flex-col md:-m-6 md:h-[calc(100%+3rem)]">
       {/* Header */}
       <div className="border-b border-border bg-card px-4 py-2">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
             <h1 className="text-sm font-semibold">Chat</h1>
             {currentSessionId && (
-              <Badge variant="secondary" className="font-mono text-[10px]">
+              <Badge variant="secondary" className="min-w-0 max-w-full truncate font-mono text-[10px]" title={currentSessionId}>
                 {currentSessionId}
               </Badge>
             )}
             {effectiveModel && (
-              <Badge variant="outline" className="text-[10px]">
+              <Badge variant="outline" className="min-w-0 max-w-full truncate text-[10px]" title={effectiveModel}>
                 {effectiveModel}
               </Badge>
             )}
           </div>
-          <div className="flex flex-wrap items-center justify-end gap-2">
+          {/* On narrow screens the controls take their own full-width row and
+              share it, so New Chat stays reachable. */}
+          <div className="flex w-full min-w-0 items-center gap-2 sm:w-auto sm:justify-end">
             <Select value={provider || (hasServerDefault ? SERVER_DEFAULT : '')} onValueChange={handleProviderChange} disabled={isStreaming}>
-              <SelectTrigger className="h-7 w-auto min-w-40 text-xs" aria-label="Chat provider">
+              <SelectTrigger className="h-7 min-w-0 flex-1 text-xs sm:w-auto sm:min-w-40 sm:flex-none" aria-label="Chat provider">
                 <SelectValue placeholder="Provider" />
               </SelectTrigger>
               <SelectContent>
@@ -142,10 +147,12 @@ export function ChatPage() {
               onChange={(e) => setModel(e.target.value)}
               placeholder={provider ? providers.find((p) => p.name === provider)?.defaultModel || 'model' : config?.model || 'model (server default)'}
               disabled={isStreaming || modelNeedsProvider}
-              className="h-7 w-48 text-xs"
+              className="h-7 min-w-0 flex-1 text-xs sm:w-48 sm:flex-none"
             />
+            {/* New Chat during a reply also cancels the server-side turn
+                (the orphaned turn sends DELETE /chat/{sessionId}). */}
             {messages.length > 0 && (
-              <Button variant="ghost" size="sm" onClick={newSession} className="h-7 text-xs">
+              <Button variant="ghost" size="sm" onClick={newSession} className="h-7 shrink-0 text-xs">
                 <Plus className="mr-1 h-3 w-3" /> New Chat
               </Button>
             )}

@@ -77,7 +77,7 @@ export function TranscriptViewer({ transcript }: { transcript?: string }) {
                     content={msg.content}
                   />
                 ) : msg.content && (
-                  <pre className="whitespace-pre-wrap text-sm font-sans">{msg.content}</pre>
+                  <pre className="whitespace-pre-wrap wrap-anywhere text-sm font-sans">{msg.content}</pre>
                 )}
                 {toolCalls.map((call, callIndex) => (
                   <ToolDetails
