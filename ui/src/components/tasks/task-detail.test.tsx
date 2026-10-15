@@ -437,6 +437,28 @@ describe('TaskDetail', () => {
     expect(screen.getAllByText('Waiting for approval').length).toBeGreaterThan(0)
   })
 
+  it('links a child task back to its parent', async () => {
+    server.use(
+      http.get('/api/v1/tasks/:id', () =>
+        HttpResponse.json({
+          metadata: {
+            name: 'child-task',
+            namespace: 'default',
+            uid: 'uid-child',
+            labels: { 'orka.ai/parent-task': 'parent-hash' },
+            annotations: { 'orka.ai/parent-task-name': 'the-parent' },
+          },
+          spec: { type: 'agent', agentRef: { name: 'a' } },
+          status: { phase: 'Running' },
+        }),
+      ),
+    )
+    render(<TaskDetail taskId="child-task" />)
+    const link = await screen.findByRole('link', { name: 'the-parent' })
+    expect(link).toHaveAttribute('href', '/tasks/$taskId')
+    expect(link.closest('p')).toHaveTextContent('Child of the-parent')
+  })
+
   it('has a single Delete control on the Runtime tab', async () => {
     mockSearch.current = { tab: 'runtime' }
     render(<TaskDetail taskId="test-task" />)

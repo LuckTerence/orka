@@ -105,11 +105,20 @@ function TreeNode({
           </span>
         )}
         {node.result && (
+          // A failed child's recorded output is its failure reason; tone the
+          // chip by phase so it never reads as a success.
           <span
-            className="truncate rounded-full bg-status-succeeded-bg px-2 py-0.5 text-[10px] text-status-succeeded"
+            className={cn(
+              'truncate rounded-full px-2 py-0.5 text-[10px]',
+              node.phase === 'Failed'
+                ? 'bg-status-failed-bg text-status-failed'
+                : node.phase === 'Succeeded'
+                  ? 'bg-status-succeeded-bg text-status-succeeded'
+                  : 'bg-muted text-muted-foreground',
+            )}
             title={node.result}
           >
-            {node.result}
+            {node.phase === 'Failed' ? `Failed: ${node.result}` : node.result}
           </span>
         )}
         <span

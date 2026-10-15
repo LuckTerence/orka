@@ -199,6 +199,11 @@ export function TaskDetail({ taskId }: { taskId: string }) {
     return <div className="text-muted-foreground">Task not found</div>
   }
 
+  // The controller's parent annotation is authoritative; the label can be a
+  // hashed selector value for long names.
+  const parentTaskName = task.metadata.annotations?.['orka.ai/parent-task-name']?.trim() ||
+    task.metadata.labels?.['orka.ai/parent-task']?.trim()
+
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -215,6 +220,14 @@ export function TaskDetail({ taskId }: { taskId: string }) {
           <TaskStatusBadge phase={task.status?.phase} />
           <TaskStateBadges task={task} />
           <PRStatusBadge annotations={task.metadata.annotations} />
+          {parentTaskName && (
+            <p className="w-full text-sm text-muted-foreground">
+              Child of{' '}
+              <Link to="/tasks/$taskId" params={{ taskId: parentTaskName }} className="font-mono text-foreground hover:underline">
+                {parentTaskName}
+              </Link>
+            </p>
+          )}
         </div>
         <div className="flex items-center gap-2">
           {deleteArmed ? (

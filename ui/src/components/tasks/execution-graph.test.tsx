@@ -184,4 +184,15 @@ describe('ExecutionGraph', () => {
     render(<ExecutionGraph task={task} />)
     expect(screen.getByText('done-42')).toBeInTheDocument()
   })
+
+  it('tones a failed child result as a failure, not a success', () => {
+    const task = makeTask({
+      status: { phase: 'Running', childTasks: [{ name: 'c2', agent: 'r', phase: 'Failed', result: 'tests did not pass' }] },
+    })
+    render(<ExecutionGraph task={task} />)
+    const chip = screen.getByText('Failed: tests did not pass')
+    expect(chip).toHaveClass('text-status-failed')
+    expect(chip).not.toHaveClass('text-status-succeeded')
+    expect(chip).toHaveAttribute('title', 'tests did not pass')
+  })
 })
