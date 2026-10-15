@@ -1852,7 +1852,7 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 			}
 			if r.shouldRetry(task) {
 				log.Info("job not found while task still has retry budget, scheduling retry", "attempt", task.Status.Attempts)
-				return r.retryTask(ctx, task)
+				return r.retryTaskAfterFailure(ctx, task, "job not found")
 			}
 			log.Info("Job not found, task may have been cleaned up")
 			return r.failTask(ctx, task, "job not found")
@@ -1905,8 +1905,9 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 		}
 		// Job failed, check retry policy
 		if r.shouldRetry(task) {
-			log.Info("retrying task", "attempt", task.Status.Attempts)
-			return r.retryTask(ctx, task)
+			failure := r.diagnoseFailedJob(ctx, task)
+			log.Info("retrying task", "attempt", task.Status.Attempts, "failure", failure)
+			return r.retryTaskAfterFailure(ctx, task, failure)
 		}
 		// Inspect terminated containers for a specific cause (OOMKilled, non-zero
 		// exit code, etc.) so the coordinator that delegated this Task can read
@@ -2941,6 +2942,24 @@ func (r *TaskReconciler) retryTask(ctx context.Context, task *corev1alpha1.Task)
 	}
 
 	return ctrl.Result{RequeueAfter: delay}, nil
+}
+
+// retryTaskAfterFailure schedules the next attempt and records why the
+// current one failed, so retried attempts are not silent in the timeline.
+func (r *TaskReconciler) retryTaskAfterFailure(ctx context.Context, task *corev1alpha1.Task, failure string) (ctrl.Result, error) {
+	attempt, jobName := task.Status.Attempts, task.Status.JobName
+	result, err := r.retryTask(ctx, task)
+	if err != nil {
+		return result, err
+	}
+	_ = r.recordTaskLifecycleEvent(
+		ctx,
+		task,
+		execevents.ExecutionEventTypeTaskPhaseChanged,
+		execevents.ExecutionEventSeverityWarning,
+		fmt.Sprintf("Attempt %d (Job %s) failed, retrying in %s: %s", attempt, jobName, result.RequeueAfter, failure),
+	)
+	return result, nil
 }
 
 // RequeueAfter does not prevent Task or owned Job events from reconciling

@@ -3479,6 +3479,62 @@ func TestHandleRunning_JobFailed_WithRetry(t *testing.T) {
 	}
 }
 
+func TestHandleRunning_RetryRecordsAttemptFailure(t *testing.T) {
+	ctx := context.Background()
+	scheme := newTestScheme()
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "run-retry-event-job-0", Namespace: "default"},
+		Status:     batchv1.JobStatus{Failed: 1},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "run-retry-event", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:        corev1alpha1.TaskTypeContainer,
+			RetryPolicy: &corev1alpha1.RetryPolicy{MaxRetries: 2},
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:    corev1alpha1.TaskPhaseRunning,
+			JobName:  job.Name,
+			Attempts: 1,
+		},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "run-retry-event-pod", Namespace: "default",
+			Labels: map[string]string{labels.LabelTask: labels.SelectorValue(task.Name), batchv1.JobNameLabel: job.Name},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodFailed,
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name:  "worker",
+				State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 3, Reason: "Error"}},
+			}},
+		},
+	}
+	r := newUnitReconciler(scheme, task, job, pod)
+
+	if _, err := r.handleRunning(ctx, task); err != nil {
+		t.Fatalf("handleRunning() error = %v", err)
+	}
+	if task.Status.Phase != corev1alpha1.TaskPhasePending {
+		t.Fatalf("phase = %s, want Pending for retry", task.Status.Phase)
+	}
+	recorded, err := r.ExecutionEventStore.ListExecutionEvents(ctx, store.ExecutionEventFilter{
+		Namespace: task.Namespace, TaskName: task.Name,
+		EventTypes: []string{events.ExecutionEventTypeTaskPhaseChanged},
+	})
+	if err != nil {
+		t.Fatalf("ListExecutionEvents() error = %v", err)
+	}
+	if len(recorded) != 1 {
+		t.Fatalf("attempt failure events = %d, want 1", len(recorded))
+	}
+	const want = "Attempt 1 (Job run-retry-event-job-0) failed, retrying in 10s: job failed: container exited with code 3 (reason=Error)"
+	if recorded[0].Summary != want || recorded[0].Severity != events.ExecutionEventSeverityWarning {
+		t.Fatalf("event = %s %q, want warning %q", recorded[0].Severity, recorded[0].Summary, want)
+	}
+}
+
 func TestHandleRunning_SurfacesPodWaitingReason(t *testing.T) {
 	ctx := context.Background()
 	scheme := newTestScheme()
