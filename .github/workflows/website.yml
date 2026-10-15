@@ -139,12 +139,14 @@ jobs:
           fi
 
           # Replace the website at the Pages root while preserving Pages
-          # metadata and Helm chart repository artifacts.
+          # metadata, Helm chart repository artifacts, and the dashboard demo
+          # (published by dashboard-demo.yml).
           find . -mindepth 1 -maxdepth 1 \
             ! -name '.git' \
             ! -name '.nojekyll' \
             ! -name 'CNAME' \
             ! -name 'charts' \
+            ! -name 'demo' \
             ! -name 'index.yaml' \
             ! -name '*.tgz' \
             ! -name '*.prov' \
