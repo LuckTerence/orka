@@ -162,10 +162,11 @@ export function TaskList() {
                     navigate({ to: '/tasks/$taskId', params: { taskId: task.metadata.name } })
                   }}
                 >
-                  {/* On narrow screens the name takes only the width the
-                      other columns leave and truncates; the full name is in
-                      its title. */}
-                  <TableCell className="w-full max-w-0 sm:w-auto sm:max-w-none">
+                  {/* At every width the name takes only the width the other
+                      columns leave and truncates, so a long generated name
+                      (scan runs are ~60 characters) never pushes Phase or
+                      Delete out of view; the full name is in its title. */}
+                  <TableCell className="w-full max-w-0">
                     <Link
                       to="/tasks/$taskId"
                       params={{ taskId: task.metadata.name }}
@@ -177,7 +178,10 @@ export function TaskList() {
                   </TableCell>
                   <TableCell className="hidden sm:table-cell">{taskTypeLabel(task.spec.type)}</TableCell>
                   <TableCell>
-                    <span className="flex flex-wrap items-center gap-1">
+                    {/* The name column takes the spare width, so the phase
+                        badges stack when narrow but stay on one line once
+                        there is room for them. */}
+                    <span className="flex flex-wrap items-center gap-1 lg:flex-nowrap">
                       <TaskStatusBadge phase={task.status?.phase} />
                       <TaskStateBadges task={task} />
                     </span>

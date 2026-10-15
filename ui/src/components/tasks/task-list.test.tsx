@@ -336,7 +336,7 @@ describe('TaskList paging and access', () => {
     expect(screen.getByText(`${maxListWalkPages} loaded · more available`)).toBeInTheDocument()
   })
 
-  it('truncates a long name on narrow screens and keeps the full name in its title', async () => {
+  it('truncates a long name at every width and keeps the full name in its title', async () => {
     const name = 'a-very-long-task-name-that-would-push-phase-and-delete-off-a-phone-screen-x'
     server.use(
       http.get('/api/v1/tasks', () =>
@@ -350,7 +350,13 @@ describe('TaskList paging and access', () => {
     const link = await screen.findByRole('link', { name })
     expect(link).toHaveAttribute('title', name)
     expect(link).toHaveClass('block', 'truncate')
-    expect(link.closest('td')).toHaveClass('w-full', 'max-w-0', 'sm:w-auto', 'sm:max-w-none')
+    // No breakpoint lifts the cap: at 1024 and 1280 every column is shown
+    // and a long name must still give way to them.
+    const cell = link.closest('td')!
+    expect(cell).toHaveClass('w-full', 'max-w-0')
+    expect(cell.className).not.toMatch(/\b(sm|md|lg|xl):(w-auto|max-w-none)\b/)
+    const phaseCell = cell.closest('tr')!.querySelectorAll('td')[2]
+    expect(phaseCell.firstElementChild).toHaveClass('flex-wrap', 'lg:flex-nowrap')
     expect(screen.getByRole('columnheader', { name: 'Age' })).toHaveClass('hidden', 'sm:table-cell')
     expect(screen.getByRole('button', { name: `Delete task ${name}` }).closest('td')).not.toHaveClass('hidden')
   })
