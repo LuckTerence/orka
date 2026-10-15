@@ -247,6 +247,40 @@ var _ = Describe("Workspace Provider Lifecycle", Ordered, Label("workspace-provi
 	name := func(prefix string) string { return prefix + "-" + runID }
 	session := func(prefix string) string { return name(prefix + "-s") }
 	marker := func(check string) string { return "[e2e:wsp-" + check + "]" }
+	// teardown deletes this run's Sessions, Tasks, checkpoints, and workspaces
+	// and waits until the backend holds nothing for them. It is idempotent.
+	teardown := func() {
+		for _, s := range []string{session("data"), session("timeout")} {
+			deleteSessionViaAPI(apiBaseURL, token, s)
+		}
+		output, err := utils.Run(exec.Command("kubectl", "-n", namespace, "get", "tasks", "-o", "name"))
+		Expect(err).NotTo(HaveOccurred())
+		var tasks []string
+		for _, task := range utils.GetNonEmptyLines(output) {
+			if task = strings.TrimPrefix(task, "task.core.orka.ai/"); strings.HasSuffix(task, "-"+runID) {
+				tasks = append(tasks, task)
+			}
+		}
+		deleteE2ETasks(apiBaseURL, token, tasks...)
+		for _, args := range [][]string{
+			{"delete", "executionworkspacecheckpoints", "--all"},
+			{"delete", "executionworkspaces", "--all"},
+		} {
+			_, err := utils.Run(exec.Command("kubectl", append(append([]string{"-n", namespace}, args...), "--timeout=10m")...))
+			Expect(err).NotTo(HaveOccurred())
+		}
+		Eventually(func(g Gomega) {
+			output, err := utils.Run(exec.Command("kubectl", "-n", namespace, "get", "runtimepools", "-o", "name"))
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(output).NotTo(ContainSubstring("acp-ws-"))
+			for _, uid := range workspaceUIDs {
+				g.Expect(backend.leftovers(g, uid)).To(BeEmpty(), "workspace %s left backend resources", uid)
+			}
+			if backend.nativeLeftovers != nil {
+				g.Expect(backend.nativeLeftovers(g)).To(BeEmpty(), "deleted workspaces left native resources")
+			}
+		}, 10*time.Minute, 5*time.Second).Should(Succeed())
+	}
 	// dataTask runs in the data Session. Read-intent workspaces are read-only
 	// to the agent, and a session workspace freezes the runtime profile, which
 	// includes the intent, so every Task in this Session has write intent and
@@ -323,6 +357,9 @@ var _ = Describe("Workspace Provider Lifecycle", Ordered, Label("workspace-provi
 		suspend, deleting = name("wsp-suspend"), name("wsp-delete")
 		applyWorkspaceClass(backend, suspend, workspaceClassOptions{suspend: true})
 		applyWorkspaceClass(backend, deleting, workspaceClassOptions{})
+		// A failed spec skips the final teardown spec. Registered last, this
+		// runs first: while the fake forge and the provider still run.
+		DeferCleanup(teardown)
 	})
 
 	AfterEach(func() {
@@ -585,38 +622,7 @@ var _ = Describe("Workspace Provider Lifecycle", Ordered, Label("workspace-provi
 		waitWorkspaceGone(backend, ws)
 	})
 
-	It("deletes every workspace and leaves no backend resources", func() {
-		for _, s := range []string{session("data"), session("timeout")} {
-			deleteSessionViaAPI(apiBaseURL, token, s)
-		}
-		output, err := utils.Run(exec.Command("kubectl", "-n", namespace, "get", "tasks", "-o", "name"))
-		Expect(err).NotTo(HaveOccurred())
-		var tasks []string
-		for _, task := range utils.GetNonEmptyLines(output) {
-			if task = strings.TrimPrefix(task, "task.core.orka.ai/"); strings.HasSuffix(task, "-"+runID) {
-				tasks = append(tasks, task)
-			}
-		}
-		deleteE2ETasks(apiBaseURL, token, tasks...)
-		for _, args := range [][]string{
-			{"delete", "executionworkspacecheckpoints", "--all"},
-			{"delete", "executionworkspaces", "--all"},
-		} {
-			_, err := utils.Run(exec.Command("kubectl", append(append([]string{"-n", namespace}, args...), "--timeout=10m")...))
-			Expect(err).NotTo(HaveOccurred())
-		}
-		Eventually(func(g Gomega) {
-			output, err := utils.Run(exec.Command("kubectl", "-n", namespace, "get", "runtimepools", "-o", "name"))
-			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(output).NotTo(ContainSubstring("acp-ws-"))
-			for _, uid := range workspaceUIDs {
-				g.Expect(backend.leftovers(g, uid)).To(BeEmpty(), "workspace %s left backend resources", uid)
-			}
-			if backend.nativeLeftovers != nil {
-				g.Expect(backend.nativeLeftovers(g)).To(BeEmpty(), "deleted workspaces left native resources")
-			}
-		}, 10*time.Minute, 5*time.Second).Should(Succeed())
-	})
+	It("deletes every workspace and leaves no backend resources", teardown)
 })
 
 type workspaceIdentity struct{ name, uid, pool string }
