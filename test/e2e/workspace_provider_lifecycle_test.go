@@ -290,6 +290,13 @@ var _ = Describe("Workspace Provider Lifecycle", Ordered, Label("workspace-provi
 		manifest["spec"].(map[string]any)["workspace"] = writeWorkspace("orka/e2e-"+task, false)
 		return manifest
 	}
+	// restoreTask restores a data Session checkpoint, which keeps its source
+	// repository.
+	restoreTask := func(task, prompt string, from *workspacev1alpha1.ExecutionWorkspaceCheckpoint) map[string]any {
+		manifest := wspTask(task, agent, suspend, "", false, prompt, "15m", from)
+		manifest["spec"].(map[string]any)["workspace"] = writeWorkspace("orka/e2e-"+task, false)
+		return manifest
+	}
 
 	BeforeAll(func() {
 		switch os.Getenv(workspaceProviderEnv) {
@@ -450,8 +457,8 @@ var _ = Describe("Workspace Provider Lifecycle", Ordered, Label("workspace-provi
 		}
 		checkpoint = exportCheckpoint(name("wsp-save"), dataWS, false)
 		restore := name("wsp-restore")
-		Expect(applyManifestJSON(wspTask(restore, agent, suspend, "", false,
-			"Read the durable workspace file. "+marker("restore"), "15m", &checkpoint))).To(Succeed())
+		Expect(applyManifestJSON(restoreTask(restore,
+			"Read the durable workspace file. "+marker("restore"), &checkpoint))).To(Succeed())
 		ws := waitTaskWorkspace(restore, suspend, backend)
 		Expect(ws.uid).NotTo(Equal(dataWS.uid))
 		workspaceUIDs = append(workspaceUIDs, ws.uid)
@@ -574,8 +581,8 @@ var _ = Describe("Workspace Provider Lifecycle", Ordered, Label("workspace-provi
 		By("exporting its last checkpoint only on explicit recovery")
 		recovered := exportCheckpoint(name("wsp-recover"), dataWS, true)
 		restore := name("wsp-after-loss")
-		Expect(applyManifestJSON(wspTask(restore, agent, suspend, "", false,
-			"Read the durable workspace file. "+marker("after-loss"), "15m", &recovered))).To(Succeed())
+		Expect(applyManifestJSON(restoreTask(restore,
+			"Read the durable workspace file. "+marker("after-loss"), &recovered))).To(Succeed())
 		ws := waitTaskWorkspace(restore, suspend, backend)
 		workspaceUIDs = append(workspaceUIDs, ws.uid)
 		waitTaskExecution(restore, corev1alpha1.TaskExecutionStateSucceeded)
