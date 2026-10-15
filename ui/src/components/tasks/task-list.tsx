@@ -17,7 +17,7 @@ import { ListAccessError } from '@/components/ui/list-access-error'
 import { Plus, Trash2 } from 'lucide-react'
 import { PageHeader } from '@/components/layout/page-header'
 import { TaskStatusBadge } from './task-status-badge'
-import { useTaskListPages, useDeleteTask } from '@/hooks/use-tasks'
+import { useTaskListAll, useDeleteTask } from '@/hooks/use-tasks'
 import type { Task } from '@/schemas/task'
 import { taskTypeLabel } from '@/lib/task-status'
 import { compareTasksNewestFirst, matchesTaskFilter } from '@/lib/task-filter'
@@ -26,11 +26,20 @@ import { actionErrorMessage } from './action-error'
 import { isTaskDeleting } from './task-state'
 import { TaskStateBadges } from './task-state-badges'
 
+// Rows revealed per "Show more". Sorting and filtering see the whole loaded
+// list; only rendering is incremental.
+const rowsPerReveal = 25
+
 export function TaskList() {
-  const { data, isLoading, error, fetchNextPage, hasNextPage, isFetchingNextPage } = useTaskListPages()
+  // The API pages in name order, so sorting one page at a time kept a new
+  // task whose name sorts late off the first screen. Walk every page up to
+  // the shared summary cap instead; this is the Board's query, so the two
+  // views share one cache entry.
+  const { data, isLoading, error } = useTaskListAll('100', 10000)
   const deleteTask = useDeleteTask()
   const navigate = useNavigate()
   const [filter, setFilter] = useState('')
+  const [shownCount, setShownCount] = useState(rowsPerReveal)
   // The task whose delete is awaiting confirmation. The dialog lives outside
   // the table so its clicks never bubble into a row's navigate handler.
   const [pendingDelete, setPendingDelete] = useState<Task | null>(null)
@@ -39,16 +48,15 @@ export function TaskList() {
   const deletingRef = useRef(false)
 
   // An errored list must not keep rendering a previous token's or
-  // namespace's rows; the access panel replaces it.
-  // Pages arrive in name order; newest-first within what is loaded keeps a
-  // just-created task at the top instead of somewhere by name.
+  // namespace's rows; the access panel replaces it. The items array is the
+  // shared cache's, so it is copied before sorting.
   const tasks = useMemo(
-    () => (error ? [] : (data?.pages ?? []).flatMap((page) => page.items).sort(compareTasksNewestFirst)),
+    () => (error ? [] : [...(data?.items ?? [])].sort(compareTasksNewestFirst)),
     [data, error],
   )
-  const visible = useMemo(() => tasks.filter((task) => matchesTaskFilter(task, filter)), [tasks, filter])
-  const lastPage = data?.pages[data.pages.length - 1]
-  const remaining = lastPage?.metadata?.remainingItemCount
+  const matching = useMemo(() => tasks.filter((task) => matchesTaskFilter(task, filter)), [tasks, filter])
+  const visible = matching.slice(0, shownCount)
+  const truncated = !error && Boolean(data?.truncated)
 
   async function confirmDelete() {
     if (!pendingDelete || deletingRef.current) return
@@ -89,11 +97,16 @@ export function TaskList() {
         />
         {tasks.length > 0 && (
           <span className="text-xs text-muted-foreground">
-            {filter ? `${visible.length} of ${tasks.length} loaded` : `${tasks.length} loaded`}
-            {hasNextPage ? ' · more available' : ''}
+            {filter ? `${matching.length} of ${tasks.length} loaded` : `${tasks.length} loaded`}
+            {truncated ? ' · more available' : ''}
           </span>
         )}
       </div>
+      {truncated && (
+        <p className="text-sm text-muted-foreground" role="status">
+          Only the first {tasks.length.toLocaleString()} tasks in resource-key order were loaded, so newer tasks may be missing. More tasks exist.
+        </p>
+      )}
       <div className="rounded-md border">
         <Table>
           <TableHeader>
@@ -184,10 +197,10 @@ export function TaskList() {
           </TableBody>
         </Table>
       </div>
-      {hasNextPage && (
+      {matching.length > visible.length && (
         <div className="flex justify-center">
-          <Button variant="outline" onClick={() => fetchNextPage()} disabled={isFetchingNextPage}>
-            {isFetchingNextPage ? 'Loading…' : remaining ? `Load more (${remaining} remaining)` : 'Load more'}
+          <Button variant="outline" onClick={() => setShownCount((count) => count + rowsPerReveal)}>
+            Show more ({matching.length - visible.length} remaining)
           </Button>
         </div>
       )}

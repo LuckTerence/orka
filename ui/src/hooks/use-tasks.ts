@@ -1,4 +1,4 @@
-import { useInfiniteQuery, useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { ApiError, api, isForbiddenError, isNotFoundError } from '@/lib/api-client'
 import { isPaginationProtocolError, pageParams, pollUnlessForbidden, retryUnlessForbidden, maxListWalkPages, walkAllPages, type ListResponse } from '@/lib/list-api'
 import { useAuthStore } from '@/stores/auth'
@@ -15,23 +15,6 @@ export function useTaskList(limit = '25', refetchInterval: number | false = 1000
   return useQuery({
     queryKey: ['tasks', namespace, limit],
     queryFn: () => fetchTaskListPage(namespace, limit),
-    enabled: Boolean(token),
-    retry: retryUnlessForbidden,
-    refetchInterval: pollUnlessForbidden(refetchInterval),
-  })
-}
-
-// Page-by-page task listing for the Tasks view: the first page loads on its
-// own and every later page follows metadata.continue on demand, so a
-// namespace with more tasks than one page is never silently truncated.
-export function useTaskListPages(limit = '25', refetchInterval: number | false = 10000) {
-  const namespace = useUIStore((s) => s.namespace)
-  const token = useAuthStore((s) => s.token)
-  return useInfiniteQuery({
-    queryKey: ['tasks', 'pages', namespace, limit],
-    queryFn: ({ pageParam }) => fetchTaskListPage(namespace, limit, pageParam || undefined),
-    initialPageParam: '',
-    getNextPageParam: (lastPage) => lastPage.metadata?.continue || undefined,
     enabled: Boolean(token),
     retry: retryUnlessForbidden,
     refetchInterval: pollUnlessForbidden(refetchInterval),

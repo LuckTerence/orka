@@ -1,11 +1,10 @@
 import type { Task } from '@/schemas/task'
 import { taskTypeLabel } from '@/lib/task-status'
 
-// matchesTaskFilter is a client-side name/type/phase search over the pages
-// loaded so far; it never hides the "Load more" control, so a task that is
-// not loaded yet can still be reached. Each term is a substring of the name
-// or the start of the type or phase: matching inside a word made "ai" match
-// every Container task.
+// matchesTaskFilter is a client-side name/type/phase search over every
+// loaded task, not just the rows revealed so far. Each term is a substring of
+// the name or the start of the type or phase: matching inside a word made
+// "ai" match every Container task.
 export function matchesTaskFilter(task: Task, filter: string): boolean {
   const needle = filter.trim().toLowerCase()
   if (!needle) return true

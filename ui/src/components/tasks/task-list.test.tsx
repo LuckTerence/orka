@@ -3,6 +3,7 @@ import { render, screen, waitFor } from '@/test/test-utils'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { server } from '@/test/mocks/server'
+import { maxListWalkPages } from '@/lib/list-api'
 
 const navigateMock = vi.hoisted(() => vi.fn())
 
@@ -245,34 +246,76 @@ describe('TaskList paging and access', () => {
     useAuthStore.setState({ token: 'test-token' })
   })
 
-  it('follows continue tokens through a Load more control and filters loaded rows', async () => {
+  it('loads every page so a new task whose name sorts last still lists first', async () => {
     server.use(
       http.get('/api/v1/tasks', ({ request }) => {
         const url = new URL(request.url)
         if (url.searchParams.get('continue') === 'page-2') {
           return HttpResponse.json({
-            items: [{ metadata: { name: 'zeta-task', namespace: 'default' }, spec: { type: 'ai' }, status: { phase: 'Succeeded' } }],
+            items: [{ metadata: { name: 'zeta-task', namespace: 'default', uid: 'z', creationTimestamp: '2026-03-01T00:00:00Z' }, spec: { type: 'ai' }, status: { phase: 'Succeeded' } }],
             metadata: {},
           })
         }
         return HttpResponse.json({
-          items: [{ metadata: { name: 'alpha-task', namespace: 'default' }, spec: { type: 'container' }, status: { phase: 'Running' } }],
+          items: [{ metadata: { name: 'alpha-task', namespace: 'default', uid: 'a', creationTimestamp: '2026-01-01T00:00:00Z' }, spec: { type: 'container' }, status: { phase: 'Running' } }],
           metadata: { continue: 'page-2', remainingItemCount: 1 },
         })
       }),
     )
+    render(<TaskList />)
+    await screen.findByText('zeta-task')
+    const names = screen.getAllByRole('row').slice(1).map((row) => row.querySelector('a')?.textContent)
+    expect(names).toEqual(['zeta-task', 'alpha-task'])
+    expect(screen.queryByRole('button', { name: /Show more/ })).not.toBeInTheDocument()
+    expect(screen.queryByText(/More tasks exist/)).not.toBeInTheDocument()
+  })
+
+  it('reveals rows incrementally and filters across every loaded task', async () => {
+    const base = Date.parse('2026-01-01T00:00:00Z')
+    const items = Array.from({ length: 30 }, (_, i) => ({
+      metadata: {
+        name: `task-${String(i).padStart(2, '0')}`,
+        namespace: 'default',
+        uid: `uid-${i}`,
+        creationTimestamp: new Date(base + i * 60_000).toISOString(),
+      },
+      spec: { type: 'container' },
+      status: { phase: 'Succeeded' },
+    }))
+    server.use(http.get('/api/v1/tasks', () => HttpResponse.json({ items, metadata: {} })))
     const user = userEvent.setup()
     render(<TaskList />)
-    await waitFor(() => expect(screen.getByText('alpha-task')).toBeInTheDocument())
-    expect(screen.queryByText('zeta-task')).not.toBeInTheDocument()
+    await screen.findByText('task-29')
+    expect(screen.getAllByRole('row')).toHaveLength(1 + 25)
+    // The oldest task is loaded but not revealed yet; the filter still finds it.
+    expect(screen.queryByText('task-00')).not.toBeInTheDocument()
+    await user.type(screen.getByLabelText('Filter tasks'), 'task-00')
+    expect(screen.getByText('task-00')).toBeInTheDocument()
+    expect(screen.getByText('1 of 30 loaded')).toBeInTheDocument()
+    await user.clear(screen.getByLabelText('Filter tasks'))
 
-    await user.click(screen.getByRole('button', { name: /Load more/ }))
-    await waitFor(() => expect(screen.getByText('zeta-task')).toBeInTheDocument())
-    expect(screen.queryByRole('button', { name: /Load more/ })).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Show more (5 remaining)' }))
+    expect(screen.getAllByRole('row')).toHaveLength(1 + 30)
+    expect(screen.getByText('task-00')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Show more/ })).not.toBeInTheDocument()
+  })
 
-    await user.type(screen.getByLabelText('Filter tasks'), 'succeeded')
-    expect(screen.getByText('zeta-task')).toBeInTheDocument()
-    expect(screen.queryByText('alpha-task')).not.toBeInTheDocument()
+  it('says so when the list walk stopped at the page cap', async () => {
+    let calls = 0
+    server.use(
+      http.get('/api/v1/tasks', () => {
+        calls += 1
+        return HttpResponse.json({
+          items: [{ metadata: { name: `task-${calls}`, namespace: 'default', uid: `uid-${calls}` }, spec: { type: 'agent' }, status: { phase: 'Running' } }],
+          metadata: { continue: `page-${calls}` },
+        })
+      }),
+    )
+    render(<TaskList />)
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      `Only the first ${maxListWalkPages} tasks in resource-key order were loaded, so newer tasks may be missing. More tasks exist.`,
+    )
+    expect(screen.getByText(`${maxListWalkPages} loaded · more available`)).toBeInTheDocument()
   })
 
   it('lists loaded tasks newest first and keeps Name and Phase visible on narrow screens', async () => {
