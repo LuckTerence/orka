@@ -624,10 +624,12 @@ func (r *RuntimePoolReconciler) ensureExternalProcessIngress(ctx context.Context
 	if err := r.bindExternalRuntimeInstanceEvidence(ctx, pool, w); err != nil {
 		return err
 	}
-	for _, target := range targets {
-		if err := r.ensureExternalIngressPolicy(ctx, pool, cfg, target, worker); err != nil {
-			return err
-		}
+	// Only the provider proxy ships ingress isolation, so only it needs a
+	// grant (targets[0]). A controller grant would itself isolate the
+	// controller and lock out its other clients; operators who isolate the
+	// controller admit native workers themselves.
+	if err := r.ensureExternalIngressPolicy(ctx, pool, cfg, targets[0], worker); err != nil {
+		return err
 	}
 	_, err = r.externalUniqueIngressWorker(ctx, process, w.Status.Allocation.Identity)
 	return err
