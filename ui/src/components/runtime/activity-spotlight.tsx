@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link } from '@tanstack/react-router'
+import { AlertTriangle } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { SonarPing } from '@/components/ui/sonar-ping'
 import { StatusDot } from '@/components/ui/status-dot'
@@ -7,7 +8,7 @@ import { useFreshness } from '@/hooks/use-freshness'
 import { cn } from '@/lib/utils'
 import { elapsedSeconds, formatElapsed, UNASSIGNED_AGENT } from '@/lib/runtime-activity'
 import { isTerminal } from '@/lib/runtime-validation'
-import { isWaitingForApproval } from '@/components/tasks/task-state'
+import { isWaitingForApproval, podWaitingMessage } from '@/components/tasks/task-state'
 import { TaskStateBadges } from '@/components/tasks/task-state-badges'
 import type { Task } from '@/schemas/task'
 import type { ExecutionEvent } from '@/schemas/execution-event'
@@ -31,10 +32,12 @@ export function ActivitySpotlight({ task, latestEvent, following, eventError = f
   const [now, setNow] = useState(() => Date.now())
   const phase = task?.status?.phase
   const running = phase === 'Running'
-  // A task parked on an approval says so in status.message; the last event
-  // ("AI worker completed") would read as if it were still progressing.
+  // A task parked on an approval or on a Pod that cannot start says so in
+  // status.message; the last event ("AI worker completed", "Task started
+  // with Job ...") would read as if it were still progressing.
   const waitingForApproval = task ? isWaitingForApproval(task) : false
-  const headline = running && !waitingForApproval
+  const podWaiting = task ? podWaitingMessage(task) : undefined
+  const headline = running && !waitingForApproval && !podWaiting
     ? latestEvent?.summary ?? task?.status?.message
     : task?.status?.message ?? latestEvent?.summary
   const justUpdated = useFreshness(headline)
@@ -109,7 +112,16 @@ export function ActivitySpotlight({ task, latestEvent, following, eventError = f
         {eventError && (
           <p className="text-sm text-destructive" role="alert">Unable to load events</p>
         )}
-        {headline && <p className="truncate text-sm text-muted-foreground">{headline}</p>}
+        {podWaiting ? (
+          // The pull or config error detail is the actionable part, so it
+          // wraps instead of truncating.
+          <p className="flex items-start gap-1.5 break-words text-sm text-status-pending" role="status">
+            <AlertTriangle className="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />
+            <span className="min-w-0">{podWaiting}</span>
+          </p>
+        ) : (
+          headline && <p className="truncate text-sm text-muted-foreground">{headline}</p>
+        )}
       </CardContent>
     </Card>
   )

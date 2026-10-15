@@ -50,6 +50,22 @@ describe('ActivitySpotlight', () => {
     expect(screen.getByText('Waiting for approval')).toBeInTheDocument()
   })
 
+  it('surfaces a stuck Pod as a warning instead of the last event', () => {
+    const ev = { summary: 'Task started with Job pull-1-abc' } as ExecutionEvent
+    const message = 'pod waiting: ImagePullBackOff - Back-off pulling image "ghcr.io/example/missing:v1"'
+    render(
+      <ActivitySpotlight
+        task={task('pull-1', { status: { phase: 'Running', startTime: new Date(0).toISOString(), message } })}
+        latestEvent={ev}
+        following
+      />,
+    )
+    const warning = screen.getByRole('status')
+    expect(warning).toHaveTextContent(message)
+    expect(warning).toHaveClass('text-status-pending')
+    expect(screen.queryByText('Task started with Job pull-1-abc')).not.toBeInTheDocument()
+  })
+
   it('prefers latest event summary over a running status message', () => {
     const ev = { summary: 'tool call completed' } as ExecutionEvent
     render(<ActivitySpotlight task={task('r-status', { status: { phase: 'Running', message: 'generic running status' } })} latestEvent={ev} following />)

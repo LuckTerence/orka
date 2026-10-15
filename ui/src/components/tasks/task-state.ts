@@ -12,6 +12,17 @@ export function isWaitingForApproval(task: Task): boolean {
   return condition?.status === 'True' || (task.status?.message?.startsWith('waiting for approval ') ?? false)
 }
 
+// The controller reports a Running Task whose Pod cannot start (an image
+// pull failure, a missing config reference) as "pod waiting: <Reason> -
+// <detail>" in its status message, and clears it once the Pod moves on.
+const podWaitingPrefix = 'pod waiting: '
+
+/** The status message of a Running Task whose Pod is stuck waiting, if any. */
+export function podWaitingMessage(task: Task): string | undefined {
+  const message = task.status?.message
+  return task.status?.phase === 'Running' && message?.startsWith(podWaitingPrefix) ? message : undefined
+}
+
 /** A delete was accepted and finalizers are still running. */
 export function isTaskDeleting(task: Task): boolean {
   return Boolean(task.metadata.deletionTimestamp)
