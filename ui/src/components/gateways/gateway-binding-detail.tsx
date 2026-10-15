@@ -6,8 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useGatewayBinding } from '@/hooks/use-gateways'
 import { Button } from '@/components/ui/button'
-import { ListAccessError } from '@/components/ui/list-access-error'
-import { NotFoundView } from '@/components/common/not-found-page'
+import { AccessErrorView, NotFoundView } from '@/components/common/not-found-page'
 import { isNotFoundError } from '@/lib/api-client'
 import { isGatewayResourceReady, isGatewayStatusFresh } from './gateway-readiness'
 import { GatewayStatusBadge } from './gateway-tables'
@@ -18,14 +17,17 @@ export function GatewayBindingDetail({ name }: { name: string }) {
   const binding = useGatewayBinding(name)
 
   if (binding.isLoading) return <Skeleton className="h-96 rounded-xl" />
-  if (binding.error && !isNotFoundError(binding.error)) return <ListAccessError resource={`GatewayBinding ${name}`} error={binding.error} />
+  const backToGateways = <Button asChild variant="outline"><Link to="/gateways"><ArrowLeft className="mr-1 h-4 w-4" />Back to Gateways</Link></Button>
+  if (binding.error && !isNotFoundError(binding.error)) {
+    return <AccessErrorView title="Could not load GatewayBinding" resource={`GatewayBinding ${name}`} error={binding.error} action={backToGateways} />
+  }
   if (isNotFoundError(binding.error) || !binding.data) {
     return (
       <NotFoundView
         title="GatewayBinding not found"
         headline={`No GatewayBinding named "${name}"`}
         hint="It may have been deleted, or it belongs to another namespace."
-        action={<Button asChild variant="outline"><Link to="/gateways"><ArrowLeft className="mr-1 h-4 w-4" />Back to Gateways</Link></Button>}
+        action={backToGateways}
       />
     )
   }

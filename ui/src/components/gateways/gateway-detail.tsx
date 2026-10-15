@@ -9,7 +9,7 @@ import { useGateway, useGatewayBindings, useGatewayDeliveries, useGatewayEvents,
 import { GatewayLedgerPagination } from './gateway-pagination'
 import { ListAccessError } from '@/components/ui/list-access-error'
 import { Button } from '@/components/ui/button'
-import { NotFoundView } from '@/components/common/not-found-page'
+import { AccessErrorView, NotFoundView } from '@/components/common/not-found-page'
 import { isNotFoundError } from '@/lib/api-client'
 import { isGatewayResourceReady, isGatewayStatusFresh } from './gateway-readiness'
 import { GatewaySessionQueue } from './gateway-session-queue'
@@ -26,14 +26,17 @@ export function GatewayDetail({ name }: { name: string }) {
   const deliveries = useGatewayDeliveries({ gateway: name, continue: deliveryPage.cursor })
 
   if (gateway.isLoading) return <Skeleton className="h-96 rounded-xl" />
-  if (gateway.error && !isNotFoundError(gateway.error)) return <ListAccessError resource="Gateway" error={gateway.error} />
+  const backToGateways = <Button asChild variant="outline"><Link to="/gateways"><ArrowLeft className="mr-1 h-4 w-4" />Back to Gateways</Link></Button>
+  if (gateway.error && !isNotFoundError(gateway.error)) {
+    return <AccessErrorView title="Could not load Gateway" resource={`Gateway ${name}`} error={gateway.error} action={backToGateways} />
+  }
   if (isNotFoundError(gateway.error) || !gateway.data) {
     return (
       <NotFoundView
         title="Gateway not found"
         headline={`No Gateway named "${name}"`}
         hint="It may have been deleted, or it belongs to another namespace."
-        action={<Button asChild variant="outline"><Link to="/gateways"><ArrowLeft className="mr-1 h-4 w-4" />Back to Gateways</Link></Button>}
+        action={backToGateways}
       />
     )
   }

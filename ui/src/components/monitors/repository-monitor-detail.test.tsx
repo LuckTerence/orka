@@ -105,6 +105,21 @@ describe('RepositoryMonitorDetail', () => {
     expect(mockDetailQuery).not.toHaveBeenCalled()
   })
 
+  it('renders a titled access-error page with a way back on 403', () => {
+    mockUseRepositoryMonitor.mockReturnValue({
+      isLoading: false,
+      data: readyMonitor,
+      error: new ApiError(403, '{"error":{"code":403,"message":"not authorized"}}'),
+    })
+    render(<RepositoryMonitorDetail monitorName="repo-monitor" />)
+
+    expect(screen.getByRole('heading', { level: 1, name: 'Could not load repository monitor' })).toBeInTheDocument()
+    expect(screen.getByRole('alert')).toHaveTextContent('Not authorized to view repository monitor repo-monitor')
+    expect(screen.getByRole('link', { name: 'Back to Monitors' })).toHaveAttribute('href', '/monitors')
+    expect(document.title).toBe('Could not load repository monitor · Orka')
+    expect(mockDetailQuery).not.toHaveBeenCalled()
+  })
+
   it('prefers the not-found page over cached data once the monitor 404s', () => {
     mockUseRepositoryMonitor.mockReturnValue({
       isLoading: false,

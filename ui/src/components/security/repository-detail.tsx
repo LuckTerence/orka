@@ -6,7 +6,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { PageHeader } from '@/components/layout/page-header'
-import { NotFoundView } from '@/components/common/not-found-page'
+import { AccessErrorView, NotFoundView } from '@/components/common/not-found-page'
 import { StatusProblemAlert } from '@/components/common/status-problem-alert'
 import { statusProblem } from '@/components/common/status-problem'
 import { useAllFindings, useDroppedFindings, useRepositoryScan, useReviewSlices, useRunSecurityScan, useScanRuns } from '@/hooks/use-security'
@@ -15,7 +15,6 @@ import { RecommendedFindings } from './recommended-findings'
 import { FindingTable } from './finding-table'
 import { FindingCountBadges } from './finding-count-badges'
 import { isForbiddenError, isNotFoundError } from '@/lib/api-client'
-import { ListAccessError } from '@/components/ui/list-access-error'
 import { repositoryDisplayName } from '@/lib/repository-name'
 import { timeAgo } from '@/lib/time'
 import { useUIStore } from '@/stores/ui'
@@ -29,10 +28,16 @@ export function RepositoryDetail({ repositoryName }: { repositoryName: string })
     return <Skeleton className="h-96 w-full" />
   }
 
+  const backToSecurity = (
+    <Button asChild variant="outline">
+      <Link to="/security"><ArrowLeft className="mr-1 h-4 w-4" />Back to Security</Link>
+    </Button>
+  )
+
   // A 403 replaces cached data (the token lost access); any other failure
   // keeps what already loaded and only blocks a page that never loaded.
   if (isForbiddenError(error) || (error && !isNotFoundError(error) && !repo)) {
-    return <ListAccessError resource={`repository ${repositoryName}`} error={error} />
+    return <AccessErrorView title="Could not load repository" resource={`repository ${repositoryName}`} error={error} action={backToSecurity} />
   }
 
   // A 404 wins over cached data: a repository deleted after it loaded keeps
@@ -44,11 +49,7 @@ export function RepositoryDetail({ repositoryName }: { repositoryName: string })
         title="Repository not found"
         headline={`No repository named "${repositoryName}" in ${namespace}`}
         hint="It may have been deleted, or it belongs to another namespace."
-        action={
-          <Button asChild variant="outline">
-            <Link to="/security"><ArrowLeft className="mr-1 h-4 w-4" />Back to Security</Link>
-          </Button>
-        }
+        action={backToSecurity}
       />
     )
   }

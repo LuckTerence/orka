@@ -3,6 +3,7 @@ import { Compass, SearchX, type LucideIcon } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { EmptyState } from '@/components/ui/empty-state'
+import { ListAccessError } from '@/components/ui/list-access-error'
 import { PageHeader } from '@/components/layout/page-header'
 
 interface NotFoundViewProps {
@@ -24,6 +25,34 @@ export function NotFoundView({ title, headline, hint, action, icon = SearchX }: 
       <Card>
         <CardContent>
           <EmptyState icon={icon} headline={headline} hint={hint} action={action} />
+        </CardContent>
+      </Card>
+    </div>
+  )
+}
+
+interface AccessErrorViewProps {
+  /** Page heading and browser-tab title, e.g. "Could not load repository". */
+  title: string
+  /** The failed request's error; a 403 reads as "Not authorized". */
+  error: unknown
+  /** What failed to load, e.g. `repository payments-main`. */
+  resource: string
+  /** The way back, e.g. a link to the list page. */
+  action: React.ReactNode
+}
+
+/**
+ * Standard "could not load" page for a detail view the token may not read
+ * (or whose request failed): a titled header over the access error card.
+ */
+export function AccessErrorView({ title, error, resource, action }: AccessErrorViewProps) {
+  return (
+    <div className="space-y-4">
+      <PageHeader title={title} />
+      <Card>
+        <CardContent>
+          <ListAccessError error={error} resource={resource} action={action} />
         </CardContent>
       </Card>
     </div>

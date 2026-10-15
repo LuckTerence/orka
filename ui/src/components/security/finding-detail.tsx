@@ -6,7 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
 import { PageHeader } from '@/components/layout/page-header'
-import { NotFoundView } from '@/components/common/not-found-page'
+import { AccessErrorView, NotFoundView } from '@/components/common/not-found-page'
 import {
   useCreatePullRequest,
   useDismissFinding,
@@ -16,7 +16,7 @@ import {
   useReopenFinding,
   useValidateFinding,
 } from '@/hooks/use-security'
-import { isNotFoundError } from '@/lib/api-client'
+import { isForbiddenError, isNotFoundError } from '@/lib/api-client'
 import { useUIStore } from '@/stores/ui'
 import type { SecurityFinding } from '@/schemas/security'
 import { PatchProposalCard } from './patch-proposal-card'
@@ -35,19 +35,27 @@ export function FindingDetail({ findingId }: { findingId: string }) {
     return <Skeleton className="h-96 w-full" />
   }
 
-  // The patch proposals query lives in FindingDetailContent, so a missing
-  // finding sends no further requests.
+  const backToSecurity = (
+    <Button asChild variant="outline">
+      <Link to="/security"><ArrowLeft className="mr-1 h-4 w-4" />Back to Security</Link>
+    </Button>
+  )
+
+  // A 403 replaces cached data (the token lost access); any other failure
+  // keeps what already loaded and only blocks a page that never loaded.
+  if (isForbiddenError(error) || (error && !isNotFoundError(error) && !finding)) {
+    return <AccessErrorView title="Could not load finding" resource={`finding ${findingId}`} error={error} action={backToSecurity} />
+  }
+
+  // A 404 wins over cached data. The patch proposals query lives in
+  // FindingDetailContent, so a missing finding sends no further requests.
   if (isNotFoundError(error) || !finding) {
     return (
       <NotFoundView
         title="Finding not found"
         headline={`No finding with ID "${findingId}" in ${namespace}`}
         hint="It may belong to another namespace, or its repository may have been removed."
-        action={
-          <Button asChild variant="outline">
-            <Link to="/security"><ArrowLeft className="mr-1 h-4 w-4" />Back to Security</Link>
-          </Button>
-        }
+        action={backToSecurity}
       />
     )
   }

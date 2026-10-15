@@ -119,6 +119,10 @@ describe('RepositoryDetail', () => {
 
     expect(await screen.findByText('Not authorized to view repository payments-main')).toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: 'Repository not found' })).not.toBeInTheDocument()
+    // The access error keeps the page chrome: a heading, tab title, and a way back.
+    expect(screen.getByRole('heading', { level: 1, name: 'Could not load repository' })).toBeInTheDocument()
+    expect(document.title).toBe('Could not load repository · Orka')
+    expect(screen.getByRole('link', { name: 'Back to Security' })).toHaveAttribute('href', '/security')
   })
 
   it('switches to the not-found page when a loaded repository is deleted', async () => {
