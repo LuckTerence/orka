@@ -7693,6 +7693,67 @@ func TestTaskLifecycleEventKeepsExistingSessionName(t *testing.T) {
 	}
 }
 
+func TestTaskLifecycleEventAttributesChatCreatedTasks(t *testing.T) {
+	// A chat-created Task has no sessionRef; its orka.ai/chat-session label
+	// attributes lifecycle events to that chat Session, but only when the
+	// label names an existing chat Session.
+	ctx := context.Background()
+	reconciler := newUnitReconciler(newTestScheme())
+	now := time.Now()
+	for _, session := range []*store.SessionRecord{
+		{Namespace: "default", Name: "chat-1", SessionType: store.SessionTypeChat},
+		{Namespace: "default", Name: "task-session", SessionType: "task"},
+	} {
+		session.CreatedAt, session.UpdatedAt = now, now
+		if err := reconciler.SessionManager.store.CreateSession(ctx, session); err != nil {
+			t.Fatalf("CreateSession(%s): %v", session.Name, err)
+		}
+	}
+	for i, tt := range []struct {
+		name        string
+		label       string
+		sessionRef  string
+		wantSession string
+	}{
+		{name: "chat session label", label: "chat-1", wantSession: "chat-1"},
+		{name: "sessionRef wins over the label", label: "chat-1", sessionRef: "task-session", wantSession: "task-session"},
+		{name: "label naming a non-chat session", label: "task-session"},
+		{name: "label naming a missing session", label: "deleted-chat"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: fmt.Sprintf("chat-task-%d", i), Namespace: "default",
+					Labels: map[string]string{labels.LabelChatSession: tt.label},
+				},
+				Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+			}
+			if tt.sessionRef != "" {
+				task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: tt.sessionRef}
+			}
+			eventStore := storetest.NewFakeExecutionEventStore()
+			reconciler.ExecutionEventStore = eventStore
+			if err := reconciler.recordTaskLifecycleEvent(ctx, task, events.ExecutionEventTypeTaskCreated,
+				events.ExecutionEventSeverityInfo, "Task status initialized to Pending"); err != nil {
+				t.Fatalf("recordTaskLifecycleEvent: %v", err)
+			}
+			listed, err := eventStore.ListExecutionEvents(ctx, store.ExecutionEventFilter{
+				Namespace: "default", StreamType: store.ExecutionEventStreamTypeTask, StreamID: task.Name, Limit: 10,
+			})
+			if err != nil {
+				t.Fatalf("ListExecutionEvents: %v", err)
+			}
+			if len(listed) != 1 || listed[0].SessionName != tt.wantSession {
+				t.Fatalf("listed events = %#v, want one event attributed to session %q", listed, tt.wantSession)
+			}
+			// Event attribution never changes Session continuity.
+			if got := taskSessionName(task); got != tt.sessionRef {
+				t.Fatalf("taskSessionName() = %q, want %q", got, tt.sessionRef)
+			}
+		})
+	}
+}
+
 func TestTaskDeletionDeletesExecutionEvents(t *testing.T) {
 	scheme := newTestScheme()
 	now := metav1.Now()

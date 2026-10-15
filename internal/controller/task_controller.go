@@ -479,11 +479,11 @@ func (r *TaskReconciler) recordTaskLifecycleEvent(
 
 func (r *TaskReconciler) executionEventSessionName(ctx context.Context, task *corev1alpha1.Task) string {
 	sessionName := taskSessionName(task)
-	if sessionName == "" {
-		return ""
-	}
 	if r == nil || r.SessionManager == nil || r.SessionManager.store == nil {
 		return ""
+	}
+	if sessionName == "" {
+		return chatSessionEventAttribution(ctx, r.SessionManager.store, task)
 	}
 	if _, err := r.SessionManager.GetSession(ctx, task.Namespace, sessionName); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -506,6 +506,51 @@ func taskSessionName(task *corev1alpha1.Task) string {
 		return ""
 	}
 	return strings.TrimSpace(task.Spec.SessionRef.Name)
+}
+
+// sessionTypeReader reads a Session's type without loading its transcript.
+type sessionTypeReader interface {
+	GetSessionType(ctx context.Context, namespace, name string) (string, error)
+}
+
+// chatSessionEventAttribution names the chat Session a Task without a
+// spec.sessionRef attributes its execution events to, so the chat's timeline
+// lists the Tasks it created. The chat API names that Session in the
+// orka.ai/chat-session label, which API clients cannot set, and the label
+// counts only when it names an existing chat Session. It is for lifecycle
+// event attribution only: Session continuity follows spec.sessionRef alone,
+// and the ACP event journal keeps spec.sessionRef because a journal Session
+// with earlier text events redacts all later runtime text, which would blank
+// every chat-created ACP Task after the chat's first one.
+func chatSessionEventAttribution(ctx context.Context, sessions store.SessionStore, task *corev1alpha1.Task) string {
+	if task == nil || sessions == nil {
+		return ""
+	}
+	sessionName := strings.TrimSpace(task.Labels[labels.LabelChatSession])
+	if sessionName == "" {
+		return ""
+	}
+	var sessionType string
+	var err error
+	if reader, ok := sessions.(sessionTypeReader); ok {
+		sessionType, err = reader.GetSessionType(ctx, task.Namespace, sessionName)
+	} else {
+		var session *store.SessionRecord
+		if session, err = sessions.GetSession(ctx, task.Namespace, sessionName); err == nil {
+			sessionType = session.SessionType
+		}
+	}
+	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			logf.FromContext(ctx).Error(err, "failed to check chat session for execution event attribution",
+				"namespace", task.Namespace, "task", task.Name, "session", sessionName)
+		}
+		return ""
+	}
+	if sessionType != store.SessionTypeChat {
+		return ""
+	}
+	return sessionName
 }
 
 func executionEventSeverityForTaskPhase(phase corev1alpha1.TaskPhase) string {
