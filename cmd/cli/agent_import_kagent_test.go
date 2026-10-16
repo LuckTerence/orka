@@ -131,9 +131,9 @@ func TestWrapKagentAgentsRejectsUnsafeInput(t *testing.T) {
 			want:  `unsupported kagent Agent version "kagent.dev/v1alpha1"`,
 		},
 		{
-			name:  "kagent v0 agent",
+			name:  "kagent v0 agent the wrapper cannot run",
 			input: agentDoc("kagent.dev/v1alpha2", "kagent", "helm-agent"),
-			want:  `unsupported kagent Agent version "kagent.dev/v1alpha2": only kagent v1`,
+			want:  "kagent Agent kagent/helm-agent cannot be wrapped: it sets no spec.type",
 		},
 		{
 			name:  "same name from two namespaces",
@@ -666,6 +666,27 @@ func TestAgentImportKagentCmdWritesDeterministicWrapperConfig(t *testing.T) {
 		config.Kagent.ExpectedRevision != "11d7665dfb79fda2112d61af3b32b10f9c8a196f5741e1f7e8e8e686147b927b" ||
 		config.Governed == nil || config.Governed.UpstreamModel != "gpt-4.1" || config.Kagent.UserIDPrefix != "orka" {
 		t.Fatalf("wrapper configuration = %s", first)
+	}
+	// A v1 configuration carries no version: the wrapper defaults to v1, and
+	// existing images keep their configuration digest.
+	if golden := `{
+  "model": "kagent/kagent/probe-gov",
+  "kagent": {
+    "controlPlaneURL": "http://kagent-controller.kagent.svc:8083",
+    "agent": {
+      "name": "probe-gov",
+      "namespace": "kagent"
+    },
+    "expectedRevision": "11d7665dfb79fda2112d61af3b32b10f9c8a196f5741e1f7e8e8e686147b927b",
+    "userIDPrefix": "orka"
+  },
+  "governed": {
+    "upstreamBaseURL": "http://vekil.vekil-system.svc:8080/v1",
+    "upstreamModel": "gpt-4.1"
+  }
+}
+`; string(first) != golden {
+		t.Fatalf("v1 wrapper configuration changed:\n%s", first)
 	}
 	unpinned := strings.Replace(governedKagentFixture, "  latestSuccessfulRevision: 11d7665dfb79fda2112d61af3b32b10f9c8a196f5741e1f7e8e8e686147b927b\n", "", 1)
 	if unpinned == governedKagentFixture {

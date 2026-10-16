@@ -25,11 +25,14 @@ import (
 )
 
 // Wrapped kagent Agents run in one of two modes. Observed: kagent runs the
-// Agent's model and tools; Orka governs dispatch and lifecycle, provided only
-// kagent's controller can reach Substrate's actor router. Governed:
-// every model and tool endpoint points at the wrapper's relay, so Orka runs
-// the tools under its policy and serves the model. Only the ADK harness can
-// be governed: it forwards the turn's bearer to models and MCP servers.
+// Agent's model and tools; Orka governs dispatch and lifecycle, provided no
+// one but kagent's controller can drive the Agent's sessions (on v1, reach
+// Substrate's actor router; on v0, reach the Agent's Service, while the
+// controller admits only the wrapper brokers and the wrapped Agents).
+// Governed: every model and tool endpoint points at the wrapper's relay, so
+// Orka runs the tools under its policy and serves the model. Only runtimes
+// that forward the turn's bearer to models and MCP servers can be governed:
+// the ADK harness on v1, and the Go runtime on v0.
 const (
 	kagentModeObserved   = "observed"
 	kagentModeGoverned   = "governed"
@@ -51,8 +54,11 @@ type kagentMode struct {
 	Reasons []string
 	// RelayOrigin is the relay every governed endpoint points at.
 	RelayOrigin string
-	// Revision is the Agent's latest successful kagent revision, if known.
+	// Revision is what the wrapper pins: the Agent's latest successful kagent
+	// revision on v1, or its Deployment's config hash on v0, if known.
 	Revision string
+	// PinProblems explain why a v0 Agent has no Revision to pin.
+	PinProblems []string
 }
 
 // kagentRevisionEvidence binds a verdict to the pinned revision. The compiled
@@ -92,14 +98,16 @@ func kagentObjectKey(kind, namespace, name string) string {
 	return kind + "/" + namespace + "/" + name
 }
 
-func indexKagentObjects(objects []map[string]any) kagentObjects {
+// indexKagentObjects indexes the objects of one kagent version. A v0 Agent's
+// Deployment belongs to the v0 index: its config hash is what the wrapper pins.
+func indexKagentObjects(objects []map[string]any, version string) kagentObjects {
 	index := kagentObjects{}
 	for _, obj := range objects {
 		apiVersion, _ := obj["apiVersion"].(string)
-		if apiVersion != kagentV1APIVersion {
+		kind, _ := obj["kind"].(string)
+		if apiVersion != version && (version != kagentV0APIVersion || apiVersion != "apps/v1" || kind != "Deployment") {
 			continue
 		}
-		kind, _ := obj["kind"].(string)
 		index[kagentObjectKey(kind, kagentString(obj, "metadata", cliNamespaceQuery), kagentString(obj, "metadata", cliNameKey))] = obj
 	}
 	return index
@@ -344,6 +352,17 @@ func kagentRelayOrigin(template, name string) (string, error) {
 }
 
 func governedRemoteMCPServerProblems(remote map[string]any) []string {
+	problems := relayRemoteMCPServerProblems(remote)
+	if labels := kagentMap(remote, "metadata", "labels"); labels == nil || labels[kagentDiscoveryLabel] != "disabled" {
+		problems = append(problems, "does not disable discovery with "+kagentDiscoveryLabel+"=disabled")
+	}
+	return append(problems, staticHeaderProblems(remote)...)
+}
+
+// relayRemoteMCPServerProblems checks the parts of a RemoteMCPServer both
+// kagent versions share: it streams over HTTP to a relay's /mcp and waits
+// longer than the relay does.
+func relayRemoteMCPServerProblems(remote map[string]any) []string {
 	var problems []string
 	if kagentString(remote, "spec", "protocol") != "STREAMABLE_HTTP" {
 		problems = append(problems, "does not use STREAMABLE_HTTP")
@@ -354,13 +373,14 @@ func governedRemoteMCPServerProblems(remote map[string]any) []string {
 	if timeout, err := time.ParseDuration(kagentString(remote, "spec", "timeout")); err != nil || timeout <= kagentRelayTimeout {
 		problems = append(problems, fmt.Sprintf("needs a timeout longer than %s", kagentRelayTimeout))
 	}
-	if labels := kagentMap(remote, "metadata", "labels"); labels == nil || labels[kagentDiscoveryLabel] != "disabled" {
-		problems = append(problems, "does not disable discovery with "+kagentDiscoveryLabel+"=disabled")
-	}
-	if headers, _ := kagentMap(remote, "spec")["headersFrom"].([]any); len(headers) > 0 {
-		problems = append(problems, "sends static headers")
-	}
 	return problems
+}
+
+func staticHeaderProblems(remote map[string]any) []string {
+	if headers, _ := kagentMap(remote, "spec")["headersFrom"].([]any); len(headers) > 0 {
+		return []string{"sends static headers"}
+	}
+	return nil
 }
 
 // relayOrigin returns the http(s) origin of value when its path is exactly path.
@@ -390,6 +410,8 @@ type kagentWrapperConfig struct {
 }
 
 type kagentWrapperTarget struct {
+	// Version selects the wrapper's kagent backend; it is omitted for v1.
+	Version          string            `json:"version,omitempty"`
 	ControlPlaneURL  string            `json:"controlPlaneURL"`
 	Agent            map[string]string `json:"agent"`
 	ExpectedRevision string            `json:"expectedRevision"`
@@ -423,7 +445,15 @@ func (o kagentWrapperOptions) validate(wrapped []kagentWrappedAgent) error {
 		if len(kagentWrapperModel(agent)) > 256 {
 			return fmt.Errorf("kagent Agent %s: its namespace and name are too long for the wrapper's 256-byte model name", agent.Source)
 		}
-		if !kagentRevisionPattern.MatchString(agent.Mode.Revision) {
+		if agent.Version == kagentVersionV0 {
+			if !kagentConfigHashPattern.MatchString(agent.Mode.Revision) {
+				why := "its Deployment has no " + kagentConfigHashAnnotation + " annotation"
+				if len(agent.Mode.PinProblems) > 0 {
+					why = strings.Join(agent.Mode.PinProblems, "; ")
+				}
+				return fmt.Errorf("kagent Agent %s has no config hash to pin (%s); export the Agent and its Deployment with kubectl get -o yaml after the rollout finishes", agent.Source, why)
+			}
+		} else if !kagentRevisionPattern.MatchString(agent.Mode.Revision) {
 			return fmt.Errorf("kagent Agent %s has no status.latestSuccessfulRevision to pin; export it with kubectl get -o yaml after it is Ready", agent.Source)
 		}
 		if agent.Mode.Mode == kagentModeGoverned && (!kagentUpstreamURL(o.UpstreamURL) || !kagentSafeString(o.UpstreamModel, 256)) {
@@ -493,6 +523,7 @@ func writeKagentWrapperConfigs(o kagentWrapperOptions, wrapped []kagentWrappedAg
 		config := kagentWrapperConfig{
 			Model: kagentWrapperModel(agent),
 			Kagent: kagentWrapperTarget{
+				Version:         agent.Version,
 				ControlPlaneURL: strings.TrimSuffix(o.ControlPlaneURL, "/"), Agent: map[string]string{cliNamespaceQuery: namespace, cliNameKey: name},
 				ExpectedRevision: agent.Mode.Revision, UserIDPrefix: o.UserIDPrefix,
 			},

@@ -15,18 +15,30 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
 
-// kagentTranslationTable documents how translate mode maps a kagent v1 Agent
-// onto a native Orka Agent. Every other field is refused rather than dropped.
-const kagentTranslationTable = `  kagent                                  Orka Agent
+// kagentTranslationTable documents how translate mode maps a kagent v1 or v0
+// Agent onto a native Orka Agent. Every other field is refused rather than
+// dropped.
+const kagentTranslationTable = `  kagent v1 (api.kagent.dev/v1alpha3)     Orka Agent
   template.inline.systemPrompt            spec.systemPrompt.inline
   template.inline.systemPromptFrom        spec.systemPrompt.configMapRef
+  template.inline.description             not carried; Orka Agents have no description
+
+  kagent v0 (kagent.dev/v1alpha2)         Orka Agent
+  declarative.systemMessage               spec.systemPrompt.inline
+  declarative.systemMessageFrom
+    (type ConfigMap)                      spec.systemPrompt.configMapRef
+  description, iconUrl, documentationUrl,
+    version, provider                     not carried; Orka Agents have no agent card
+  declarative.stream, declarative.runtime,
+    deployment placement settings         not carried; kagent runtime details
+
+  Both versions                           Orka Agent
   ModelConfig provider OpenAI/Anthropic   spec.model.provider openai/anthropic
   ModelConfig model                       spec.model.name
   ModelConfig openAI|anthropic
     .temperature / .maxTokens             spec.model.temperature / .maxTokens
   ModelConfig with a custom baseUrl       spec.providerRef (--provider-ref)
   MCP tool <server>/<tool>                spec.tools (--tool <server>/<tool>=<Orka Tool>)
-  template.inline.description             not carried; Orka Agents have no description
   ModelConfig apiKeySecret                not carried; Orka uses its own provider credentials
   ModelConfig stream, openAI.apiFormat    not carried; wire details Orka's provider decides`
 

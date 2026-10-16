@@ -190,40 +190,67 @@ and serve exactly that kagent Agent. Re-running the import is safe: Agents that
 already wrap the same kagent Agent are left alone or updated, and any other
 existing Agent is an error.
 
-Each Agent is reported as governed or observed. A governed Agent runs on the
-ADK harness with every model and tool endpoint pointing at the relay named by
---relay-url, so Orka executes its tools and serves its model. Its latest
-successful kagent revision must be the one its current spec compiles to, and
-must have been compiled from the Harness, AgentTemplate, ModelConfig, and
+Accepts kagent v1 (api.kagent.dev/v1alpha3) and kagent v0 (kagent.dev/v1alpha2)
+Agents, including lists from "kubectl get -o yaml". Other objects are skipped.
+
+Each Agent is reported as governed or observed. A governed Agent has every
+model and tool endpoint pointing at the relay named by --relay-url, so Orka
+executes its tools and serves its model. Any other Agent is observed: kagent
+runs its tools, and Orka governs dispatch and lifecycle.
+
+kagent v1: a governed Agent runs on the ADK harness. Its latest successful
+kagent revision must be the one its current spec compiles to, and must have
+been compiled from the Harness, AgentTemplate, ModelConfig, and
 RemoteMCPServer objects in the input (--revision-sources). That revision's
 compiled egress (--revision-egress) may reach only the relay and the origins
-named by --accepted-egress. Any other Agent is observed: kagent runs its
-tools, and Orka governs dispatch and lifecycle. Dispatch control requires the
-kagent install to admit only kagent's controller to Substrate's actor router
-(see the orka-runtime-kagent README).
-Include the Agents' Harness, AgentTemplate, ModelConfig, and RemoteMCPServer
-objects in the input so the import can check them.
+named by --accepted-egress. Dispatch control requires the kagent install to
+admit only kagent's controller to Substrate's actor router.
 
-Accepts kagent v1 (api.kagent.dev/v1alpha3) Agents, including lists from
-"kubectl get agents -o yaml". Other objects are skipped.
+kagent v0: only Declarative Agents on the Go runtime can be wrapped, because
+the Python runtime cannot cancel a task and saves request headers. kagent
+approval prompts (requireApproval) are refused. The wrapper pins the Agent
+Deployment's kagent.dev/config-hash, so the Agent must be Ready and its
+Deployment fully rolled out. A governed Agent's ModelConfig passes the
+caller's bearer through, and each tool binding forwards Authorization
+(allowedHeaders). v0 has no compiled revisions, so --revision-egress and
+--revision-sources do not apply. Dispatch control requires the agents'
+Services to admit only kagent's controller, and the controller to admit only
+the wrapper brokers and the wrapped Agents.
+
+See the orka-runtime-kagent README for both install requirements. Include the
+Agents' related objects in the input so the import can check them: Harness,
+AgentTemplate, ModelConfig, and RemoteMCPServer for v1; the Agent's
+Deployment, ModelConfig, and RemoteMCPServer for v0.
 
 With --wrapper-config-dir, also writes each Agent's wrapper configuration,
-<name>.kagent.json, pinned to the Agent's latest successful revision.
+<name>.kagent.json, pinned to the Agent's latest successful revision (v1) or
+its Deployment's config hash (v0).
 
 With --translate, converts each kagent Agent into a native Orka Agent that Orka
 runs itself, with no kagent at run time. Translation maps only these fields
 and refuses everything else, listing every problem:
 
-  kagent                                  Orka Agent
+  kagent v1 (api.kagent.dev/v1alpha3)     Orka Agent
   template.inline.systemPrompt            spec.systemPrompt.inline
   template.inline.systemPromptFrom        spec.systemPrompt.configMapRef
+  template.inline.description             not carried; Orka Agents have no description
+
+  kagent v0 (kagent.dev/v1alpha2)         Orka Agent
+  declarative.systemMessage               spec.systemPrompt.inline
+  declarative.systemMessageFrom
+    (type ConfigMap)                      spec.systemPrompt.configMapRef
+  description, iconUrl, documentationUrl,
+    version, provider                     not carried; Orka Agents have no agent card
+  declarative.stream, declarative.runtime,
+    deployment placement settings         not carried; kagent runtime details
+
+  Both versions                           Orka Agent
   ModelConfig provider OpenAI/Anthropic   spec.model.provider openai/anthropic
   ModelConfig model                       spec.model.name
   ModelConfig openAI|anthropic
     .temperature / .maxTokens             spec.model.temperature / .maxTokens
   ModelConfig with a custom baseUrl       spec.providerRef (--provider-ref)
   MCP tool <server>/<tool>                spec.tools (--tool <server>/<tool>=<Orka Tool>)
-  template.inline.description             not carried; Orka Agents have no description
   ModelConfig apiKeySecret                not carried; Orka uses its own provider credentials
   ModelConfig stream, openAI.apiFormat    not carried; wire details Orka's provider decides
 

@@ -37,8 +37,9 @@ const (
 	kagentRuntimeSuffix = "-kagent-runtime"
 )
 
-// kagentV1APIVersion is kagent v1, the Substrate-based design the wrapper
-// targets. Earlier kagent versions expose a different control plane.
+// kagentV1APIVersion is kagent v1, the Substrate-based design. kagent v0
+// (kagentV0APIVersion) runs each Agent as a Deployment behind a different
+// control plane; the import detects the version from each Agent.
 const kagentV1APIVersion = "api.kagent.dev/v1alpha3"
 
 // kagentWrappedAgent is one Orka Agent generated from a kagent Agent.
@@ -48,9 +49,11 @@ type kagentWrappedAgent struct {
 	// SourceNamespace is empty when the input sets no metadata.namespace.
 	SourceNamespace string
 	SourceName      string
-	RuntimeName     string
-	Manifest        map[string]any
-	Mode            kagentMode
+	// Version is kagentVersionV0 for a kagent v0 Agent and empty for v1.
+	Version     string
+	RuntimeName string
+	Manifest    map[string]any
+	Mode        kagentMode
 }
 
 func newAgentImportCmd() *cobra.Command {
@@ -79,25 +82,41 @@ and serve exactly that kagent Agent. Re-running the import is safe: Agents that
 already wrap the same kagent Agent are left alone or updated, and any other
 existing Agent is an error.
 
-Each Agent is reported as governed or observed. A governed Agent runs on the
-ADK harness with every model and tool endpoint pointing at the relay named by
---relay-url, so Orka executes its tools and serves its model. Its latest
-successful kagent revision must be the one its current spec compiles to, and
-must have been compiled from the Harness, AgentTemplate, ModelConfig, and
+Accepts kagent v1 (api.kagent.dev/v1alpha3) and kagent v0 (kagent.dev/v1alpha2)
+Agents, including lists from "kubectl get -o yaml". Other objects are skipped.
+
+Each Agent is reported as governed or observed. A governed Agent has every
+model and tool endpoint pointing at the relay named by --relay-url, so Orka
+executes its tools and serves its model. Any other Agent is observed: kagent
+runs its tools, and Orka governs dispatch and lifecycle.
+
+kagent v1: a governed Agent runs on the ADK harness. Its latest successful
+kagent revision must be the one its current spec compiles to, and must have
+been compiled from the Harness, AgentTemplate, ModelConfig, and
 RemoteMCPServer objects in the input (--revision-sources). That revision's
 compiled egress (--revision-egress) may reach only the relay and the origins
-named by --accepted-egress. Any other Agent is observed: kagent runs its
-tools, and Orka governs dispatch and lifecycle. Dispatch control requires the
-kagent install to admit only kagent's controller to Substrate's actor router
-(see the orka-runtime-kagent README).
-Include the Agents' Harness, AgentTemplate, ModelConfig, and RemoteMCPServer
-objects in the input so the import can check them.
+named by --accepted-egress. Dispatch control requires the kagent install to
+admit only kagent's controller to Substrate's actor router.
 
-Accepts kagent v1 (api.kagent.dev/v1alpha3) Agents, including lists from
-"kubectl get agents -o yaml". Other objects are skipped.
+kagent v0: only Declarative Agents on the Go runtime can be wrapped, because
+the Python runtime cannot cancel a task and saves request headers. kagent
+approval prompts (requireApproval) are refused. The wrapper pins the Agent
+Deployment's kagent.dev/config-hash, so the Agent must be Ready and its
+Deployment fully rolled out. A governed Agent's ModelConfig passes the
+caller's bearer through, and each tool binding forwards Authorization
+(allowedHeaders). v0 has no compiled revisions, so --revision-egress and
+--revision-sources do not apply. Dispatch control requires the agents'
+Services to admit only kagent's controller, and the controller to admit only
+the wrapper brokers and the wrapped Agents.
+
+See the orka-runtime-kagent README for both install requirements. Include the
+Agents' related objects in the input so the import can check them: Harness,
+AgentTemplate, ModelConfig, and RemoteMCPServer for v1; the Agent's
+Deployment, ModelConfig, and RemoteMCPServer for v0.
 
 With --wrapper-config-dir, also writes each Agent's wrapper configuration,
-<name>.kagent.json, pinned to the Agent's latest successful revision.
+<name>.kagent.json, pinned to the Agent's latest successful revision (v1) or
+its Deployment's config hash (v0).
 
 With --translate, converts each kagent Agent into a native Orka Agent that Orka
 runs itself, with no kagent at run time. Translation maps only these fields
@@ -183,9 +202,10 @@ type kagentSourceAgent struct {
 	Wrapped    kagentWrappedAgent
 }
 
-// collectKagentAgents decodes the input, keeps kagent v1 Agents, and indexes
-// the related kagent objects. It returns a summary of the kinds it skipped.
-func collectKagentAgents(data []byte) ([]kagentSourceAgent, kagentObjects, string, error) {
+// collectKagentAgents decodes the input, keeps kagent v1 and v0 Agents, and
+// indexes the related objects of each version. It returns a summary of the
+// kinds it skipped.
+func collectKagentAgents(data []byte) ([]kagentSourceAgent, map[string]kagentObjects, string, error) {
 	objects, err := decodeKubernetesObjects(data)
 	if err != nil {
 		return nil, nil, "", err
@@ -200,12 +220,15 @@ func collectKagentAgents(data []byte) ([]kagentSourceAgent, kagentObjects, strin
 			skipped[strings.TrimSpace(apiVersion+" "+kind)]++
 			continue
 		}
-		if apiVersion != kagentV1APIVersion {
-			return nil, nil, "", fmt.Errorf("unsupported kagent Agent version %q: only kagent v1 (%s) Agents can be wrapped", apiVersion, kagentV1APIVersion)
+		if apiVersion != kagentV1APIVersion && apiVersion != kagentV0APIVersion {
+			return nil, nil, "", fmt.Errorf("unsupported kagent Agent version %q: only kagent v1 (%s) and v0 (%s) Agents can be imported", apiVersion, kagentV1APIVersion, kagentV0APIVersion)
 		}
 		agent, err := wrapKagentAgent(apiVersion, obj)
 		if err != nil {
 			return nil, nil, "", err
+		}
+		if apiVersion == kagentV0APIVersion {
+			agent.Version = kagentVersionV0
 		}
 		name := metadataName(agent.Manifest)
 		if previous, ok := byName[name]; ok {
@@ -215,13 +238,18 @@ func collectKagentAgents(data []byte) ([]kagentSourceAgent, kagentObjects, strin
 		agents = append(agents, kagentSourceAgent{APIVersion: apiVersion, Object: obj, Wrapped: agent})
 	}
 	if len(agents) == 0 {
-		return nil, nil, "", fmt.Errorf("no kagent Agents found (expected %s kind Agent)", kagentV1APIVersion)
+		return nil, nil, "", fmt.Errorf("no kagent Agents found (expected %s or %s kind Agent)", kagentV1APIVersion, kagentV0APIVersion)
 	}
-	return agents, indexKagentObjects(objects), summarizeSkipped(skipped), nil
+	related := map[string]kagentObjects{
+		kagentV1APIVersion: indexKagentObjects(objects, kagentV1APIVersion),
+		kagentV0APIVersion: indexKagentObjects(objects, kagentV0APIVersion),
+	}
+	return agents, related, summarizeSkipped(skipped), nil
 }
 
-// wrapKagentAgents wraps every kagent v1 Agent in the input as an Orka Agent
-// whose runtime is a per-agent AgentRuntime, and classifies its mode.
+// wrapKagentAgents wraps every kagent Agent in the input as an Orka Agent
+// whose runtime is a per-agent AgentRuntime, and classifies its mode. A kagent
+// v0 Agent the wrapper cannot run safely fails the whole import.
 func wrapKagentAgents(data []byte, relayURL string, evidence kagentRevisionEvidence) ([]kagentWrappedAgent, string, error) {
 	agents, related, skipped, err := collectKagentAgents(data)
 	if err != nil {
@@ -234,13 +262,20 @@ func wrapKagentAgents(data []byte, relayURL string, evidence kagentRevisionEvide
 		if err != nil {
 			return nil, "", err
 		}
-		agent.Mode = classifyKagentAgent(source.Object, related, relay, evidence)
+		if agent.Version == kagentVersionV0 {
+			if problems := kagentV0WrapRefusals(source.Object); len(problems) > 0 {
+				return nil, "", fmt.Errorf("kagent Agent %s cannot be wrapped: %s", agent.Source, strings.Join(problems, "; "))
+			}
+			agent.Mode = classifyKagentV0Agent(source.Object, related[kagentV0APIVersion], relay)
+		} else {
+			agent.Mode = classifyKagentAgent(source.Object, related[kagentV1APIVersion], relay, evidence)
+		}
 		wrapped = append(wrapped, agent)
 	}
 	return wrapped, skipped, nil
 }
 
-// translateKagentAgents converts every kagent v1 Agent into a native Orka
+// translateKagentAgents converts every kagent Agent into a native Orka
 // Agent. It refuses the whole input if any field of any Agent cannot be
 // translated, listing every problem.
 func translateKagentAgents(data []byte, options kagentTranslateOptions) ([]kagentWrappedAgent, string, error) {
@@ -251,7 +286,13 @@ func translateKagentAgents(data []byte, options kagentTranslateOptions) ([]kagen
 	translated := make([]kagentWrappedAgent, 0, len(agents))
 	var refusals []string
 	for _, source := range agents {
-		spec, problems := translateKagentAgent(source.Object, related, options)
+		var spec map[string]any
+		var problems []string
+		if source.Wrapped.Version == kagentVersionV0 {
+			spec, problems = translateKagentV0Agent(source.Object, related[kagentV0APIVersion], options)
+		} else {
+			spec, problems = translateKagentAgent(source.Object, related[kagentV1APIVersion], options)
+		}
 		if len(problems) > 0 {
 			refusals = append(refusals, fmt.Sprintf("kagent Agent %s: %s", source.Wrapped.Source, strings.Join(problems, "; ")))
 			continue
