@@ -135,6 +135,9 @@ func run(adapter, configPath string, allowed, approvalRequired []string) error {
 			"ORKA_ACP_PROXY_CREDENTIAL_SCOPE":     profile.ProxyCredentialScope,
 			"ORKA_ACP_RESOURCE_CLASS":             profile.ResourceClass,
 			"ORKA_ACP_PROVIDER_PROXY_BASE_URL":    "http://127.0.0.1:8091",
+			// The kagent broker serves the identity and retire-boot recovery
+			// endpoints, so the supervisor can retire a restarted boot.
+			"ORKA_ACP_FOUNDRY_RECOVERY_PROFILE_DIGEST": string(digest),
 		},
 	}
 	if len(approvalRequired) != 0 {
