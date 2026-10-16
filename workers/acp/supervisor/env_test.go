@@ -757,8 +757,8 @@ func TestLoadConfigFromEnv(t *testing.T) {
 		t.Fatalf("unexpected kagent provider capabilities: %#v", kagentCfg.Capabilities)
 	}
 	t.Setenv(EnvBrokeredToolApprovalProfileDigest, string(kagentCfg.Fence.RuntimeProfileDigest))
-	if _, err := LoadConfigFromEnv(); err == nil || !strings.Contains(err.Error(), EnvBrokeredToolApprovalProfileDigest+" is unsupported for provider") {
-		t.Fatalf("kagent brokered approval qualification error = %v", err)
+	if qualified, err := LoadConfigFromEnv(); err != nil || !qualified.Capabilities.Provider.SupportsBrokeredToolApprovals {
+		t.Fatalf("kagent brokered approval qualification was rejected: %v", err)
 	}
 	t.Setenv(EnvBrokeredToolApprovalProfileDigest, "")
 	// The kagent broker speaks the same lifecycle protocol, so it can be

@@ -223,9 +223,10 @@ func validateAgentRuntimeMCPPolicyClaims(
 }
 
 // runtimeSupportsMCPApprovals reports whether a runtime profile can honor an
-// approval-required MCP policy.
+// approval-required MCP policy. A governed kagent Agent calls Orka tools
+// through the wrapper's relay, which holds each call open for the approval.
 func runtimeSupportsMCPApprovals(profile harnessv2.RuntimeProfile) bool {
-	return profile.ProviderKind == "agentkit" || profile.ProviderKind == "foundry"
+	return profile.ProviderKind == "agentkit" || profile.ProviderKind == "foundry" || profile.ProviderKind == "kagent"
 }
 
 // adjustInputsForConnectorTools returns planning inputs with the connector

@@ -147,3 +147,23 @@ func TestSanitizeProviderUpstreamDetailWithholdsPolicyMatchedCredentials(t *test
 		}
 	}
 }
+
+func TestSSETerminalErrorScannerCapturesUsageOnlyWhenAsked(t *testing.T) {
+	line := "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":7,\"output_tokens\":3}}}\n"
+	for _, capture := range []bool{false, true} {
+		scanner := &sseTerminalErrorScanner{captureUsage: capture}
+		_, _ = scanner.Write([]byte(line))
+		if !scanner.completed || (scanner.usage != nil) != capture {
+			t.Fatalf("capture=%v: completed=%v usage=%#v", capture, scanner.completed, scanner.usage)
+		}
+		if capture && (scanner.usage.InputTokens != 7 || scanner.usage.OutputTokens != 3) {
+			t.Fatalf("usage = %#v", scanner.usage)
+		}
+	}
+	// Invalid cache accounting is dropped rather than recorded.
+	scanner := &sseTerminalErrorScanner{captureUsage: true}
+	_, _ = scanner.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"input_tokens_details\":{\"cached_tokens\":5}}}}\n"))
+	if scanner.usage != nil {
+		t.Fatalf("invalid usage recorded: %#v", scanner.usage)
+	}
+}

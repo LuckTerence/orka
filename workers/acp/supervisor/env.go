@@ -178,7 +178,7 @@ func LoadConfigFromEnv() (Config, error) {
 	}
 	providerCaps := providerCapabilities(providerKind, model)
 	if qualifiedDigest := strings.TrimSpace(os.Getenv(EnvBrokeredToolApprovalProfileDigest)); qualifiedDigest != "" {
-		if providerKind != providerKindAgentKit && providerKind != providerKindFoundry {
+		if providerKind != providerKindAgentKit && !usesLifecycleBroker(providerKind) {
 			return Config{}, fmt.Errorf("%s is unsupported for provider %q", EnvBrokeredToolApprovalProfileDigest, providerKind)
 		}
 		if err := harnessv2.ValidateProfileDigest(harnessv2.ProfileDigest(qualifiedDigest)); err != nil {

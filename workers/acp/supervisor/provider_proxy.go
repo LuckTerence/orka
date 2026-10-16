@@ -23,6 +23,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/providerproxy"
 	"github.com/orka-agents/orka/internal/redact"
 	"github.com/orka-agents/orka/internal/security"
@@ -159,6 +160,9 @@ type providerProxySession struct {
 	lastFailureSeq                  uint64
 	lastUpstreamStatus              int
 	lastUpstreamDetail              string
+	// turnUsage totals the token usage a lifecycle broker reported for the
+	// active prompt's successful inference responses.
+	turnUsage *harnessv2.UsageUpdate
 	// admissionClosed rejects new requests for the active prompt once the
 	// ACP child has settled its turn, while in-flight relays keep their
 	// gate context and drain normally.
@@ -385,6 +389,7 @@ func (s *providerProxySession) activateWithMaxTurns(promptID string, maxTurns in
 	s.lastFailureSeq = 0
 	s.lastUpstreamStatus = 0
 	s.lastUpstreamDetail = ""
+	s.turnUsage = nil
 	s.leaseVersion++
 	version := s.leaseVersion
 	s.gateContext, s.gateCancel = context.WithCancelCause(context.Background())
@@ -683,6 +688,49 @@ func (s *providerProxySession) recordInferenceOutcome(promptID string, class pro
 		return
 	}
 	s.recordInferenceOutcomeLocked(seq, statusCode, detail)
+}
+
+// recordInferenceUsage adds a successful response's reported token usage to
+// the active prompt's totals.
+func (s *providerProxySession) recordInferenceUsage(promptID string, usage harnessv2.UsageUpdate) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if strings.TrimSpace(promptID) == "" || s.turnPromptID != strings.TrimSpace(promptID) {
+		return
+	}
+	if s.turnUsage == nil {
+		s.turnUsage = &harnessv2.UsageUpdate{Reported: true}
+	}
+	s.turnUsage.InputTokens += usage.InputTokens
+	s.turnUsage.OutputTokens += usage.OutputTokens
+	if usage.CachedInputTokens != nil {
+		cached := *usage.CachedInputTokens
+		if s.turnUsage.CachedInputTokens != nil {
+			cached += *s.turnUsage.CachedInputTokens
+		}
+		s.turnUsage.CachedInputTokens = &cached
+	}
+}
+
+// promptUsage returns the prompt's reported token usage, if any.
+func (s *providerProxySession) promptUsage(promptID string) *harnessv2.UsageUpdate {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.turnUsage == nil || s.turnPromptID != strings.TrimSpace(promptID) {
+		return nil
+	}
+	usage := *s.turnUsage
+	if usage.CachedInputTokens != nil {
+		cached := *usage.CachedInputTokens
+		usage.CachedInputTokens = &cached
+	}
+	return &usage
 }
 
 // recordRejectedInferenceRequest accounts an inference request the proxy
@@ -1215,7 +1263,9 @@ func (p *providerProxy) relayUpstreamResponseWithCancellation(
 	// stream for explicit error events so they are accounted as failures.
 	var streamScanner *sseTerminalErrorScanner
 	if !upstreamFailed && strings.Contains(strings.ToLower(response.Header.Get("Content-Type")), "text/event-stream") {
-		streamScanner = &sseTerminalErrorScanner{}
+		// A lifecycle broker reports the turn's token usage on its terminal
+		// Responses event; other providers keep their existing accounting.
+		streamScanner = &sseTerminalErrorScanner{captureUsage: usesLifecycleBroker(p.providerKind)}
 		// The scanner attaches on the WRITE side below, so it sees only
 		// bytes the child actually received. A marker read upstream but
 		// never delivered must not count as delivered.
@@ -1301,6 +1351,9 @@ func (p *providerProxy) relayUpstreamResponseWithCancellation(
 		// child; a streamed response must also carry a provider terminal
 		// success marker so a truncated 2xx cannot mask an earlier failure.
 		session.recordInferenceOutcome(promptID, requestClass, seq, response.StatusCode, "")
+		if streamScanner != nil && streamScanner.usage != nil && requestClass == providerRequestInference {
+			session.recordInferenceUsage(promptID, *streamScanner.usage)
+		}
 	}
 }
 
@@ -1338,6 +1391,10 @@ type sseTerminalErrorScanner struct {
 	eventMarker       []byte
 	completed         bool
 	detail            string
+	// captureUsage parses Responses usage from a complete terminal
+	// response.completed data line into usage.
+	captureUsage bool
+	usage        *harnessv2.UsageUpdate
 }
 
 const (
@@ -1441,6 +1498,9 @@ func (c *sseTerminalErrorScanner) scanWindow() {
 }
 
 func (c *sseTerminalErrorScanner) finishLine() {
+	if c.captureUsage && c.pendingMarker == nil && !c.awaitingErrorData {
+		c.captureResponseUsage()
+	}
 	if c.pendingMarker != nil {
 		c.markFailure(c.pendingMarker)
 		return
@@ -1474,6 +1534,43 @@ func (c *sseTerminalErrorScanner) finishLine() {
 			c.completed = true
 			return
 		}
+	}
+}
+
+// captureResponseUsage reads usage only from a whole data line whose
+// top-level event is response.completed. Model text reaches the stream only
+// JSON-escaped inside other events, so it cannot forge this line.
+func (c *sseTerminalErrorScanner) captureResponseUsage() {
+	if len(c.linePrefix) >= sseScannerDetailPrefixBytes {
+		return
+	}
+	payload, ok := bytes.CutPrefix(bytes.TrimSpace(c.linePrefix), sseDataFieldPrefix)
+	if !ok {
+		return
+	}
+	var event struct {
+		Type     string `json:"type"`
+		Response *struct {
+			Usage *struct {
+				InputTokens        uint64 `json:"input_tokens"`
+				OutputTokens       uint64 `json:"output_tokens"`
+				InputTokensDetails *struct {
+					CachedTokens *uint64 `json:"cached_tokens"`
+				} `json:"input_tokens_details"`
+			} `json:"usage"`
+		} `json:"response"`
+	}
+	if json.Unmarshal(bytes.TrimSpace(payload), &event) != nil || event.Type != "response.completed" ||
+		event.Response == nil || event.Response.Usage == nil {
+		return
+	}
+	usage := harnessv2.UsageUpdate{InputTokens: event.Response.Usage.InputTokens, OutputTokens: event.Response.Usage.OutputTokens, Reported: true}
+	if details := event.Response.Usage.InputTokensDetails; details != nil && details.CachedTokens != nil {
+		cached := *details.CachedTokens
+		usage.CachedInputTokens = &cached
+	}
+	if usage.Validate() == nil {
+		c.usage = &usage
 	}
 }
 
