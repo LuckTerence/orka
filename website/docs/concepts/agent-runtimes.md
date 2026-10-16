@@ -292,7 +292,9 @@ How the check reads a policy:
   OpenCode's alias grouping) apply. Tool names ignore case. A bare ceiling
   entry such as `Read` also covers scoped requests like `Read(/workspace/**)`,
   but a scoped entry covers only that exact scope, compared case-sensitively.
-  Brokered and custom tool names count too.
+  Brokered and custom tool names count too. A `disallowedTools` entry narrows
+  the request only when it matches an allowed name exactly, as at dispatch, so
+  `bash` does not remove `Bash`.
 - **No explicit list.** A Task with no allowlist and an Agent with no
   `defaultAllowedTools` resolve to the full native tool set. That exceeds any
   tool ceiling, so set `defaultAllowedTools` within the ceiling. Likewise,
@@ -300,6 +302,9 @@ How the check reads a policy:
 - **Explicit empty list.** `ceiling.allowedTools: []` permits no tools.
 - **Coordination tools.** The `send_message` and `check_messages` tools that
   Orka injects into delegated child Tasks are not counted against the ceiling.
+- **Gateway replies.** Orka grants `reply_in_conversation` to eligible gateway
+  Tasks without an explicit allowlist only when the ceiling, if it lists tools,
+  includes it.
 - **`runtimeRef` Agents.** Only `allowedTools` applies; the registered profile
   already fixes Bash and the turn budget.
 

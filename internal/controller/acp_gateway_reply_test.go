@@ -95,6 +95,12 @@ func TestACPReplyFrozenPolicy(t *testing.T) {
 			a.Spec.Runtime.DefaultAllowedTools = []string{}
 			t.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{"Read", aitools.GatewayReplyToolName}}
 		}, true},
+		{"ceiling excludes implicit grant", func(t *corev1alpha1.Task, a *corev1alpha1.Agent) {
+			a.Spec.Runtime.Ceiling = &corev1alpha1.AgentRuntimeCeiling{AllowedTools: []string{"Read", "Bash"}}
+		}, false},
+		{"ceiling permits implicit grant", func(t *corev1alpha1.Task, a *corev1alpha1.Agent) {
+			a.Spec.Runtime.Ceiling = &corev1alpha1.AgentRuntimeCeiling{AllowedTools: []string{"Read", aitools.GatewayReplyToolName}}
+		}, true},
 		{"disallowed", func(t *corev1alpha1.Task, a *corev1alpha1.Agent) {
 			t.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{DisallowedTools: []string{aitools.GatewayReplyToolName}}
 		}, false},

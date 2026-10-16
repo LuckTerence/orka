@@ -98,6 +98,17 @@ func TestValidateAgentRuntimeCeiling(t *testing.T) {
 			wantErr: "forbids Bash",
 		},
 		{
+			// Dispatch matches deny entries exactly, so "bash" does not remove "Bash".
+			name:  "differently cased deny entry does not narrow the request",
+			agent: ceilingTestAgent(corev1alpha1.AgentRuntimeClaude, &corev1alpha1.AgentRuntimeCeiling{AllowedTools: tools(), AllowBash: no}),
+			task: func() *corev1alpha1.Task {
+				task := ceilingTestTask(tools("Bash"), yes)
+				task.Spec.AgentRuntime.DisallowedTools = tools("bash")
+				return task
+			}(),
+			wantErr: "forbids Bash",
+		},
+		{
 			name:  "bash flag without a Bash tool grants nothing",
 			agent: ceilingTestAgent(corev1alpha1.AgentRuntimeClaude, &corev1alpha1.AgentRuntimeCeiling{AllowBash: no}),
 			task:  ceilingTestTask(tools("Read"), yes),
@@ -258,6 +269,17 @@ func TestValidateAgentRuntimeCeiling(t *testing.T) {
 				}},
 			},
 			task: ceilingTestTask(tools("read-inventory"), nil),
+		},
+		{
+			name: "external runtime ignores the Bash ceiling",
+			agent: &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Name: "fibey", Namespace: "team-a"},
+				Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
+					RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "fibey-runtime"},
+					Ceiling:    &corev1alpha1.AgentRuntimeCeiling{AllowedTools: tools("bash"), AllowBash: no},
+				}},
+			},
+			task: ceilingTestTask(tools("bash"), nil),
 		},
 	}
 	for _, tt := range tests {

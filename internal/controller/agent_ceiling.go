@@ -7,6 +7,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/acp"
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
 
 const ceilingToolBash = "Bash"
@@ -43,7 +44,9 @@ func validateAgentRuntimeCeiling(task *corev1alpha1.Task, agent *corev1alpha1.Ag
 		return nil
 	}
 	tools, bash := resolvedCeilingToolRequest(task, agent, runtimeRef)
-	if ceiling.AllowBash != nil && !*ceiling.AllowBash && bash {
+	// Registered external runtimes fix the Bash gate in their profile, so only
+	// the tool allowlist applies to them.
+	if ceiling.AllowBash != nil && !*ceiling.AllowBash && bash && !runtimeRef {
 		return fmt.Errorf("agent %q ceiling forbids Bash, but the task resolves to a policy that allows it; set allowBash: false or omit Bash from the allowed tools", agent.Name)
 	}
 	if ceiling.AllowedTools == nil || (task == nil && runtime.DefaultAllowedTools == nil) {
@@ -100,8 +103,25 @@ func resolvedCeilingToolRequest(task *corev1alpha1.Task, agent *corev1alpha1.Age
 	if allowed == nil {
 		return nil, allowBash
 	}
-	tools := acp.BuiltInRuntimeEffectiveAllowedTools(allowed, disallowed, allowBash)
-	return tools, acp.BuiltInRuntimeEffectiveAllowBash(tools, disallowed, allowBash)
+	// Judge exactly what dispatch grants: descriptors keep every allowed name
+	// that MCPToolPolicy.Allows accepts, and its deny list matches names
+	// exactly, so a differently cased deny entry does not narrow the request.
+	policy := harnessv2.MCPToolPolicy{AllowedToolNames: allowed, DisallowedToolNames: disallowed, AllowBash: allowBash}
+	tools := sortedUnique(slices.DeleteFunc(slices.Clone(allowed), func(tool string) bool { return !policy.Allows(tool) }))
+	return tools, slices.ContainsFunc(tools, isCeilingBashTool)
+}
+
+// agentCeilingAllowsTool reports whether the Agent's ceiling, if any, permits
+// a tool that Orka would otherwise grant implicitly.
+func agentCeilingAllowsTool(agent *corev1alpha1.Agent, tool string) bool {
+	if agent == nil || agent.Spec.Runtime == nil || agent.Spec.Runtime.Ceiling == nil || agent.Spec.Runtime.Ceiling.AllowedTools == nil {
+		return true
+	}
+	limit := agent.Spec.Runtime.Ceiling.AllowedTools
+	if agent.Spec.Runtime.Type == corev1alpha1.AgentRuntimeOpencode {
+		limit = acp.NormalizeOpenCodeAuthorizationTools(limit)
+	}
+	return ceilingAllowsTool(limit, tool)
 }
 
 // ceilingAllowsTool reports whether a requested tool is within the ceiling.

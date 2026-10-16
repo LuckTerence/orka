@@ -34,7 +34,9 @@ func (r *TaskReconciler) projectACPReplyPolicy(ctx context.Context, task *corev1
 	if task.Spec.AgentRuntime != nil && task.Spec.AgentRuntime.AllowedTools != nil {
 		explicit = true
 	}
-	grant := permitted && (!explicit || selected)
+	// An implicit grant stays within the Agent ceiling; an explicit selection
+	// was already checked against it before binding.
+	grant := permitted && (selected || (!explicit && agentCeilingAllowsTool(agent, aitools.GatewayReplyToolName)))
 	if grant == selected {
 		return task, nil
 	}
