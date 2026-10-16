@@ -3832,39 +3832,11 @@ func (d *ACPDispatcher) settleTaskBeforeRuntimeAdmission(ctx context.Context, ta
 	if err != nil {
 		return true, err
 	}
-	var recoveredSession *acpTaskSession
+	recoveredSession, complete, err := d.recoverReservedTaskBeforeTerminal(ctx, task, attemptID, fence)
+	if err != nil || !complete {
+		return true, err
+	}
 	if task.Status.Execution.State == corev1alpha1.TaskExecutionStateReserved {
-		if task.Spec.SessionRef == nil {
-			attempt, getErr := d.Store.GetPromptAttempt(ctx, attemptID)
-			if getErr != nil {
-				return true, getErr
-			}
-			bound, boundErr := promptAttemptSessionBound(attempt)
-			if boundErr != nil {
-				return true, boundErr
-			}
-			if bound {
-				task.Status.Execution.RuntimeInstanceID = attempt.RuntimeInstanceID
-				task.Status.Execution.RuntimeSessionUID = attempt.SessionUID
-				task.Status.Execution.RuntimeSessionGeneration = attempt.SessionLeaseGeneration
-				if err := d.patchExecution(ctx, task, func(status *corev1alpha1.TaskExecutionStatus) {
-					status.RuntimeInstanceID = attempt.RuntimeInstanceID
-					status.RuntimeSessionUID = attempt.SessionUID
-					status.RuntimeSessionGeneration = attempt.SessionLeaseGeneration
-				}); err != nil {
-					return true, err
-				}
-				complete, cleanupErr := d.cleanupRecoveredTaskScopedRuntimeSession(ctx, task)
-				if cleanupErr != nil || !complete {
-					return true, cleanupErr
-				}
-			}
-		} else {
-			recoveredSession, err = d.quiesceInterruptedTaskSessionPreparation(ctx, task, attemptID, fence)
-			if err != nil {
-				return true, err
-			}
-		}
 		if strings.TrimSpace(task.Status.Execution.RuntimePoolName) != "" {
 			identity := acpRuntimePoolReservationIdentity{
 				PoolKey: types.NamespacedName{Namespace: task.Namespace, Name: task.Status.Execution.RuntimePoolName},
@@ -3882,18 +3854,69 @@ func (d *ACPDispatcher) settleTaskBeforeRuntimeAdmission(ctx context.Context, ta
 	if err := d.settlePreSubmissionCancellation(ctx, task, attemptID, fence, operation, reason, message); err != nil {
 		return true, err
 	}
-	if recoveredSession != nil {
-		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), acpPreSubmissionCleanupTimeout)
-		defer cancel()
-		var terminalErr = context.Canceled
-		if reason == corev1alpha1.TaskExecutionReason(acpTaskTimeoutReason) {
-			terminalErr = context.DeadlineExceeded
-		}
-		if err := d.reconcileUnfinalizedTaskSession(cleanupCtx, task, fence, recoveredSession, terminalErr); err != nil {
-			return true, err
-		}
+	var terminalErr = context.Canceled
+	if reason == corev1alpha1.TaskExecutionReason(acpTaskTimeoutReason) {
+		terminalErr = context.DeadlineExceeded
 	}
-	return true, nil
+	return true, d.finalizeRecoveredTaskSessionAfterTerminal(ctx, task, fence, recoveredSession, terminalErr)
+}
+
+// recoverReservedTaskBeforeTerminal undoes the pre-submission runtime state a
+// Reserved Task can still hold before it is terminalized ahead of runtime
+// admission: a standalone Task's bound task-scoped RuntimeSession is cleaned
+// up, and a Session Task's interrupted preparation is quiesced. A recovered
+// open SessionTurn is returned for the caller to finalize once the Task is
+// terminal. complete is false while cleanup must be retried later.
+func (d *ACPDispatcher) recoverReservedTaskBeforeTerminal(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	attemptID string,
+	fence store.ControllerEpochFence,
+) (*acpTaskSession, bool, error) {
+	if task.Status.Execution.State != corev1alpha1.TaskExecutionStateReserved {
+		return nil, true, nil
+	}
+	if task.Spec.SessionRef != nil {
+		session, err := d.quiesceInterruptedTaskSessionPreparation(ctx, task, attemptID, fence)
+		return session, err == nil, err
+	}
+	attempt, err := d.Store.GetPromptAttempt(ctx, attemptID)
+	if err != nil {
+		return nil, false, err
+	}
+	bound, err := promptAttemptSessionBound(attempt)
+	if err != nil || !bound {
+		return nil, err == nil, err
+	}
+	task.Status.Execution.RuntimeInstanceID = attempt.RuntimeInstanceID
+	task.Status.Execution.RuntimeSessionUID = attempt.SessionUID
+	task.Status.Execution.RuntimeSessionGeneration = attempt.SessionLeaseGeneration
+	if err := d.patchExecution(ctx, task, func(status *corev1alpha1.TaskExecutionStatus) {
+		status.RuntimeInstanceID = attempt.RuntimeInstanceID
+		status.RuntimeSessionUID = attempt.SessionUID
+		status.RuntimeSessionGeneration = attempt.SessionLeaseGeneration
+	}); err != nil {
+		return nil, false, err
+	}
+	complete, err := d.cleanupRecoveredTaskScopedRuntimeSession(ctx, task)
+	return nil, complete && err == nil, err
+}
+
+// finalizeRecoveredTaskSessionAfterTerminal finalizes a SessionTurn returned
+// by recoverReservedTaskBeforeTerminal after the Task became terminal.
+func (d *ACPDispatcher) finalizeRecoveredTaskSessionAfterTerminal(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	fence store.ControllerEpochFence,
+	session *acpTaskSession,
+	cause error,
+) error {
+	if session == nil {
+		return nil
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), acpPreSubmissionCleanupTimeout)
+	defer cancel()
+	return d.reconcileUnfinalizedTaskSession(cleanupCtx, task, fence, session, cause)
 }
 
 //nolint:gocyclo // Reservation and its rollback paths form one fenced state transition.
@@ -4308,6 +4331,23 @@ func (d *ACPDispatcher) settlePreSubmissionCancellation(
 	); err != nil {
 		return err
 	}
+	return d.failTaskBeforeRuntimeAdmission(
+		ctx, task, attemptID, corev1alpha1.TaskExecutionStateCancelled, corev1alpha1.TaskExecutionOutcomeCancelled, reason, message,
+	)
+}
+
+// failTaskBeforeRuntimeAdmission projects a Task terminalized before runtime
+// admission. A Session Task whose attempt holds no SessionTurn binding uses
+// the unbound projection; a bound turn is projected by Session settlement.
+func (d *ACPDispatcher) failTaskBeforeRuntimeAdmission(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	attemptID string,
+	state corev1alpha1.TaskExecutionState,
+	outcome corev1alpha1.TaskExecutionOutcome,
+	reason corev1alpha1.TaskExecutionReason,
+	message string,
+) error {
 	attempt, err := d.Store.GetPromptAttempt(ctx, attemptID)
 	if err != nil {
 		return err
@@ -4317,13 +4357,9 @@ func (d *ACPDispatcher) settlePreSubmissionCancellation(
 		return err
 	}
 	if task.Spec.SessionRef != nil && !bound {
-		return d.failTaskBeforeSessionBinding(
-			ctx, task, corev1alpha1.TaskExecutionStateCancelled, corev1alpha1.TaskExecutionOutcomeCancelled, reason, message,
-		)
+		return d.failTaskBeforeSessionBinding(ctx, task, state, outcome, reason, message)
 	}
-	return d.failTask(
-		ctx, task, corev1alpha1.TaskExecutionStateCancelled, corev1alpha1.TaskExecutionOutcomeCancelled, reason, message,
-	)
+	return d.failTask(ctx, task, state, outcome, reason, message)
 }
 
 type attemptRuntimeBinding struct {
@@ -7121,6 +7157,8 @@ func (d *ACPDispatcher) settleRuntimePoolToolboxUnavailable(
 // settleRuntimePoolToolboxUnavailableForPool fails the queued or reserved
 // Task with the pool's ToolboxUnavailable message. The caller has already
 // verified the pool reports that condition and released any reservation.
+// A requeued Task's pre-submission runtime state is recovered and finalized
+// exactly as on the pre-admission timeout path.
 func (d *ACPDispatcher) settleRuntimePoolToolboxUnavailableForPool(
 	ctx context.Context,
 	task *corev1alpha1.Task,
@@ -7131,12 +7169,19 @@ func (d *ACPDispatcher) settleRuntimePoolToolboxUnavailableForPool(
 	message, _ := runtimePoolToolboxUnavailableMessage(pool)
 	reason := corev1alpha1.TaskExecutionReason(corev1alpha1.RuntimePoolReasonToolboxUnavailable)
 	message = boundACPStatusMessage(message)
+	recoveredSession, complete, err := d.recoverReservedTaskBeforeTerminal(ctx, task, attemptID, fence)
+	if err != nil || !complete {
+		return err
+	}
 	if err := d.transitionAttemptToFailed(ctx, attemptID, fence, "toolbox-unavailable", reason, message); err != nil {
 		return err
 	}
-	return d.failTaskBeforeSessionBinding(
-		ctx, task, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed, reason, message,
-	)
+	if err := d.failTaskBeforeRuntimeAdmission(
+		ctx, task, attemptID, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed, reason, message,
+	); err != nil {
+		return err
+	}
+	return d.finalizeRecoveredTaskSessionAfterTerminal(ctx, task, fence, recoveredSession, errors.New(message))
 }
 
 // runtimePoolToolboxUnavailableMessage reports the pool's current-generation

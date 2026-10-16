@@ -4,11 +4,17 @@ import (
 	"context"
 	"errors"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
@@ -115,4 +121,74 @@ func TestACPToolboxNoteFollowsRuntimeSessionPlanning(t *testing.T) {
 		require.True(t, plan.Recreate, name)
 		require.True(t, acpToolboxNoteDue(&acpTaskSession{Binding: plan.Binding}), "%s: a new process gets the note", name)
 	}
+}
+
+// A Reserved Session Task whose interrupted preparation still holds an open
+// SessionTurn is failed with ToolboxUnavailable only after the turn is
+// recovered and finalized, so the next Session Task is not blocked on the
+// mutation lease.
+func TestACPDispatcherToolboxUnavailableFinalizesRecoveredSessionTurn(t *testing.T) {
+	ctx := context.Background()
+	controlStore, fence, closeStore := newACPSessionTestStore(t, filepath.Join(t.TempDir(), "toolbox-turn.db"))
+	defer closeStore()
+	continuity := newACPSessionTestContinuity(t, controlStore, ACPBootstrapLimits{})
+	taskUID := types.UID("66666666-6666-6666-6666-666666666666")
+	promptID := "prompt-" + string(taskUID) + "-1"
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "toolbox-turn", UID: taskUID},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAgent, Prompt: "toolbox pool fails during session preparation",
+			SessionRef: &corev1alpha1.SessionReference{Name: "toolbox-turn", Create: true, Append: true},
+		},
+		Status: corev1alpha1.TaskStatus{Attempts: 1, Execution: &corev1alpha1.TaskExecutionStatus{
+			State: corev1alpha1.TaskExecutionStateReserved, Attempt: 1, PromptID: promptID,
+			RequestDigest: testControlDigestForDispatcher("toolbox-turn"), ControllerEpoch: fence.Epoch,
+		}},
+	}
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}).WithObjects(task.DeepCopy()).Build()
+	key := store.PromptAttemptKey{Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: 1, PromptID: promptID}
+	attempt, err := controlStore.CreatePromptAttempt(ctx, boundPromptAttemptForTest(&store.PromptAttempt{Key: key, RequestDigest: task.Status.Execution.RequestDigest}), fence)
+	require.NoError(t, err)
+	_, err = controlStore.TransitionPromptAttemptExecution(ctx, store.PromptAttemptExecutionTransition{
+		ID: attempt.ID, Fence: fence, ExpectedVersion: attempt.Version, ExpectedState: attempt.ExecutionState,
+		NewState: store.PromptExecutionReserved, OperationID: "reserve-toolbox-turn",
+		OperationDigest: testControlDigestForDispatcher("reserve-toolbox-turn"), UpdatedAt: time.Now().UTC(),
+	})
+	require.NoError(t, err)
+	dispatcher := &ACPDispatcher{
+		Client: kubeClient, APIReader: kubeClient, Store: controlStore, Sessions: continuity,
+		runtimeSessions: make(map[string]ACPRuntimeSessionBinding),
+	}
+	opened, err := dispatcher.prepareTaskSession(
+		ctx, task, fence, harnessv2.ProfileDigest(testControlDigestForDispatcher("profile-toolbox-turn")),
+		testControlDigestForDispatcher("mcp-toolbox-turn"),
+		harnessv2.RuntimeInstanceID("runtime-instance"), harnessv2.SupervisorBootID("boot-id"),
+		acpSessionLineageIdentity{}, false,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, opened)
+	require.NotNil(t, opened.Turn)
+
+	pool := &corev1alpha1.RuntimePool{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "pool", Generation: 1}}
+	meta.SetStatusCondition(&pool.Status.Conditions, metav1.Condition{
+		Type: corev1alpha1.RuntimePoolConditionRolloutReady, Status: metav1.ConditionFalse, ObservedGeneration: 1,
+		Reason: corev1alpha1.RuntimePoolReasonToolboxUnavailable, Message: acpToolboxUnavailablePrefix + "TOOLBOX_IMAGE_PULL: test",
+	})
+	require.NoError(t, dispatcher.settleRuntimePoolToolboxUnavailableForPool(ctx, task, attempt.ID, fence, pool))
+
+	turn, err := controlStore.GetSessionTurn(ctx, opened.Turn.Turn.ID)
+	require.NoError(t, err)
+	require.Equal(t, store.SessionTurnFinalized, turn.State)
+	control, err := controlStore.GetSessionControl(ctx, task.Namespace, task.Spec.SessionRef.Name)
+	require.NoError(t, err)
+	require.Nil(t, control.Lease, "the toolbox failure must not leak the Session mutation lease")
+	settled, err := controlStore.GetPromptAttempt(ctx, attempt.ID)
+	require.NoError(t, err)
+	require.Equal(t, store.PromptExecutionFailed, settled.ExecutionState)
+	current := &corev1alpha1.Task{}
+	require.NoError(t, kubeClient.Get(ctx, client.ObjectKeyFromObject(task), current))
+	require.Equal(t, corev1alpha1.TaskPhaseFailed, current.Status.Phase)
+	require.Equal(t, corev1alpha1.TaskExecutionReason(corev1alpha1.RuntimePoolReasonToolboxUnavailable), current.Status.Execution.Reason)
 }
