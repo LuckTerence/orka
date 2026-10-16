@@ -629,7 +629,7 @@ spec:
   model: gpt-4.1
   apiKeySecret: openai-key
   apiKeySecretKey: key
-  openAI: {temperature: "0.2", maxTokens: 1024}
+  openAI: {temperature: "0.2", maxTokens: 1024, apiFormat: chatCompletions}
 ---
 apiVersion: api.kagent.dev/v1alpha3
 kind: Agent
@@ -705,7 +705,10 @@ spec: {provider: Bedrock, model: claude}
 }
 
 func TestTranslateKagentAgentsNeedsAProviderForCustomEndpoints(t *testing.T) {
-	custom := strings.Replace(translatableKagentFixture, `openAI: {temperature: "0.2", maxTokens: 1024}`, `openAI: {baseUrl: "http://vekil:8080/v1"}`, 1)
+	custom := strings.Replace(translatableKagentFixture, `openAI: {temperature: "0.2", maxTokens: 1024, apiFormat: chatCompletions}`, `openAI: {baseUrl: "http://vekil:8080/v1"}`, 1)
+	if custom == translatableKagentFixture {
+		t.Fatal("fixture has no openAI settings to replace")
+	}
 	tools := map[string]string{"k8s/list_pods": "k8s-list-pods"}
 	if _, _, err := translateKagentAgents([]byte(custom), kagentTranslateOptions{Tools: tools}); err == nil || !strings.Contains(err.Error(), "--provider-ref") {
 		t.Fatalf("custom endpoint without a provider = %v", err)

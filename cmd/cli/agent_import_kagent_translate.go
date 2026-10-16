@@ -27,7 +27,8 @@ const kagentTranslationTable = `  kagent                                  Orka A
   ModelConfig with a custom baseUrl       spec.providerRef (--provider-ref)
   MCP tool <server>/<tool>                spec.tools (--tool <server>/<tool>=<Orka Tool>)
   template.inline.description             not carried; Orka Agents have no description
-  ModelConfig apiKeySecret                not carried; Orka uses its own provider credentials`
+  ModelConfig apiKeySecret                not carried; Orka uses its own provider credentials
+  ModelConfig stream, openAI.apiFormat    not carried; wire details Orka's provider decides`
 
 // Field and kind names translation reads and writes.
 const (
@@ -206,6 +207,9 @@ func translateKagentModel(model map[string]any, providerRef string) (map[string]
 			} else {
 				problems = append(problems, "has an invalid maxTokens")
 			}
+		case "apiFormat":
+			// kagent defaults the OpenAI wire shape; Orka's provider owns its
+			// own, and the shape does not change the agent's behavior.
 		case "baseUrl":
 			if providerRef == "" {
 				problems = append(problems, "uses a custom endpoint; map it to an Orka Provider with --provider-ref")

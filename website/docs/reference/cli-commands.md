@@ -221,6 +221,7 @@ and refuses everything else, listing every problem:
   MCP tool <server>/<tool>                spec.tools (--tool <server>/<tool>=<Orka Tool>)
   template.inline.description             not carried; Orka Agents have no description
   ModelConfig apiKeySecret                not carried; Orka uses its own provider credentials
+  ModelConfig stream, openAI.apiFormat    not carried; wire details Orka's provider decides
 
 Usage:
   orka agent import kagent -f <file> [flags]
