@@ -300,6 +300,13 @@ func applyRuntimePoolToolboxImageVolumeTemplate(template *corev1.PodTemplateSpec
 			SubPath: strings.TrimPrefix(toolboxes[i].MountPath, "/"), ReadOnly: true,
 		})
 	}
+	// The supervisor runs the unprivileged toolbox check before it serves, so
+	// the startup probe must outlast the check or kubelet restarts the
+	// container before the check can report a classified failure.
+	if probe := runtime.StartupProbe; probe != nil && probe.PeriodSeconds > 0 {
+		period := time.Duration(probe.PeriodSeconds) * time.Second
+		probe.FailureThreshold += int32((toolbox.ImageVolumeCheckTimeout + period - 1) / period)
+	}
 }
 
 // runtimePoolToolboxFailure classifies toolbox-related Pod failures into the

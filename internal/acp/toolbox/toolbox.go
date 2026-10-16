@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"time"
 )
 
 const (
@@ -28,6 +29,12 @@ const (
 	HandoffSubcommand = "toolbox-handoff"
 	CopySubcommand    = "toolbox-copy"
 	CheckSubcommand   = "toolbox-check"
+
+	// ImageVolumeCheckTimeout bounds the supervisor's unprivileged
+	// image-volume check, which runs before the supervisor serves. The
+	// runtime startup probe is extended by this much so a slow check reports
+	// its FAIL line before kubelet restarts the container.
+	ImageVolumeCheckTimeout = 2 * time.Minute
 
 	// Default copy limits. Flags can lower or raise them.
 	DefaultMaxEntries    int64 = 200_000

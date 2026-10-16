@@ -224,9 +224,9 @@ const (
 // acpToolboxPromptNote renders the short Orka-generated note that tells the
 // agent which toolbox folders are on PATH. It lists folders from the frozen
 // profile only, never file names from inside the untrusted image, and is
-// empty without toolboxes or when newProcess is false.
-func acpToolboxPromptNote(toolboxes []harnessv2.RuntimeToolbox, newProcess bool) string {
-	if !newProcess || len(toolboxes) == 0 {
+// empty without toolboxes.
+func acpToolboxPromptNote(toolboxes []harnessv2.RuntimeToolbox) string {
+	if len(toolboxes) == 0 {
 		return ""
 	}
 	var builder strings.Builder

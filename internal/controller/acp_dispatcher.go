@@ -1830,10 +1830,11 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		bootstrap = bootstrapPromptText(sessionExecution.Bootstrap)
 		userPrompt = sessionExecution.UserPrompt
 	}
-	// The toolbox note is built only from the frozen profile and is sent once
-	// per provider process: standalone Tasks and new or recreated Session
-	// runtimes get it, a reused resident Session does not.
-	toolboxNote := acpToolboxPromptNote(profile.Toolboxes, sessionExecution == nil || !sessionExecution.Reused)
+	// The toolbox note is built only from the frozen profile and goes with
+	// every prompt. A reused Session runtime is not proof that its provider
+	// process already received a prompt (a pre-submission retry can reuse a
+	// process that never did), and the note is small and bounded.
+	toolboxNote := acpToolboxPromptNote(profile.Toolboxes)
 	var terminal *harnessv2.Event
 	var lastAssistantUpdate *harnessv2.Event
 	var assistant strings.Builder

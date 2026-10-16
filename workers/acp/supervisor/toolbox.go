@@ -9,7 +9,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/orka-agents/orka/internal/acp/toolbox"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
@@ -20,7 +19,6 @@ const (
 	// architecture check. It differs from the session identity range and from
 	// the init-container identities.
 	toolboxCheckUID               = 64022
-	toolboxCheckTimeout           = 2 * time.Minute
 	toolboxMountMethodImageVolume = "imageVolume"
 	toolboxMountMethodCopy        = "copy"
 )
@@ -61,7 +59,7 @@ func runUnprivilegedToolboxCheck(cfg Config) error {
 	for i := range cfg.Toolboxes {
 		args = append(args, "--mount", toolbox.MountFlagValue(cfg.Toolboxes[i].MountPath, cfg.Toolboxes[i].PathEntries))
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), toolboxCheckTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), toolbox.ImageVolumeCheckTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, toolboxCheckCommand, args...)
 	cmd.Dir = "/"

@@ -272,6 +272,20 @@ func TestRuntimePoolPodTemplateImageVolumeMode(t *testing.T) {
 	// The mount method changes the template, never the profile digest.
 	copyPolicy := acpTestToolboxPolicy()
 	_, copyTemplate := renderToolboxTemplate(t, pool, copyPolicy)
+	// The supervisor's image-volume check runs before it serves, so the
+	// startup probe must allow the full check on top of the normal startup
+	// allowance; copy mode checks in init containers and keeps the default.
+	startupBudget := func(probe *corev1.Probe) time.Duration {
+		return time.Duration(probe.FailureThreshold*probe.PeriodSeconds) * time.Second
+	}
+	copyStartup := copyTemplate.Spec.Containers[0].StartupProbe
+	imageStartup := template.Spec.Containers[0].StartupProbe
+	if got, want := startupBudget(imageStartup), startupBudget(copyStartup)+toolbox.ImageVolumeCheckTimeout; got < want {
+		t.Fatalf("image volume startup probe allows %s, want at least %s", got, want)
+	}
+	if imageStartup.PeriodSeconds != copyStartup.PeriodSeconds || imageStartup.TimeoutSeconds != copyStartup.TimeoutSeconds {
+		t.Fatalf("image volume startup probe changed more than its failure threshold: %#v", imageStartup)
+	}
 	if copyTemplate.Annotations[runtimePoolTemplateRevisionAnnotation] == template.Annotations[runtimePoolTemplateRevisionAnnotation] {
 		t.Fatal("changing the mount method must change the template revision")
 	}
