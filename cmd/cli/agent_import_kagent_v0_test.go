@@ -203,6 +203,13 @@ func TestClassifyKagentV0AgentReadsTheCompiledConfiguration(t *testing.T) {
 			t.Errorf("%s: mode = %+v, want governed", name, mode)
 		}
 	}
+	// A tool URL comes from the config Secret and may carry credentials; the
+	// reasons, which the import prints, must not repeat it.
+	leaky := strings.Replace(governedV0Config, "http://probe-gov-relay.orka-system.svc:8092/mcp", "http://user:s3cret@tools.example.com/mcp?token=t0ken", 1)
+	if mode := classifyV0Fixture(t, governedV0Input(leaky, kagentV0ConfigHash(leaky)), governedRelay); mode.Mode != kagentModeObserved ||
+		strings.Contains(strings.Join(mode.Reasons, ";"), "s3cret") || strings.Contains(strings.Join(mode.Reasons, ";"), "t0ken") {
+		t.Fatalf("a credential-bearing tool URL reached the reasons: %+v", mode)
+	}
 	// What is outside the compiled configuration still counts.
 	for name, test := range map[string]struct{ old, new, reason string }{
 		"skills":         {"  type: Declarative\n", "  type: Declarative\n  skills: {refs: [ghcr.io/x/skills:1]}\n", "loads skills"},

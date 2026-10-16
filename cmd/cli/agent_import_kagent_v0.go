@@ -336,7 +336,9 @@ func kagentV0ConfigProblems(config map[string]any) ([]string, []string) {
 		if origin, ok := relayOrigin(kagentString(params, "url"), "/mcp"); ok {
 			origins = append(origins, origin)
 		} else {
-			problems = append(problems, fmt.Sprintf("compiled tool server %d (%s) does not point at a relay's /mcp", i, kagentString(params, "url")))
+			// The URL comes from the config Secret and may carry credentials,
+			// so the reason names the server only by its position.
+			problems = append(problems, fmt.Sprintf("compiled tool server %d does not point at a relay's /mcp", i))
 		}
 		if len(kagentMap(params, "headers")) > 0 {
 			problems = append(problems, fmt.Sprintf("compiled tool server %d sends static headers", i))

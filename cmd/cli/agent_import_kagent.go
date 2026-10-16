@@ -88,7 +88,9 @@ Agents, including lists from "kubectl get -o yaml". Other objects are skipped.
 Each Agent is reported as governed or observed. A governed Agent has every
 model and tool endpoint pointing at the relay named by --relay-url, so Orka
 executes its tools and serves its model. Any other Agent is observed: kagent
-runs its tools, and Orka governs dispatch and lifecycle.
+runs its tools, and Orka governs dispatch and lifecycle. An Agent with a kagent
+approval prompt (requireApproval) cannot be wrapped in either mode: a wrapped
+Agent cannot answer it.
 
 kagent v1: a governed Agent runs on the ADK harness. Its latest successful
 kagent revision must be the one its current spec compiles to, and must have
@@ -101,9 +103,8 @@ admit only kagent's controller to Substrate's actor router.
 kagent v0: only Declarative Agents on the Go runtime can be wrapped, because
 the Python runtime cannot cancel a task and saves request headers. An Agent
 must run exactly one replica, because kagent v0 cancels a task only in the
-pod that runs it. kagent approval prompts (requireApproval) are refused. The
-wrapper pins the Agent
-Deployment's kagent.dev/config-hash, so kagent must have accepted the Agent's
+pod that runs it. The wrapper pins the Agent Deployment's
+kagent.dev/config-hash, so kagent must have accepted the Agent's
 current generation, the Agent must be Ready, and its Deployment must run the
 Go runtime and be fully rolled out. A governed Agent is judged by the
 compiled configuration in its config Secret (named after the Agent), which
@@ -278,6 +279,9 @@ func wrapKagentAgents(data []byte, relayURL string, evidence kagentRevisionEvide
 			}
 			agent.Mode = classifyKagentV0Agent(source.Object, v0, relay)
 		} else {
+			if problems := kagentV1WrapRefusals(source.Object, related[kagentV1APIVersion], agent.SourceNamespace); len(problems) > 0 {
+				return nil, "", fmt.Errorf("kagent Agent %s cannot be wrapped: %s", agent.Source, strings.Join(problems, "; "))
+			}
 			agent.Mode = classifyKagentAgent(source.Object, related[kagentV1APIVersion], relay, evidence)
 		}
 		wrapped = append(wrapped, agent)

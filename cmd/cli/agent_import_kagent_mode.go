@@ -234,6 +234,10 @@ func templateProblems(agent map[string]any, related *kagentInputs, namespace str
 		problems = append(problems, fmt.Sprintf("model config %q does not use the OpenAI provider", modelName))
 	case !kagentBool(model, "spec", "apiKeyPassthrough"):
 		problems = append(problems, fmt.Sprintf("model config %q does not pass the caller's bearer through", modelName))
+	case len(kagentMap(model, "spec", "defaultHeaders")) > 0:
+		// kagent applies static headers after the passthrough bearer, so one
+		// can replace the turn token the relay authorizes.
+		problems = append(problems, fmt.Sprintf("model config %q sends static headers (defaultHeaders)", modelName))
 	case !slices.Contains([]string{"", "chatCompletions"}, kagentString(model, "spec", "openAI", "apiFormat")):
 		// kagent defaults apiFormat to chatCompletions; the relay serves only
 		// /v1/chat/completions.
@@ -260,6 +264,28 @@ func templateProblems(agent map[string]any, related *kagentInputs, namespace str
 	}
 	slices.Sort(sorted)
 	return problems, sorted
+}
+
+// kagentV1WrapRefusals lists what keeps a v1 Agent from being wrapped in
+// either mode. A binding that requires kagent approval pauses each call for a
+// prompt the wrapper cannot answer, so the broker would cancel every such turn.
+func kagentV1WrapRefusals(agent map[string]any, related kagentObjects, namespace string) []string {
+	template := kagentMap(agent, kagentFieldSpec, "template", "inline")
+	if template == nil {
+		ref := kagentString(agent, kagentFieldSpec, "template", "ref", cliNameKey)
+		template = kagentMap(related.lookup("AgentTemplate", namespace, ref), kagentFieldSpec)
+	}
+	var problems []string
+	tools, _ := template[kagentFieldTools].([]any)
+	for i, raw := range tools {
+		binding, _ := raw.(map[string]any)
+		if approval, set := kagentMap(binding, "mcp")["requireApproval"]; set && approval != nil && approval != false {
+			if list, isList := approval.([]any); !isList || len(list) > 0 {
+				problems = append(problems, fmt.Sprintf("tool %d requires kagent approval (mcp.requireApproval), which a wrapped Agent cannot answer", i))
+			}
+		}
+	}
+	return problems
 }
 
 func toolBindingProblems(binding map[string]any, index int, related *kagentInputs, namespace string) ([]string, string) {

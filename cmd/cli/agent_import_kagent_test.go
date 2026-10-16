@@ -542,6 +542,43 @@ var governedEvidence = kagentRevisionEvidence{
 	Accepted: []string{"http://probe-cpfilter.probe.svc:8083", "https://api.openai.com:443"},
 }
 
+// A v1 binding that requires kagent approval pauses every call for a prompt
+// the wrapper cannot answer, so the Agent cannot be wrapped in either mode,
+// whether its template is inline or referenced.
+func TestKagentV1ApprovalBindingsAreRefused(t *testing.T) {
+	inline := strings.Replace(governedKagentFixture, "tools: [probe-orka]", "tools: [probe-orka]\n          requireApproval: [probe-orka]", 1)
+	referenced := strings.Replace(inline, `  template:
+    inline:
+      modelConfig: {name: relay-model}
+      tools:
+      - mcp:
+          server: {kind: RemoteMCPServer, name: orka-relay}
+          tools: [probe-orka]
+          requireApproval: [probe-orka]
+`, "  template:\n    ref: {name: gated}\n", 1) + `---
+apiVersion: api.kagent.dev/v1alpha3
+kind: AgentTemplate
+metadata: {name: gated, namespace: kagent}
+spec:
+  modelConfig: {name: relay-model}
+  tools:
+  - mcp:
+      server: {kind: RemoteMCPServer, name: orka-relay}
+      tools: [probe-orka]
+      requireApproval: [probe-orka]
+`
+	for name, input := range map[string]string{"inline": inline, "referenced": referenced} {
+		if !strings.Contains(input, "requireApproval") || (name == "referenced" && !strings.Contains(input, "ref: {name: gated}")) {
+			t.Fatalf("%s fixture did not change", name)
+		}
+		for _, relay := range []string{governedRelay, ""} {
+			if _, _, err := wrapKagentAgents([]byte(input), relay, governedEvidence); err == nil || !strings.Contains(err.Error(), "requires kagent approval") {
+				t.Fatalf("%s template, relay %q: err = %v", name, relay, err)
+			}
+		}
+	}
+}
+
 func TestClassifyKagentAgentRequiresEveryEndpointOnOneRelay(t *testing.T) {
 	wrapped, _, err := wrapKagentAgents([]byte(governedKagentFixture), governedRelay, governedEvidence)
 	if err != nil {
@@ -555,23 +592,23 @@ func TestClassifyKagentAgentRequiresEveryEndpointOnOneRelay(t *testing.T) {
 		t.Fatalf("an Agent was governed without a named relay: %+v", wrapped[0].Mode)
 	}
 	for name, test := range map[string]struct{ old, new, reason string }{
-		"claude harness":      {"spec: {kagent: {}}", "spec: {claude: {}}", `harness "kagent" is not the ADK (kagent) harness`},
-		"memory":              {"spec: {kagent: {}}", "spec: {kagent: {memory: {modelConfig: {name: m}}}}", "enables memory"},
-		"no passthrough":      {"apiKeyPassthrough: true", "apiKeyPassthrough: false", "does not pass the caller's bearer through"},
-		"model elsewhere":     {"8092/v1", "8092/other", "does not point at a relay's /v1"},
-		"short timeout":       {"timeout: 30m", "timeout: 30s", "needs a timeout longer than 20m0s"},
-		"relay timeout":       {"timeout: 30m", "timeout: 20m", "needs a timeout longer than 20m0s"},
-		"responses API":       {"8092/v1\"}", "8092/v1\", apiFormat: responses}", "uses the responses API"},
-		"stale model config":  {"uid: model-uid, generation: 2", "uid: model-uid, generation: 3", `not compiled from the ModelConfig "relay-model"`},
-		"replaced tools":      {"uid: mcp-uid", "uid: other-uid", `not compiled from the RemoteMCPServer "orka-relay"`},
-		"recreated Agent":     {"uid: agent-uid", "uid: new-agent-uid", "not compiled for this Agent's metadata.uid"},
-		"discovery enabled":   {"labels: {kagent.dev/discovery: disabled}", "labels: {}", "does not disable discovery"},
-		"two relays":          {"svc:8092/mcp", "svc:9000/mcp", "not the relay http://probe-gov-relay.orka-system.svc:8092"},
-		"lookalike endpoint":  {"http://probe-gov-relay.orka-system.svc:8092/v1", "http://ollama:11434/v1", "points at http://ollama:11434"},
-		"stale revision":      {"  desiredRevision: 11d7665d", "  desiredRevision: 22d7665d", "not the one the current spec compiles to"},
-		"unobserved spec":     {"observedGeneration: 3", "observedGeneration: 2", "has not observed the Agent's current generation"},
-		"kagent approval":     {"tools: [probe-orka]", "tools: [probe-orka]\n          requireApproval: [probe-orka]", "binding sets mcp.requireApproval"},
-		"missing tool server": {"name: orka-relay\n  namespace", "name: other\n  namespace", `tool server "orka-relay" is not in the input`},
+		"claude harness":       {"spec: {kagent: {}}", "spec: {claude: {}}", `harness "kagent" is not the ADK (kagent) harness`},
+		"memory":               {"spec: {kagent: {}}", "spec: {kagent: {memory: {modelConfig: {name: m}}}}", "enables memory"},
+		"no passthrough":       {"apiKeyPassthrough: true", "apiKeyPassthrough: false", "does not pass the caller's bearer through"},
+		"model elsewhere":      {"8092/v1", "8092/other", "does not point at a relay's /v1"},
+		"short timeout":        {"timeout: 30m", "timeout: 30s", "needs a timeout longer than 20m0s"},
+		"relay timeout":        {"timeout: 30m", "timeout: 20m", "needs a timeout longer than 20m0s"},
+		"responses API":        {"8092/v1\"}", "8092/v1\", apiFormat: responses}", "uses the responses API"},
+		"stale model config":   {"uid: model-uid, generation: 2", "uid: model-uid, generation: 3", `not compiled from the ModelConfig "relay-model"`},
+		"replaced tools":       {"uid: mcp-uid", "uid: other-uid", `not compiled from the RemoteMCPServer "orka-relay"`},
+		"recreated Agent":      {"uid: agent-uid", "uid: new-agent-uid", "not compiled for this Agent's metadata.uid"},
+		"discovery enabled":    {"labels: {kagent.dev/discovery: disabled}", "labels: {}", "does not disable discovery"},
+		"two relays":           {"svc:8092/mcp", "svc:9000/mcp", "not the relay http://probe-gov-relay.orka-system.svc:8092"},
+		"lookalike endpoint":   {"http://probe-gov-relay.orka-system.svc:8092/v1", "http://ollama:11434/v1", "points at http://ollama:11434"},
+		"stale revision":       {"  desiredRevision: 11d7665d", "  desiredRevision: 22d7665d", "not the one the current spec compiles to"},
+		"unobserved spec":      {"observedGeneration: 3", "observedGeneration: 2", "has not observed the Agent's current generation"},
+		"static model headers": {"apiKeyPassthrough: true", "apiKeyPassthrough: true\n  defaultHeaders: {Authorization: Bearer static}", "sends static headers"},
+		"missing tool server":  {"name: orka-relay\n  namespace", "name: other\n  namespace", `tool server "orka-relay" is not in the input`},
 	} {
 		t.Run(name, func(t *testing.T) {
 			changed := strings.Replace(governedKagentFixture, test.old, test.new, 1)
