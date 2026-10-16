@@ -253,6 +253,65 @@ remain available when allowed by policy.
 
 For built-in RuntimePools, Task-level `spec.agentRuntime` contains runtime overrides such as `maxTurns`, `allowedTools`, `disallowedTools`, and `allowBash`. For `runtimeRef`, the registered external profile owns provider, model, prompt, skill, tool, and runtime defaults. Its `capabilities.mcpPolicy` stores the exact tool and approval policy represented by the profile digests, and Orka uses that same policy for conformance and dispatch. The Agent must omit `spec.model`, `spec.systemPrompt`, `spec.skills`, enabled `spec.tools`, `defaultMaxTurns`, `defaultAllowedTools`, `defaultAllowBash`, and `defaultReasoningEffort`. Disabled Agent tool entries are inert and accepted. Task-level `allowedTools` must equal the registered allowlist when brokered tools are exposed. Orka rejects `maxTurns`, `disallowedTools`, and `allowBash` because those values are fixed by the registration. Repository configuration belongs at top-level `spec.workspace`.
 
+### Cap what Tasks can request
+
+The `default*` fields are only defaults: a Task can replace them with its own
+`allowedTools`, `allowBash`, or `maxTurns`. To set limits that a Task can
+narrow but never exceed, add a `ceiling`:
+
+```yaml
+spec:
+  runtime:
+    type: claude
+    contractVersion: orka.harness.v2
+    defaultAllowedTools: [Read, Grep]
+    defaultAllowBash: false
+    defaultMaxTurns: 20
+    ceiling:
+      allowedTools: [Read, Grep, Edit]
+      allowBash: false
+      maxTurns: 40
+```
+
+Before a Task is bound, Orka resolves the policy it would run with (the Task's
+override, otherwise the Agent default) and fails the Task if that policy goes
+beyond the ceiling:
+
+| Task asks for | Result |
+| --- | --- |
+| nothing | the Agent defaults: Read, Grep, 20 turns |
+| `allowedTools: [Read]` | Read |
+| `allowedTools: [Read, Write]` | fails: `ceiling does not allow tool "Write"` |
+| `allowBash: true` with `Bash` in `allowedTools` | fails: `ceiling forbids Bash` |
+| `maxTurns: 100` | fails: `ceiling allows at most 40 turns` |
+
+How the check reads a policy:
+
+- **Tools.** The check uses the tools the runtime would actually expose, after
+  `disallowedTools`, the Bash gate, and runtime normalization (such as
+  OpenCode's alias grouping) apply. Tool names ignore case. A bare ceiling
+  entry such as `Read` also covers scoped requests like `Read(/workspace/**)`,
+  but a scoped entry covers only that exact scope, compared case-sensitively.
+  Brokered and custom tool names count too.
+- **No explicit list.** A Task with no allowlist and an Agent with no
+  `defaultAllowedTools` resolve to the full native tool set. That exceeds any
+  tool ceiling, so set `defaultAllowedTools` within the ceiling. Likewise,
+  `allowBash` defaults to true and `maxTurns` to 50 when nothing sets them.
+- **Explicit empty list.** `ceiling.allowedTools: []` permits no tools.
+- **Coordination tools.** The `send_message` and `check_messages` tools that
+  Orka injects into delegated child Tasks are not counted against the ceiling.
+- **`runtimeRef` Agents.** Only `allowedTools` applies; the registered profile
+  already fixes Bash and the turn budget.
+
+A Task is checked against the Agent generation it binds to. Changing a
+ceiling does not affect Tasks that are already bound. When an Agent's own
+explicit defaults exceed its ceiling, the Agent reports `Ready=False` with the
+reason.
+
+A ceiling limits what callers may request through the Task API. It does not
+stop anyone who can edit the Agent from changing the ceiling, so restrict
+`update` on Agents to the people who own them.
+
 ## Read-only workspace Task
 
 Agent Tasks default to `intent: read` when `workspace.intent` is omitted, but setting it explicitly makes review intent clear.

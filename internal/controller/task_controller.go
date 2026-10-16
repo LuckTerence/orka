@@ -3527,6 +3527,9 @@ func (r *TaskReconciler) validateAgentRuntimeTaskCompatibility(task *corev1alpha
 	default:
 		return fmt.Errorf("agent %q runtime must set exactly one of type or runtimeRef", agent.Name)
 	}
+	if err := validateAgentRuntimeCeiling(task, agent); err != nil {
+		return err
+	}
 	if agent.Spec.Execution != nil && agent.Spec.Execution.Workspace != nil &&
 		(agent.Spec.Execution.Workspace.Enabled || agent.Spec.Execution.Workspace.ClassRef != nil) {
 		return fmt.Errorf("agent %q sets spec.execution.workspace, but execution workspace requests are only supported on Task.spec.execution.workspace", agent.Name)
