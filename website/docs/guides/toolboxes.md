@@ -116,8 +116,8 @@ shell and Debian's `/etc/profile` resets `PATH` for non-root users.
 Changing any toolbox field creates a new RuntimePool; Tasks that are already
 running keep the toolboxes frozen in their execution snapshot.
 
-Agents with toolboxes get a short Orka-generated note at the start of every
-prompt that lists the toolbox folders. It lists
+Agents with toolboxes get a short Orka-generated note at the start of the
+first prompt of each runtime session that lists the toolbox folders. It lists
 folders from the Agent spec, never file names from inside the image, so a
 toolbox author cannot put text in front of the model.
 

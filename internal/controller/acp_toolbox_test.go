@@ -356,19 +356,22 @@ func TestACPToolboxPromptNote(t *testing.T) {
 	}
 	want := "Extra command-line tools are installed for this task:\n- /opt/yq-jq/bin\n- /home/linuxbrew/.linuxbrew/bin\n- /opt/none (mounted, not on PATH)\n" +
 		"Folders not marked otherwise are on PATH. Run `ls <folder>` to see what is available. There is no internet access, so you can't install new packages."
-	if got := acpToolboxPromptNote(toolboxes); got != want {
+	if got := acpToolboxPromptNote(toolboxes, true); got != want {
 		t.Fatalf("note = %q, want %q", got, want)
 	}
-	if got, want := acpToolboxPromptNote(toolboxes[:2]), "Extra command-line tools are installed for this task:\n- /opt/yq-jq/bin\n- /home/linuxbrew/.linuxbrew/bin\n"+
+	if got, want := acpToolboxPromptNote(toolboxes[:2], true), "Extra command-line tools are installed for this task:\n- /opt/yq-jq/bin\n- /home/linuxbrew/.linuxbrew/bin\n"+
 		"These folders are on PATH. Run `ls <folder>` to see what is available. There is no internet access, so you can't install new packages."; got != want {
 		t.Fatalf("all-on-PATH note = %q, want %q", got, want)
 	}
 	// Mounted-only toolboxes never get a PATH claim.
-	if got, want := acpToolboxPromptNote(toolboxes[2:]), "Extra command-line tools are installed for this task:\n- /opt/none (mounted, not on PATH)\n"+
+	if got, want := acpToolboxPromptNote(toolboxes[2:], true), "Extra command-line tools are installed for this task:\n- /opt/none (mounted, not on PATH)\n"+
 		"Run `ls <folder>` to see what is available. There is no internet access, so you can't install new packages."; got != want {
 		t.Fatalf("mounted-only note = %q, want %q", got, want)
 	}
-	if acpToolboxPromptNote(nil) != "" {
+	if acpToolboxPromptNote(toolboxes, false) != "" {
+		t.Fatal("a provider process that already accepted a prompt must not get the note again")
+	}
+	if acpToolboxPromptNote(nil, true) != "" {
 		t.Fatal("no toolboxes must produce no note")
 	}
 	many := make([]harnessv2.RuntimeToolbox, 0, 4)
@@ -381,14 +384,14 @@ func TestACPToolboxPromptNote(t *testing.T) {
 			Image: "registry.example.com/tools/x@" + acpTestToolboxDigest, MountPath: "/opt/" + strings.Repeat("m", 120) + string(rune('0'+i)), PathEntries: entries,
 		})
 	}
-	if note := acpToolboxPromptNote(many); len(note) > acpToolboxPromptNoteMaxBytes || !strings.HasSuffix(note, acpToolboxPromptNoteFooter) {
+	if note := acpToolboxPromptNote(many, true); len(note) > acpToolboxPromptNoteMaxBytes || !strings.HasSuffix(note, acpToolboxPromptNoteFooter) {
 		t.Fatalf("oversized note (%d bytes) was not bounded", len(note))
 	}
-	content := acpPromptInputContentWithToolboxes("", acpToolboxPromptNote(toolboxes), "user prompt")
+	content := acpPromptInputContentWithToolboxes("", acpToolboxPromptNote(toolboxes, true), "user prompt")
 	if len(content) != 2 || content[0].Text != want || content[1].Text != "user prompt" {
 		t.Fatalf("content = %#v", content)
 	}
-	content = acpPromptInputContentWithToolboxes("bootstrap", acpToolboxPromptNote(toolboxes), "user prompt")
+	content = acpPromptInputContentWithToolboxes("bootstrap", acpToolboxPromptNote(toolboxes, true), "user prompt")
 	if len(content) != 3 || content[0].Text != "bootstrap" || content[1].Text != want {
 		t.Fatalf("content with bootstrap = %#v", content)
 	}

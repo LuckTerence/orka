@@ -1518,6 +1518,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	if runtimeSessionCreationRequired {
 		if sessionExecution != nil {
 			sessionExecution.Binding.RecreationRequired = true
+			sessionExecution.Binding.PromptDelivered = false
 			d.setRuntimeSessionBinding(sessionExecution.Binding)
 			if err := d.patchExecution(ctx, task, func(status *corev1alpha1.TaskExecutionStatus) {
 				applyRuntimeSessionBindingToExecution(status, &sessionExecution.Binding)
@@ -1830,11 +1831,11 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		bootstrap = bootstrapPromptText(sessionExecution.Bootstrap)
 		userPrompt = sessionExecution.UserPrompt
 	}
-	// The toolbox note is built only from the frozen profile and goes with
-	// every prompt. A reused Session runtime is not proof that its provider
-	// process already received a prompt (a pre-submission retry can reuse a
-	// process that never did), and the note is small and bounded.
-	toolboxNote := acpToolboxPromptNote(profile.Toolboxes)
+	// The toolbox note is built only from the frozen profile and is sent once
+	// per provider process: standalone Tasks always get it, and a Session
+	// runtime gets it until its current process accepted a prompt, so a
+	// pre-submission retry that reuses a never-prompted process still sends it.
+	toolboxNote := acpToolboxPromptNote(profile.Toolboxes, acpToolboxNoteDue(sessionExecution))
 	var terminal *harnessv2.Event
 	var lastAssistantUpdate *harnessv2.Event
 	var assistant strings.Builder
@@ -1895,8 +1896,11 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 						return err
 					}
 					accepted = true
-					if nativeSessionsSupported && sessionExecution != nil {
-						sessionExecution.Binding.RecreationRequired = true
+					if sessionExecution != nil {
+						sessionExecution.Binding.PromptDelivered = true
+						if nativeSessionsSupported {
+							sessionExecution.Binding.RecreationRequired = true
+						}
 						d.setRuntimeSessionBinding(sessionExecution.Binding)
 					}
 					if err := d.patchExecution(ctx, task, func(status *corev1alpha1.TaskExecutionStatus) {

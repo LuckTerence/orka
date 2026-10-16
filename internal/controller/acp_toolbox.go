@@ -225,12 +225,19 @@ const (
 	acpToolboxPromptNoteFooter     = "Run `ls <folder>` to see what is available. There is no internet access, so you can't install new packages."
 )
 
+// acpToolboxNoteDue reports whether a prompt starts a provider process's
+// conversation: always for standalone Tasks, and for a Session runtime until
+// its current process accepted a prompt.
+func acpToolboxNoteDue(session *acpTaskSession) bool {
+	return session == nil || !session.Binding.PromptDelivered
+}
+
 // acpToolboxPromptNote renders the short Orka-generated note that tells the
 // agent which toolbox folders are on PATH. It lists folders from the frozen
 // profile only, never file names from inside the untrusted image, and is
-// empty without toolboxes.
-func acpToolboxPromptNote(toolboxes []harnessv2.RuntimeToolbox) string {
-	if len(toolboxes) == 0 {
+// empty without toolboxes or when newProcess is false.
+func acpToolboxPromptNote(toolboxes []harnessv2.RuntimeToolbox, newProcess bool) string {
+	if !newProcess || len(toolboxes) == 0 {
 		return ""
 	}
 	const omitted = "- (more folders omitted)\n"
