@@ -73,10 +73,16 @@ func translateKagentAgent(agent map[string]any, related kagentObjects, options k
 	} else if kagentMap(harness, kagentFieldSpec, "kagent") == nil {
 		refuse("harness %q is not the ADK (kagent) harness", harnessName)
 	} else {
-		for _, field := range []string{"memory", "compaction"} {
-			if kagentMap(harness, kagentFieldSpec, "kagent", field) != nil {
-				refuse("harness %q uses %s, which Orka Agents do not have", harnessName, field)
+		// A native Orka Agent runs Orka's own loop, so any harness setting
+		// that changes the agent's behavior cannot carry over. Substrate
+		// placement is infrastructure and does not.
+		for field := range kagentMap(harness, kagentFieldSpec) {
+			if field != "kagent" && field != "substrate" {
+				refuse("harness %q sets %s, which Orka Agents do not have", harnessName, field)
 			}
+		}
+		for field := range kagentMap(harness, kagentFieldSpec, "kagent") {
+			refuse("harness %q uses %s, which Orka Agents do not have", harnessName, field)
 		}
 	}
 
@@ -90,7 +96,7 @@ func translateKagentAgent(agent map[string]any, related kagentObjects, options k
 			return nil, problems
 		}
 	}
-	translated := map[string]string{kagentFieldDescription: "", "systemPrompt": "", "systemPromptFrom": "", "modelConfig": "", "tools": ""}
+	translated := map[string]string{kagentFieldDescription: "", "systemPrompt": "", "systemPromptFrom": "", "modelConfig": "", kagentFieldTools: ""}
 	for field := range template {
 		if _, ok := translated[field]; !ok {
 			refuse("template field %q has no Orka equivalent", field)
@@ -123,7 +129,7 @@ func translateKagentAgent(agent map[string]any, related kagentObjects, options k
 		}
 	}
 
-	tools, _ := template["tools"].([]any)
+	tools, _ := template[kagentFieldTools].([]any)
 	var refs []any
 	for i, raw := range tools {
 		binding, _ := raw.(map[string]any)
@@ -132,8 +138,15 @@ func translateKagentAgent(agent map[string]any, related kagentObjects, options k
 			refuse("tool %d is not an MCP binding", i)
 			continue
 		}
+		// Every binding field changes behavior; an approval requirement in
+		// particular must never be dropped by a plain Orka Tool reference.
+		for field := range kagentMap(binding, "mcp") {
+			if !kagentMCPBindingField(field) {
+				refuse("tool %d sets mcp.%s, which has no Orka equivalent; give the Orka Tool its own policy", i, field)
+			}
+		}
 		serverName, _ := server[cliNameKey].(string)
-		names, _ := kagentMap(binding, "mcp")["tools"].([]any)
+		names, _ := kagentMap(binding, "mcp")[kagentFieldTools].([]any)
 		if len(names) == 0 {
 			refuse("tool server %q binds every tool; list them so each can be mapped", serverName)
 		}

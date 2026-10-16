@@ -532,6 +532,7 @@ func TestClassifyKagentAgentRequiresEveryEndpointOnOneRelay(t *testing.T) {
 		"lookalike endpoint":  {"http://probe-gov-relay.orka-system.svc:8092/v1", "http://ollama:11434/v1", "points at http://ollama:11434"},
 		"stale revision":      {"  desiredRevision: 11d7665d", "  desiredRevision: 22d7665d", "not the one the current spec compiles to"},
 		"unobserved spec":     {"observedGeneration: 3", "observedGeneration: 2", "has not observed the Agent's current generation"},
+		"kagent approval":     {"tools: [probe-orka]", "tools: [probe-orka]\n          requireApproval: [probe-orka]", "binding sets mcp.requireApproval"},
 		"missing tool server": {"name: orka-relay\n  namespace", "name: other\n  namespace", `tool server "orka-relay" is not in the input`},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -661,6 +662,19 @@ func TestTranslateKagentAgentsMapsOnlyKnownFields(t *testing.T) {
 	if translated[0].RuntimeName != "" || translated[0].Mode.Mode != kagentModeTranslated {
 		t.Fatalf("translated agent = %+v", translated[0])
 	}
+	for name, harness := range map[string]string{
+		"workload command": "spec: {kagent: {}, workload: {command: [python, -m, custom]}}",
+		"environment":      "spec: {kagent: {}, env: [{name: MODE, value: custom}]}",
+	} {
+		changed := strings.Replace(translatableKagentFixture, "spec: {kagent: {}}", harness, 1)
+		if _, _, err := translateKagentAgents([]byte(changed), kagentTranslateOptions{Tools: map[string]string{"k8s/list_pods": "k8s-list-pods"}}); err == nil {
+			t.Errorf("%s: a harness override was translated away", name)
+		}
+	}
+	placed := strings.Replace(translatableKagentFixture, "spec: {kagent: {}}", "spec: {kagent: {}, substrate: {workerPoolRef: {name: p}}}", 1)
+	if _, _, err := translateKagentAgents([]byte(placed), kagentTranslateOptions{Tools: map[string]string{"k8s/list_pods": "k8s-list-pods"}}); err != nil {
+		t.Errorf("substrate placement was refused: %v", err)
+	}
 }
 
 func TestTranslateKagentAgentsRefusesEverythingItCannotMap(t *testing.T) {
@@ -674,6 +688,7 @@ metadata: {name: bedrock, namespace: kagent}
 spec: {provider: Bedrock, model: claude}
 `
 	input = strings.Replace(input, "      modelConfig: {name: gpt}\n", "      modelConfig: {name: gpt}\n      skills: [{name: s}]\n", 1)
+	input = strings.Replace(input, "          tools: [list_pods]\n", "          tools: [list_pods]\n          requireApproval: [list_pods]\n", 1)
 	_, _, err := translateKagentAgents([]byte(input), kagentTranslateOptions{})
 	if err == nil {
 		t.Fatal("an untranslatable Agent was accepted")
@@ -681,6 +696,7 @@ spec: {provider: Bedrock, model: claude}
 	for _, want := range []string{
 		"kagent Agent kagent/k8s-agent", "kagent Agent kagent/helm-agent", "uses memory", `template field "skills" has no Orka equivalent`,
 		"tool k8s/list_pods has no Orka Tool", `uses provider "Bedrock"`, "Translation maps only these fields",
+		"sets mcp.requireApproval",
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error does not mention %q:\n%v", want, err)

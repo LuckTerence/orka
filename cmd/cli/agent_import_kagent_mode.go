@@ -137,6 +137,9 @@ func harnessProblems(harness map[string]any, name string) []string {
 			problems = append(problems, fmt.Sprintf("harness %q overrides the workload %s", name, field))
 		}
 	}
+	if env, _ := kagentMap(harness, "spec")["env"].([]any); len(env) > 0 {
+		problems = append(problems, fmt.Sprintf("harness %q injects environment overrides", name))
+	}
 	if kagentMap(harness, "spec", "kagent", "memory") != nil {
 		problems = append(problems, fmt.Sprintf("harness %q enables memory", name))
 	}
@@ -184,7 +187,7 @@ func templateProblems(agent map[string]any, related kagentObjects, namespace str
 			problems = append(problems, fmt.Sprintf("model config %q does not point at a relay's /v1", modelName))
 		}
 	}
-	tools, _ := template["tools"].([]any)
+	tools, _ := template[kagentFieldTools].([]any)
 	for i, raw := range tools {
 		binding, _ := raw.(map[string]any)
 		toolProblems, origin := toolBindingProblems(binding, i, related, namespace)
@@ -207,6 +210,13 @@ func toolBindingProblems(binding map[string]any, index int, related kagentObject
 		return []string{fmt.Sprintf("tool %d is not an MCP binding", index)}, ""
 	}
 	serverName, _ := server[cliNameKey].(string)
+	for field := range kagentMap(binding, "mcp") {
+		if !kagentMCPBindingField(field) {
+			// A kagent approval prompt cannot be answered by a wrapped Agent;
+			// Orka's approval policy governs relayed tools instead.
+			return []string{fmt.Sprintf("tool server %q binding sets mcp.%s", serverName, field)}, ""
+		}
+	}
 	if kind, _ := server["kind"].(string); kind != "RemoteMCPServer" {
 		return []string{fmt.Sprintf("tool server %q is a %s, not a RemoteMCPServer", serverName, kind)}, ""
 	}
@@ -236,6 +246,15 @@ func egressProblems(evidence kagentEgressEvidence, revision, relay string) []str
 		}
 	}
 	return problems
+}
+
+// kagentFieldTools names a template's tool list and a binding's tool names.
+const kagentFieldTools = "tools"
+
+// kagentMCPBindingField reports the MCP binding fields both modes understand:
+// the server and its tool names. Every other field changes behavior.
+func kagentMCPBindingField(field string) bool {
+	return field == "server" || field == kagentFieldTools
 }
 
 // kagentRelayOrigin expands the --relay-url template for one Agent.
