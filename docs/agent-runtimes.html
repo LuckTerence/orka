@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="generator" content="Docusaurus v3.10.1">
 <title data-rh="true">Agent runtimes | Orka</title><meta data-rh="true" name="viewport" content="width=device-width,initial-scale=1"><meta data-rh="true" name="twitter:card" content="summary_large_image"><meta data-rh="true" property="og:url" content="https://orka-agents.github.io/orka/docs/agent-runtimes"><meta data-rh="true" property="og:locale" content="en"><meta data-rh="true" name="docusaurus_locale" content="en"><meta data-rh="true" name="docsearch:language" content="en"><meta data-rh="true" name="docusaurus_version" content="current"><meta data-rh="true" name="docusaurus_tag" content="docs-default-current"><meta data-rh="true" name="docsearch:version" content="current"><meta data-rh="true" name="docsearch:docusaurus_tag" content="docs-default-current"><meta data-rh="true" property="og:title" content="Agent runtimes | Orka"><meta data-rh="true" name="description" content="How Orka runs coding agents: ACP RuntimePools, sessions, and the pool lifecycle."><meta data-rh="true" property="og:description" content="How Orka runs coding agents: ACP RuntimePools, sessions, and the pool lifecycle."><link data-rh="true" rel="canonical" href="https://orka-agents.github.io/orka/docs/agent-runtimes"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/agent-runtimes" hreflang="en"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/agent-runtimes" hreflang="x-default"><script data-rh="true" type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Agent runtimes","item":"https://orka-agents.github.io/orka/docs/agent-runtimes"}]}</script><link rel="stylesheet" href="/orka/assets/css/styles.ecda331d.css">
-<script src="/orka/assets/js/runtime~main.35944fdc.js" defer="defer"></script>
+<script src="/orka/assets/js/runtime~main.2ea58448.js" defer="defer"></script>
 <script src="/orka/assets/js/main.3c9f6e2c.js" defer="defer"></script>
 </head>
 <body>
@@ -214,7 +214,8 @@ the supported format and import/export commands.</p>
 service-account token. It holds no Git credential and has no route to source control. Its
 model traffic goes only to the central provider proxy, and each RuntimeSession reaches Orka
 tools only through a credential-protected loopback MCP proxy that the controller rechecks on
-every call. The Workspace/Publisher, which does hold the Git credentials, has no access to
+every call. A call to a tool outside the frozen policy, such as one the model names on its own,
+is refused there as a failed tool call and the prompt continues. The Workspace/Publisher, which does hold the Git credentials, has no access to
 models or tools. <a class="" href="/orka/docs/security#acp-runtimepool-pods">Security</a> describes each boundary.</p>
 <h2 class="anchor anchorTargetStickyNavbar_Vzrq" id="controller-configuration">Controller configuration<a href="#controller-configuration" class="hash-link" aria-label="Direct link to Controller configuration" title="Direct link to Controller configuration" translate="no">​</a></h2>
 <p>ACP is active when the controller runs in <code>harness-v2</code> mode; there is no
@@ -233,6 +234,7 @@ cross-namespace Vekil ingress boundary.</p>
 <ul>
 <li class=""><strong>Task fails before queueing</strong>: for a built-in runtime, verify the Agent has <code>runtime.type: codex</code>, <code>claude</code>, <code>copilot</code>, or <code>opencode</code>, ACP is enabled, and the matching digest-pinned image is configured. For <code>runtimeRef</code>, verify the registration is current-generation, ready, strict-governed, and matches the Task workspace intent.</li>
 <li class=""><strong>Task remains queued</strong>: inspect the selected RuntimePool lifecycle/admission/capacity and the runtime Pod scheduling conditions.</li>
+<li class=""><strong>Agent warnings in Task results</strong>: Orka advertises ACP session notices, so Codex and Claude Code send their own warnings, such as Codex&#x27;s missing model metadata, as notices, which Orka keeps out of the result and does not log. Copilot CLI 1.0.96 ignores notices and still writes its <code>Info:</code> lines into the reply.</li>
 <li class=""><strong>Task reports <code>OutcomeUnknown</code></strong>: do not retry the same attempt automatically. Inspect the recorded attempt, controller epoch, runtime instance, and event timeline.</li>
 <li class=""><strong>Read Task fails validation</strong>: inspect <code>status.delivery</code> for <code>ReadOnlyWorkspaceModified</code> and treat the session as poisoned.</li>
 <li class=""><strong>Write Task is blocked</strong>: verify all required source-read, target-read, target-write, and forge credential references, the publication repository/branch, and the Workspace/Publisher broker configuration. Require a terminal verified delivery receipt before claiming success.</li>
