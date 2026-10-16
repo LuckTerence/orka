@@ -1,6 +1,7 @@
 // Command profile renders the immutable AgentRuntime registration inputs for
 // one wrapped kagent Agent: the v2 profile, its MCP policy, and the matching
-// supervisor environment. Observed mode brokers no Orka tools.
+// supervisor environment. Observed mode brokers no Orka tools; governed mode
+// lists the Orka tools the Agent calls through the wrapper's relay.
 package main
 
 import (
@@ -10,6 +11,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -25,14 +27,27 @@ func main() {
 	adapter := flag.String("adapter-digest", "",
 		"digest of the configured kagent source image before supervisor composition")
 	configPath := flag.String("config", "", "exact baked /agent/kagent.json")
+	allowedTools := flag.String("allowed-tools", "", "comma-separated Orka tools a governed Agent may call")
+	approvalTools := flag.String("approval-required-tools", "", "comma-separated allowed tools that need an Orka approval")
 	flag.Parse()
-	if err := run(*adapter, *configPath); err != nil {
+	if err := run(*adapter, *configPath, toolList(*allowedTools), toolList(*approvalTools)); err != nil {
 		_, _ = fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
 
-func run(adapter, configPath string) error {
+func toolList(value string) []string {
+	tools := []string{}
+	for tool := range strings.SplitSeq(value, ",") {
+		if tool = strings.TrimSpace(tool); tool != "" {
+			tools = append(tools, tool)
+		}
+	}
+	slices.Sort(tools)
+	return slices.Compact(tools)
+}
+
+func run(adapter, configPath string, allowed, approvalRequired []string) error {
 	encoded, ok := strings.CutPrefix(adapter, "sha256:")
 	if !ok || len(encoded) != 64 || strings.ToLower(encoded) != encoded {
 		return fmt.Errorf("--adapter-digest must be the configured image's sha256 digest")
@@ -42,16 +57,27 @@ func run(adapter, configPath string) error {
 		return fmt.Errorf("read the exact baked configuration: %w", err)
 	}
 	var configuration struct {
-		Model string `json:"model"`
+		Model    string          `json:"model"`
+		Governed json.RawMessage `json:"governed"`
 	}
 	if err := json.Unmarshal(raw, &configuration); err != nil || configuration.Model == "" {
 		return fmt.Errorf("kagent configuration must name its profile model")
 	}
-	// Observed mode brokers no Orka tools. The CRD lists stay explicit, while
-	// the approval digest uses the empty policy the controller derives from
-	// an empty approvalRequiredTools list.
-	allowed, disallowed, approvalRequired := []string{}, []string{}, []string{}
+	if (len(allowed) != 0) != (len(configuration.Governed) != 0) {
+		return fmt.Errorf("only a governed kagent configuration may list Orka tools, and it must list at least one")
+	}
+	for _, tool := range approvalRequired {
+		if !slices.Contains(allowed, tool) {
+			return fmt.Errorf("approval-required tool %q is not allowed", tool)
+		}
+	}
+	// The CRD lists stay explicit, while the approval digest uses the empty
+	// policy the controller derives from an empty approvalRequiredTools list.
+	disallowed := []string{}
 	approval := harnessv2.MCPApprovalPolicy{}
+	if len(approvalRequired) != 0 {
+		approval.RequiredTools = approvalRequired
+	}
 	toolDigest, err := harnessv2.CanonicalRuntimeToolPolicyDigest(allowed, disallowed, false)
 	if err != nil {
 		return err
@@ -110,6 +136,10 @@ func run(adapter, configPath string) error {
 			"ORKA_ACP_RESOURCE_CLASS":             profile.ResourceClass,
 			"ORKA_ACP_PROVIDER_PROXY_BASE_URL":    "http://127.0.0.1:8091",
 		},
+	}
+	if len(approvalRequired) != 0 {
+		// Approval-gated tools need the supervisor qualified for this exact profile.
+		output.SupervisorEnv["ORKA_ACP_BROKERED_TOOL_APPROVAL_PROFILE_DIGEST"] = string(digest)
 	}
 	encoder := json.NewEncoder(os.Stdout)
 	encoder.SetIndent("", "  ")
