@@ -45,8 +45,8 @@ the reason, and an Agent whose explicit defaults exceed its ceiling reports
 Orka-injected coordination tools for delegated children (`send_message`,
 `check_messages`) are not counted, because they are platform plumbing rather
 than a capability the caller requested. The implicit `reply_in_conversation`
-grant for gateway Tasks does reach outside the Task, so a tool ceiling that does
-not list it suppresses that grant. For `runtimeRef` Agents only
+grant for gateway Tasks does reach outside the Task, so Orka keeps it only when
+the projected policy still fits the ceiling. For `runtimeRef` Agents only
 `allowedTools` applies; the registered profile already fixes Bash and turns.
 The exception is a harness v1 registration, which takes `maxTurns` from the
 Task or Agent, so it is also held to the turn ceiling once planning resolves it.

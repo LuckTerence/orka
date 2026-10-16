@@ -443,3 +443,33 @@ func TestValidatePlannedHarnessV1RuntimeRefEnforcesTurnCeiling(t *testing.T) {
 		t.Fatalf("harness v1 runtimeRef within turn ceiling: error = %v, want nil", err)
 	}
 }
+
+func TestValidateAgentHarnessV1RuntimeRefTurnDefaults(t *testing.T) {
+	limit, high := int32(10), int32(100)
+	agent := func() *corev1alpha1.Agent {
+		return &corev1alpha1.Agent{
+			ObjectMeta: metav1.ObjectMeta{Name: "fibey", Namespace: testNS},
+			Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
+				RuntimeRef:      &corev1alpha1.AgentRuntimeReference{Name: "fibey-runtime"},
+				DefaultMaxTurns: &high,
+				Ceiling:         &corev1alpha1.AgentRuntimeCeiling{MaxTurns: &limit},
+			}},
+		}
+	}
+	registered := func(contract corev1alpha1.AgentRuntimeContractVersion) *corev1alpha1.AgentRuntime {
+		return &corev1alpha1.AgentRuntime{
+			ObjectMeta: metav1.ObjectMeta{Name: "fibey-runtime", Namespace: testNS},
+			Spec:       corev1alpha1.AgentRuntimeRegistrySpec{ContractVersion: &contract},
+		}
+	}
+	err := setupAgentReconciler(registered(corev1alpha1.AgentRuntimeContractHarnessV1)).validateAgent(t.Context(), agent())
+	if err == nil || !strings.Contains(err.Error(), "ceiling allows at most 10 turns") {
+		t.Fatalf("harness v1 default above turn ceiling: error = %v, want ceiling rejection", err)
+	}
+	// v2 registrations fix the turn budget in their profile; their own
+	// validation rejects defaultMaxTurns, not the ceiling.
+	err = setupAgentReconciler(registered(corev1alpha1.AgentRuntimeContractHarnessV2)).validateAgent(t.Context(), agent())
+	if err != nil && strings.Contains(err.Error(), "ceiling") {
+		t.Fatalf("harness v2 runtimeRef: error = %v, want no ceiling rejection", err)
+	}
+}

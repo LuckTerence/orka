@@ -289,24 +289,30 @@ How the check reads a policy:
 
 - **Tools.** The check uses the tools the runtime would actually expose, after
   `disallowedTools`, the Bash gate, and runtime normalization (such as
-  OpenCode's alias grouping) apply. Tool names ignore case. A bare ceiling
-  entry such as `Read` also covers scoped requests like `Read(/workspace/**)`,
-  but a scoped entry covers only that exact scope, compared case-sensitively.
-  Brokered and custom tool names count too. A `disallowedTools` entry narrows
+  OpenCode's alias grouping) apply. Tool names ignore case. Brokered and
+  custom tool names count too. For runtimes that accept scoped names such as
+  `Bash(git status)` (the harness v1 CLI wrappers; v2 RuntimePools accept only
+  plain names), a bare ceiling entry covers every scope of that tool, but a
+  scoped entry covers only that exact scope, compared case-sensitively. A `disallowedTools` entry narrows
   the request only when it matches an allowed name exactly, as at dispatch, so
   `bash` does not remove `Bash`.
 - **No explicit list.** A Task with no allowlist and an Agent with no
-  `defaultAllowedTools` resolve to the full native tool set. That exceeds any
-  tool ceiling, so set `defaultAllowedTools` within the ceiling. Likewise,
+  `defaultAllowedTools` resolve to the full native tool set, less anything
+  `disallowedTools` or `allowBash: false` removes. That usually exceeds a tool
+  ceiling, so set `defaultAllowedTools` within the ceiling. An allowlist of only
+  blank entries is judged the same way, because the harness v1 wrappers read
+  it as no list. Likewise,
   `allowBash` defaults to true and `maxTurns` to 50 when nothing sets them.
 - **Explicit empty list.** `ceiling.allowedTools: []` permits no tools.
 - **Coordination tools.** The `send_message` and `check_messages` tools that
   Orka injects into delegated child Tasks are not counted against the ceiling.
 - **Gateway replies.** Eligible gateway Tasks without an explicit allowlist
-  normally get `reply_in_conversation` implicitly. Under a tool ceiling that
-  happens only for OpenCode Agents, and only when the ceiling lists the tool;
-  other runtimes need an explicit allowlist under a tool ceiling, so add
-  `reply_in_conversation` to it (and to the ceiling) to keep replies.
+  normally get `reply_in_conversation` implicitly. Under a ceiling, Orka keeps
+  that grant only when the resulting policy still fits: the ceiling must list
+  `reply_in_conversation`, and the native tool set must fit it (OpenCode's
+  default list, or another runtime's set narrowed by `disallowedTools` or
+  `allowBash: false`). Otherwise, include `reply_in_conversation` in an explicit
+  allowlist and in the ceiling.
 - **`runtimeRef` Agents.** Only `allowedTools` applies; the registered profile
   already fixes Bash and the turn budget. Harness v1 registrations, which take
   `maxTurns` from the Task or Agent, are also held to `maxTurns`.

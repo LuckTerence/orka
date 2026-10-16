@@ -139,19 +139,6 @@ func validateHarnessV1RuntimeRefCeiling(task *corev1alpha1.Task, agent *corev1al
 	return nil
 }
 
-// agentCeilingAllowsTool reports whether the Agent's ceiling, if any, permits
-// a tool that Orka would otherwise grant implicitly.
-func agentCeilingAllowsTool(agent *corev1alpha1.Agent, tool string) bool {
-	if agent == nil || agent.Spec.Runtime == nil || agent.Spec.Runtime.Ceiling == nil || agent.Spec.Runtime.Ceiling.AllowedTools == nil {
-		return true
-	}
-	limit := agent.Spec.Runtime.Ceiling.AllowedTools
-	if agent.Spec.Runtime.Type == corev1alpha1.AgentRuntimeOpencode {
-		limit = acp.NormalizeOpenCodeAuthorizationTools(limit)
-	}
-	return ceilingAllowsTool(limit, tool)
-}
-
 // ceilingAllowsTool reports whether a requested tool is within the ceiling.
 // Tool names match without regard to case, but scopes must match exactly
 // because they carry command or path text. A bare ceiling entry also covers

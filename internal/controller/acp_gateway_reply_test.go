@@ -109,6 +109,43 @@ func TestACPReplyImplicitGrantRespectsCeiling(t *testing.T) {
 	}
 }
 
+// The reply grant turns the implicit native set into an explicit allowlist,
+// which dispatch filters with exact-match deny entries. The grant is kept only
+// when that projected policy still fits the ceiling.
+func TestACPReplyGrantRevalidatesCeiling(t *testing.T) {
+	no := false
+	yes := true
+	for _, tc := range []struct {
+		name    string
+		mutate  func(*corev1alpha1.Task, *corev1alpha1.Agent)
+		reply   bool
+		hasBash bool
+	}{
+		{"case-mismatched deny would reopen Bash", func(t *corev1alpha1.Task, a *corev1alpha1.Agent) {
+			a.Spec.Runtime.Ceiling = &corev1alpha1.AgentRuntimeCeiling{AllowBash: &no}
+			t.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{DisallowedTools: []string{"bash"}, AllowBash: &yes}
+		}, false, false},
+		{"deny list narrows the native set into the ceiling", func(t *corev1alpha1.Task, a *corev1alpha1.Agent) {
+			ceiling := slices.DeleteFunc(acp.BuiltInRuntimeNativeToolNames(string(corev1alpha1.AgentRuntimeClaude)), func(name string) bool { return name == "Bash" })
+			a.Spec.Runtime.Ceiling = &corev1alpha1.AgentRuntimeCeiling{AllowedTools: append(ceiling, aitools.GatewayReplyToolName), AllowBash: &no}
+			t.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{DisallowedTools: []string{"Bash"}}
+		}, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, task, agent := acpReplyPlanningFixture(t, true)
+			tc.mutate(task, agent)
+			require.NoError(t, r.validateAgentRuntimeTaskCompatibility(task, agent))
+			candidate, err := r.resolveAgentExecutionCandidate(t.Context(), task, agent)
+			require.NoError(t, err)
+			body, err := decodeAgentExecutionSnapshot(candidate.snapshotBody)
+			require.NoError(t, err)
+			policy := body.MCPConfiguration.ToolPolicy
+			require.Equal(t, tc.reply, slices.Contains(policy.AllowedToolNames, aitools.GatewayReplyToolName))
+			require.Equal(t, tc.hasBash, policy.Allows("Bash"))
+		})
+	}
+}
+
 func TestACPReplyFrozenPolicy(t *testing.T) {
 	for _, tc := range []struct {
 		name   string

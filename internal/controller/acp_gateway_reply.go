@@ -34,9 +34,7 @@ func (r *TaskReconciler) projectACPReplyPolicy(ctx context.Context, task *corev1
 	if task.Spec.AgentRuntime != nil && task.Spec.AgentRuntime.AllowedTools != nil {
 		explicit = true
 	}
-	// An implicit grant stays within the Agent ceiling; an explicit selection
-	// was already checked against it before binding.
-	grant := permitted && (selected || (!explicit && agentCeilingAllowsTool(agent, aitools.GatewayReplyToolName)))
+	grant := permitted && (!explicit || selected)
 	if grant == selected {
 		return task, nil
 	}
@@ -53,5 +51,13 @@ func (r *TaskReconciler) projectACPReplyPolicy(ctx context.Context, task *corev1
 		projected.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{}
 	}
 	projected.Spec.AgentRuntime.AllowedTools = sortedUnique(allowed)
+	if grant {
+		// The grant turns an implicit native set into an explicit allowlist,
+		// which dispatch judges differently, so keep it only when the
+		// projected policy still fits the Agent ceiling.
+		if validateAgentRuntimeCeiling(projected, agent) != nil {
+			return task, nil
+		}
+	}
 	return projected, nil
 }
