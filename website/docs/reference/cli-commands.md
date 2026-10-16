@@ -76,6 +76,7 @@ Available Commands:
   create      Create an agent from a manifest
   delete      Delete an agent
   get         Get agent details
+  import      Import agents defined on another platform
   list        List agents
   update      Update an agent resource from a manifest
 
@@ -145,6 +146,59 @@ Usage:
 Flags:
   -h, --help            help for get
   -o, --output string   Output format: table, json, yaml (default "table")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka agent import`
+
+```text
+Import agents defined on another platform
+
+Usage:
+  orka agent import [command]
+
+Available Commands:
+  kagent      Wrap kagent Agents as Orka Agents
+
+Flags:
+  -h, --help   help for import
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+
+Use "orka agent import [command] --help" for more information about a command.
+```
+
+## `orka agent import kagent`
+
+```text
+Create one Orka Agent per kagent Agent. Each Orka Agent references the
+AgentRuntime "<name>-kagent-runtime", which must be registered separately and
+serve exactly that kagent Agent. kagent keeps executing the agent and its tools
+with its own credentials; Orka governs who can dispatch work to it.
+
+Accepts api.kagent.dev/v1alpha3 and kagent.dev/v1alpha2 Agents, including lists
+from "kubectl get agents -o yaml". Other objects are skipped.
+
+Usage:
+  orka agent import kagent -f <file> [flags]
+
+Flags:
+      --dry-run       Print the Orka Agent manifests instead of creating them
+  -f, --file string   Path to kagent Agent YAML/JSON (use - for stdin)
+  -h, --help          help for kagent
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
