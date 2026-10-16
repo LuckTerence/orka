@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"net/url"
 	"regexp"
 	"slices"
 	"strconv"
@@ -113,7 +114,7 @@ func kagentV0Tools(agent map[string]any) []map[string]any {
 // configuration, with every endpoint on the relay and nothing that runs code
 // or calls out on its own. Anything the import cannot see keeps the Agent
 // observed.
-func classifyKagentV0Agent(agent map[string]any, related kagentObjects, relay string) kagentMode {
+func classifyKagentV0Agent(agent map[string]any, related kagentObjects, relay, controller string) kagentMode {
 	namespace := kagentString(agent, kagentFieldMetadata, cliNamespaceQuery)
 	name := kagentString(agent, kagentFieldMetadata, cliNameKey)
 	var mode kagentMode
@@ -124,6 +125,9 @@ func classifyKagentV0Agent(agent map[string]any, related kagentObjects, relay st
 	}
 	reasons = append(reasons, mode.PinProblems...)
 	reasons = append(reasons, kagentV0BehaviorProblems(agent)...)
+	if deployment := related.lookup("Deployment", namespace, name); deployment != nil {
+		reasons = append(reasons, kagentV0WorkloadProblems(deployment, namespace, name, controller)...)
+	}
 	modelName := kagentString(agent, kagentFieldSpec, kagentFieldDeclarative, kagentFieldModelConfig)
 	compiled, compiledProblems := kagentV0CompiledConfig(related.lookup("Secret", namespace, name),
 		related.lookup("ModelConfig", namespace, modelName), name, modelName, mode.Revision)
@@ -208,6 +212,187 @@ func kagentConditionCurrent(obj map[string]any, conditionType string, generation
 }
 
 // kagentV0ContainerImage returns the image of the Deployment's agent container.
+// kagentV0WorkloadEnv lists the only environment the import accepts in a v0
+// Agent's container: what kagent v0.10 renders, with values it can verify.
+// KAGENT_URL is where the runtime persists session events, so it must be
+// the controller the wrapper calls. Telemetry may only be switched; an
+// exporter endpoint is a destination the import cannot verify.
+var kagentV0WorkloadEnv = []string{kagentV0EnvNamespace, kagentV0EnvName, kagentV0EnvURL, "OTEL_LOGGING_ENABLED", "OTEL_TRACING_ENABLED"}
+
+const (
+	kagentV0EnvNamespace = "KAGENT_NAMESPACE"
+	kagentV0EnvName      = "KAGENT_NAME"
+	kagentV0EnvURL       = "KAGENT_URL"
+)
+
+// kagentV0WorkloadProblems checks that the Deployment loads the configuration
+// the import judged, as kagent renders it: one kagent container, the image's
+// own command, the config Secret named after the Agent at /config, and only
+// the environment and mounts kagent adds. An admission webhook or a direct
+// edit could otherwise keep the config hash while loading something else.
+//
+// Only the pod and container fields kagent renders, or that place the pod
+// without changing what it runs or reaches, are allowed: any other field,
+// such as hostAliases, dnsConfig, host namespaces, or lifecycle hooks, could
+// redirect or run something the configuration does not describe. This is an
+// import-time check: governed mode also requires that nothing but kagent's
+// controller changes Agent Deployments afterwards.
+func kagentV0WorkloadProblems(deployment map[string]any, namespace, name, controller string) []string {
+	pod := kagentMap(deployment, kagentFieldSpec, "template", kagentFieldSpec)
+	containers, _ := pod["containers"].([]any)
+	if init, _ := pod["initContainers"].([]any); len(containers) != 1 || len(init) != 0 {
+		return []string{fmt.Sprintf("deployment %q runs containers besides kagent's", name)}
+	}
+	container, _ := containers[0].(map[string]any)
+	var problems []string
+	for _, field := range slices.Sorted(maps.Keys(pod)) {
+		if !slices.Contains(kagentV0PodFields, field) {
+			problems = append(problems, fmt.Sprintf("deployment %q sets pod field %s", name, field))
+		}
+	}
+	if policy := kagentString(pod, "dnsPolicy"); policy != "" && policy != "ClusterFirst" {
+		problems = append(problems, fmt.Sprintf("deployment %q uses DNS policy %s", name, policy))
+	}
+	for _, field := range slices.Sorted(maps.Keys(container)) {
+		if !slices.Contains(kagentV0ContainerFields, field) && field != "command" && field != "envFrom" {
+			problems = append(problems, fmt.Sprintf("deployment %q sets container field %s", name, field))
+		}
+	}
+	for _, probe := range []string{"readinessProbe", "livenessProbe", "startupProbe"} {
+		if kagentMap(container, probe, "exec") != nil {
+			problems = append(problems, fmt.Sprintf("deployment %q runs a command in its %s", name, probe))
+		}
+	}
+	if command, _ := container["command"].([]any); len(command) != 0 {
+		problems = append(problems, fmt.Sprintf("deployment %q overrides the container command", name))
+	}
+	if !kagentV0Arguments(container) {
+		problems = append(problems, fmt.Sprintf("deployment %q does not run kagent's arguments (--host, --port 8080, --filepath /config)", name))
+	}
+	if envFrom, _ := container["envFrom"].([]any); len(envFrom) != 0 {
+		problems = append(problems, fmt.Sprintf("deployment %q loads environment from envFrom", name))
+	}
+	env, _ := container["env"].([]any)
+	persists := false
+	for _, raw := range env {
+		entry, _ := raw.(map[string]any)
+		persists = persists || kagentString(entry, cliNameKey) == kagentV0EnvURL
+		if problem := kagentV0EnvProblem(entry, namespace, name, controller); problem != "" {
+			problems = append(problems, fmt.Sprintf("deployment %q %s", name, problem))
+		}
+	}
+	if !persists {
+		// Without KAGENT_URL the runtime keeps sessions and tasks in memory,
+		// where neither the broker nor Orka can see them.
+		problems = append(problems, fmt.Sprintf("deployment %q persists sessions to a controller other than --control-plane-url", name))
+	}
+	return append(problems, kagentV0MountProblems(pod, container, name)...)
+}
+
+const kagentFieldSecurityContext = "securityContext"
+
+// kagentV0PodFields and kagentV0ContainerFields are the fields kagent v0.10
+// renders into an Agent's pod, plus placement-only settings.
+var (
+	kagentV0PodFields = []string{"containers", "volumes", "dnsPolicy", "restartPolicy", "schedulerName", kagentFieldSecurityContext,
+		"serviceAccount", "serviceAccountName", "terminationGracePeriodSeconds", "imagePullSecrets", "nodeSelector", "tolerations", "affinity"}
+	kagentV0ContainerFields = []string{"name", "image", "imagePullPolicy", "args", "env", "ports", "readinessProbe", "livenessProbe",
+		"startupProbe", "resources", "terminationMessagePath", "terminationMessagePolicy", "volumeMounts", kagentFieldSecurityContext}
+)
+
+// kagentV0Arguments reports whether the container runs exactly kagent's
+// arguments: a bind host, port 8080, and the config at /config.
+func kagentV0Arguments(container map[string]any) bool {
+	args, _ := container["args"].([]any)
+	flags := map[string]string{}
+	for i := 0; i+1 < len(args); i += 2 {
+		flag, _ := args[i].(string)
+		value, _ := args[i+1].(string)
+		flags[flag] = value
+	}
+	return len(args)%2 == 0 && len(flags) == 3 && len(args) == 6 &&
+		flags["--host"] != "" && flags["--port"] == "8080" && flags["--filepath"] == "/config"
+}
+
+// kagentV0EnvProblem describes what is wrong with one environment entry, or
+// returns "" when it is one kagent renders with a value the import verifies.
+func kagentV0EnvProblem(entry map[string]any, namespace, name, controller string) string {
+	variable := kagentString(entry, cliNameKey)
+	value, literal := entry["value"].(string)
+	// kagent renders the namespace through the downward API.
+	ownNamespace := variable == kagentV0EnvNamespace && !literal && len(kagentMap(entry, "valueFrom")) == 1 &&
+		len(kagentMap(entry, "valueFrom", "fieldRef")) > 0 && kagentString(entry, "valueFrom", "fieldRef", "fieldPath") == "metadata.namespace"
+	switch {
+	case !slices.Contains(kagentV0WorkloadEnv, variable):
+		return "sets environment variable " + variable
+	case ownNamespace:
+		return ""
+	case !literal || entry["valueFrom"] != nil:
+		return "takes " + variable + " from another source"
+	case variable == kagentV0EnvNamespace && value != namespace, variable == kagentV0EnvName && value != name:
+		return "sets " + variable + " to another Agent"
+	case variable == kagentV0EnvURL && !kagentSameService(value, controller):
+		return "persists sessions to a controller other than --control-plane-url"
+	}
+	return ""
+}
+
+// kagentV0MountProblems requires the config Secret named after the Agent at
+// /config, mounted whole, and allows only kagent's projected token besides
+// it. A key projection (items) or a subPath could put another key where the
+// runtime reads /config/config.json.
+func kagentV0MountProblems(pod, container map[string]any, name string) []string {
+	volumes := map[string]map[string]any{}
+	rawVolumes, _ := pod["volumes"].([]any)
+	for _, raw := range rawVolumes {
+		volume, _ := raw.(map[string]any)
+		volumes[kagentString(volume, cliNameKey)] = volume
+	}
+	mounts, _ := container["volumeMounts"].([]any)
+	var problems []string
+	config := false
+	for _, raw := range mounts {
+		mount, _ := raw.(map[string]any)
+		volume := volumes[kagentString(mount, cliNameKey)]
+		items, _ := kagentMap(volume, "secret")["items"].([]any)
+		whole := len(items) == 0 && kagentString(mount, "subPath") == "" && kagentString(mount, "subPathExpr") == ""
+		switch path := kagentString(mount, "mountPath"); {
+		case path == "/config" && kagentString(volume, "secret", "secretName") == name && whole:
+			config = true
+		case path == "/var/run/secrets/tokens" && kagentMap(volume, "projected") != nil:
+		default:
+			problems = append(problems, fmt.Sprintf("deployment %q mounts %s", name, path))
+		}
+	}
+	if !config {
+		problems = append(problems, fmt.Sprintf("deployment %q does not load its config from Secret %q at /config", name, name))
+	}
+	return problems
+}
+
+// kagentSameService reports whether two in-cluster URLs name the same
+// Service and port, however much of the cluster domain each spells out.
+func kagentSameService(a, b string) bool {
+	normalize := func(raw string) (string, bool) {
+		u, err := url.Parse(raw)
+		if err != nil || u.Host == "" || u.User != nil || !kagentHTTPScheme(u.Scheme) {
+			return "", false
+		}
+		host := strings.TrimSuffix(strings.TrimSuffix(strings.ToLower(u.Hostname()), ".cluster.local"), ".svc")
+		port := u.Port()
+		if port == "" {
+			port = "80"
+			if u.Scheme == "https" {
+				port = "443"
+			}
+		}
+		return u.Scheme + "://" + host + ":" + port, true
+	}
+	left, ok := normalize(a)
+	right, ok2 := normalize(b)
+	return ok && ok2 && left == right
+}
+
 func kagentV0ContainerImage(deployment map[string]any) string {
 	containers, _ := kagentMap(deployment, kagentFieldSpec, "template", kagentFieldSpec)["containers"].([]any)
 	for _, raw := range containers {

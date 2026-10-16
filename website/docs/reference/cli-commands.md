@@ -219,8 +219,12 @@ compiled configuration in its config Secret (named after the Agent), which
 with its ModelConfig's status.secretHash must hash to the pinned value: its
 model passes the caller's bearer through
 to the relay's /v1, and every tool server is the relay's /mcp and forwards
-Authorization. That Secret holds any static tool headers in plain text, so
-include it only for Agents you mean to govern. v0 has no compiled revisions,
+Authorization. Its Deployment must load that configuration as kagent renders
+it, and persist sessions to the controller named by --control-plane-url; this
+is checked at import, so only kagent's controller may change Agent Deployments
+afterwards. That
+Secret holds any static tool headers in plain text, so include it only for
+Agents you mean to govern. v0 has no compiled revisions,
 so --revision-egress and --revision-sources do not apply. Dispatch control
 requires the agents' Services to admit only kagent's controller, and the
 controller to admit only the wrapper brokers and the wrapped Agents.
@@ -268,7 +272,7 @@ Usage:
 
 Flags:
       --accepted-egress stringArray   Origin a governed revision may reach besides its relay, such as the runtime control-plane filter (repeatable)
-      --control-plane-url string      kagent controller base URL the wrapper calls (with --wrapper-config-dir)
+      --control-plane-url string      kagent controller base URL the wrapper calls (with --wrapper-config-dir); a governed kagent v0 Agent must persist sessions there
       --dry-run                       Print the Orka Agent manifests instead of creating them
   -f, --file string                   Path to kagent Agent YAML/JSON (use - for stdin)
   -h, --help                          help for kagent

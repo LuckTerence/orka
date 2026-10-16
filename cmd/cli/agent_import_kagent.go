@@ -111,8 +111,12 @@ compiled configuration in its config Secret (named after the Agent), which
 with its ModelConfig's status.secretHash must hash to the pinned value: its
 model passes the caller's bearer through
 to the relay's /v1, and every tool server is the relay's /mcp and forwards
-Authorization. That Secret holds any static tool headers in plain text, so
-include it only for Agents you mean to govern. v0 has no compiled revisions,
+Authorization. Its Deployment must load that configuration as kagent renders
+it, and persist sessions to the controller named by --control-plane-url; this
+is checked at import, so only kagent's controller may change Agent Deployments
+afterwards. That
+Secret holds any static tool headers in plain text, so include it only for
+Agents you mean to govern. v0 has no compiled revisions,
 so --revision-egress and --revision-sources do not apply. Dispatch control
 requires the agents' Services to admit only kagent's controller, and the
 controller to admit only the wrapper brokers and the wrapped Agents.
@@ -156,6 +160,7 @@ and refuses everything else, listing every problem:
 				if evidence, err = readKagentRevisionEvidence(egressFile, sourcesFile, acceptedEgress); err != nil {
 					return err
 				}
+				evidence.Controller = wrapper.ControlPlaneURL
 				wrapped, skipped, err = wrapKagentAgents(data, relayURL, evidence)
 			}
 			if err != nil {
@@ -194,7 +199,7 @@ and refuses everything else, listing every problem:
 	cmd.Flags().StringArrayVar(&toolMappings, "tool", nil, "With --translate, map a kagent MCP tool to an existing Orka Tool: <RemoteMCPServer>/<tool>=<Orka Tool> (repeatable)")
 	cmd.Flags().StringVar(&translateOptions.ProviderRef, "provider-ref", "", "With --translate, the Orka Provider serving models that use a custom endpoint")
 	cmd.Flags().StringVar(&wrapper.Dir, "wrapper-config-dir", "", "Write each Agent's wrapper configuration (<name>.kagent.json) to this directory")
-	cmd.Flags().StringVar(&wrapper.ControlPlaneURL, "control-plane-url", "", "kagent controller base URL the wrapper calls (with --wrapper-config-dir)")
+	cmd.Flags().StringVar(&wrapper.ControlPlaneURL, "control-plane-url", "", "kagent controller base URL the wrapper calls (with --wrapper-config-dir); a governed kagent v0 Agent must persist sessions there")
 	cmd.Flags().StringVar(&wrapper.UserIDPrefix, "user-id-prefix", "orka", "Prefix of the per-session kagent user identity (with --wrapper-config-dir)")
 	cmd.Flags().StringVar(&wrapper.UpstreamURL, "model-upstream-url", "", "OpenAI-compatible base URL the relay serves governed Agents from")
 	cmd.Flags().StringVar(&wrapper.UpstreamModel, "model-upstream-model", "", "Model the relay calls for governed Agents")
@@ -277,7 +282,7 @@ func wrapKagentAgents(data []byte, relayURL string, evidence kagentRevisionEvide
 			if problems := kagentV0WrapRefusals(source.Object, deployment); len(problems) > 0 {
 				return nil, "", fmt.Errorf("kagent Agent %s cannot be wrapped: %s", agent.Source, strings.Join(problems, "; "))
 			}
-			agent.Mode = classifyKagentV0Agent(source.Object, v0, relay)
+			agent.Mode = classifyKagentV0Agent(source.Object, v0, relay, evidence.Controller)
 		} else {
 			if problems := kagentV1WrapRefusals(source.Object, related[kagentV1APIVersion], agent.SourceNamespace); len(problems) > 0 {
 				return nil, "", fmt.Errorf("kagent Agent %s cannot be wrapped: %s", agent.Source, strings.Join(problems, "; "))

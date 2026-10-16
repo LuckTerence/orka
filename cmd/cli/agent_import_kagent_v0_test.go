@@ -66,7 +66,20 @@ spec:
       annotations: {kagent.dev/config-hash: "{{HASH}}"}
     spec:
       containers:
-      - {name: kagent, image: "cr.kagent.dev/kagent-dev/kagent/golang-adk:0.10.3"}
+      - name: kagent
+        image: "cr.kagent.dev/kagent-dev/kagent/golang-adk:0.10.3"
+        args: ["--host", "0.0.0.0", "--port", "8080", "--filepath", "/config"]
+        env:
+        - {name: OTEL_TRACING_ENABLED, value: "false"}
+        - {name: KAGENT_NAMESPACE, valueFrom: {fieldRef: {apiVersion: v1, fieldPath: metadata.namespace}}}
+        - {name: KAGENT_NAME, value: probe-gov}
+        - {name: KAGENT_URL, value: "http://kagent-controller.kagent:8083"}
+        volumeMounts:
+        - {name: config, mountPath: /config}
+        - {name: kagent-token, mountPath: /var/run/secrets/tokens}
+      volumes:
+      - {name: config, secret: {secretName: probe-gov}}
+      - {name: kagent-token, projected: {sources: [{serviceAccountToken: {audience: kagent, path: kagent-token}}]}}
 status: {observedGeneration: 4, replicas: 1, updatedReplicas: 1, availableReplicas: 1}
 ---
 apiVersion: kagent.dev/v1alpha2
@@ -94,9 +107,13 @@ var governedKagentV0Fixture = governedV0Input(governedV0Config, governedV0Hash)
 
 const governedV0Relay = "http://probe-gov-relay.orka-system.svc:8092"
 
+// v0Controller is the --control-plane-url the v0 fixtures persist to; kagent
+// renders the same Service as http://kagent-controller.kagent:8083.
+const v0Controller = "http://kagent-controller.kagent.svc:8083"
+
 func classifyV0Fixture(t *testing.T, fixture, relay string) kagentMode {
 	t.Helper()
-	wrapped, _, err := wrapKagentAgents([]byte(fixture), relay, kagentRevisionEvidence{})
+	wrapped, _, err := wrapKagentAgents([]byte(fixture), relay, kagentRevisionEvidence{Controller: v0Controller})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -210,6 +227,38 @@ func TestClassifyKagentV0AgentReadsTheCompiledConfiguration(t *testing.T) {
 		strings.Contains(strings.Join(mode.Reasons, ";"), "s3cret") || strings.Contains(strings.Join(mode.Reasons, ";"), "t0ken") {
 		t.Fatalf("a credential-bearing tool URL reached the reasons: %+v", mode)
 	}
+	// The Deployment must load the configuration the import judged, as kagent
+	// renders it.
+	for name, test := range map[string]struct{ old, new, reason string }{
+		"other config":     {"secret: {secretName: probe-gov}", "secret: {secretName: elsewhere}", `does not load its config from Secret "probe-gov"`},
+		"remapped key":     {"secret: {secretName: probe-gov}", "secret: {secretName: probe-gov, items: [{key: alternate.json, path: config.json}]}", "does not load its config from Secret"},
+		"sub path":         {"        - {name: config, mountPath: /config}", "        - {name: config, mountPath: /config, subPath: alternate}", "does not load its config from Secret"},
+		"other file":       {`"--filepath", "/config"`, `"--filepath", "/other"`, "does not run kagent's arguments"},
+		"extra argument":   {`"/config"]`, `"/config", "--verbose", "1"]`, "does not run kagent's arguments"},
+		"command override": {"        args: [", "        command: [/bin/sh]\n        args: [", "overrides the container command"},
+		"sts environment":  {"        - {name: KAGENT_NAME, value: probe-gov}", "        - {name: STS_WELL_KNOWN_URI, value: http://sts}\n        - {name: KAGENT_NAME, value: probe-gov}", "sets environment variable STS_WELL_KNOWN_URI"},
+		"other field":      {"fieldPath: metadata.namespace", "fieldPath: metadata.name", "takes KAGENT_NAMESPACE from another source"},
+		"environment from": {"        volumeMounts:", "        envFrom: [{secretRef: {name: extra}}]\n        volumeMounts:", "loads environment from envFrom"},
+		"extra mount":      {"        - {name: kagent-token, mountPath: /var/run/secrets/tokens}", "        - {name: kagent-token, mountPath: /var/run/secrets/tokens}\n        - {name: config, mountPath: /skills}", "mounts /skills"},
+		"sidecar":          {"      volumes:", "      - {name: proxy, image: example.com/proxy:1}\n      volumes:", "runs containers besides kagent's"},
+		"host aliases":     {"      volumes:", "      hostAliases: [{ip: 203.0.113.9, hostnames: [probe-gov-relay.orka-system.svc]}]\n      volumes:", "sets pod field hostAliases"},
+		"dns override":     {"      volumes:", "      dnsPolicy: None\n      volumes:", "uses DNS policy None"},
+		"lifecycle hook":   {"        volumeMounts:", "        lifecycle: {postStart: {exec: {command: [sh]}}}\n        volumeMounts:", "sets container field lifecycle"},
+		"exec probe":       {"        volumeMounts:", "        readinessProbe: {exec: {command: [sh]}}\n        volumeMounts:", "runs a command in its readinessProbe"},
+		"no persistence":   {`        - {name: KAGENT_URL, value: "http://kagent-controller.kagent:8083"}` + "\n", "", "persists sessions to a controller other than --control-plane-url"},
+		"other controller": {`value: "http://kagent-controller.kagent:8083"`, `value: "http://collector.example.com:8083"`, "persists sessions to a controller other than --control-plane-url"},
+		"other Agent name": {"{name: KAGENT_NAME, value: probe-gov}", "{name: KAGENT_NAME, value: probe}", "sets KAGENT_NAME to another Agent"},
+		"indirect value":   {`{name: KAGENT_URL, value: "http://kagent-controller.kagent:8083"}`, "{name: KAGENT_URL, valueFrom: {configMapKeyRef: {name: c, key: k}}}", "takes KAGENT_URL from another source"},
+		"telemetry export": {`        - {name: OTEL_TRACING_ENABLED, value: "false"}`, `        - {name: OTEL_TRACING_ENABLED, value: "false"}` + "\n" + `        - {name: OTEL_EXPORTER_OTLP_ENDPOINT, value: "http://collector.example.com:4317"}`, "sets environment variable OTEL_EXPORTER_OTLP_ENDPOINT"},
+	} {
+		changed := strings.Replace(governedKagentV0Fixture, test.old, test.new, 1)
+		if changed == governedKagentV0Fixture {
+			t.Fatalf("%s: fixture has no %q", name, test.old)
+		}
+		if mode := classifyV0Fixture(t, changed, governedRelay); mode.Mode != kagentModeObserved || !strings.Contains(strings.Join(mode.Reasons, "; "), test.reason) {
+			t.Errorf("%s: mode = %+v, want observed because %s", name, mode, test.reason)
+		}
+	}
 	// What is outside the compiled configuration still counts.
 	for name, test := range map[string]struct{ old, new, reason string }{
 		"skills":         {"  type: Declarative\n", "  type: Declarative\n  skills: {refs: [ghcr.io/x/skills:1]}\n", "loads skills"},
@@ -321,7 +370,7 @@ func TestWrapKagentV0AgentsRefusesRuntimesTheWrapperCannotRun(t *testing.T) {
 
 func TestImportKagentAgentsKeepsEachVersionsObjectsApart(t *testing.T) {
 	mixed := governedKagentV0Fixture + "---\napiVersion: api.kagent.dev/v1alpha3\nkind: Agent\nmetadata: {name: v1-agent, namespace: kagent}\n"
-	wrapped, _, err := wrapKagentAgents([]byte(mixed), governedRelay, kagentRevisionEvidence{})
+	wrapped, _, err := wrapKagentAgents([]byte(mixed), governedRelay, kagentRevisionEvidence{Controller: v0Controller})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -475,5 +524,25 @@ func TestTranslateKagentV0AgentsRefusesEverythingItCannotMap(t *testing.T) {
 	if _, _, err := translateKagentAgents([]byte(strings.Replace(translatableKagentV0Fixture, "type: Declarative", "type: BYO", 1)), kagentTranslateOptions{}); err == nil ||
 		!strings.Contains(err.Error(), "it is a \"BYO\" Agent; only Declarative Agents translate") {
 		t.Fatalf("BYO Agent error = %v", err)
+	}
+}
+
+func TestKagentV0GovernedNeedsTheControllerItPersistsTo(t *testing.T) {
+	wrapped, _, err := wrapKagentAgents([]byte(governedKagentV0Fixture), governedRelay, kagentRevisionEvidence{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode := wrapped[0].Mode; mode.Mode != kagentModeObserved || !strings.Contains(strings.Join(mode.Reasons, ";"), "persists sessions to a controller other than --control-plane-url") {
+		t.Fatalf("a v0 Agent was governed without --control-plane-url: %+v", mode)
+	}
+	for _, same := range []string{"http://kagent-controller.kagent:8083", "http://kagent-controller.kagent.svc.cluster.local:8083/"} {
+		if !kagentSameService(same, v0Controller) {
+			t.Errorf("%s does not match %s", same, v0Controller)
+		}
+	}
+	for _, other := range []string{"http://kagent-controller.kagent:8084", "https://kagent-controller.kagent:8083", "http://kagent-controller.other:8083", "http://user:pass@kagent-controller.kagent:8083"} {
+		if kagentSameService(other, v0Controller) {
+			t.Errorf("%s matched %s", other, v0Controller)
+		}
 	}
 }

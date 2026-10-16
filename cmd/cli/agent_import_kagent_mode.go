@@ -73,6 +73,9 @@ type kagentRevisionEvidence struct {
 	// Accepted are origins a governed revision may reach besides its relay,
 	// such as the runtime control-plane filter.
 	Accepted []string
+	// Controller is the kagent controller URL (--control-plane-url). A
+	// governed v0 Agent must persist its sessions there.
+	Controller string
 }
 
 // kagentRevisionSource is the part of a revision's source snapshot
