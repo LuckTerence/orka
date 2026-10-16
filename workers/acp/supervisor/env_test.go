@@ -761,6 +761,13 @@ func TestLoadConfigFromEnv(t *testing.T) {
 		t.Fatalf("kagent brokered approval qualification error = %v", err)
 	}
 	t.Setenv(EnvBrokeredToolApprovalProfileDigest, "")
+	// The kagent broker speaks the same lifecycle protocol, so it can be
+	// qualified for supervisor restart recovery.
+	t.Setenv(EnvFoundryRecoveryProfileDigest, string(kagentCfg.Fence.RuntimeProfileDigest))
+	if recovered, err := LoadConfigFromEnv(); err != nil || !recovered.Capabilities.SupportsFoundryRecovery {
+		t.Fatalf("kagent recovery qualification was rejected: %v", err)
+	}
+	t.Setenv(EnvFoundryRecoveryProfileDigest, "")
 	t.Setenv(EnvProviderProxyBaseURL, "")
 
 	t.Run("exact profile brokered approval qualification", testLoadConfigFromEnvBrokeredApprovalQualification)

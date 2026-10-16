@@ -191,7 +191,7 @@ func LoadConfigFromEnv() (Config, error) {
 	}
 	foundryRecovery := false
 	if qualifiedDigest := strings.TrimSpace(os.Getenv(EnvFoundryRecoveryProfileDigest)); qualifiedDigest != "" {
-		if providerKind != providerKindFoundry {
+		if !usesLifecycleBroker(providerKind) {
 			return Config{}, fmt.Errorf("%s is unsupported for provider %q", EnvFoundryRecoveryProfileDigest, providerKind)
 		}
 		if err := harnessv2.ValidateProfileDigest(harnessv2.ProfileDigest(qualifiedDigest)); err != nil {
