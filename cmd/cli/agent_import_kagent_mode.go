@@ -24,8 +24,9 @@ import (
 // the tools under its policy and serves the model. Only the ADK harness can
 // be governed: it forwards the turn's bearer to models and MCP servers.
 const (
-	kagentModeObserved = "observed"
-	kagentModeGoverned = "governed"
+	kagentModeObserved   = "observed"
+	kagentModeGoverned   = "governed"
+	kagentModeTranslated = "translated"
 
 	kagentDiscoveryLabel = "kagent.dev/discovery"
 	// The relay may hold a tool call for an Orka approval (up to 15 minutes)
@@ -362,8 +363,11 @@ func writeKagentWrapperConfigs(o kagentWrapperOptions, wrapped []kagentWrappedAg
 }
 
 func describeKagentMode(mode kagentMode) string {
-	if mode.Mode == kagentModeGoverned {
+	switch mode.Mode {
+	case kagentModeGoverned:
 		return "governed via " + mode.RelayOrigin
+	case kagentModeTranslated:
+		return "translated to a native Orka Agent"
 	}
 	return "observed: " + strings.Join(mode.Reasons, "; ")
 }

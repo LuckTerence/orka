@@ -62,7 +62,9 @@ func newAgentImportKagentCmd() *cobra.Command {
 	var dryRun bool
 	var wrapper kagentWrapperOptions
 	var relayURL, egressFile string
-	var acceptedEgress []string
+	var acceptedEgress, toolMappings []string
+	var translate bool
+	var translateOptions kagentTranslateOptions
 	cmd := &cobra.Command{
 		Use:   "kagent -f <file>",
 		Short: "Wrap kagent Agents as Orka Agents",
@@ -86,7 +88,13 @@ Accepts kagent v1 (api.kagent.dev/v1alpha3) Agents, including lists from
 "kubectl get agents -o yaml". Other objects are skipped.
 
 With --wrapper-config-dir, also writes each Agent's wrapper configuration,
-<name>.kagent.json, pinned to the Agent's latest successful revision.`,
+<name>.kagent.json, pinned to the Agent's latest successful revision.
+
+With --translate, converts each kagent Agent into a native Orka Agent that Orka
+runs itself, with no kagent at run time. Translation maps only these fields
+and refuses everything else, listing every problem:
+
+` + kagentTranslationTable,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if file == "" {
@@ -96,11 +104,23 @@ With --wrapper-config-dir, also writes each Agent's wrapper configuration,
 			if err != nil {
 				return fmt.Errorf("reading file: %w", err)
 			}
-			evidence, err := readKagentEgressEvidence(egressFile, acceptedEgress)
-			if err != nil {
-				return err
+			var wrapped []kagentWrappedAgent
+			var skipped string
+			if translate {
+				if wrapper.Dir != "" || relayURL != "" {
+					return fmt.Errorf("--translate creates native Orka Agents; it takes no wrapper or relay flags")
+				}
+				if translateOptions.Tools, err = parseKagentToolMappings(toolMappings); err != nil {
+					return err
+				}
+				wrapped, skipped, err = translateKagentAgents(data, translateOptions)
+			} else {
+				var evidence kagentEgressEvidence
+				if evidence, err = readKagentEgressEvidence(egressFile, acceptedEgress); err != nil {
+					return err
+				}
+				wrapped, skipped, err = wrapKagentAgents(data, relayURL, evidence)
 			}
-			wrapped, skipped, err := wrapKagentAgents(data, relayURL, evidence)
 			if err != nil {
 				return err
 			}
@@ -132,6 +152,9 @@ With --wrapper-config-dir, also writes each Agent's wrapper configuration,
 	cmd.Flags().StringVar(&relayURL, "relay-url", "", "Origin of each Agent's wrapper relay, such as http://{name}-kagent-relay.orka-system.svc:8092; required for governed Agents")
 	cmd.Flags().StringVar(&egressFile, "revision-egress", "", `JSON object mapping each kagent revision to its compiled egress destinations, e.g. {"<revision>": ["http://relay:8092"]}`)
 	cmd.Flags().StringArrayVar(&acceptedEgress, "accepted-egress", nil, "Origin a governed revision may reach besides its relay, such as the runtime control-plane filter (repeatable)")
+	cmd.Flags().BoolVar(&translate, "translate", false, "Convert the kagent Agents into native Orka Agents instead of wrapping them")
+	cmd.Flags().StringArrayVar(&toolMappings, "tool", nil, "With --translate, map a kagent MCP tool to an existing Orka Tool: <RemoteMCPServer>/<tool>=<Orka Tool> (repeatable)")
+	cmd.Flags().StringVar(&translateOptions.ProviderRef, "provider-ref", "", "With --translate, the Orka Provider serving models that use a custom endpoint")
 	cmd.Flags().StringVar(&wrapper.Dir, "wrapper-config-dir", "", "Write each Agent's wrapper configuration (<name>.kagent.json) to this directory")
 	cmd.Flags().StringVar(&wrapper.ControlPlaneURL, "control-plane-url", "", "kagent controller base URL the wrapper calls (with --wrapper-config-dir)")
 	cmd.Flags().StringVar(&wrapper.UserIDPrefix, "user-id-prefix", "orka", "Prefix of the per-session kagent user identity (with --wrapper-config-dir)")
@@ -143,13 +166,21 @@ With --wrapper-config-dir, also writes each Agent's wrapper configuration,
 // wrapKagentAgents converts every kagent Agent in a YAML/JSON stream into an
 // Orka Agent whose runtime is a per-agent AgentRuntime. It returns the other
 // object kinds it skipped as a summary.
-func wrapKagentAgents(data []byte, relayURL string, evidence kagentEgressEvidence) ([]kagentWrappedAgent, string, error) {
+// kagentSourceAgent is one kagent Agent read from the input.
+type kagentSourceAgent struct {
+	APIVersion string
+	Object     map[string]any
+	Wrapped    kagentWrappedAgent
+}
+
+// collectKagentAgents decodes the input, keeps kagent v1 Agents, and indexes
+// the related kagent objects. It returns a summary of the kinds it skipped.
+func collectKagentAgents(data []byte) ([]kagentSourceAgent, kagentObjects, string, error) {
 	objects, err := decodeKubernetesObjects(data)
 	if err != nil {
-		return nil, "", err
+		return nil, nil, "", err
 	}
-	related := indexKagentObjects(objects)
-	var wrapped []kagentWrappedAgent
+	var agents []kagentSourceAgent
 	skipped := map[string]int{}
 	byName := map[string]string{}
 	for _, obj := range objects {
@@ -160,28 +191,70 @@ func wrapKagentAgents(data []byte, relayURL string, evidence kagentEgressEvidenc
 			continue
 		}
 		if apiVersion != kagentV1APIVersion {
-			return nil, "", fmt.Errorf("unsupported kagent Agent version %q: only kagent v1 (%s) Agents can be wrapped", apiVersion, kagentV1APIVersion)
+			return nil, nil, "", fmt.Errorf("unsupported kagent Agent version %q: only kagent v1 (%s) Agents can be wrapped", apiVersion, kagentV1APIVersion)
 		}
 		agent, err := wrapKagentAgent(apiVersion, obj)
 		if err != nil {
-			return nil, "", err
+			return nil, nil, "", err
 		}
+		name := metadataName(agent.Manifest)
+		if previous, ok := byName[name]; ok {
+			return nil, nil, "", fmt.Errorf("kagent Agents %s and %s would both become Orka Agent %q; import them into different namespaces", previous, agent.Source, name)
+		}
+		byName[name] = agent.Source
+		agents = append(agents, kagentSourceAgent{APIVersion: apiVersion, Object: obj, Wrapped: agent})
+	}
+	if len(agents) == 0 {
+		return nil, nil, "", fmt.Errorf("no kagent Agents found (expected %s kind Agent)", kagentV1APIVersion)
+	}
+	return agents, indexKagentObjects(objects), summarizeSkipped(skipped), nil
+}
+
+// wrapKagentAgents wraps every kagent v1 Agent in the input as an Orka Agent
+// whose runtime is a per-agent AgentRuntime, and classifies its mode.
+func wrapKagentAgents(data []byte, relayURL string, evidence kagentEgressEvidence) ([]kagentWrappedAgent, string, error) {
+	agents, related, skipped, err := collectKagentAgents(data)
+	if err != nil {
+		return nil, "", err
+	}
+	wrapped := make([]kagentWrappedAgent, 0, len(agents))
+	for _, source := range agents {
+		agent := source.Wrapped
 		relay, err := kagentRelayOrigin(relayURL, metadataName(agent.Manifest))
 		if err != nil {
 			return nil, "", err
 		}
-		agent.Mode = classifyKagentAgent(obj, related, relay, evidence)
-		name := metadataName(agent.Manifest)
-		if previous, ok := byName[name]; ok {
-			return nil, "", fmt.Errorf("kagent Agents %s and %s would both become Orka Agent %q; import them into different namespaces", previous, agent.Source, name)
-		}
-		byName[name] = agent.Source
+		agent.Mode = classifyKagentAgent(source.Object, related, relay, evidence)
 		wrapped = append(wrapped, agent)
 	}
-	if len(wrapped) == 0 {
-		return nil, "", fmt.Errorf("no kagent Agents found (expected api.kagent.dev/v1alpha3 or kagent.dev/v1alpha2 kind Agent)")
+	return wrapped, skipped, nil
+}
+
+// translateKagentAgents converts every kagent v1 Agent into a native Orka
+// Agent. It refuses the whole input if any field of any Agent cannot be
+// translated, listing every problem.
+func translateKagentAgents(data []byte, options kagentTranslateOptions) ([]kagentWrappedAgent, string, error) {
+	agents, related, skipped, err := collectKagentAgents(data)
+	if err != nil {
+		return nil, "", err
 	}
-	return wrapped, summarizeSkipped(skipped), nil
+	translated := make([]kagentWrappedAgent, 0, len(agents))
+	var refusals []string
+	for _, source := range agents {
+		spec, problems := translateKagentAgent(source.Object, related, options)
+		if len(problems) > 0 {
+			refusals = append(refusals, fmt.Sprintf("kagent Agent %s: %s", source.Wrapped.Source, strings.Join(problems, "; ")))
+			continue
+		}
+		agent := source.Wrapped
+		agent.Manifest = translatedKagentAgent(source.APIVersion, agent.Source, metadataName(agent.Manifest), spec)
+		agent.RuntimeName, agent.Mode = "", kagentMode{Mode: kagentModeTranslated}
+		translated = append(translated, agent)
+	}
+	if len(refusals) > 0 {
+		return nil, "", fmt.Errorf("cannot translate:\n  %s\n\nTranslation maps only these fields:\n%s", strings.Join(refusals, "\n  "), kagentTranslationTable)
+	}
+	return translated, skipped, nil
 }
 
 func wrapKagentAgent(apiVersion string, obj map[string]any) (kagentWrappedAgent, error) {
@@ -489,6 +562,10 @@ func reconcileKagentWrappedAgents(cmd *cobra.Command, wrapped []kagentWrappedAge
 				}
 				action = "updated"
 			}
+		}
+		if agent.RuntimeName == "" {
+			fmt.Fprintf(out, "Agent %s: %s (from kagent Agent %s; %s)\n", action, name, agent.Source, describeKagentMode(agent.Mode)) //nolint:errcheck
+			continue
 		}
 		fmt.Fprintf(out, "Agent %s: %s (wraps kagent Agent %s; %s; needs AgentRuntime %s)\n", action, name, agent.Source, describeKagentMode(agent.Mode), agent.RuntimeName) //nolint:errcheck
 	}

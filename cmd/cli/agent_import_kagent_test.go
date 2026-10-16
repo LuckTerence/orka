@@ -614,3 +614,116 @@ func TestAgentImportKagentCmdWritesDeterministicWrapperConfig(t *testing.T) {
 		t.Fatalf("unpinned Agent error = %v", err)
 	}
 }
+
+const translatableKagentFixture = `apiVersion: api.kagent.dev/v1alpha3
+kind: Harness
+metadata: {name: kagent, namespace: kagent}
+spec: {kagent: {}}
+---
+apiVersion: api.kagent.dev/v1alpha3
+kind: ModelConfig
+metadata: {name: gpt, namespace: kagent}
+spec:
+  provider: OpenAI
+  model: gpt-4.1
+  apiKeySecret: openai-key
+  apiKeySecretKey: key
+  openAI: {temperature: "0.2", maxTokens: 1024}
+---
+apiVersion: api.kagent.dev/v1alpha3
+kind: Agent
+metadata: {name: k8s-agent, namespace: kagent}
+spec:
+  harnessRef: {name: kagent}
+  template:
+    inline:
+      description: Answers Kubernetes questions.
+      systemPrompt: You are a Kubernetes expert.
+      modelConfig: {name: gpt}
+      tools:
+      - mcp:
+          server: {kind: RemoteMCPServer, name: k8s}
+          tools: [list_pods]
+`
+
+func TestTranslateKagentAgentsMapsOnlyKnownFields(t *testing.T) {
+	translated, _, err := translateKagentAgents([]byte(translatableKagentFixture), kagentTranslateOptions{Tools: map[string]string{"k8s/list_pods": "k8s-list-pods"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent := decodeWrappedAgent(t, translated[0].Manifest)
+	if agent.Spec.Runtime != nil || agent.Spec.SystemPrompt == nil || agent.Spec.SystemPrompt.Inline != "You are a Kubernetes expert." ||
+		agent.Spec.Model == nil || agent.Spec.Model.Provider != "openai" || agent.Spec.Model.Name != "gpt-4.1" ||
+		agent.Spec.Model.Temperature == nil || *agent.Spec.Model.Temperature != 0.2 || agent.Spec.Model.MaxTokens == nil || *agent.Spec.Model.MaxTokens != 1024 ||
+		len(agent.Spec.Tools) != 1 || agent.Spec.Tools[0].Name != "k8s-list-pods" || agent.Spec.ProviderRef != nil {
+		t.Fatalf("translated spec = %+v", agent.Spec)
+	}
+	if translated[0].RuntimeName != "" || translated[0].Mode.Mode != kagentModeTranslated {
+		t.Fatalf("translated agent = %+v", translated[0])
+	}
+}
+
+func TestTranslateKagentAgentsRefusesEverythingItCannotMap(t *testing.T) {
+	second := strings.NewReplacer("name: k8s-agent", "name: helm-agent", "modelConfig: {name: gpt}", "modelConfig: {name: bedrock}").
+		Replace(strings.SplitAfterN(translatableKagentFixture, "---\n", 3)[2])
+	input := strings.Replace(translatableKagentFixture, "spec: {kagent: {}}", "spec: {kagent: {memory: {}}}", 1) +
+		"---\n" + second + `---
+apiVersion: api.kagent.dev/v1alpha3
+kind: ModelConfig
+metadata: {name: bedrock, namespace: kagent}
+spec: {provider: Bedrock, model: claude}
+`
+	input = strings.Replace(input, "      modelConfig: {name: gpt}\n", "      modelConfig: {name: gpt}\n      skills: [{name: s}]\n", 1)
+	_, _, err := translateKagentAgents([]byte(input), kagentTranslateOptions{})
+	if err == nil {
+		t.Fatal("an untranslatable Agent was accepted")
+	}
+	for _, want := range []string{
+		"kagent Agent kagent/k8s-agent", "kagent Agent kagent/helm-agent", "uses memory", `template field "skills" has no Orka equivalent`,
+		"tool k8s/list_pods has no Orka Tool", `uses provider "Bedrock"`, "Translation maps only these fields",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error does not mention %q:\n%v", want, err)
+		}
+	}
+}
+
+func TestTranslateKagentAgentsNeedsAProviderForCustomEndpoints(t *testing.T) {
+	custom := strings.Replace(translatableKagentFixture, `openAI: {temperature: "0.2", maxTokens: 1024}`, `openAI: {baseUrl: "http://vekil:8080/v1"}`, 1)
+	tools := map[string]string{"k8s/list_pods": "k8s-list-pods"}
+	if _, _, err := translateKagentAgents([]byte(custom), kagentTranslateOptions{Tools: tools}); err == nil || !strings.Contains(err.Error(), "--provider-ref") {
+		t.Fatalf("custom endpoint without a provider = %v", err)
+	}
+	translated, _, err := translateKagentAgents([]byte(custom), kagentTranslateOptions{Tools: tools, ProviderRef: "vekil"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if agent := decodeWrappedAgent(t, translated[0].Manifest); agent.Spec.ProviderRef == nil || agent.Spec.ProviderRef.Name != "vekil" {
+		t.Fatalf("providerRef = %+v", agent.Spec.ProviderRef)
+	}
+}
+
+func TestAgentImportKagentCmdTranslateTakesNoWrapperFlags(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	path := filepath.Join(t.TempDir(), "agents.yaml")
+	if err := os.WriteFile(path, []byte(translatableKagentFixture), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runKagentImport(t, "-f", path, "--translate", "--dry-run", "--relay-url", "http://relay:8092"); err == nil {
+		t.Fatal("--translate accepted a relay")
+	}
+	if _, err := runKagentImport(t, "-f", path, "--translate", "--dry-run", "--tool", "k8s-list_pods"); err == nil || !strings.Contains(err.Error(), "<RemoteMCPServer>/<tool>=<Orka Tool>") {
+		t.Fatalf("malformed --tool = %v", err)
+	}
+	out, err := runKagentImport(t, "-f", path, "--translate", "--dry-run", "--tool", "k8s/list_pods=k8s-list-pods")
+	if err != nil {
+		t.Fatal(err)
+	}
+	objects, err := decodeKubernetesObjects([]byte(out))
+	if err != nil || len(objects) != 1 {
+		t.Fatalf("dry run = %q %v", out, err)
+	}
+	if agent := decodeWrappedAgent(t, objects[0]); agent.Spec.Runtime != nil || agent.Spec.Model == nil {
+		t.Fatalf("dry-run Agent = %+v", agent.Spec)
+	}
+}

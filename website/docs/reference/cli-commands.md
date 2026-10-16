@@ -206,6 +206,22 @@ Accepts kagent v1 (api.kagent.dev/v1alpha3) Agents, including lists from
 With --wrapper-config-dir, also writes each Agent's wrapper configuration,
 <name>.kagent.json, pinned to the Agent's latest successful revision.
 
+With --translate, converts each kagent Agent into a native Orka Agent that Orka
+runs itself, with no kagent at run time. Translation maps only these fields
+and refuses everything else, listing every problem:
+
+  kagent                                  Orka Agent
+  template.inline.systemPrompt            spec.systemPrompt.inline
+  template.inline.systemPromptFrom        spec.systemPrompt.configMapRef
+  ModelConfig provider OpenAI/Anthropic   spec.model.provider openai/anthropic
+  ModelConfig model                       spec.model.name
+  ModelConfig openAI|anthropic
+    .temperature / .maxTokens             spec.model.temperature / .maxTokens
+  ModelConfig with a custom baseUrl       spec.providerRef (--provider-ref)
+  MCP tool <server>/<tool>                spec.tools (--tool <server>/<tool>=<Orka Tool>)
+  template.inline.description             not carried; Orka Agents have no description
+  ModelConfig apiKeySecret                not carried; Orka uses its own provider credentials
+
 Usage:
   orka agent import kagent -f <file> [flags]
 
@@ -217,8 +233,11 @@ Flags:
   -h, --help                          help for kagent
       --model-upstream-model string   Model the relay calls for governed Agents
       --model-upstream-url string     OpenAI-compatible base URL the relay serves governed Agents from
+      --provider-ref string           With --translate, the Orka Provider serving models that use a custom endpoint
       --relay-url string              Origin of each Agent's wrapper relay, such as http://{name}-kagent-relay.orka-system.svc:8092; required for governed Agents
       --revision-egress string        JSON object mapping each kagent revision to its compiled egress destinations, e.g. {"<revision>": ["http://relay:8092"]}
+      --tool stringArray              With --translate, map a kagent MCP tool to an existing Orka Tool: <RemoteMCPServer>/<tool>=<Orka Tool> (repeatable)
+      --translate                     Convert the kagent Agents into native Orka Agents instead of wrapping them
       --user-id-prefix string         Prefix of the per-session kagent user identity (with --wrapper-config-dir) (default "orka")
       --wrapper-config-dir string     Write each Agent's wrapper configuration (<name>.kagent.json) to this directory
 

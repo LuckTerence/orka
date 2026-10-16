@@ -1,0 +1,219 @@
+/*
+Copyright (c) 2026.
+
+MIT License - see LICENSE file for details.
+*/
+
+package main
+
+import (
+	"fmt"
+	"sort"
+	"strconv"
+	"strings"
+
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+)
+
+// kagentTranslationTable documents how translate mode maps a kagent v1 Agent
+// onto a native Orka Agent. Every other field is refused rather than dropped.
+const kagentTranslationTable = `  kagent                                  Orka Agent
+  template.inline.systemPrompt            spec.systemPrompt.inline
+  template.inline.systemPromptFrom        spec.systemPrompt.configMapRef
+  ModelConfig provider OpenAI/Anthropic   spec.model.provider openai/anthropic
+  ModelConfig model                       spec.model.name
+  ModelConfig openAI|anthropic
+    .temperature / .maxTokens             spec.model.temperature / .maxTokens
+  ModelConfig with a custom baseUrl       spec.providerRef (--provider-ref)
+  MCP tool <server>/<tool>                spec.tools (--tool <server>/<tool>=<Orka Tool>)
+  template.inline.description             not carried; Orka Agents have no description
+  ModelConfig apiKeySecret                not carried; Orka uses its own provider credentials`
+
+// Field and kind names translation reads and writes.
+const (
+	kagentFieldSpec         = "spec"
+	kagentFieldMetadata     = "metadata"
+	kagentFieldDescription  = "description"
+	kagentKindAgent         = "Agent"
+	kagentProviderAnthropic = "anthropic"
+	kagentProviderOpenAI    = "openai"
+)
+
+// kagentTranslateOptions map what translation cannot infer.
+type kagentTranslateOptions struct {
+	// Tools maps "<RemoteMCPServer>/<tool>" to an existing Orka Tool name.
+	Tools map[string]string
+	// ProviderRef names an Orka Provider for models with a custom endpoint.
+	ProviderRef string
+}
+
+func parseKagentToolMappings(values []string) (map[string]string, error) {
+	mappings := map[string]string{}
+	for _, value := range values {
+		source, target, ok := strings.Cut(value, "=")
+		server, tool, hasTool := strings.Cut(source, "/")
+		if !ok || !hasTool || strings.TrimSpace(server) == "" || strings.TrimSpace(tool) == "" || strings.TrimSpace(target) == "" {
+			return nil, fmt.Errorf("--tool %q must look like <RemoteMCPServer>/<tool>=<Orka Tool>", value)
+		}
+		mappings[strings.TrimSpace(source)] = strings.TrimSpace(target)
+	}
+	return mappings, nil
+}
+
+// translateKagentAgent returns the native Orka Agent spec for a kagent Agent,
+// or every reason it cannot be translated.
+func translateKagentAgent(agent map[string]any, related kagentObjects, options kagentTranslateOptions) (map[string]any, []string) {
+	namespace := kagentString(agent, kagentFieldMetadata, cliNamespaceQuery)
+	var problems []string
+	refuse := func(format string, args ...any) { problems = append(problems, fmt.Sprintf(format, args...)) }
+
+	harnessName := kagentString(agent, kagentFieldSpec, "harnessRef", cliNameKey)
+	if harness := related.lookup("Harness", namespace, harnessName); harness == nil {
+		refuse("harness %q is not in the input", harnessName)
+	} else if kagentMap(harness, kagentFieldSpec, "kagent") == nil {
+		refuse("harness %q is not the ADK (kagent) harness", harnessName)
+	} else {
+		for _, field := range []string{"memory", "compaction"} {
+			if kagentMap(harness, kagentFieldSpec, "kagent", field) != nil {
+				refuse("harness %q uses %s, which Orka Agents do not have", harnessName, field)
+			}
+		}
+	}
+
+	template := kagentMap(agent, kagentFieldSpec, "template", "inline")
+	if template == nil {
+		ref := kagentString(agent, kagentFieldSpec, "template", "ref", cliNameKey)
+		if found := related.lookup("AgentTemplate", namespace, ref); found != nil {
+			template = kagentMap(found, kagentFieldSpec)
+		} else {
+			refuse("agent template %q is not in the input", ref)
+			return nil, problems
+		}
+	}
+	translated := map[string]string{kagentFieldDescription: "", "systemPrompt": "", "systemPromptFrom": "", "modelConfig": "", "tools": ""}
+	for field := range template {
+		if _, ok := translated[field]; !ok {
+			refuse("template field %q has no Orka equivalent", field)
+		}
+	}
+	spec := map[string]any{}
+	switch {
+	case kagentString(template, "systemPrompt") != "" && kagentMap(template, "systemPromptFrom") != nil:
+		refuse("the template sets both systemPrompt and systemPromptFrom")
+	case kagentString(template, "systemPrompt") != "":
+		spec["systemPrompt"] = map[string]any{"inline": template["systemPrompt"]}
+	case kagentMap(template, "systemPromptFrom") != nil:
+		from := kagentMap(template, "systemPromptFrom")
+		spec["systemPrompt"] = map[string]any{"configMapRef": map[string]any{
+			cliNameKey: kagentString(from, cliNameKey), "key": kagentString(from, "key"),
+		}}
+	}
+
+	modelName := kagentString(template, "modelConfig", cliNameKey)
+	if model := related.lookup("ModelConfig", namespace, modelName); model == nil {
+		refuse("model config %q is not in the input", modelName)
+	} else {
+		translatedModel, providerRef, modelProblems := translateKagentModel(model, options.ProviderRef)
+		for _, problem := range modelProblems {
+			refuse("model config %q %s", modelName, problem)
+		}
+		spec["model"] = translatedModel
+		if providerRef != "" {
+			spec["providerRef"] = map[string]any{cliNameKey: providerRef}
+		}
+	}
+
+	tools, _ := template["tools"].([]any)
+	var refs []any
+	for i, raw := range tools {
+		binding, _ := raw.(map[string]any)
+		server := kagentMap(binding, "mcp", "server")
+		if server == nil {
+			refuse("tool %d is not an MCP binding", i)
+			continue
+		}
+		serverName, _ := server[cliNameKey].(string)
+		names, _ := kagentMap(binding, "mcp")["tools"].([]any)
+		if len(names) == 0 {
+			refuse("tool server %q binds every tool; list them so each can be mapped", serverName)
+		}
+		for _, rawName := range names {
+			name, _ := rawName.(string)
+			target, ok := options.Tools[serverName+"/"+name]
+			if !ok {
+				refuse("tool %s/%s has no Orka Tool; pass --tool %s/%s=<Orka Tool>", serverName, name, serverName, name)
+				continue
+			}
+			refs = append(refs, map[string]any{cliNameKey: target})
+		}
+	}
+	if len(refs) > 0 {
+		spec["tools"] = refs
+	}
+	sort.Strings(problems)
+	return spec, problems
+}
+
+// translateKagentModel maps a kagent ModelConfig onto spec.model. kagent's
+// credential is never carried over: an Orka Agent uses Orka's provider
+// credentials, or the Provider named by --provider-ref.
+func translateKagentModel(model map[string]any, providerRef string) (map[string]any, string, []string) {
+	var problems []string
+	spec := kagentMap(model, kagentFieldSpec)
+	provider := map[string]string{"OpenAI": kagentProviderOpenAI, "Anthropic": kagentProviderAnthropic}[kagentString(model, kagentFieldSpec, "provider")]
+	settingsField := map[string]string{kagentProviderOpenAI: "openAI", kagentProviderAnthropic: "anthropic"}[provider]
+	if provider == "" {
+		problems = append(problems, fmt.Sprintf("uses provider %q; only OpenAI and Anthropic translate", kagentString(model, kagentFieldSpec, "provider")))
+	}
+	for field := range spec {
+		switch field {
+		case "provider", "model", "apiKeySecret", "apiKeySecretKey", "stream", settingsField:
+		default:
+			problems = append(problems, fmt.Sprintf("sets %s, which has no Orka equivalent", field))
+		}
+	}
+	out := map[string]any{"name": kagentString(model, kagentFieldSpec, "model")}
+	if provider != "" {
+		out["provider"] = provider
+	}
+	ref := ""
+	settings := kagentMap(spec, settingsField)
+	for field := range settings {
+		switch field {
+		case "temperature":
+			value, err := strconv.ParseFloat(kagentString(settings, "temperature"), 64)
+			if err != nil || value < 0 || value > 2 {
+				problems = append(problems, "has a temperature Orka cannot accept")
+			} else {
+				out["temperature"] = value
+			}
+		case "maxTokens":
+			if tokens, ok := settings["maxTokens"].(float64); ok && tokens > 0 && tokens <= 1<<31-1 {
+				out["maxTokens"] = int32(tokens)
+			} else {
+				problems = append(problems, "has an invalid maxTokens")
+			}
+		case "baseUrl":
+			if providerRef == "" {
+				problems = append(problems, "uses a custom endpoint; map it to an Orka Provider with --provider-ref")
+			}
+			ref = providerRef
+		default:
+			problems = append(problems, fmt.Sprintf("sets %s.%s, which has no Orka equivalent", settingsField, field))
+		}
+	}
+	return out, ref, problems
+}
+
+// translatedKagentAgent builds the native Orka Agent manifest.
+func translatedKagentAgent(apiVersion, source, name string, spec map[string]any) map[string]any {
+	return map[string]any{
+		"apiVersion": corev1alpha1.GroupVersion.String(),
+		"kind":       kagentKindAgent,
+		kagentFieldMetadata: map[string]any{
+			cliNameKey:    name,
+			"annotations": map[string]any{kagentSourceAnnotation: apiVersion + " " + source},
+		},
+		kagentFieldSpec: spec,
+	}
+}
