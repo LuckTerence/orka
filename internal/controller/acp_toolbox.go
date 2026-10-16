@@ -218,7 +218,11 @@ const (
 	// Four toolboxes with eight 256-byte entries each stay well inside it.
 	acpToolboxPromptNoteMaxBytes = 8192
 	acpToolboxPromptNoteHeader   = "Extra command-line tools are installed for this task:\n"
-	acpToolboxPromptNoteFooter   = "These folders are on PATH. Run `ls <folder>` to see what is available. There is no internet access, so you can't install new packages."
+	// The PATH sentence is chosen from the listed folders so the note never
+	// claims a mounted-only folder is on PATH.
+	acpToolboxPromptNoteAllOnPath  = "These folders are on PATH. "
+	acpToolboxPromptNoteSomeOnPath = "Folders not marked otherwise are on PATH. "
+	acpToolboxPromptNoteFooter     = "Run `ls <folder>` to see what is available. There is no internet access, so you can't install new packages."
 )
 
 // acpToolboxPromptNote renders the short Orka-generated note that tells the
@@ -229,30 +233,44 @@ func acpToolboxPromptNote(toolboxes []harnessv2.RuntimeToolbox) string {
 	if len(toolboxes) == 0 {
 		return ""
 	}
+	const omitted = "- (more folders omitted)\n"
+	footerBytes := max(len(acpToolboxPromptNoteAllOnPath), len(acpToolboxPromptNoteSomeOnPath)) + len(acpToolboxPromptNoteFooter)
 	var builder strings.Builder
 	builder.WriteString(acpToolboxPromptNoteHeader)
-	listed := 0
+	onPath, mountedOnly := 0, 0
+	truncated := false
+list:
 	for i := range toolboxes {
 		lines := toolboxes[i].PathDirs()
-		if len(lines) == 0 {
+		mounted := len(lines) == 0
+		if mounted {
 			// A toolbox without pathEntries is mounted but contributes nothing
 			// to PATH; say so instead of implying its tools are on PATH.
 			lines = []string{toolboxes[i].MountPath + " (mounted, not on PATH)"}
 		}
 		for _, dir := range lines {
 			line := "- " + dir + "\n"
-			const omitted = "- (more folders omitted)\n"
-			if builder.Len()+len(line)+len(omitted)+len(acpToolboxPromptNoteFooter) > acpToolboxPromptNoteMaxBytes {
+			if builder.Len()+len(line)+len(omitted)+footerBytes > acpToolboxPromptNoteMaxBytes {
 				builder.WriteString(omitted)
-				builder.WriteString(acpToolboxPromptNoteFooter)
-				return builder.String()
+				truncated = true
+				break list
 			}
 			builder.WriteString(line)
-			listed++
+			if mounted {
+				mountedOnly++
+			} else {
+				onPath++
+			}
 		}
 	}
-	if listed == 0 {
+	if onPath+mountedOnly == 0 && !truncated {
 		return ""
+	}
+	switch {
+	case onPath > 0 && mountedOnly > 0:
+		builder.WriteString(acpToolboxPromptNoteSomeOnPath)
+	case onPath > 0:
+		builder.WriteString(acpToolboxPromptNoteAllOnPath)
 	}
 	builder.WriteString(acpToolboxPromptNoteFooter)
 	return builder.String()

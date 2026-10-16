@@ -3478,13 +3478,13 @@ func (r *RuntimePoolReconciler) finishRuntimePoolResourceFailure(
 // can be stopped without interrupting work. The toolbox gate runs before the
 // rollout probe that refreshes the pool's capacity counters, so this path
 // observes the live state itself: the controller must hold no reservation or
-// finalization work; with no active instance and no Ready Pod nothing can be
-// running; with an active instance whose Pod is confirmed gone nothing can be
-// running either; otherwise the active supervisor must be probed and report
-// the complete drained-and-quiescent invariant used by the rollout paths (a
-// requested drain that stopped new sessions, and no resident session, prompt,
-// queued admission, pending permission, or live descendant). A NotReady or
-// unreachable active supervisor is never assumed idle.
+// finalization work; with an active instance whose Pod is confirmed gone
+// nothing can be running; otherwise every Ready supervisor that may hold work
+// (the active one, or each Ready Pod when no instance was recorded) must be
+// probed and report the complete drained-and-quiescent invariant used by the
+// rollout paths (a requested drain that stopped new sessions, and no resident
+// session, prompt, queued admission, pending permission, or live descendant).
+// A NotReady or unreachable active supervisor is never assumed idle.
 func (r *RuntimePoolReconciler) runtimePoolToolboxWorkloadIdle(
 	ctx context.Context,
 	pool *corev1alpha1.RuntimePool,
@@ -3496,23 +3496,46 @@ func (r *RuntimePoolReconciler) runtimePoolToolboxWorkloadIdle(
 		return false, err
 	}
 	active := pool.Status.ActiveInstance
+	readyPods := readyRuntimePoolPods(pods)
 	if active == nil {
-		return runtimePoolRolloutControllerWorkIsQuiescent(pool.Status.Capacity) && len(readyRuntimePoolPods(pods)) == 0, nil
+		if !runtimePoolRolloutControllerWorkIsQuiescent(pool.Status.Capacity) {
+			return false, nil
+		}
+		// A Pod can become Ready after admission closed, before any instance
+		// was recorded. It is never assumed idle: each Ready Pod passes the
+		// same authenticated drain before the workload stops.
+		idle := true
+		for i := range readyPods {
+			drained, err := r.runtimePoolToolboxPodDrained(ctx, pool, deployment, &readyPods[i], nil)
+			if err != nil {
+				return false, err
+			}
+			idle = idle && drained
+		}
+		return idle, nil
 	}
 	if !runtimePoolActiveInstancePodPresent(active, pods) {
 		return runtimePoolRolloutControllerWorkIsQuiescent(pool.Status.Capacity), nil
 	}
-	var activePod *corev1.Pod
-	readyPods := readyRuntimePoolPods(pods)
 	for i := range readyPods {
 		if runtimePoolActiveInstanceMatchesPod(active, &readyPods[i]) {
-			activePod = &readyPods[i]
-			break
+			return r.runtimePoolToolboxPodDrained(ctx, pool, deployment, &readyPods[i], active)
 		}
 	}
-	if activePod == nil {
-		return false, nil
-	}
+	return false, nil
+}
+
+// runtimePoolToolboxPodDrained authenticates one Ready runtime Pod with the
+// deployed instance's credentials and applies the rollout drain barrier to
+// it. With an active instance the observed identity must match it exactly; a
+// supervisor that restarted in place is recycled instead.
+func (r *RuntimePoolReconciler) runtimePoolToolboxPodDrained(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+	deployment *appsv1.Deployment,
+	pod *corev1.Pod,
+	active *corev1alpha1.RuntimePoolActiveInstanceStatus,
+) (bool, error) {
 	// Admission may change across a controller epoch. Authenticate the exact
 	// deployed instance, not the credentials rendered for its replacement.
 	validationPool, validationConfig, err := runtimePoolDeploymentValidationTarget(pool, deployment)
@@ -3524,31 +3547,34 @@ func (r *RuntimePoolReconciler) runtimePoolToolboxWorkloadIdle(
 		return false, err
 	}
 	supervisor := r.supervisorClientForPool(pool)
-	endpoint := runtimePoolInstanceEndpoint(pool, activePod)
+	endpoint := runtimePoolInstanceEndpoint(pool, pod)
 	token := string(authSecret.Data[runtimePoolControllerTokenKey])
 	capability := authSecret.Data[runtimePoolCapabilitySecretKey]
 	probe, err := supervisor.Probe(ctx, endpoint, token, capability)
 	if err != nil {
 		return false, nil
 	}
-	observed, err := validateRuntimePoolProbeForRollout(validationPool, validationConfig, activePod, probe, r.now())
+	observed, err := validateRuntimePoolProbeForRollout(validationPool, validationConfig, pod, probe, r.now())
 	if err != nil {
 		return false, err
 	}
-	if runtimePoolSupervisorRestartedInPlace(active, observed) {
-		// The old session tree is no longer trustworthy. Admission was closed
-		// in an earlier reconcile; use the existing UID-fenced recycle path
-		// rather than repeatedly comparing the old boot against the new one.
-		if err := r.stopRuntimePoolDeployment(ctx, deployment); err != nil {
-			return false, err
+	if active != nil {
+		if runtimePoolSupervisorRestartedInPlace(active, observed) {
+			// The old session tree is no longer trustworthy. Admission was
+			// closed in an earlier reconcile; use the existing UID-fenced
+			// recycle path rather than repeatedly comparing the old boot
+			// against the new one.
+			if err := r.stopRuntimePoolDeployment(ctx, deployment); err != nil {
+				return false, err
+			}
+			if err := r.recycleRuntimePoolInstance(ctx, pool, pod); err != nil {
+				return false, err
+			}
+			return true, nil
 		}
-		if err := r.recycleRuntimePoolInstance(ctx, pool, activePod); err != nil {
-			return false, err
+		if !runtimePoolRolloutActiveInstanceMatches(active, observed) {
+			return false, fmt.Errorf("authenticated runtime identity changed before toolbox drain")
 		}
-		return true, nil
-	}
-	if !runtimePoolRolloutActiveInstanceMatches(active, observed) {
-		return false, fmt.Errorf("authenticated runtime identity changed before toolbox drain")
 	}
 	if !runtimePoolRolloutControllerWorkIsQuiescent(pool.Status.Capacity) {
 		return false, nil

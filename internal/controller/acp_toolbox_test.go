@@ -355,9 +355,18 @@ func TestACPToolboxPromptNote(t *testing.T) {
 		{Image: "registry.example.com/tools/none@" + acpTestToolboxDigest, MountPath: "/opt/none"},
 	}
 	want := "Extra command-line tools are installed for this task:\n- /opt/yq-jq/bin\n- /home/linuxbrew/.linuxbrew/bin\n- /opt/none (mounted, not on PATH)\n" +
-		"These folders are on PATH. Run `ls <folder>` to see what is available. There is no internet access, so you can't install new packages."
+		"Folders not marked otherwise are on PATH. Run `ls <folder>` to see what is available. There is no internet access, so you can't install new packages."
 	if got := acpToolboxPromptNote(toolboxes); got != want {
 		t.Fatalf("note = %q, want %q", got, want)
+	}
+	if got, want := acpToolboxPromptNote(toolboxes[:2]), "Extra command-line tools are installed for this task:\n- /opt/yq-jq/bin\n- /home/linuxbrew/.linuxbrew/bin\n"+
+		"These folders are on PATH. Run `ls <folder>` to see what is available. There is no internet access, so you can't install new packages."; got != want {
+		t.Fatalf("all-on-PATH note = %q, want %q", got, want)
+	}
+	// Mounted-only toolboxes never get a PATH claim.
+	if got, want := acpToolboxPromptNote(toolboxes[2:]), "Extra command-line tools are installed for this task:\n- /opt/none (mounted, not on PATH)\n"+
+		"Run `ls <folder>` to see what is available. There is no internet access, so you can't install new packages."; got != want {
+		t.Fatalf("mounted-only note = %q, want %q", got, want)
 	}
 	if acpToolboxPromptNote(nil) != "" {
 		t.Fatal("no toolboxes must produce no note")

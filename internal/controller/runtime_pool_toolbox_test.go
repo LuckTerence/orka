@@ -410,6 +410,71 @@ func TestRuntimePoolReconcileReportsToolboxUnavailableWhenDisabled(t *testing.T)
 	}
 }
 
+// A Pod that becomes Ready after toolbox admission is revoked, before the
+// pool recorded an active instance, is drained through the same
+// authenticated barrier and scaled away instead of running indefinitely.
+func TestRuntimePoolToolboxFailureDrainsReadyPodWithoutActiveInstance(t *testing.T) {
+	scheme := runtimePoolTestScheme(t)
+	pool := runtimePoolToolboxTestObject(runtimePoolTestToolboxes()...)
+	pod := runtimePoolReadyPod(pool, pool.Namespace, "codex-pod", "pod-uid-1", "10.0.0.21")
+	supervisor := &fakeRuntimePoolSupervisorClient{probe: runtimePoolValidProbe(pool, &pod, "boot-1", false)}
+	r := runtimePoolTestReconciler(t, scheme, supervisor, pool, &pod)
+	r.ToolboxPolicy = acpTestToolboxPolicy()
+	runtimePoolTestSetPodReady(t, r, &pod, false)
+	runtimePoolReconcile(t, r, pool)
+	name := runtimePoolResourceName(pool.Namespace, pool.Name)
+	if ptr.Deref(runtimePoolTestDeployment(t, r, pool.Namespace, name).Spec.Replicas, 0) != 1 {
+		t.Fatal("admitted pool must run one replica")
+	}
+	if current := runtimePoolTestGetPool(t, r, pool); current.Status.ActiveInstance != nil {
+		t.Fatalf("a NotReady Pod must not be recorded as the active instance: %#v", current.Status.ActiveInstance)
+	}
+
+	// Toolboxes are disabled; the barrier reconcile records no instance and
+	// the Pod becomes Ready afterwards.
+	r.ToolboxPolicy = ACPToolboxPolicy{}
+	runtimePoolReconcile(t, r, pool)
+	runtimePoolTestSetPodReady(t, r, &pod, true)
+	current := runtimePoolTestGetPool(t, r, pool)
+	if current.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed || current.Status.ActiveInstance != nil {
+		t.Fatalf("barrier status = %#v", current.Status)
+	}
+
+	// The unrecorded Ready Pod is never assumed idle: the first observation
+	// requests an authenticated drain and keeps the workload.
+	drainCallsBefore := supervisor.drainCalls
+	runtimePoolReconcile(t, r, pool)
+	if supervisor.drainCalls != drainCallsBefore+1 || supervisor.drainReason != harnessv2.DrainReasonToolboxUnavailable {
+		t.Fatalf("drain calls = %d (reason %q), want one toolbox drain request", supervisor.drainCalls, supervisor.drainReason)
+	}
+	if ptr.Deref(runtimePoolTestDeployment(t, r, pool.Namespace, name).Spec.Replicas, 0) != 1 {
+		t.Fatal("the workload must stay until the drained supervisor is observed quiescent")
+	}
+
+	// A busy supervisor keeps the workload even after the drain request.
+	supervisor.probe.Status.Drain.Requested = true
+	supervisor.probe.Status.Drain.RequestedAt = runtimePoolTestNow
+	supervisor.probe.Status.Drain.Reason = harnessv2.DrainReasonToolboxUnavailable
+	supervisor.probe.Status.Lifecycle = harnessv2.SupervisorLifecycleDraining
+	supervisor.probe.Status.Drain.AcceptingNewSessions = false
+	supervisor.probe.Status.Pressure.LiveDescendants = 1
+	runtimePoolReconcile(t, r, pool)
+	if ptr.Deref(runtimePoolTestDeployment(t, r, pool.Namespace, name).Spec.Replicas, 0) != 1 {
+		t.Fatal("a supervisor with live descendants must not be scaled away")
+	}
+
+	// Once the drained supervisor is quiescent the workload is scaled to zero.
+	supervisor.probe.Status.Pressure.LiveDescendants = 0
+	runtimePoolReconcile(t, r, pool)
+	if ptr.Deref(runtimePoolTestDeployment(t, r, pool.Namespace, name).Spec.Replicas, 0) != 0 {
+		t.Fatal("an idle unrecorded supervisor must be scaled to zero")
+	}
+	current = runtimePoolTestGetPool(t, r, pool)
+	if current.Status.ActiveInstance != nil || !strings.Contains(current.Status.Message, "scaled to zero") {
+		t.Fatalf("stopped status = %#v", current.Status)
+	}
+}
+
 // A pool that loses toolbox admission while its supervisor still serves a
 // session keeps its workload until the live probe reports it idle; the probe
 // is consulted directly because the toolbox gate runs before the rollout
