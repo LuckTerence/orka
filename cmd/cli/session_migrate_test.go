@@ -403,8 +403,8 @@ func TestMigrateSelectsTheAgentFormat(t *testing.T) {
 		require.NoError(t, os.Chmod(dir, 0o700))
 		return dir
 	}
-	err := migrationCommand(t, server.URL, "import", "new", "--agent", "claude", "--state-dir", t.TempDir(), "--session-id", "id", "--journal-dir", private(), "--source-stopped")
-	require.ErrorContains(t, err, "--agent must be one of: codex, opencode")
+	err := migrationCommand(t, server.URL, "import", "new", "--agent", "copilot", "--state-dir", t.TempDir(), "--session-id", "id", "--journal-dir", private(), "--source-stopped")
+	require.ErrorContains(t, err, "--agent must be one of: claude, codex, opencode")
 
 	// OpenCode's own database records where the session ran, so import needs
 	// no --cwd and reads XDG_DATA_HOME/opencode.
@@ -497,12 +497,15 @@ func TestLocalStateDirFollowsTheAgentsVariable(t *testing.T) {
 	t.Chdir(t.TempDir())
 	cwd, err := os.Getwd()
 	require.NoError(t, err)
+	claude, _ := nativesession.For("claude")
 	codex, _ := nativesession.For("codex")
 	opencode, _ := nativesession.For("opencode")
 	for _, test := range []struct {
 		local         nativesession.Local
 		value, expect string
 	}{
+		{claude.Local(), "", filepath.Join(home, ".claude")},
+		{claude.Local(), "relative/claude", filepath.Join(cwd, "relative", "claude")},
 		{codex.Local(), "/custom/codex", "/custom/codex"},
 		{codex.Local(), "", filepath.Join(home, ".codex")},
 		{codex.Local(), "relative/codex", filepath.Join(cwd, "relative", "codex")},
