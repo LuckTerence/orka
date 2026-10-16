@@ -99,13 +99,16 @@ func kagentObjectKey(kind, namespace, name string) string {
 }
 
 // indexKagentObjects indexes the objects of one kagent version. A v0 Agent's
-// Deployment belongs to the v0 index: its config hash is what the wrapper pins.
+// Deployment and config Secret belong to the v0 index: the wrapper pins the
+// Deployment's config hash, and the Secret holds the configuration it hashes.
 func indexKagentObjects(objects []map[string]any, version string) kagentObjects {
 	index := kagentObjects{}
 	for _, obj := range objects {
 		apiVersion, _ := obj["apiVersion"].(string)
 		kind, _ := obj["kind"].(string)
-		if apiVersion != version && (version != kagentV0APIVersion || apiVersion != "apps/v1" || kind != "Deployment") {
+		v0Workload := version == kagentV0APIVersion &&
+			((apiVersion == "apps/v1" && kind == "Deployment") || (apiVersion == "v1" && kind == "Secret"))
+		if apiVersion != version && !v0Workload {
 			continue
 		}
 		index[kagentObjectKey(kind, kagentString(obj, "metadata", cliNamespaceQuery), kagentString(obj, "metadata", cliNameKey))] = obj
@@ -352,17 +355,6 @@ func kagentRelayOrigin(template, name string) (string, error) {
 }
 
 func governedRemoteMCPServerProblems(remote map[string]any) []string {
-	problems := relayRemoteMCPServerProblems(remote)
-	if labels := kagentMap(remote, "metadata", "labels"); labels == nil || labels[kagentDiscoveryLabel] != "disabled" {
-		problems = append(problems, "does not disable discovery with "+kagentDiscoveryLabel+"=disabled")
-	}
-	return append(problems, staticHeaderProblems(remote)...)
-}
-
-// relayRemoteMCPServerProblems checks the parts of a RemoteMCPServer both
-// kagent versions share: it streams over HTTP to a relay's /mcp and waits
-// longer than the relay does.
-func relayRemoteMCPServerProblems(remote map[string]any) []string {
 	var problems []string
 	if kagentString(remote, "spec", "protocol") != "STREAMABLE_HTTP" {
 		problems = append(problems, "does not use STREAMABLE_HTTP")
@@ -373,14 +365,13 @@ func relayRemoteMCPServerProblems(remote map[string]any) []string {
 	if timeout, err := time.ParseDuration(kagentString(remote, "spec", "timeout")); err != nil || timeout <= kagentRelayTimeout {
 		problems = append(problems, fmt.Sprintf("needs a timeout longer than %s", kagentRelayTimeout))
 	}
-	return problems
-}
-
-func staticHeaderProblems(remote map[string]any) []string {
-	if headers, _ := kagentMap(remote, "spec")["headersFrom"].([]any); len(headers) > 0 {
-		return []string{"sends static headers"}
+	if labels := kagentMap(remote, "metadata", "labels"); labels == nil || labels[kagentDiscoveryLabel] != "disabled" {
+		problems = append(problems, "does not disable discovery with "+kagentDiscoveryLabel+"=disabled")
 	}
-	return nil
+	if headers, _ := kagentMap(remote, "spec")["headersFrom"].([]any); len(headers) > 0 {
+		problems = append(problems, "sends static headers")
+	}
+	return problems
 }
 
 // relayOrigin returns the http(s) origin of value when its path is exactly path.

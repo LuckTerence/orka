@@ -7,6 +7,10 @@ MIT License - see LICENSE file for details.
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"maps"
 	"regexp"
@@ -20,7 +24,10 @@ import (
 // revisions. The wrapper pins instead the kagent.dev/config-hash annotation
 // on the Deployment's pod template: kagent derives it from the compiled
 // agent configuration, agent card, and secrets, and rolls the Deployment
-// whenever it changes.
+// whenever it changes. A governed verdict reads that compiled configuration
+// from the Agent's config Secret and recomputes the hash, so the verdict is
+// about exactly the configuration the wrapper pins, not about source objects
+// kagent may not have recompiled yet.
 const (
 	kagentV0APIVersion         = "kagent.dev/v1alpha2"
 	kagentVersionV0            = "v0"
@@ -34,7 +41,10 @@ const (
 	kagentFieldKind            = "kind"
 	kagentFieldInline          = "inline"
 	kagentToolTypeMCPServer    = "McpServer"
-	kagentProviderOpenAIKind   = "OpenAI"
+	// kagentV0Container and kagentV0GoImage name the agent container and the
+	// Go ADK image repository kagent runs it from (both image variants).
+	kagentV0Container = "kagent"
+	kagentV0GoImage   = "golang-adk"
 )
 
 // kagentConfigHashPattern matches the decimal uint64 kagent writes.
@@ -80,9 +90,10 @@ func kagentV0Tools(agent map[string]any) []map[string]any {
 
 // classifyKagentV0Agent decides governed or observed for a v0 Agent, and
 // finds the config hash the wrapper pins. v0 compiles no egress allowlist:
-// what keeps a governed Agent behind the relay is its pinned configuration,
-// with every endpoint on the relay and nothing that runs code or calls out
-// on its own. Anything the import cannot see keeps the Agent observed.
+// what keeps a governed Agent behind the relay is its pinned compiled
+// configuration, with every endpoint on the relay and nothing that runs code
+// or calls out on its own. Anything the import cannot see keeps the Agent
+// observed.
 func classifyKagentV0Agent(agent map[string]any, related kagentObjects, relay string) kagentMode {
 	namespace := kagentString(agent, kagentFieldMetadata, cliNamespaceQuery)
 	name := kagentString(agent, kagentFieldMetadata, cliNameKey)
@@ -94,16 +105,13 @@ func classifyKagentV0Agent(agent map[string]any, related kagentObjects, relay st
 	}
 	reasons = append(reasons, mode.PinProblems...)
 	reasons = append(reasons, kagentV0BehaviorProblems(agent)...)
+	compiled, compiledProblems := kagentV0CompiledConfig(related.lookup("Secret", namespace, name), name, mode.Revision)
+	reasons = append(reasons, compiledProblems...)
 	origins := map[string]bool{}
-	modelProblems, modelOrigin := kagentV0ModelProblems(agent, related, namespace)
-	reasons = append(reasons, modelProblems...)
-	if modelOrigin != "" {
-		origins[modelOrigin] = true
-	}
-	for i, tool := range kagentV0Tools(agent) {
-		toolProblems, origin := kagentV0ToolProblems(tool, i, related, namespace)
-		reasons = append(reasons, toolProblems...)
-		if origin != "" {
+	if compiled != nil {
+		configProblems, configOrigins := kagentV0ConfigProblems(compiled)
+		reasons = append(reasons, configProblems...)
+		for _, origin := range configOrigins {
 			origins[origin] = true
 		}
 	}
@@ -121,26 +129,35 @@ func classifyKagentV0Agent(agent map[string]any, related kagentObjects, relay st
 }
 
 // kagentV0Pin returns the Deployment's config hash when the running Agent is
-// exactly the one the input describes: kagent has observed the Agent, it is
-// Ready, and the Deployment has finished rolling out to that hash.
+// exactly the one the input describes: kagent has accepted the Agent's
+// current generation and it is Ready, and the Deployment runs the Go ADK and
+// has finished rolling out to that hash. Ready alone is not enough: a failed
+// reconcile leaves the previous Deployment Ready while Accepted turns False.
 func kagentV0Pin(agent, deployment map[string]any, name string) (string, []string) {
 	var problems []string
-	if generation := kagentInt(agent, kagentFieldMetadata, "generation"); generation == 0 || kagentInt(agent, "status", "observedGeneration") != generation {
+	generation := kagentInt(agent, kagentFieldMetadata, "generation")
+	if generation == 0 || kagentInt(agent, "status", "observedGeneration") != generation {
 		problems = append(problems, "kagent has not observed the Agent's current generation")
 	}
-	if !kagentConditionTrue(agent, "Ready") {
+	if !kagentConditionCurrent(agent, "Accepted", generation) {
+		problems = append(problems, "kagent has not accepted the Agent's current generation")
+	}
+	if !kagentConditionCurrent(agent, "Ready", generation) {
 		problems = append(problems, "the Agent is not Ready")
 	}
 	if deployment == nil {
 		return "", append(problems, fmt.Sprintf("deployment %q is not in the input", name))
 	}
+	if image := kagentV0ContainerImage(deployment); kagentImageRepositoryName(image) != kagentV0GoImage {
+		problems = append(problems, fmt.Sprintf("deployment %q runs %q, not kagent's Go runtime", name, image))
+	}
 	replicas := int64(1) // the Deployment default
 	if value, ok := kagentMap(deployment, kagentFieldSpec)["replicas"].(float64); ok {
 		replicas = int64(value)
 	}
-	generation := kagentInt(deployment, kagentFieldMetadata, "generation")
+	rollout := kagentInt(deployment, kagentFieldMetadata, "generation")
 	switch {
-	case generation == 0 || kagentInt(deployment, "status", "observedGeneration") != generation:
+	case rollout == 0 || kagentInt(deployment, "status", "observedGeneration") != rollout:
 		problems = append(problems, fmt.Sprintf("deployment %q has not been observed at its current generation", name))
 	case replicas < 1:
 		problems = append(problems, fmt.Sprintf("deployment %q has no replicas", name))
@@ -158,110 +175,178 @@ func kagentV0Pin(agent, deployment map[string]any, name string) (string, []strin
 	return hash, nil
 }
 
-func kagentConditionTrue(obj map[string]any, conditionType string) bool {
+// kagentConditionCurrent reports whether the condition is True and, when it
+// records one, was set for the given generation.
+func kagentConditionCurrent(obj map[string]any, conditionType string, generation int64) bool {
 	conditions, _ := kagentMap(obj, "status")["conditions"].([]any)
 	return slices.ContainsFunc(conditions, func(raw any) bool {
 		condition, _ := raw.(map[string]any)
-		return condition["type"] == conditionType && condition["status"] == "True"
+		observed, recorded := condition["observedGeneration"].(float64)
+		return condition["type"] == conditionType && condition["status"] == "True" && (!recorded || int64(observed) == generation)
 	})
 }
 
-// kagentV0BehaviorProblems lists the Agent settings that run code, call out,
-// or change the runtime outside the relay, or that the input cannot show.
+// kagentV0ContainerImage returns the image of the Deployment's agent container.
+func kagentV0ContainerImage(deployment map[string]any) string {
+	containers, _ := kagentMap(deployment, kagentFieldSpec, "template", kagentFieldSpec)["containers"].([]any)
+	for _, raw := range containers {
+		container, _ := raw.(map[string]any)
+		if container[cliNameKey] == kagentV0Container {
+			image, _ := container["image"].(string)
+			return image
+		}
+	}
+	return ""
+}
+
+// kagentImageRepositoryName returns the last path segment of an image's
+// repository, without its tag or digest.
+func kagentImageRepositoryName(image string) string {
+	repository, _, _ := strings.Cut(image, "@")
+	if slash := strings.LastIndex(repository, "/"); slash >= 0 {
+		repository = repository[slash+1:]
+	}
+	name, _, _ := strings.Cut(repository, ":")
+	return name
+}
+
+// kagentV0BehaviorProblems lists the Agent settings that run code or change
+// the agent's runtime outside the compiled configuration, so the config hash
+// does not show them.
 func kagentV0BehaviorProblems(agent map[string]any) []string {
 	var problems []string
-	declarative := kagentMap(agent, kagentFieldSpec, kagentFieldDeclarative)
 	if _, set := kagentMap(agent, kagentFieldSpec)["skills"]; set {
 		problems = append(problems, "the Agent loads skills, which run inside kagent")
 	}
-	for field, reason := range map[string]string{
-		"executeCodeBlocks": "the Agent executes code blocks inside kagent",
-		"shareTools":        "the Agent has kagent's share-link tools",
-	} {
-		if kagentBool(declarative, field) {
-			problems = append(problems, reason)
-		}
-	}
-	for field, reason := range map[string]string{
-		"memory":            "the Agent enables memory, which calls its own model",
-		"context":           "the Agent compacts its context, which can call its own model",
-		"systemMessageFrom": "the Agent reads its system message from an object the input does not show",
-		"promptTemplate":    "the Agent templates its system message from objects the input does not show",
-	} {
-		if _, set := declarative[field]; set {
-			problems = append(problems, reason)
-		}
-	}
 	// Environment can replace the forwarded bearer (STS) or reroute tools,
 	// and an image registry or extra container runs code the hash does not cover.
+	deployment := kagentMap(agent, kagentFieldSpec, kagentFieldDeclarative, "deployment")
 	for _, field := range []string{"env", "envFrom", "volumes", "volumeMounts", "extraContainers", "imageRegistry"} {
-		if _, set := kagentMap(declarative, "deployment")[field]; set {
+		if _, set := deployment[field]; set {
 			problems = append(problems, "the Agent's deployment sets "+field)
 		}
 	}
-	slices.Sort(problems)
 	return problems
 }
 
-func kagentV0ModelProblems(agent map[string]any, related kagentObjects, namespace string) ([]string, string) {
-	name := kagentString(agent, kagentFieldSpec, kagentFieldDeclarative, "modelConfig")
-	model := related.lookup("ModelConfig", namespace, name)
-	switch {
-	case name == "":
-		return []string{"the Agent names no modelConfig"}, ""
-	case model == nil:
-		return []string{fmt.Sprintf("model config %q is not in the input", name)}, ""
-	case kagentString(model, kagentFieldSpec, cliProviderKey) != kagentProviderOpenAIKind:
-		return []string{fmt.Sprintf("model config %q does not use the OpenAI provider", name)}, ""
-	case !kagentBool(model, kagentFieldSpec, "apiKeyPassthrough"):
-		return []string{fmt.Sprintf("model config %q does not pass the caller's bearer through", name)}, ""
-	case !slices.Contains([]string{"", "chatCompletions"}, kagentString(model, kagentFieldSpec, "openAI", "apiFormat")):
-		return []string{fmt.Sprintf("model config %q uses the %s API; the relay serves only chat completions", name, kagentString(model, kagentFieldSpec, "openAI", "apiFormat"))}, ""
-	case len(kagentMap(model, kagentFieldSpec, "defaultHeaders")) > 0:
-		return []string{fmt.Sprintf("model config %q sends static headers", name)}, ""
+// kagentV0CompiledConfig reads the compiled configuration from the Agent's
+// config Secret and requires it to be the one the Deployment runs. kagent
+// hashes the compiled config.json, the agent card, the secret material the
+// configuration depends on, and any code-sandbox settings, in that order. A
+// governed configuration depends on no secret material, so recomputing the
+// hash over the Secret alone must give the pinned value; anything else
+// (secret material, or a Secret kagent has not rolled out yet) fails closed.
+func kagentV0CompiledConfig(secret map[string]any, name, pinned string) (map[string]any, []string) {
+	if secret == nil {
+		return nil, []string{fmt.Sprintf("the Agent's config Secret %q is not in the input; a governed verdict reads the compiled configuration it holds", name)}
 	}
-	origin, ok := relayOrigin(kagentString(model, kagentFieldSpec, "openAI", "baseUrl"), "/v1")
+	data := kagentMap(secret, "data")
+	decode := func(key string) ([]byte, bool) {
+		value, _ := data[key].(string)
+		decoded, err := base64.StdEncoding.DecodeString(value)
+		return decoded, value != "" && err == nil
+	}
+	var problems []string
+	cfg, ok := decode("config.json")
 	if !ok {
-		return []string{fmt.Sprintf("model config %q does not point at a relay's /v1", name)}, ""
+		return nil, []string{fmt.Sprintf("config Secret %q has no readable config.json", name)}
 	}
-	return nil, origin
+	card, _ := decode("agent-card.json")
+	sandbox, hasSandbox := decode("srt-settings.json")
+	if hasSandbox {
+		problems = append(problems, "the Agent runs a code sandbox (srt-settings.json)")
+	}
+	if pinned != "" {
+		sum := sha256.New()
+		sum.Write(cfg)
+		sum.Write(card)
+		sum.Write(sandbox)
+		if got := strconv.FormatUint(binary.BigEndian.Uint64(sum.Sum(nil)[:8]), 10); got != pinned {
+			problems = append(problems, fmt.Sprintf("config Secret %q hashes to %s, not the pinned %s: kagent has not rolled it out yet, or it depends on secret material", name, got, pinned))
+		}
+	}
+	var config map[string]any
+	if err := json.Unmarshal(cfg, &config); err != nil || config == nil {
+		return nil, append(problems, fmt.Sprintf("config Secret %q holds a config.json that is not a JSON object", name))
+	}
+	return config, problems
 }
 
-// kagentV0ToolProblems checks one tool binding of a governed v0 Agent and
-// returns the origin its server points at.
-func kagentV0ToolProblems(tool map[string]any, index int, related kagentObjects, namespace string) ([]string, string) {
-	if toolType := kagentString(tool, "type"); toolType != kagentToolTypeMCPServer {
-		return []string{fmt.Sprintf("tool %d is a %q tool, not an MCP server", index, toolType)}, ""
+// kagentV0ConfigProblems checks a compiled v0 configuration for a governed
+// Agent and returns the origins its endpoints point at.
+func kagentV0ConfigProblems(config map[string]any) ([]string, []string) {
+	var problems, origins []string
+	model := kagentMap(config, "model")
+	switch {
+	case kagentString(model, "type") != "openai":
+		problems = append(problems, fmt.Sprintf("the compiled model is %q, not OpenAI", kagentString(model, "type")))
+	case !kagentBool(model, "api_key_passthrough"):
+		problems = append(problems, "the compiled model does not pass the caller's bearer through")
+	case !slices.Contains([]string{"", "chatCompletions"}, kagentString(model, "api_format")):
+		problems = append(problems, fmt.Sprintf("the compiled model uses the %s API; the relay serves only chat completions", kagentString(model, "api_format")))
+	case len(kagentMap(model, "headers")) > 0:
+		problems = append(problems, "the compiled model sends static headers")
+	case kagentMap(model, "token_exchange") != nil:
+		problems = append(problems, "the compiled model exchanges its own tokens")
+	default:
+		if origin, ok := relayOrigin(kagentString(model, "base_url"), "/v1"); ok {
+			origins = append(origins, origin)
+		} else {
+			problems = append(problems, "the compiled model does not point at a relay's /v1")
+		}
 	}
-	server := kagentMap(tool, kagentFieldMCPServer)
-	name := kagentString(server, cliNameKey)
-	var problems []string
-	if headers, _ := tool["headersFrom"].([]any); len(headers) > 0 {
-		problems = append(problems, fmt.Sprintf("tool server %q binding sends static headers", name))
+	tools, _ := config["http_tools"].([]any)
+	for i, raw := range tools {
+		tool, _ := raw.(map[string]any)
+		params := kagentMap(tool, "params")
+		if origin, ok := relayOrigin(kagentString(params, "url"), "/mcp"); ok {
+			origins = append(origins, origin)
+		} else {
+			problems = append(problems, fmt.Sprintf("compiled tool server %d (%s) does not point at a relay's /mcp", i, kagentString(params, "url")))
+		}
+		if len(kagentMap(params, "headers")) > 0 {
+			problems = append(problems, fmt.Sprintf("compiled tool server %d sends static headers", i))
+		}
+		if timeout, _ := params["timeout"].(float64); timeout <= kagentRelayTimeout.Seconds() {
+			problems = append(problems, fmt.Sprintf("compiled tool server %d needs a timeout longer than %s", i, kagentRelayTimeout))
+		}
+		allowed, _ := tool["allowed_headers"].([]any)
+		if !slices.ContainsFunc(allowed, func(raw any) bool {
+			header, _ := raw.(string)
+			return strings.EqualFold(strings.TrimSpace(header), "Authorization")
+		}) {
+			problems = append(problems, fmt.Sprintf("compiled tool server %d does not forward Authorization (allowedHeaders)", i))
+		}
+		if approval, _ := tool["require_approval"].([]any); len(approval) > 0 {
+			problems = append(problems, fmt.Sprintf("compiled tool server %d requires kagent approval", i))
+		}
 	}
-	allowed, _ := server["allowedHeaders"].([]any)
-	if !slices.ContainsFunc(allowed, func(raw any) bool {
-		header, _ := raw.(string)
-		return strings.EqualFold(strings.TrimSpace(header), "Authorization")
-	}) {
-		problems = append(problems, fmt.Sprintf("tool server %q binding does not forward Authorization (allowedHeaders)", name))
+	for field, reason := range map[string]string{
+		"sse_tools":     "the compiled configuration uses SSE tool servers",
+		"remote_agents": "the compiled configuration calls other Agents",
+	} {
+		if items, _ := config[field].([]any); len(items) > 0 {
+			problems = append(problems, reason)
+		}
 	}
-	if kind, group := kagentString(server, kagentFieldKind), kagentString(server, "apiGroup"); kind != "RemoteMCPServer" || (group != "" && group != "kagent.dev") {
-		return append(problems, fmt.Sprintf("tool server %q is not a kagent RemoteMCPServer", name)), ""
+	for field, reason := range map[string]string{
+		"execute_code": "the compiled configuration executes code blocks inside kagent",
+		"share_tools":  "the compiled configuration has kagent's share-link tools",
+	} {
+		if kagentBool(config, field) {
+			problems = append(problems, reason)
+		}
 	}
-	serverNamespace := kagentString(server, cliNamespaceQuery)
-	if serverNamespace == "" {
-		serverNamespace = namespace
+	for field, reason := range map[string]string{
+		"memory":         "the compiled configuration enables memory, which calls its own model",
+		"context_config": "the compiled configuration compacts its context, which can call its own model",
+	} {
+		if value, set := config[field]; set && value != nil {
+			problems = append(problems, reason)
+		}
 	}
-	remote := related.lookup("RemoteMCPServer", serverNamespace, name)
-	if remote == nil {
-		return append(problems, fmt.Sprintf("tool server %q is not in the input", name)), ""
-	}
-	for _, reason := range append(relayRemoteMCPServerProblems(remote), staticHeaderProblems(remote)...) {
-		problems = append(problems, fmt.Sprintf("tool server %q %s", name, reason))
-	}
-	origin, _ := relayOrigin(kagentString(remote, kagentFieldSpec, "url"), "/mcp")
-	return problems, origin
+	slices.Sort(problems)
+	return problems, origins
 }
 
 // kagentV0TranslatedDeploymentFields are deployment settings that only place
