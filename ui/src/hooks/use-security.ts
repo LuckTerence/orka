@@ -67,26 +67,33 @@ export function useThreatModel(name: string) {
   })
 }
 
+// expectedVersion is the version the edit started from, or 0 when no model
+// existed; the server answers 409 when the model has moved on since (or, for 0,
+// when one has been created meanwhile).
+interface ThreatModelEdit {
+  content: string
+  source?: string
+  expectedVersion: number
+}
+
 export function useUpdateThreatModel(name: string) {
   const queryClient = useQueryClient()
   const namespace = useUIStore((s) => s.namespace)
-  return useMutation({
-    // expectedVersion is the version the edit started from, or 0 when no
-    // model existed; the server answers 409 when the model has moved on since
-    // (or, for 0, when one has been created meanwhile).
-    mutationFn: (body: { content: string; source?: string; expectedVersion: number }) =>
-      api.put<ThreatModel>(`/security/repositories/${name}/threat-model`, body, { namespace }),
-    // The callbacks run with the latest render's options, so keep the target
-    // the PUT was sent for: a namespace or repository switch while the save is
-    // pending must not file the saved model under the new one.
-    onMutate: () => ({ namespace, name }),
-    onSuccess: (saved, _body, target) => {
+  const mutation = useMutation({
+    // The target travels in the variables, fixed when the save is made. A
+    // pending mutation runs with the latest render's options, so a namespace
+    // or repository switch before the PUT goes out (a save waiting for the
+    // network, say) must not send it, or file the saved model, anywhere else.
+    mutationFn: ({ target, edit }: { target: { namespace: string; name: string }; edit: ThreatModelEdit }) =>
+      api.put<ThreatModel>(`/security/repositories/${target.name}/threat-model`, edit, { namespace: target.namespace }),
+    onSuccess: (saved, { target }) => {
       // The saved version is the base for the next edit, even before the refetch lands.
       if (saved) queryClient.setQueryData(['security', 'threat-model', target.namespace, target.name], saved)
       queryClient.invalidateQueries({ queryKey: ['security', 'threat-model', target.namespace, target.name] })
       queryClient.invalidateQueries({ queryKey: ['security', 'repository', target.namespace, target.name] })
     },
   })
+  return { ...mutation, mutateAsync: (edit: ThreatModelEdit) => mutation.mutateAsync({ target: { namespace, name }, edit }) }
 }
 
 export function useScanRuns(name: string) {

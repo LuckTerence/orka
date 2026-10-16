@@ -1,5 +1,5 @@
 import { act, renderHook, waitFor } from '@testing-library/react'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { onlineManager, QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { http, HttpResponse } from 'msw'
 import type { ReactNode } from 'react'
 import { afterEach, describe, expect, it, beforeEach, vi } from 'vitest'
@@ -89,27 +89,32 @@ describe('security mutations', () => {
     useUIStore.setState({ namespace: 'team-blue' })
   })
 
-  it('files a saved threat model under the repository it was saved for', async () => {
-    let release: () => void = () => {}
-    server.use(http.put('/api/v1/security/repositories/:name/threat-model', ({ params }) =>
-      new Promise<Response>((resolve) => {
-        release = () => resolve(HttpResponse.json({ namespace: 'team-blue', repositoryScan: params.name, version: 2, content: 'saved', source: 'edited' }))
-      })))
+  it('saves a threat model to the namespace it was saved in, and files it there', async () => {
+    let putNamespace: string | null = null
+    server.use(http.put('/api/v1/security/repositories/:name/threat-model', ({ request, params }) => {
+      putNamespace = new URL(request.url).searchParams.get('namespace')
+      return HttpResponse.json({ namespace: 'team-blue', repositoryScan: params.name, version: 2, content: 'saved', source: 'edited' })
+    }))
     const queryClient = createQueryClient()
     const { result } = renderHook(() => useUpdateThreatModel('repo'), { wrapper: createWrapper(queryClient) })
 
-    let save: Promise<unknown> = Promise.resolve()
-    act(() => {
-      save = result.current.mutateAsync({ content: 'saved', expectedVersion: 1 })
-    })
-    // The user switches namespace while the PUT is still in flight.
-    act(() => useUIStore.setState({ namespace: 'team-red' }))
-    await waitFor(() => expect(release).not.toBe(undefined))
-    await act(async () => {
-      release()
-      await save
-    })
+    // Offline, the save waits before sending; the user switches namespace meanwhile.
+    onlineManager.setOnline(false)
+    try {
+      let save: Promise<unknown> = Promise.resolve()
+      act(() => {
+        save = result.current.mutateAsync({ content: 'saved', expectedVersion: 1 })
+      })
+      act(() => useUIStore.setState({ namespace: 'team-red' }))
+      await act(async () => {
+        onlineManager.setOnline(true)
+        await save
+      })
+    } finally {
+      onlineManager.setOnline(true)
+    }
 
+    expect(putNamespace).toBe('team-blue')
     expect(queryClient.getQueryData(['security', 'threat-model', 'team-blue', 'repo'])).toMatchObject({ version: 2 })
     expect(queryClient.getQueryData(['security', 'threat-model', 'team-red', 'repo'])).toBeUndefined()
   })
