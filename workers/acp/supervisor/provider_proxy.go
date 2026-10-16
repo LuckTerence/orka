@@ -216,8 +216,8 @@ func (c ProviderProxyConfig) normalized() (ProviderProxyConfig, *url.URL, error)
 	if providerproxy.HasUnsafePathSegment(parsed.Path) {
 		return ProviderProxyConfig{}, nil, fmt.Errorf("provider proxy upstream URL is invalid")
 	}
-	if c.ProviderKind == providerKindFoundry && (parsed.Path != "/v1" || parsed.RawPath != "") {
-		return ProviderProxyConfig{}, nil, fmt.Errorf("external Foundry provider proxy must target the lifecycle broker /v1 endpoint")
+	if usesLifecycleBroker(c.ProviderKind) && (parsed.Path != "/v1" || parsed.RawPath != "") {
+		return ProviderProxyConfig{}, nil, fmt.Errorf("external %s provider proxy must target the lifecycle broker /v1 endpoint", lifecycleBrokerLabel(c.ProviderKind))
 	}
 	if c.MaxRequestBytes <= 0 {
 		c.MaxRequestBytes = defaultProviderProxyMaxRequestBytes
@@ -993,8 +993,8 @@ func (p *providerProxy) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		reject(http.StatusBadRequest, "provider request path is invalid")
 		return
 	}
-	if p.providerKind == providerKindFoundry && (r.URL.RawQuery != "" || session.foundry == nil) {
-		reject(http.StatusForbidden, "Foundry inference requires a bound session and exact broker route")
+	if usesLifecycleBroker(p.providerKind) && (r.URL.RawQuery != "" || session.foundry == nil) {
+		reject(http.StatusForbidden, lifecycleBrokerLabel(p.providerKind)+" inference requires a bound session and exact broker route")
 		return
 	}
 	if providerproxy.HasDisallowedContentEncoding(r.Header) {
@@ -1061,7 +1061,7 @@ func (p *providerProxy) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		trustedContext, contextErr := session.foundry.inferenceContext(authorization.promptID, inferenceSeq, body)
 		if contextErr != nil {
 			waitForPromptGateCancellation(r.Context(), authorization.gateContext)
-			reject(http.StatusForbidden, "Foundry inference ownership is no longer active")
+			reject(http.StatusForbidden, session.foundry.label+" inference ownership is no longer active")
 			return
 		}
 		// Always replace child input, including duplicates, with the context
@@ -1666,7 +1666,7 @@ func providerRequestRoute(providerKind, requestPath, method string) (allowed, re
 		case providerOpenAIChatCompletionsPath:
 			allowed, requiresModel, class = method == http.MethodPost, true, providerRequestInference
 		}
-	case providerKindFoundry:
+	case providerKindFoundry, providerKindKagent:
 		if requestPath == providerResponsesPath {
 			allowed, requiresModel, class = method == http.MethodPost, true, providerRequestInference
 		}

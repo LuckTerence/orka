@@ -344,8 +344,8 @@ func LoadConfigFromEnv() (Config, error) {
 		E2EPromptWriteAmbiguityMarker: e2ePromptWriteAmbiguityMarker,
 	}
 	cfg.ProviderProxy.ModelOutputLimit = modelOutputLimit
-	if providerKind == providerKindFoundry {
-		// Remote Hosted Agent stop/delete must complete before settlement.
+	if usesLifecycleBroker(providerKind) {
+		// Remote stop/delete must complete before settlement.
 		cfg.CancelGrace = foundryCleanupTimeout
 	}
 	if err := cfg.Validate(); err != nil {
@@ -823,7 +823,7 @@ func providerProfile(
 			},
 			PrepareSession: prepareOpenCodeConfig,
 		}, nil
-	case providerKindAgentKit, providerKindFoundry:
+	case providerKindAgentKit, providerKindFoundry, providerKindKagent:
 		adapter, _ := externalACPAdapterFor(kind)
 		return adapter.profile(model)
 	default:
@@ -1071,7 +1071,7 @@ func defaultProxyBaseURL() string {
 
 func providerUpstreamBaseURL(provider, base string) string {
 	base = strings.TrimSuffix(strings.TrimSpace(base), "/")
-	if provider == providerKindCodex || provider == providerKindCopilot || provider == providerKindOpencode || provider == providerKindAgentKit || provider == providerKindFoundry {
+	if provider == providerKindCodex || provider == providerKindCopilot || provider == providerKindOpencode || provider == providerKindAgentKit || usesLifecycleBroker(provider) {
 		return openAIProxyURL(base)
 	}
 	return base
