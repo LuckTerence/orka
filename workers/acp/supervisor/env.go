@@ -824,6 +824,11 @@ func providerProfile(
 			PrepareSession: prepareOpenCodeConfig,
 		}, nil
 	case providerKindAgentKit, providerKindFoundry, providerKindKagent:
+		if kind == providerKindKagent && modelLimits != nil {
+			// The broker forwards only the prompt; kagent's own model
+			// configuration bounds each turn, so Orka cannot enforce a limit.
+			return ProviderProfile{}, fmt.Errorf("kagent runtimes cannot enforce model token limits; leave %s and %s unset", EnvModelContextLimit, EnvModelOutputLimit)
+		}
 		adapter, _ := externalACPAdapterFor(kind)
 		return adapter.profile(model)
 	default:

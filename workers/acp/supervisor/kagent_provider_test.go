@@ -50,6 +50,47 @@ func TestKagentProfileHasOnlyFrozenBrokeredCapabilities(t *testing.T) {
 	}
 }
 
+func TestKagentProfileRefusesModelTokenLimits(t *testing.T) {
+	t.Setenv(EnvKagentAdapterDigest, testDigest("kagent-adapter"))
+	t.Setenv(EnvAgentConfigurationDigest, testDigest("kagent-config"))
+	limits := &harnessv2.ModelTokenLimits{Context: 128000, Output: 4096}
+	if _, err := providerProfile(providerKindKagent, "kagent/kagent/probe", harnessv2.WorkspaceIntentRead, limits); err == nil ||
+		!strings.Contains(err.Error(), "cannot enforce model token limits") {
+		t.Fatalf("kagent profile with model limits error = %v", err)
+	}
+}
+
+func TestKagentProxyRecordsUsageWhenTheChildLeavesAfterCompletion(t *testing.T) {
+	proxy, session, _ := activeTestProviderProxySession(t, ProviderProxyConfig{
+		UpstreamBaseURL: testUnreachableUpstreamURL + "/v1", UpstreamBearerToken: testUpstreamToken, ProviderKind: providerKindKagent,
+	})
+	defer session.close()
+	seq := testAllocateInferenceSeq(session)
+	if err := session.consumeInferenceRequest(testPromptOneID, providerRequestInference, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	// The child closes the stream once it reads response.completed, before
+	// the upstream body ends.
+	delivered := "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":12,\"output_tokens\":4}}}\n\n"
+	response := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(strings.NewReader(delivered + "data: trailing\n\n")),
+	}
+	func() {
+		defer func() {
+			if recovered := recover(); recovered != http.ErrAbortHandler {
+				t.Fatalf("relay panic = %v, want http.ErrAbortHandler", recovered)
+			}
+		}()
+		proxy.relayUpstreamResponse(context.Background(), &prefixDisconnectedWriter{header: http.Header{}, limit: len(delivered)},
+			session, testPromptOneID, providerRequestInference, seq, response)
+	}()
+	if usage := session.promptUsage(testPromptOneID); usage == nil || usage.InputTokens != 12 || usage.OutputTokens != 4 {
+		t.Fatalf("usage after the child left = %#v", usage)
+	}
+}
+
 func TestKagentProxyRequiresLifecycleBrokerEndpoint(t *testing.T) {
 	_, _, err := (ProviderProxyConfig{
 		UpstreamBaseURL: "http://127.0.0.1:8091", UpstreamBearerToken: testUpstreamToken,

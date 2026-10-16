@@ -1299,6 +1299,11 @@ func (p *providerProxy) relayUpstreamResponseWithCancellation(
 	recordIncompleteStream := func() {
 		session.recordInferenceOutcome(promptID, requestClass, seq, http.StatusBadGateway, "provider stream ended before a terminal success event")
 	}
+	recordStreamUsage := func() {
+		if streamScanner != nil && streamScanner.usage != nil && requestClass == providerRequestInference {
+			session.recordInferenceUsage(promptID, *streamScanner.usage)
+		}
+	}
 	if upstreamFailed {
 		session.attachInferenceFailureDetail(promptID, requestClass, seq, providerUpstreamErrorDetail(capture.buffer))
 	}
@@ -1315,7 +1320,10 @@ func (p *providerProxy) relayUpstreamResponseWithCancellation(
 					if !streamScanner.completed {
 						recordIncompleteStream()
 					} else {
+						// A child may close the stream as soon as it reads
+						// the terminal event, before the upstream body ends.
 						session.recordInferenceOutcome(promptID, requestClass, seq, response.StatusCode, "")
+						recordStreamUsage()
 					}
 				}
 				// A partially delivered non-SSE body is left unaccounted:
@@ -1351,9 +1359,7 @@ func (p *providerProxy) relayUpstreamResponseWithCancellation(
 		// child; a streamed response must also carry a provider terminal
 		// success marker so a truncated 2xx cannot mask an earlier failure.
 		session.recordInferenceOutcome(promptID, requestClass, seq, response.StatusCode, "")
-		if streamScanner != nil && streamScanner.usage != nil && requestClass == providerRequestInference {
-			session.recordInferenceUsage(promptID, *streamScanner.usage)
-		}
+		recordStreamUsage()
 	}
 }
 
@@ -1392,14 +1398,19 @@ type sseTerminalErrorScanner struct {
 	completed         bool
 	detail            string
 	// captureUsage parses Responses usage from a complete terminal
-	// response.completed data line into usage.
-	captureUsage bool
-	usage        *harnessv2.UsageUpdate
+	// response.completed data line into usage. That line carries the whole
+	// response object, so it is buffered separately from linePrefix.
+	captureUsage  bool
+	usageLine     []byte
+	usageOverflow bool
+	usage         *harnessv2.UsageUpdate
 }
 
 const (
 	sseScannerDetailPrefixBytes = 1024
 	sseScannerWindowBytes       = 64
+	// sseScannerUsageLineBytes bounds the buffered response.completed line.
+	sseScannerUsageLineBytes = 1 << 20
 )
 
 // Markers are matched against a whitespace-stripped copy of each line, so
@@ -1449,6 +1460,13 @@ func (c *sseTerminalErrorScanner) Write(p []byte) (int, error) {
 		}
 		if len(c.linePrefix) < sseScannerDetailPrefixBytes {
 			c.linePrefix = append(c.linePrefix, b)
+		}
+		if c.captureUsage && !c.usageOverflow {
+			if len(c.usageLine) < sseScannerUsageLineBytes {
+				c.usageLine = append(c.usageLine, b)
+			} else {
+				c.usageOverflow = true
+			}
 		}
 		if b == ' ' || b == '\t' || b == '\r' {
 			continue
@@ -1541,10 +1559,10 @@ func (c *sseTerminalErrorScanner) finishLine() {
 // top-level event is response.completed. Model text reaches the stream only
 // JSON-escaped inside other events, so it cannot forge this line.
 func (c *sseTerminalErrorScanner) captureResponseUsage() {
-	if len(c.linePrefix) >= sseScannerDetailPrefixBytes {
+	if c.usageOverflow {
 		return
 	}
-	payload, ok := bytes.CutPrefix(bytes.TrimSpace(c.linePrefix), sseDataFieldPrefix)
+	payload, ok := bytes.CutPrefix(bytes.TrimSpace(c.usageLine), sseDataFieldPrefix)
 	if !ok {
 		return
 	}
@@ -1594,6 +1612,7 @@ func (c *sseTerminalErrorScanner) markFailure(marker []byte) {
 
 func (c *sseTerminalErrorScanner) resetLine() {
 	c.linePrefix = c.linePrefix[:0]
+	c.usageLine, c.usageOverflow = c.usageLine[:0], false
 	c.lineWindow = c.lineWindow[:0]
 	c.compactLen = 0
 }
