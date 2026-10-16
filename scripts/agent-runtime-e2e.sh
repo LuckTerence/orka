@@ -1809,6 +1809,7 @@ run_toolbox_check() {
           and .securityContext.readOnlyRootFilesystem == true and (.securityContext.capabilities.drop // []) == ["ALL"])] | length >= 1
     ' >/dev/null || die "no runtime Pod in ${runtime_namespace} carries a hardened toolbox-copy-0 init container"
   fi
+  mark_task_validated "${task}"
 
   # Expected reasons differ by mount method: the copier rejects special files
   # and reports a missing source folder itself, while an image volume mounts
@@ -1850,6 +1851,7 @@ run_toolbox_check() {
       .status.execution.reason == "ToolboxUnavailable" and ((.status.execution.message // "") | contains($reason))
     ' < <(task_json "${negative_task}") >/dev/null || \
       die "toolbox ${case_name} Task/${negative_task} did not fail with ToolboxUnavailable ${case_reason}: $(safe_task_summary "${negative_task}")"
+    mark_task_validated "${negative_task}"
   done
 
   # Image volumes mount files unsanitized, so the hostile fixture must stay
@@ -1871,6 +1873,7 @@ run_toolbox_check() {
     grep -Eq 'uid=0\(|euid=0' <<<"${hostile_result}" && die "hostile toolbox result shows the setuid-root binary gaining root"
     [[ "$(grep -o 'Operation not permitted' <<<"${hostile_result}" | wc -l | tr -d ' ')" -ge 2 ]] || \
       die "hostile toolbox result does not show the file-capability binary and the device node being refused"
+    mark_task_validated "${hostile_task}"
   fi
 }
 

@@ -212,7 +212,7 @@ reason. The message carries one stable code:
 | Reason | Meaning | Fix |
 | --- | --- | --- |
 | `TOOLBOX_IMAGE_PULL` | The toolbox image could not be pulled after five minutes from the first observed pull failure; invalid image names fail immediately. | Check the digest, registry access, and `imagePullSecrets`. |
-| `TOOLBOX_SOURCE_OPEN` | `mountPath` does not exist in the image, or a symlink sits somewhere in its path (`copy` mode; image volumes report `TOOLBOX_MOUNT_FAILED` instead). | Build the image so the folder exists as a real directory at exactly `mountPath`. |
+| `TOOLBOX_SOURCE_OPEN` | `copy` mode only: `mountPath` does not exist in the image, or a symlink sits somewhere in its path. Image volumes report a missing `mountPath` as `TOOLBOX_MOUNT_FAILED` and leave a symlinked one to the node runtime to resolve. | Build the image so the folder exists as a real directory at exactly `mountPath`. |
 | `TOOLBOX_MISSING_PATH_ENTRY` | A `pathEntries` folder is missing or is not a real directory. | Fix the entry or the image layout. |
 | `TOOLBOX_ARCH_MISMATCH` | An ELF file in a `pathEntries` folder is built for another CPU architecture. | Publish a multi-architecture image or pin toolbox Pods to matching nodes with `nodeSelector`. |
 | `TOOLBOX_UNSUPPORTED_FILE_TYPE` | The toolbox contains a FIFO, socket, or device file in `copy` mode, an overlong symlink chain, or a PATH symlink that leaves the toolbox root. | Remove special files or rewrite the symlink within the toolbox; only folders, regular files, and PATH symlinks resolved entirely within the toolbox are supported. |

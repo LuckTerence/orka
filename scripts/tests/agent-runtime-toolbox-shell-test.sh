@@ -123,14 +123,20 @@ done
     printf '%s\n' '{"status":{"execution":{"reason":"ToolboxUnavailable","message":"TOOLBOX_IMAGE_PULL"}}}'
   }
   k() { echo 'unexpected Kubernetes operation in checksum regression' >&2; return 1; }
+  mark_task_validated() { printf '%s\n' "$1" >>"${test_root}/validated-tasks"; }
   run_toolbox_check mock-model "${ACP_E2E_TOOLBOX_IMAGE}"
   mapfile -t images <"${test_root}/toolbox-images"
   assert_equal "${#images[@]}" 2
   assert_equal "${images[0]}" "${ACP_E2E_TOOLBOX_IMAGE}"
   # SHA-256 of the literal no-newline input orka-toolbox-unknown-digest-toolbox-checksum-test.
   assert_equal "${images[1]}" 'registry.example:5000/toolbox@sha256:147073788b0f333909b2193112de5d970beab147655376c8f9053da888c833b4'
+  # Run cleanup refuses Tasks without the validated label, so every checked
+  # toolbox Task must be marked.
+  mapfile -t validated <"${test_root}/validated-tasks"
+  assert_equal "${validated[*]}" "acp-codex-toolbox-run-${run_id} acp-codex-toolbox-unknown-run-${run_id}"
 )
 printf '%s\n' 'ok - the toolbox unknown-image case uses exact SHA-256 bytes with shasum and no GNU sha256sum'
+printf '%s\n' 'ok - run_toolbox_check marks every checked toolbox Task validated'
 
 # Both commands present: GNU sha256sum is preferred and receives no shasum flags.
 cat >"${portable_bin}/sha256sum" <<STUB
