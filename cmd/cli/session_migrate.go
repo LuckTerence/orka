@@ -246,7 +246,7 @@ func migrationOperationID() (string, error) {
 }
 
 func newSessionMigrateCmd() *cobra.Command {
-	cmd := &cobra.Command{Use: "migrate", Short: "Move agent conversations between local Claude Code, Codex, or OpenCode and Orka Sessions"}
+	cmd := &cobra.Command{Use: "migrate", Short: "Move agent conversations between local Claude Code, Codex, Copilot CLI, or OpenCode and Orka Sessions"}
 	cmd.PersistentFlags().Int("max-bundle-bytes", harnessv2.DefaultMaxNativeSessionBytes, "Maximum encoded native bundle bytes (1..67108864); ORKA_NATIVE_SESSION_MAX_BYTES supplies the default")
 	cmd.AddCommand(newSessionMigrateImportCmd(), newSessionMigrateExportCmd())
 	return cmd
@@ -380,7 +380,7 @@ func newSessionMigrateImportCmd() *cobra.Command {
 	agentHelp, stateDirHelp := migrationFlagHelp()
 	cmd.Flags().StringVar(&agent, "agent", "", agentHelp)
 	cmd.Flags().StringVar(&stateDir, "state-dir", "", "Source "+stateDirHelp+" (default: the agent's own, from that variable or under HOME)")
-	cmd.Flags().StringVar(&providerSessionID, "session-id", "", "The agent's own session ID: a Claude Code or Codex session UUID, or an OpenCode ses_ ID")
+	cmd.Flags().StringVar(&providerSessionID, "session-id", "", "The agent's own session ID: a Claude Code, Codex, or Copilot CLI session UUID, or an OpenCode ses_ ID")
 	cmd.Flags().StringVar(&cwd, "cwd", "", "Directory the source session ran in (default: the directory the agent recorded)")
 	cmd.Flags().StringVar(&journal, "journal-dir", "", "Private directory retained for exact retries (default: under ~/.orka/migrations, removed once the import completes)")
 	cmd.Flags().BoolVar(&stopped, "source-stopped", false, "Confirm every local agent process using the state directory has stopped")
@@ -413,7 +413,12 @@ func newSessionMigrateExportCmd() *cobra.Command {
 				if local.NewerReleases {
 					later = " or later"
 				}
-				return fmt.Errorf("destination requires %s reporting version %q%s (--agent-bin)", local.Binary, local.Version, later)
+				printed, _, _ := strings.Cut(strings.TrimSpace(string(version)), "\n")
+				if len(printed) > 80 {
+					printed = printed[:80]
+				}
+				return fmt.Errorf("destination requires %s %s%s (--agent-bin); %s --version printed %q",
+					local.Binary, local.Release, later, binary, printed)
 			}
 			c, target, cleanup, err := newMigrationClient(cmd)
 			if err != nil {

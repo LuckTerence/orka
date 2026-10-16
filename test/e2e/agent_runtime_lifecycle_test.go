@@ -165,6 +165,32 @@ var _ = Describe("Agent Runtime Lifecycle", Ordered, Label("agent-runtime"), fun
 		}, time.Minute, 2*time.Second).Should(Succeed())
 	}
 
+	// expectHistoryCarried checks in mock mode that the first model request of
+	// the turn marked continued is at least historyBytes larger than the first
+	// request of the turn marked first, so it carried the first turn's messages
+	// and tool results rather than an empty conversation. It compares sizes,
+	// so it holds whether or not the aimock journal cap hid the bodies.
+	expectHistoryCarried := func(first, continued string, historyBytes int) {
+		if live {
+			return
+		}
+		earliest := func(marker string) mockLLMRequest {
+			served, err := providerProxyMockLLM.servedFor(marker)
+			ExpectWithOffset(2, err).NotTo(HaveOccurred())
+			ExpectWithOffset(2, served).NotTo(BeEmpty(), "aimock answered no request for %s", marker)
+			request := served[0]
+			for _, candidate := range served[1:] {
+				if candidate.Timestamp < request.Timestamp {
+					request = candidate
+				}
+			}
+			return request
+		}
+		before, after := earliest(first), earliest(continued)
+		ExpectWithOffset(1, after.Body.Size).To(BeNumerically(">=", before.Body.Size+historyBytes),
+			"%s reached the model without the history of %s", continued, first)
+	}
+
 	// expectNativeCheckpointSaved checks that task's turn saved the agent's
 	// own conversation instead of falling back to the canonical transcript.
 	expectNativeCheckpointSaved := func(task string) {
@@ -230,7 +256,7 @@ var _ = Describe("Agent Runtime Lifecycle", Ordered, Label("agent-runtime"), fun
 	// after each turn, so a continuation restores it into a fresh
 	// RuntimeSession.
 	nativeCheckpoints := func(provider agentRuntimeProvider) bool {
-		return provider.kind == opencode.kind || provider.kind == claude.kind
+		return provider.kind == opencode.kind || provider.kind == claude.kind || provider.kind == copilot.kind
 	}
 
 	// readSmoke ports run_read_smoke for one provider: a read that starts a
@@ -290,6 +316,13 @@ var _ = Describe("Agent Runtime Lifecycle", Ordered, Label("agent-runtime"), fun
 			By("checking the provider proxy refused the model request Claude makes while resuming")
 			expectNoResumeModelRequest(continuedAt)
 		}
+		if provider.kind == copilot.kind {
+			// Copilot's requests can exceed the journal cap, which hides the
+			// nonce from expectReplayed. The first turn read the roughly 1 KB
+			// LICENSE, which a loaded conversation sends again.
+			By("checking the loaded Copilot conversation reached the model with the first turn")
+			expectHistoryCarried(marker(provider.kind+"-read"), marker(provider.kind+"-continue"), 1024)
+		}
 		continuedUID, continuedGeneration := taskSessionIdentity(Default, continuation)
 		Expect(continuedUID).To(Equal(firstUID))
 		Expect(continuedGeneration).To(Equal(expectedGeneration), "continuation must honor the prior turn's runtime retirement fence")
@@ -324,48 +357,6 @@ var _ = Describe("Agent Runtime Lifecycle", Ordered, Label("agent-runtime"), fun
 		expectTaskResult(fork, nonce)
 		expectReplayed(marker(provider.kind+"-fork"), nonce)
 		return agent, session, pool, nonce, continuedUID, continuedGeneration
-	}
-
-	// rebuildCopilotAfterAdapterExit kills the idle Copilot adapter behind the
-	// Session's RuntimeSession uid/generation, as an adapter crash between
-	// prompts would, and continues the Session. Copilot cannot resume, so the
-	// supervisor refuses its next prompt before writing it to the agent, and
-	// the continuation after that rebuilds the Session from its transcript at a
-	// later generation. The other agents restore a native checkpoint into a
-	// fresh RuntimeSession every turn, so they have no idle adapter to lose.
-	rebuildCopilotAfterAdapterExit := func(agent, session, pool, nonce, uid string, generation int64) {
-		snapshot := captureRuntimePoolSnapshot(pool, copilot.kind, copilot.model, corev1alpha1.WorkspaceIntentRead)
-		By(fmt.Sprintf("killing the idle Copilot adapter of Session %s", session))
-		killRuntimeSessionAdapter(snapshot, uid, generation)
-
-		task := name("acp-copilot-after-exit")
-		applyReadTask(agentRuntimeReadTask{Name: task, Agent: agent, Provider: copilot.kind, Session: session,
-			Prompt: "Continue the existing session. Return the session nonce from the prior turn and no " +
-				"repository-derived replacement. Do not modify files. " + marker("copilot-after-exit")})
-		Expect(waitTaskPoolName(task)).To(Equal(pool), "the continuation selected a different RuntimePool")
-		By("failing the Copilot prompt before it reaches the agent")
-		failed := waitTaskTerminalProjection(task)
-		Expect(failed.Status.Phase).To(Equal(corev1alpha1.TaskPhaseFailed), failed.Status.Message)
-		Expect(failed.Status.Execution.State).To(Equal(corev1alpha1.TaskExecutionStateFailed))
-		Expect(failed.Status.Execution.Outcome).To(Equal(corev1alpha1.TaskExecutionOutcomeFailed))
-		Expect(failed.Status.Execution.Reason).To(Equal(corev1alpha1.TaskExecutionReason("RuntimeLost")))
-		assertTaskFence(Default, failed, snapshot, false)
-		Expect(failed.Status.Execution.RuntimeSessionUID).To(Equal(uid))
-		Expect(failed.Status.Execution.RuntimeSessionGeneration).To(Equal(generation))
-
-		By("rebuilding the Copilot Session from its transcript on the next continuation")
-		rebuild := name("acp-copilot-rebuild")
-		applyReadTask(agentRuntimeReadTask{Name: rebuild, Agent: agent, Provider: copilot.kind, Session: session,
-			Prompt: "Continue the existing session. Return the session nonce from the earlier turns and no " +
-				"repository-derived replacement. Do not modify files. " + marker("copilot-rebuild")})
-		Expect(waitTaskPoolName(rebuild)).To(Equal(pool), "the rebuild selected a different RuntimePool")
-		assertTaskSucceededRead(rebuild, snapshot)
-		expectTaskResult(rebuild, nonce)
-		expectReplayed(marker("copilot-rebuild"), nonce)
-		rebuiltUID, rebuiltGeneration := taskSessionIdentity(Default, rebuild)
-		Expect(rebuiltUID).To(Equal(uid))
-		Expect(rebuiltGeneration).To(BeNumerically(">", generation),
-			"Copilot must rebuild the Session, not reuse its adapter")
 	}
 
 	// removeProviderResources ports remove_provider_resources: delete the run's
@@ -862,9 +853,8 @@ var _ = Describe("Agent Runtime Lifecycle", Ordered, Label("agent-runtime"), fun
 		removeProviderResources(claude.kind, agent)
 	})
 
-	It("runs GitHub Copilot with Session continuation and rebuilds a Session whose idle adapter exited", func() {
-		agent, session, pool, nonce, uid, generation := readSmoke(copilot)
-		rebuildCopilotAfterAdapterExit(agent, session, pool, nonce, uid, generation)
+	It("runs GitHub Copilot with Session continuation from its native checkpoint", func() {
+		agent, _, _, _, _, _ := readSmoke(copilot)
 		removeProviderResources(copilot.kind, agent)
 	})
 })

@@ -176,9 +176,18 @@ spilled tool results' paths. The adapter applies the projected
 `session/resume` sends one "Hi" request to the model; the supervisor resumes
 before granting any prompt provider access, so the provider proxy refuses it.
 
-Codex, OpenCode, and Claude Sessions save a native checkpoint after each turn
-and start the next turn in a fresh RuntimeSession, so the idle-adapter restart
-below applies to Copilot.
+For native Copilot restoration, the supervisor captures the stopped session's
+`$COPILOT_HOME/session-state/<session-id>/events.jsonl` and installs it before
+starting Copilot. Copilot cannot resume, so Orka restores the session with
+`session/load` in the new working directory. Copilot replays the history as
+`session/update` notifications before answering; no prompt is active then, so
+the supervisor discards them. The restore fails unless at least one replayed
+update names the loaded session, every one names it, and the replay stays
+within its byte budget.
+
+Every built-in runtime saves a native checkpoint after each turn and starts the
+next turn in a fresh RuntimeSession when the controller keeps native Sessions,
+so the idle-adapter restart below applies only when it does not.
 
 When the agent advertises `sessionCapabilities.close`, Orka sends
 `session/close` before the bounded process stop on deletion. When an adapter
@@ -199,9 +208,10 @@ transcript, and an idle exit the agent cannot resume retires the session the
 same way. Before any ACP prompt write, the supervisor returns non-retryable
 `prompt_not_accepted` for that idle-exit retirement; the controller records
 `Failed`/`RuntimeLost` without automatic replay, and the next continuation
-rebuilds from the canonical transcript. Orka does not use `session/load`
-(removed in the ACP v2 draft in favor of `session/resume` with `replayFrom`),
-`session/list`, or the still-unstable `session/fork`.
+rebuilds from the canonical transcript. Orka uses `session/load` only for
+native Copilot restoration, because Copilot cannot resume; the ACP v2 draft
+removes `session/load` in favor of `session/resume` with `replayFrom`. Orka
+does not use `session/list` or the still-unstable `session/fork`.
 
 Session-lifecycle capabilities advertised by the pinned runtimes, verified by
 driving each adapter over stdio (`initialize`, `session/new`, `session/prompt`,

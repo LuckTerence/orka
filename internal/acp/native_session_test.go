@@ -12,7 +12,7 @@ import (
 )
 
 func TestRuntimeSessionResumeRequiresSupportAndNeverCreatesFallback(t *testing.T) {
-	for _, mode := range []string{"resume-success", "resume-error", "resume-unsupported", "resume-wrong-id"} {
+	for _, mode := range []string{"resume-success", "resume-error", "resume-unsupported", "resume-wrong-id", "load-success", "load-error", "load-wrong-id", "load-over-budget", "load-silent", "load-silent-then-update"} {
 		t.Run(mode, func(t *testing.T) {
 			uid, gid := os.Getuid(), os.Getgid()
 			if uid == 0 {
@@ -41,21 +41,31 @@ func TestRuntimeSessionResumeRequiresSupportAndNeverCreatesFallback(t *testing.T
 			command, helperCommand := testAdapterCommand(t), testExecHelperCommand(t)
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
+			replayBudget := 0
+			if mode == "load-over-budget" {
+				replayBudget = 64
+			}
 			session, err := NewRuntimeSession(ctx, RuntimeSessionConfig{
 				ID: "resume-session", Generation: 1, ProfileDigest: "sha256:profile", ResumeSessionID: nativeID,
-				MCPServers:  []MCPServer{{Name: "current-mcp", Type: "http", URL: "http://current.example/mcp"}},
-				Process:     ProcessConfig{Command: command, Args: []string{"-test.run=TestACPHelperProcess"}, Environment: env, Paths: paths, UID: uid, GID: gid, ExecHelperCommand: helperCommand},
-				CancelGrace: 100 * time.Millisecond,
+				MCPServers:         []MCPServer{{Name: "current-mcp", Type: "http", URL: "http://current.example/mcp"}},
+				Process:            ProcessConfig{Command: command, Args: []string{"-test.run=TestACPHelperProcess"}, Environment: env, Paths: paths, UID: uid, GID: gid, ExecHelperCommand: helperCommand},
+				CancelGrace:        100 * time.Millisecond,
+				MaxLoadReplayBytes: replayBudget,
 			})
-			if mode != "resume-success" {
+			if mode != "resume-success" && mode != "load-success" {
 				if err == nil {
 					_, _ = session.Delete(ctx)
 					t.Fatal("unsupported or failed native resume succeeded")
 				}
 				want := map[string]string{
-					"resume-error":       "resume ACP provider session",
-					"resume-unsupported": "did not advertise session/resume",
-					"resume-wrong-id":    "bound a different provider session",
+					"resume-error":            "restore ACP provider session",
+					"load-error":              "restore ACP provider session",
+					"resume-unsupported":      "did not advertise session/resume",
+					"resume-wrong-id":         "bound a different provider session",
+					"load-wrong-id":           "replayed a different provider session",
+					"load-over-budget":        "session/load replayed more than 64 bytes",
+					"load-silent":             "replayed none of the provider session's history",
+					"load-silent-then-update": "replayed none of the provider session's history",
 				}[mode]
 				if !strings.Contains(err.Error(), want) {
 					t.Fatalf("native resume error = %v, want %s", err, want)
@@ -64,7 +74,7 @@ func TestRuntimeSessionResumeRequiresSupportAndNeverCreatesFallback(t *testing.T
 				if !ok || initialization.RuntimeSession() == nil || session != nil {
 					t.Fatalf("failed resume lost its runtime cleanup handle: %v", err)
 				}
-				if mode == "resume-error" {
+				if mode == "resume-error" || mode == "load-error" {
 					if rpc, ok := errors.AsType[*RPCError](err); !ok || rpc.Code != -32602 {
 						t.Fatalf("failed resume lost its RPC cause: %v", err)
 					}
@@ -95,7 +105,7 @@ func TestRuntimeSessionResumeRequiresSupportAndNeverCreatesFallback(t *testing.T
 			}
 			for event := range run.Events {
 				if event.Update != nil && strings.Contains(string(event.Update.Update), "imported history") {
-					t.Fatal("session/resume history entered the fresh prompt")
+					t.Fatal("restored history entered the fresh prompt")
 				}
 			}
 			if result := <-run.Result; result.Outcome != PromptOutcomeCompleted {

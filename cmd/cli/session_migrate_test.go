@@ -403,8 +403,8 @@ func TestMigrateSelectsTheAgentFormat(t *testing.T) {
 		require.NoError(t, os.Chmod(dir, 0o700))
 		return dir
 	}
-	err := migrationCommand(t, server.URL, "import", "new", "--agent", "copilot", "--state-dir", t.TempDir(), "--session-id", "id", "--journal-dir", private(), "--source-stopped")
-	require.ErrorContains(t, err, "--agent must be one of: claude, codex, opencode")
+	err := migrationCommand(t, server.URL, "import", "new", "--agent", "agentkit", "--state-dir", t.TempDir(), "--session-id", "id", "--journal-dir", private(), "--source-stopped")
+	require.ErrorContains(t, err, "--agent must be one of: claude, codex, copilot, opencode")
 
 	// OpenCode's own database records where the session ran, so import needs
 	// no --cwd and reads XDG_DATA_HOME/opencode.
@@ -499,6 +499,7 @@ func TestLocalStateDirFollowsTheAgentsVariable(t *testing.T) {
 	require.NoError(t, err)
 	claude, _ := nativesession.For("claude")
 	codex, _ := nativesession.For("codex")
+	copilot, _ := nativesession.For("copilot")
 	opencode, _ := nativesession.For("opencode")
 	for _, test := range []struct {
 		local         nativesession.Local
@@ -509,6 +510,8 @@ func TestLocalStateDirFollowsTheAgentsVariable(t *testing.T) {
 		{codex.Local(), "/custom/codex", "/custom/codex"},
 		{codex.Local(), "", filepath.Join(home, ".codex")},
 		{codex.Local(), "relative/codex", filepath.Join(cwd, "relative", "codex")},
+		{copilot.Local(), "", filepath.Join(home, ".copilot")},
+		{copilot.Local(), "relative/copilot", filepath.Join(cwd, "relative", "copilot")},
 		{opencode.Local(), "", filepath.Join(home, ".local", "share")},
 		// OpenCode reads XDG_DATA_HOME through xdg-basedir, which keeps a
 		// relative value.
