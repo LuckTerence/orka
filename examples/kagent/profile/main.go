@@ -63,8 +63,9 @@ func run(adapter, configPath string, allowed, approvalRequired []string) error {
 	if err := json.Unmarshal(raw, &configuration); err != nil || configuration.Model == "" {
 		return fmt.Errorf("kagent configuration must name its profile model")
 	}
-	if (len(allowed) != 0) != (len(configuration.Governed) != 0) {
-		return fmt.Errorf("only a governed kagent configuration may list Orka tools, and it must list at least one")
+	// A governed Agent may also have no tools: Orka then serves only its model.
+	if len(allowed) != 0 && len(configuration.Governed) == 0 {
+		return fmt.Errorf("only a governed kagent configuration may list Orka tools")
 	}
 	for _, tool := range approvalRequired {
 		if !slices.Contains(allowed, tool) {
