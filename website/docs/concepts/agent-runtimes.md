@@ -302,11 +302,14 @@ How the check reads a policy:
 - **Explicit empty list.** `ceiling.allowedTools: []` permits no tools.
 - **Coordination tools.** The `send_message` and `check_messages` tools that
   Orka injects into delegated child Tasks are not counted against the ceiling.
-- **Gateway replies.** Orka grants `reply_in_conversation` to eligible gateway
-  Tasks without an explicit allowlist only when the ceiling, if it lists tools,
-  includes it.
+- **Gateway replies.** Eligible gateway Tasks without an explicit allowlist
+  normally get `reply_in_conversation` implicitly. Under a tool ceiling that
+  happens only for OpenCode Agents, and only when the ceiling lists the tool;
+  other runtimes need an explicit allowlist under a tool ceiling, so add
+  `reply_in_conversation` to it (and to the ceiling) to keep replies.
 - **`runtimeRef` Agents.** Only `allowedTools` applies; the registered profile
-  already fixes Bash and the turn budget.
+  already fixes Bash and the turn budget. Harness v1 registrations, which take
+  `maxTurns` from the Task or Agent, are also held to `maxTurns`.
 
 A Task is checked against the Agent generation it binds to. Changing a
 ceiling does not affect Tasks that are already bound. When an Agent's own

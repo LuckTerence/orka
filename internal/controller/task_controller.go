@@ -3448,6 +3448,9 @@ func validatePlannedRuntimeRefAgentTaskRestrictions(
 ) error {
 	// planAgentExecution resolves runtimeRef before selecting the external path,
 	// so these v2-only checks cannot change harness v1 compatibility.
+	if plan.path == agentExecutionPathHarnessV1 {
+		return validateHarnessV1RuntimeRefCeiling(task, agent)
+	}
 	if plan.path != agentExecutionPathExternal {
 		return nil
 	}

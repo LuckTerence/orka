@@ -1,11 +1,13 @@
 package controller
 
 import (
+	"slices"
 	"testing"
 	"time"
 
 	gatewayv1alpha1 "github.com/orka-agents/orka/api/gateway/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/acp"
 	"github.com/orka-agents/orka/internal/aitools"
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	"github.com/orka-agents/orka/internal/gateway/protocol"
@@ -78,6 +80,35 @@ func TestACPReplyProviderDefaults(t *testing.T) {
 	}
 }
 
+// OpenCode is the runtime whose implicit allowlist is a bounded default list,
+// so an Agent with a tool ceiling can bind without an explicit allowlist and
+// still receive the implicit reply grant.
+func TestACPReplyImplicitGrantRespectsCeiling(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		reply bool
+	}{{"ceiling omits reply", false}, {"ceiling lists reply", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, task, agent := acpReplyPlanningFixture(t, true)
+			agent.Spec.Runtime.Type = corev1alpha1.AgentRuntimeOpencode
+			agent.Spec.SystemPrompt = nil
+			agent.Spec.Model = testOpenCodeModelConfig()
+			r.ACPRuntimeImages.Opencode = r.ACPRuntimeImages.Codex
+			ceiling := acp.OpenCodeDefaultAllowedTools()
+			if tc.reply {
+				ceiling = append(ceiling, aitools.GatewayReplyToolName)
+			}
+			agent.Spec.Runtime.Ceiling = &corev1alpha1.AgentRuntimeCeiling{AllowedTools: ceiling}
+			require.NoError(t, r.validateAgentRuntimeTaskCompatibility(task, agent), "the policy must pass the ceiling and bind")
+			candidate, err := r.resolveAgentExecutionCandidate(t.Context(), task, agent)
+			require.NoError(t, err)
+			body, err := decodeAgentExecutionSnapshot(candidate.snapshotBody)
+			require.NoError(t, err)
+			require.Equal(t, tc.reply, slices.Contains(body.MCPConfiguration.ToolPolicy.AllowedToolNames, aitools.GatewayReplyToolName))
+		})
+	}
+}
+
 func TestACPReplyFrozenPolicy(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -94,12 +125,6 @@ func TestACPReplyFrozenPolicy(t *testing.T) {
 		{"task precedence", func(t *corev1alpha1.Task, a *corev1alpha1.Agent) {
 			a.Spec.Runtime.DefaultAllowedTools = []string{}
 			t.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{"Read", aitools.GatewayReplyToolName}}
-		}, true},
-		{"ceiling excludes implicit grant", func(t *corev1alpha1.Task, a *corev1alpha1.Agent) {
-			a.Spec.Runtime.Ceiling = &corev1alpha1.AgentRuntimeCeiling{AllowedTools: []string{"Read", "Bash"}}
-		}, false},
-		{"ceiling permits implicit grant", func(t *corev1alpha1.Task, a *corev1alpha1.Agent) {
-			a.Spec.Runtime.Ceiling = &corev1alpha1.AgentRuntimeCeiling{AllowedTools: []string{"Read", aitools.GatewayReplyToolName}}
 		}, true},
 		{"disallowed", func(t *corev1alpha1.Task, a *corev1alpha1.Agent) {
 			t.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{DisallowedTools: []string{aitools.GatewayReplyToolName}}

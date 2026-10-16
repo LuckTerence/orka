@@ -187,6 +187,43 @@ func TestValidateAgentRuntimeCeiling(t *testing.T) {
 			}(),
 		},
 		{
+			// Dispatch materializes the native list before injecting messaging
+			// tools, so the exact-match deny entry "bash" leaves "Bash" granted.
+			name:  "delegated child judged on the materialized native list",
+			agent: ceilingTestAgent(corev1alpha1.AgentRuntimeClaude, &corev1alpha1.AgentRuntimeCeiling{AllowBash: no}),
+			task: func() *corev1alpha1.Task {
+				task := ceilingTestTask(nil, yes)
+				task.Labels = map[string]string{labels.LabelParentTask: "parent"}
+				task.Spec.AgentRuntime.DisallowedTools = tools("bash")
+				return task
+			}(),
+			wantErr: "forbids Bash",
+		},
+		{
+			name:  "padded names are trimmed before the deny list applies",
+			agent: ceilingTestAgent(corev1alpha1.AgentRuntimeClaude, &corev1alpha1.AgentRuntimeCeiling{AllowedTools: tools("Read")}),
+			task: func() *corev1alpha1.Task {
+				task := ceilingTestTask(tools("Read", " Write "), nil)
+				task.Spec.AgentRuntime.DisallowedTools = tools("Write")
+				return task
+			}(),
+		},
+		{
+			name:  "padded Bash is removed by the Bash gate",
+			agent: ceilingTestAgent(corev1alpha1.AgentRuntimeClaude, &corev1alpha1.AgentRuntimeCeiling{AllowedTools: tools("Read"), AllowBash: no}),
+			task:  ceilingTestTask(tools("Read", " Bash "), no),
+		},
+		{
+			name: "padded Bash in Agent defaults is removed by the Bash gate",
+			agent: func() *corev1alpha1.Agent {
+				agent := ceilingTestAgent(corev1alpha1.AgentRuntimeClaude, &corev1alpha1.AgentRuntimeCeiling{AllowedTools: tools("Read"), AllowBash: no})
+				agent.Spec.Runtime.DefaultAllowedTools = tools("Read", " Bash ")
+				agent.Spec.Runtime.DefaultAllowBash = no
+				return agent
+			}(),
+			task: ceilingTestTask(nil, nil),
+		},
+		{
 			name:  "read-only preset is judged after translation",
 			agent: ceilingTestAgent(corev1alpha1.AgentRuntimeClaude, &corev1alpha1.AgentRuntimeCeiling{AllowedTools: tools("Glob", "Grep", "Read")}),
 			task: func() *corev1alpha1.Task {
@@ -381,5 +418,28 @@ func TestAgentRuntimeCeilingJSONPreservesExplicitEmptyTools(t *testing.T) {
 	}
 	if string(unbounded) != "{}" {
 		t.Fatalf("encoded unbounded ceiling = %s, want {}", unbounded)
+	}
+}
+
+func TestValidatePlannedHarnessV1RuntimeRefEnforcesTurnCeiling(t *testing.T) {
+	limit, requested := int32(10), int32(100)
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "fibey", Namespace: "team-a"},
+		Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
+			RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "fibey-runtime"},
+			Ceiling:    &corev1alpha1.AgentRuntimeCeiling{MaxTurns: &limit},
+		}},
+	}
+	task := ceilingTestTask(nil, nil)
+	task.Spec.AgentRuntime.MaxTurns = &requested
+	plan := agentHarnessV1Plan("fibey-runtime")
+	err := validatePlannedRuntimeRefAgentTaskRestrictions(task, agent, plan)
+	if err == nil || !strings.Contains(err.Error(), "ceiling allows at most 10 turns") {
+		t.Fatalf("harness v1 runtimeRef above turn ceiling: error = %v, want ceiling rejection", err)
+	}
+	within := int32(5)
+	task.Spec.AgentRuntime.MaxTurns = &within
+	if err := validatePlannedRuntimeRefAgentTaskRestrictions(task, agent, plan); err != nil {
+		t.Fatalf("harness v1 runtimeRef within turn ceiling: error = %v, want nil", err)
 	}
 }

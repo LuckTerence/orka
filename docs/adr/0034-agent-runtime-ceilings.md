@@ -48,6 +48,8 @@ than a capability the caller requested. The implicit `reply_in_conversation`
 grant for gateway Tasks does reach outside the Task, so a tool ceiling that does
 not list it suppresses that grant. For `runtimeRef` Agents only
 `allowedTools` applies; the registered profile already fixes Bash and turns.
+The exception is a harness v1 registration, which takes `maxTurns` from the
+Task or Agent, so it is also held to the turn ceiling once planning resolves it.
 
 ## Consequences
 

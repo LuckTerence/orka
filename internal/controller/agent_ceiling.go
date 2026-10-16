@@ -69,7 +69,9 @@ func validateAgentRuntimeCeiling(task *corev1alpha1.Task, agent *corev1alpha1.Ag
 
 // resolvedCeilingToolRequest returns the tools the Task can execute after the
 // runtime's own normalization, deny list, and Bash gate, and whether that
-// policy grants Bash. A nil tool list means the unrestricted native set.
+// policy grants Bash. It starts from the same allowlist dispatch uses and
+// then drops only the injected coordination tools. A nil tool list means the
+// unrestricted native set.
 func resolvedCeilingToolRequest(task *corev1alpha1.Task, agent *corev1alpha1.Agent, runtimeRef bool) ([]string, bool) {
 	requested := requestedACPAllowedTools(task, agent)
 	if runtimeRef {
@@ -82,7 +84,17 @@ func resolvedCeilingToolRequest(task *corev1alpha1.Task, agent *corev1alpha1.Age
 		// A nonempty all-blank allowlist is the legacy unrestricted sentinel;
 		// judge it as the widest grant so it can never slip past a ceiling.
 		requested = nil
+	} else {
+		requested = effectiveACPAllowedTools(task, agent)
 	}
+	tools, bash := resolvedCeilingRuntimeTools(task, agent, requested)
+	if tools != nil && injectsACPCoordinationTools(task, agent) {
+		tools = slices.DeleteFunc(tools, func(tool string) bool { return slices.Contains(acpInjectedCoordinationTools, tool) })
+	}
+	return tools, bash
+}
+
+func resolvedCeilingRuntimeTools(task *corev1alpha1.Task, agent *corev1alpha1.Agent, requested []string) ([]string, bool) {
 	var disallowed []string
 	if task != nil && task.Spec.AgentRuntime != nil {
 		disallowed = sortedUnique(task.Spec.AgentRuntime.DisallowedTools)
@@ -109,6 +121,22 @@ func resolvedCeilingToolRequest(task *corev1alpha1.Task, agent *corev1alpha1.Age
 	policy := harnessv2.MCPToolPolicy{AllowedToolNames: allowed, DisallowedToolNames: disallowed, AllowBash: allowBash}
 	tools := sortedUnique(slices.DeleteFunc(slices.Clone(allowed), func(tool string) bool { return !policy.Allows(tool) }))
 	return tools, slices.ContainsFunc(tools, isCeilingBashTool)
+}
+
+// validateHarnessV1RuntimeRefCeiling enforces the turn ceiling for a runtimeRef
+// Agent whose AgentRuntime resolved to harness v1. Unlike v2 registrations, v1
+// freezes the Task or Agent maxTurns into the session configuration.
+func validateHarnessV1RuntimeRefCeiling(task *corev1alpha1.Task, agent *corev1alpha1.Agent) error {
+	if agent == nil || agent.Spec.Runtime == nil || agent.Spec.Runtime.Ceiling == nil || agent.Spec.Runtime.Ceiling.MaxTurns == nil ||
+		agent.Spec.Runtime.RuntimeRef == nil || strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name) == "" {
+		return nil
+	}
+	limit := *agent.Spec.Runtime.Ceiling.MaxTurns
+	if turns := effectiveACPMaxTurns(task, agent); turns > limit {
+		return fmt.Errorf("agent %q ceiling allows at most %d turns, but the task resolves to %d; set maxTurns or the Agent defaultMaxTurns within the ceiling",
+			agent.Name, limit, turns)
+	}
+	return nil
 }
 
 // agentCeilingAllowsTool reports whether the Agent's ceiling, if any, permits
