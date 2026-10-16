@@ -461,10 +461,18 @@ func TestAgentImportKagentCmdUpdatesItsOwnAgentsOnly(t *testing.T) {
 	if _, err := runKagentImport(t, "-f", path, "--server", srv.URL, "-n", "team"); err != nil {
 		t.Fatal(err)
 	}
-	api.agents["k8s-agent"]["spec"] = map[string]any{"runtime": map[string]any{"runtimeRef": map[string]any{"name": "drifted"}}}
+	api.agents["k8s-agent"]["spec"] = map[string]any{
+		"runtime": map[string]any{"runtimeRef": map[string]any{"name": "drifted"}},
+		"session": map[string]any{"maxMessages": float64(10)},
+	}
 	out, err := runKagentImport(t, "-f", path, "--server", srv.URL, "-n", "team")
 	if err != nil || !strings.Contains(out, "Agent updated: k8s-agent") || api.updates != 1 {
 		t.Fatalf("drift repair = %q %v (updates %d)", out, err, api.updates)
+	}
+	// The repair replaces only the fields the import owns.
+	if repaired := decodeWrappedAgent(t, api.agents["k8s-agent"]); repaired.Spec.Runtime == nil || repaired.Spec.Runtime.RuntimeRef == nil ||
+		repaired.Spec.Runtime.RuntimeRef.Name != "k8s-agent-kagent-runtime" || repaired.Spec.Session == nil || repaired.Spec.Session.MaxMessages != 10 {
+		t.Fatalf("repaired spec = %+v", repaired.Spec)
 	}
 	api.agents["helm-agent"]["metadata"] = map[string]any{"name": "helm-agent", "annotations": map[string]any{}}
 	if _, err := runKagentImport(t, "-f", path, "--server", srv.URL, "-n", "team"); err == nil || !strings.Contains(err.Error(), `agent "helm-agent" already exists and does not wrap kagent Agent kagent/helm-agent`) {
@@ -629,6 +637,16 @@ func TestAgentImportKagentCmdWritesDeterministicWrapperConfig(t *testing.T) {
 		t.Fatalf("governed Agent without an upstream: %v", err)
 	}
 	args := append(slices.Clone(base), "--model-upstream-url", "http://vekil.vekil-system.svc:8080/v1", "--model-upstream-model", "gpt-4.1")
+	// The wrapper refuses these, so the import must not write them.
+	for flag, value := range map[string]string{
+		"--control-plane-url":  "http://10.0.0.1:8083",
+		"--user-id-prefix":     "Orka_Users",
+		"--model-upstream-url": "vekil:8080/v1",
+	} {
+		if _, err := runKagentImport(t, append(slices.Clone(args), flag, value)...); err == nil || !strings.Contains(err.Error(), flag) {
+			t.Errorf("%s %s error = %v", flag, value, err)
+		}
+	}
 	if _, err := runKagentImport(t, args...); err != nil {
 		t.Fatal(err)
 	}

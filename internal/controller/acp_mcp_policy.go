@@ -326,7 +326,7 @@ func buildMCPPolicyConfigurationWithRegistry(
 ) (harnessv2.MCPPolicyConfiguration, error) {
 	if len(approval.RequiredTools) > 0 && !runtimeSupportsMCPApprovals(profile) {
 		return harnessv2.MCPPolicyConfiguration{}, permanentACPAgentConfiguration(
-			fmt.Errorf("approval-required MCP tools require a qualified AgentKit or Foundry runtime"),
+			fmt.Errorf("approval-required MCP tools require a qualified AgentKit, Foundry, or kagent runtime"),
 		)
 	}
 	toolDigest, err := harnessv2.CanonicalRuntimeToolPolicyDigest(allowed, disallowed, allowBash)

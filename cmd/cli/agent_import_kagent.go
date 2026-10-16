@@ -565,7 +565,7 @@ func reconcileKagentWrappedAgents(cmd *cobra.Command, wrapped []kagentWrappedAge
 			}
 			action = "unchanged"
 			if kagentSpecDrifted(current[kagentFieldSpec], agent.Manifest[kagentFieldSpec]) {
-				body, err := json.Marshal(map[string]any{kagentFieldSpec: agent.Manifest[kagentFieldSpec]})
+				body, err := json.Marshal(map[string]any{kagentFieldSpec: kagentRepairedSpec(current[kagentFieldSpec], agent.Manifest[kagentFieldSpec])})
 				if err != nil {
 					return fmt.Errorf("marshaling Agent %q: %w", name, err)
 				}
@@ -588,6 +588,25 @@ func reconcileKagentWrappedAgents(cmd *cobra.Command, wrapped []kagentWrappedAge
 // mode. A field the import no longer sets must be removed, so each one is
 // compared whole; fields the import never writes are left to their owners.
 var kagentOwnedSpecFields = []string{"runtime", "systemPrompt", "model", "providerRef", kagentFieldTools}
+
+// kagentRepairedSpec keeps the fields other owners set and replaces or
+// removes only the import-owned ones; the update replaces the whole spec.
+func kagentRepairedSpec(got, want any) map[string]any {
+	gotSpec, _ := got.(map[string]any)
+	wantSpec, _ := want.(map[string]any)
+	spec := maps.Clone(gotSpec)
+	if spec == nil {
+		spec = map[string]any{}
+	}
+	for _, field := range kagentOwnedSpecFields {
+		if value, ok := wantSpec[field]; ok {
+			spec[field] = value
+		} else {
+			delete(spec, field)
+		}
+	}
+	return spec
+}
 
 // kagentSpecDrifted reports whether any import-owned spec field differs. The
 // server defaults tools[].enabled to true, which the import never sets.

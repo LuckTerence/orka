@@ -10,13 +10,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
+	"unicode"
+
+	utilvalidation "k8s.io/apimachinery/pkg/util/validation"
 )
 
 // Wrapped kagent Agents run in one of two modes. Observed: kagent runs the
@@ -361,7 +366,7 @@ func governedRemoteMCPServerProblems(remote map[string]any) []string {
 // relayOrigin returns the http(s) origin of value when its path is exactly path.
 func relayOrigin(value, path string) (string, bool) {
 	u, err := url.Parse(strings.TrimSpace(value))
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil ||
+	if err != nil || !kagentHTTPScheme(u.Scheme) || u.Host == "" || u.User != nil ||
 		u.RawQuery != "" || u.Fragment != "" || strings.TrimSuffix(u.Path, "/") != path {
 		return "", false
 	}
@@ -396,25 +401,74 @@ type kagentWrapperGoverned struct {
 	UpstreamModel   string `json:"upstreamModel"`
 }
 
+// kagentUserIDPrefixPattern matches the wrapper's user ID prefix rule.
+var kagentUserIDPrefixPattern = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]{0,30}[a-z0-9])?$`)
+
+// validate applies the wrapper's own configuration rules, so the import never
+// writes a file the wrapper refuses to load.
 func (o kagentWrapperOptions) validate(wrapped []kagentWrappedAgent) error {
 	if o.Dir == "" {
 		return nil
 	}
-	if _, ok := relayOrigin(o.ControlPlaneURL, ""); !ok {
-		return fmt.Errorf("--control-plane-url must be the kagent controller's http(s) base URL")
+	if !kagentControlPlaneURL(o.ControlPlaneURL) {
+		return fmt.Errorf("--control-plane-url must be the kagent controller's http(s) base URL with a DNS host name")
+	}
+	if !kagentUserIDPrefixPattern.MatchString(o.UserIDPrefix) {
+		return fmt.Errorf("--user-id-prefix must be 1-32 lowercase letters, digits, or hyphens, starting and ending with a letter or digit")
 	}
 	for _, agent := range wrapped {
 		if agent.SourceNamespace == "" {
 			return fmt.Errorf("kagent Agent %s has no metadata.namespace; the wrapper configuration must name it, so export the Agent with kubectl get -o yaml", agent.Source)
 		}
+		if len(kagentWrapperModel(agent)) > 256 {
+			return fmt.Errorf("kagent Agent %s: its namespace and name are too long for the wrapper's 256-byte model name", agent.Source)
+		}
 		if !kagentRevisionPattern.MatchString(agent.Mode.Revision) {
 			return fmt.Errorf("kagent Agent %s has no status.latestSuccessfulRevision to pin; export it with kubectl get -o yaml after it is Ready", agent.Source)
 		}
-		if agent.Mode.Mode == kagentModeGoverned && (o.UpstreamURL == "" || o.UpstreamModel == "") {
-			return fmt.Errorf("kagent Agent %s is governed: --model-upstream-url and --model-upstream-model name the model Orka serves it", agent.Source)
+		if agent.Mode.Mode == kagentModeGoverned && (!kagentUpstreamURL(o.UpstreamURL) || !kagentSafeString(o.UpstreamModel, 256)) {
+			return fmt.Errorf("kagent Agent %s is governed: --model-upstream-url (an http(s) base URL) and --model-upstream-model name the model Orka serves it", agent.Source)
 		}
 	}
 	return nil
+}
+
+func kagentWrapperModel(agent kagentWrappedAgent) string {
+	return "kagent/" + agent.SourceNamespace + "/" + agent.SourceName
+}
+
+// kagentControlPlaneURL accepts an http(s) origin whose host is a DNS name:
+// Substrate egress rules match DNS names, not literal IPs.
+func kagentControlPlaneURL(value string) bool {
+	if _, ok := relayOrigin(value, ""); !ok || !kagentSafeString(value, 2048) || strings.Contains(value, "?") {
+		return false
+	}
+	u, _ := url.Parse(value)
+	host := u.Hostname()
+	if port := u.Port(); port != "" {
+		if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+			return false
+		}
+	}
+	return net.ParseIP(host) == nil && len(utilvalidation.IsDNS1123Subdomain(host)) == 0
+}
+
+// kagentUpstreamURL accepts an http(s) base URL with an optional path and no
+// credentials, query, or fragment.
+func kagentUpstreamURL(value string) bool {
+	u, err := url.Parse(value)
+	return err == nil && kagentSafeString(value, 2048) && kagentHTTPScheme(u.Scheme) && u.Host != "" &&
+		u.User == nil && !strings.ContainsAny(value, "?#") && u.RawPath == ""
+}
+
+func kagentHTTPScheme(scheme string) bool {
+	return scheme == "http" || scheme == "https"
+}
+
+// kagentSafeString reports whether value is nonempty, trimmed, at most limit
+// bytes, and free of control characters.
+func kagentSafeString(value string, limit int) bool {
+	return value != "" && len(value) <= limit && strings.TrimSpace(value) == value && !strings.ContainsFunc(value, unicode.IsControl)
 }
 
 // writeKagentWrapperConfigs writes <name>.kagent.json for each Agent. The
@@ -437,7 +491,7 @@ func writeKagentWrapperConfigs(o kagentWrapperOptions, wrapped []kagentWrappedAg
 	for _, agent := range wrapped {
 		namespace, name := agent.SourceNamespace, agent.SourceName
 		config := kagentWrapperConfig{
-			Model: "kagent/" + namespace + "/" + name,
+			Model: kagentWrapperModel(agent),
 			Kagent: kagentWrapperTarget{
 				ControlPlaneURL: strings.TrimSuffix(o.ControlPlaneURL, "/"), Agent: map[string]string{cliNamespaceQuery: namespace, cliNameKey: name},
 				ExpectedRevision: agent.Mode.Revision, UserIDPrefix: o.UserIDPrefix,
