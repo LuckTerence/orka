@@ -40,6 +40,8 @@ const (
 	kagentFieldRuntime         = "runtime"
 	kagentFieldKind            = "kind"
 	kagentFieldInline          = "inline"
+	kagentFieldMemory          = "memory"
+	kagentFieldModelConfig     = "modelConfig"
 	kagentToolTypeMCPServer    = "McpServer"
 	// kagentV0Container and kagentV0GoImage name the agent container and the
 	// Go ADK image repository kagent runs it from (both image variants).
@@ -50,9 +52,12 @@ const (
 // kagentConfigHashPattern matches the decimal uint64 kagent writes.
 var kagentConfigHashPattern = regexp.MustCompile(`^[0-9]{1,20}$`)
 
+// kagentV0SingleReplica explains why a v0 Agent must run one replica.
+const kagentV0SingleReplica = "kagent v0 cancels a task only in the pod that runs it, so with more replicas a cancel can land on a pod that is not running the turn"
+
 // kagentV0WrapRefusals lists why the wrapper cannot run a v0 Agent at all,
 // in either mode.
-func kagentV0WrapRefusals(agent map[string]any) []string {
+func kagentV0WrapRefusals(agent, deployment map[string]any) []string {
 	var problems []string
 	switch kind := kagentString(agent, kagentFieldSpec, "type"); kind {
 	case "Declarative":
@@ -74,6 +79,19 @@ func kagentV0WrapRefusals(agent map[string]any) []string {
 			// approval policy gates relayed tools instead.
 			problems = append(problems, fmt.Sprintf("tool %d requires kagent approval (requireApproval), which a wrapped Agent cannot answer", i))
 		}
+	}
+	if replicas, set := kagentMap(agent, kagentFieldSpec, kagentFieldDeclarative, "deployment")["replicas"].(float64); set && replicas != 1 {
+		problems = append(problems, fmt.Sprintf("it asks for %d replicas (declarative.deployment.replicas); %s", int64(replicas), kagentV0SingleReplica))
+	}
+	if deployment == nil {
+		return append(problems, "its Deployment is not in the input, so the import cannot confirm it runs exactly one replica; "+kagentV0SingleReplica)
+	}
+	specReplicas := int64(1) // the Deployment default
+	if value, ok := kagentMap(deployment, kagentFieldSpec)["replicas"].(float64); ok {
+		specReplicas = int64(value)
+	}
+	if running := kagentInt(deployment, "status", "replicas"); specReplicas != 1 || running != 1 {
+		problems = append(problems, fmt.Sprintf("its Deployment runs %d replicas of %d (status.replicas, spec.replicas), not exactly one; %s", running, specReplicas, kagentV0SingleReplica))
 	}
 	return problems
 }
@@ -338,8 +356,8 @@ func kagentV0ConfigProblems(config map[string]any) ([]string, []string) {
 		}
 	}
 	for field, reason := range map[string]string{
-		"memory":         "the compiled configuration enables memory, which calls its own model",
-		"context_config": "the compiled configuration compacts its context, which can call its own model",
+		kagentFieldMemory: "the compiled configuration enables memory, which calls its own model",
+		"context_config":  "the compiled configuration compacts its context, which can call its own model",
 	} {
 		if value, set := config[field]; set && value != nil {
 			problems = append(problems, reason)
@@ -376,7 +394,7 @@ func translateKagentV0Agent(agent map[string]any, related kagentObjects, options
 	} else if prompt != nil {
 		spec["systemPrompt"] = prompt
 	}
-	modelName := kagentString(declarative, "modelConfig")
+	modelName := kagentString(declarative, kagentFieldModelConfig)
 	if model := related.lookup("ModelConfig", namespace, modelName); model == nil {
 		problems = append(problems, fmt.Sprintf("model config %q is not in the input", modelName))
 	} else {
@@ -415,7 +433,7 @@ func untranslatableKagentV0Fields(agent map[string]any) []string {
 	declarative := kagentMap(agent, kagentFieldSpec, kagentFieldDeclarative)
 	for field := range declarative {
 		switch field {
-		case "systemMessage", "systemMessageFrom", "modelConfig", kagentFieldTools, "stream", kagentFieldRuntime:
+		case "systemMessage", "systemMessageFrom", kagentFieldModelConfig, kagentFieldTools, "stream", kagentFieldRuntime:
 		case "executeCodeBlocks", "shareTools":
 			if kagentBool(declarative, field) {
 				problems = append(problems, fmt.Sprintf("declarative.%s is enabled, which Orka Agents do not have", field))

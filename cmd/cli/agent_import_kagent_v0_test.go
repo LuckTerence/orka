@@ -110,9 +110,8 @@ func TestClassifyKagentV0AgentPinsTheRunningDeployment(t *testing.T) {
 		"unobserved Agent":    {"  observedGeneration: 2\n", "  observedGeneration: 1\n", "has not observed the Agent's current generation"},
 		"python deployment":   {"kagent/golang-adk:0.10.3", "kagent/app:0.10.3", `runs "cr.kagent.dev/kagent-dev/kagent/app:0.10.3", not kagent's Go runtime`},
 		"rolling out":         {"updatedReplicas: 1", "updatedReplicas: 0", "has not finished rolling out"},
-		"old pods remain":     {"status: {observedGeneration: 4, replicas: 1", "status: {observedGeneration: 4, replicas: 2", "has not finished rolling out"},
+		"unavailable":         {"availableReplicas: 1", "availableReplicas: 0", "has not finished rolling out"},
 		"unobserved rollout":  {"status: {observedGeneration: 4", "status: {observedGeneration: 3", "has not been observed at its current generation"},
-		"no deployment":       {"metadata: {name: probe-gov, namespace: kagent, generation: 4}", "metadata: {name: other, namespace: kagent, generation: 4}", `deployment "probe-gov" is not in the input`},
 		"no config hash":      {`annotations: {kagent.dev/config-hash: "` + governedV0Hash + `"}`, "annotations: {}", "has no kagent.dev/config-hash annotation"},
 		"hash out of range":   {`"` + governedV0Hash + `"`, `"99999999999999999999"`, "has no kagent.dev/config-hash annotation"},
 	} {
@@ -213,6 +212,17 @@ func TestWrapKagentV0AgentsRefusesRuntimesTheWrapperCannotRun(t *testing.T) {
 		"kagent approval": {
 			"allowedHeaders: [Authorization]}", "allowedHeaders: [Authorization], requireApproval: [probe-orka]}",
 			"tool 0 requires kagent approval (requireApproval), which a wrapped Agent cannot answer",
+		},
+		"replicas asked": {
+			"    runtime: go\n", "    runtime: go\n    deployment: {replicas: 2}\n",
+			"it asks for 2 replicas (declarative.deployment.replicas); kagent v0 cancels a task only in the pod that runs it",
+		},
+		"replicas deployed": {"spec:\n  replicas: 1\n  template:", "spec:\n  replicas: 2\n  template:", "its Deployment runs 1 replicas of 2"},
+		"old pods remain":   {"status: {observedGeneration: 4, replicas: 1", "status: {observedGeneration: 4, replicas: 2", "its Deployment runs 2 replicas of 1"},
+		"no pods":           {"status: {observedGeneration: 4, replicas: 1", "status: {observedGeneration: 4, replicas: 0", "its Deployment runs 0 replicas of 1"},
+		"no deployment": {
+			"metadata: {name: probe-gov, namespace: kagent, generation: 4}", "metadata: {name: other, namespace: kagent, generation: 4}",
+			"its Deployment is not in the input, so the import cannot confirm it runs exactly one replica",
 		},
 	} {
 		t.Run(name, func(t *testing.T) {

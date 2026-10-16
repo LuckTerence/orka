@@ -207,8 +207,10 @@ named by --accepted-egress. Dispatch control requires the kagent install to
 admit only kagent's controller to Substrate's actor router.
 
 kagent v0: only Declarative Agents on the Go runtime can be wrapped, because
-the Python runtime cannot cancel a task and saves request headers. kagent
-approval prompts (requireApproval) are refused. The wrapper pins the Agent
+the Python runtime cannot cancel a task and saves request headers. An Agent
+must run exactly one replica, because kagent v0 cancels a task only in the
+pod that runs it. kagent approval prompts (requireApproval) are refused. The
+wrapper pins the Agent
 Deployment's kagent.dev/config-hash, so kagent must have accepted the Agent's
 current generation, the Agent must be Ready, and its Deployment must run the
 Go runtime and be fully rolled out. A governed Agent is judged by the
