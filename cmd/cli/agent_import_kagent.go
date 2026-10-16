@@ -287,7 +287,7 @@ func wrapKagentAgent(apiVersion string, obj map[string]any) (kagentWrappedAgent,
 					kagentSourceAnnotation: apiVersion + " " + source,
 				},
 			},
-			"spec": map[string]any{
+			kagentFieldSpec: map[string]any{
 				"runtime": map[string]any{
 					"runtimeRef": map[string]any{cliNameKey: runtimeName},
 				},
@@ -552,8 +552,8 @@ func reconcileKagentWrappedAgents(cmd *cobra.Command, wrapped []kagentWrappedAge
 				return fmt.Errorf("agent %q already exists and does not wrap kagent Agent %s; remove it or import into another namespace", name, agent.Source)
 			}
 			action = "unchanged"
-			if !jsonContains(current["spec"], agent.Manifest["spec"]) {
-				body, err := json.Marshal(map[string]any{"spec": agent.Manifest["spec"]})
+			if !jsonContains(current[kagentFieldSpec], agent.Manifest[kagentFieldSpec]) {
+				body, err := json.Marshal(map[string]any{kagentFieldSpec: agent.Manifest[kagentFieldSpec]})
 				if err != nil {
 					return fmt.Errorf("marshaling Agent %q: %w", name, err)
 				}
