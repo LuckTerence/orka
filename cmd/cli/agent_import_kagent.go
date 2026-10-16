@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
 	"sort"
@@ -42,10 +43,14 @@ const kagentV1APIVersion = "api.kagent.dev/v1alpha3"
 
 // kagentWrappedAgent is one Orka Agent generated from a kagent Agent.
 type kagentWrappedAgent struct {
-	Source      string
-	RuntimeName string
-	Manifest    map[string]any
-	Mode        kagentMode
+	// Source is the kagent Agent's [namespace/]name.
+	Source string
+	// SourceNamespace is empty when the input sets no metadata.namespace.
+	SourceNamespace string
+	SourceName      string
+	RuntimeName     string
+	Manifest        map[string]any
+	Mode            kagentMode
 }
 
 func newAgentImportCmd() *cobra.Command {
@@ -61,7 +66,7 @@ func newAgentImportKagentCmd() *cobra.Command {
 	var file string
 	var dryRun bool
 	var wrapper kagentWrapperOptions
-	var relayURL, egressFile string
+	var relayURL, egressFile, sourcesFile string
 	var acceptedEgress, toolMappings []string
 	var translate bool
 	var translateOptions kagentTranslateOptions
@@ -78,9 +83,13 @@ Each Agent is reported as governed or observed. A governed Agent runs on the
 ADK harness with every model and tool endpoint pointing at the relay named by
 --relay-url, so Orka executes its tools and serves its model. Its latest
 successful kagent revision must be the one its current spec compiles to, and
-that revision's compiled egress (--revision-egress) may reach only the relay
-and the origins named by --accepted-egress. Any other Agent is
-observed: kagent runs its tools, and Orka governs dispatch and lifecycle.
+must have been compiled from the Harness, AgentTemplate, ModelConfig, and
+RemoteMCPServer objects in the input (--revision-sources). That revision's
+compiled egress (--revision-egress) may reach only the relay and the origins
+named by --accepted-egress. Any other Agent is observed: kagent runs its
+tools, and Orka governs dispatch and lifecycle. Dispatch control requires the
+kagent install to admit only kagent's controller to Substrate's actor router
+(see the orka-runtime-kagent README).
 Include the Agents' Harness, AgentTemplate, ModelConfig, and RemoteMCPServer
 objects in the input so the import can check them.
 
@@ -115,8 +124,8 @@ and refuses everything else, listing every problem:
 				}
 				wrapped, skipped, err = translateKagentAgents(data, translateOptions)
 			} else {
-				var evidence kagentEgressEvidence
-				if evidence, err = readKagentEgressEvidence(egressFile, acceptedEgress); err != nil {
+				var evidence kagentRevisionEvidence
+				if evidence, err = readKagentRevisionEvidence(egressFile, sourcesFile, acceptedEgress); err != nil {
 					return err
 				}
 				wrapped, skipped, err = wrapKagentAgents(data, relayURL, evidence)
@@ -151,6 +160,7 @@ and refuses everything else, listing every problem:
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Print the Orka Agent manifests instead of creating them")
 	cmd.Flags().StringVar(&relayURL, "relay-url", "", "Origin of each Agent's wrapper relay, such as http://{name}-kagent-relay.orka-system.svc:8092; required for governed Agents")
 	cmd.Flags().StringVar(&egressFile, "revision-egress", "", `JSON object mapping each kagent revision to its compiled egress destinations, e.g. {"<revision>": ["http://relay:8092"]}`)
+	cmd.Flags().StringVar(&sourcesFile, "revision-sources", "", "JSON object mapping each kagent revision to its source snapshot (kagent.agent_runtime_revision.source_snapshot)")
 	cmd.Flags().StringArrayVar(&acceptedEgress, "accepted-egress", nil, "Origin a governed revision may reach besides its relay, such as the runtime control-plane filter (repeatable)")
 	cmd.Flags().BoolVar(&translate, "translate", false, "Convert the kagent Agents into native Orka Agents instead of wrapping them")
 	cmd.Flags().StringArrayVar(&toolMappings, "tool", nil, "With --translate, map a kagent MCP tool to an existing Orka Tool: <RemoteMCPServer>/<tool>=<Orka Tool> (repeatable)")
@@ -212,7 +222,7 @@ func collectKagentAgents(data []byte) ([]kagentSourceAgent, kagentObjects, strin
 
 // wrapKagentAgents wraps every kagent v1 Agent in the input as an Orka Agent
 // whose runtime is a per-agent AgentRuntime, and classifies its mode.
-func wrapKagentAgents(data []byte, relayURL string, evidence kagentEgressEvidence) ([]kagentWrappedAgent, string, error) {
+func wrapKagentAgents(data []byte, relayURL string, evidence kagentRevisionEvidence) ([]kagentWrappedAgent, string, error) {
 	agents, related, skipped, err := collectKagentAgents(data)
 	if err != nil {
 		return nil, "", err
@@ -276,8 +286,10 @@ func wrapKagentAgent(apiVersion string, obj map[string]any) (kagentWrappedAgent,
 		}
 	}
 	return kagentWrappedAgent{
-		Source:      source,
-		RuntimeName: runtimeName,
+		Source:          source,
+		SourceNamespace: namespace,
+		SourceName:      name,
+		RuntimeName:     runtimeName,
 		Manifest: map[string]any{
 			"apiVersion": corev1alpha1.GroupVersion.String(),
 			"kind":       "Agent",
@@ -552,7 +564,7 @@ func reconcileKagentWrappedAgents(cmd *cobra.Command, wrapped []kagentWrappedAge
 				return fmt.Errorf("agent %q already exists and does not wrap kagent Agent %s; remove it or import into another namespace", name, agent.Source)
 			}
 			action = "unchanged"
-			if !jsonContains(current[kagentFieldSpec], agent.Manifest[kagentFieldSpec]) {
+			if kagentSpecDrifted(current[kagentFieldSpec], agent.Manifest[kagentFieldSpec]) {
 				body, err := json.Marshal(map[string]any{kagentFieldSpec: agent.Manifest[kagentFieldSpec]})
 				if err != nil {
 					return fmt.Errorf("marshaling Agent %q: %w", name, err)
@@ -572,23 +584,35 @@ func reconcileKagentWrappedAgents(cmd *cobra.Command, wrapped []kagentWrappedAge
 	return nil
 }
 
-// jsonContains reports whether every field set in want has the same value in
-// got. The server may add defaulted fields that the import never sets.
-func jsonContains(got, want any) bool {
-	wantMap, ok := want.(map[string]any)
-	if !ok {
-		gotJSON, _ := json.Marshal(got)
-		wantJSON, _ := json.Marshal(want)
-		return bytes.Equal(gotJSON, wantJSON)
-	}
-	gotMap, ok := got.(map[string]any)
-	if !ok {
-		return false
-	}
-	for key, value := range wantMap {
-		if !jsonContains(gotMap[key], value) {
-			return false
+// kagentOwnedSpecFields are the Agent spec fields the import writes in either
+// mode. A field the import no longer sets must be removed, so each one is
+// compared whole; fields the import never writes are left to their owners.
+var kagentOwnedSpecFields = []string{"runtime", "systemPrompt", "model", "providerRef", kagentFieldTools}
+
+// kagentSpecDrifted reports whether any import-owned spec field differs. The
+// server defaults tools[].enabled to true, which the import never sets.
+func kagentSpecDrifted(got, want any) bool {
+	gotSpec, _ := got.(map[string]any)
+	wantSpec, _ := want.(map[string]any)
+	for _, field := range kagentOwnedSpecFields {
+		current := gotSpec[field]
+		if tools, ok := current.([]any); ok && field == kagentFieldTools {
+			normalized := make([]any, 0, len(tools))
+			for _, raw := range tools {
+				if tool, ok := raw.(map[string]any); ok && tool["enabled"] == true {
+					tool = maps.Clone(tool)
+					delete(tool, "enabled")
+					raw = tool
+				}
+				normalized = append(normalized, raw)
+			}
+			current = normalized
+		}
+		gotJSON, _ := json.Marshal(current)
+		wantJSON, _ := json.Marshal(wantSpec[field])
+		if !bytes.Equal(gotJSON, wantJSON) {
+			return true
 		}
 	}
-	return true
+	return false
 }

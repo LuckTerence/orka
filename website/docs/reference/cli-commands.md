@@ -194,9 +194,13 @@ Each Agent is reported as governed or observed. A governed Agent runs on the
 ADK harness with every model and tool endpoint pointing at the relay named by
 --relay-url, so Orka executes its tools and serves its model. Its latest
 successful kagent revision must be the one its current spec compiles to, and
-that revision's compiled egress (--revision-egress) may reach only the relay
-and the origins named by --accepted-egress. Any other Agent is
-observed: kagent runs its tools, and Orka governs dispatch and lifecycle.
+must have been compiled from the Harness, AgentTemplate, ModelConfig, and
+RemoteMCPServer objects in the input (--revision-sources). That revision's
+compiled egress (--revision-egress) may reach only the relay and the origins
+named by --accepted-egress. Any other Agent is observed: kagent runs its
+tools, and Orka governs dispatch and lifecycle. Dispatch control requires the
+kagent install to admit only kagent's controller to Substrate's actor router
+(see the orka-runtime-kagent README).
 Include the Agents' Harness, AgentTemplate, ModelConfig, and RemoteMCPServer
 objects in the input so the import can check them.
 
@@ -237,6 +241,7 @@ Flags:
       --provider-ref string           With --translate, the Orka Provider serving models that use a custom endpoint
       --relay-url string              Origin of each Agent's wrapper relay, such as http://{name}-kagent-relay.orka-system.svc:8092; required for governed Agents
       --revision-egress string        JSON object mapping each kagent revision to its compiled egress destinations, e.g. {"<revision>": ["http://relay:8092"]}
+      --revision-sources string       JSON object mapping each kagent revision to its source snapshot (kagent.agent_runtime_revision.source_snapshot)
       --tool stringArray              With --translate, map a kagent MCP tool to an existing Orka Tool: <RemoteMCPServer>/<tool>=<Orka Tool> (repeatable)
       --translate                     Convert the kagent Agents into native Orka Agents instead of wrapping them
       --user-id-prefix string         Prefix of the per-session kagent user identity (with --wrapper-config-dir) (default "orka")

@@ -9,6 +9,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -19,7 +20,8 @@ import (
 )
 
 // Wrapped kagent Agents run in one of two modes. Observed: kagent runs the
-// Agent's model and tools; Orka governs dispatch and lifecycle. Governed:
+// Agent's model and tools; Orka governs dispatch and lifecycle, provided only
+// kagent's controller can reach Substrate's actor router. Governed:
 // every model and tool endpoint points at the wrapper's relay, so Orka runs
 // the tools under its policy and serves the model. Only the ADK harness can
 // be governed: it forwards the turn's bearer to models and MCP servers.
@@ -30,8 +32,9 @@ const (
 
 	kagentDiscoveryLabel = "kagent.dev/discovery"
 	// The relay may hold a tool call for an Orka approval (up to 15 minutes)
-	// and waits 20 minutes; kagent's MCP client must wait longer still.
-	kagentMinRelayTimeout = 20 * time.Minute
+	// and waits 20 minutes; kagent's MCP client must wait strictly longer,
+	// because it starts waiting before the relay does.
+	kagentRelayTimeout = 20 * time.Minute
 )
 
 var kagentRevisionPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -47,16 +50,34 @@ type kagentMode struct {
 	Revision string
 }
 
-// kagentEgressEvidence binds a verdict to what a revision can reach. The
-// compiled egress allowlist, enforced by kagent's gateway, is the boundary
-// that keeps a revision's model and tools behind the relay; the declared
-// resources alone cannot prove what an immutable revision was compiled from.
-type kagentEgressEvidence struct {
+// kagentRevisionEvidence binds a verdict to the pinned revision. The compiled
+// egress allowlist, enforced by kagent's gateway, is the boundary that keeps a
+// revision's model and tools behind the relay. The source snapshot proves the
+// revision was compiled from the declared resources the verdict reads.
+type kagentRevisionEvidence struct {
 	// Revisions maps a kagent revision to its compiled egress destinations.
 	Revisions map[string][]string
+	// Sources maps a kagent revision to its source snapshot.
+	Sources map[string]kagentRevisionSource
 	// Accepted are origins a governed revision may reach besides its relay,
 	// such as the runtime control-plane filter.
 	Accepted []string
+}
+
+// kagentRevisionSource is the part of a revision's source snapshot
+// (kagent.agent_runtime_revision.source_snapshot) that names the objects the
+// revision was compiled from.
+type kagentRevisionSource struct {
+	AgentUID string                `json:"agentUID"`
+	Inputs   []kagentRevisionInput `json:"inputs"`
+}
+
+type kagentRevisionInput struct {
+	APIVersion string `json:"apiVersion"`
+	Kind       string `json:"kind"`
+	Name       string `json:"name"`
+	UID        string `json:"uid"`
+	Generation int64  `json:"generation"`
 }
 
 // kagentObjects indexes the kagent resources supplied next to the Agents.
@@ -83,14 +104,30 @@ func (o kagentObjects) lookup(kind, namespace, name string) map[string]any {
 	return o[kagentObjectKey(kind, namespace, name)]
 }
 
+// kagentInputs records the related objects a classification reads, so the
+// verdict can be bound to a revision compiled from exactly those objects.
+type kagentInputs struct {
+	objects kagentObjects
+	read    map[string]map[string]any
+}
+
+func (i *kagentInputs) lookup(kind, namespace, name string) map[string]any {
+	obj := i.objects.lookup(kind, namespace, name)
+	if obj != nil {
+		i.read[kagentObjectKey(kind, namespace, name)] = obj
+	}
+	return obj
+}
+
 // classifyKagentAgent decides governed or observed from the Agent and the
 // related objects in the same input. relay is the wrapper relay's origin for
 // this Agent, established by the operator; endpoint shape alone never proves
 // that a URL is Orka's relay. evidence binds the verdict to what the pinned
 // revision can reach. Anything it cannot prove keeps the Agent observed.
-func classifyKagentAgent(agent map[string]any, related kagentObjects, relay string, evidence kagentEgressEvidence) kagentMode {
+func classifyKagentAgent(agent map[string]any, related kagentObjects, relay string, evidence kagentRevisionEvidence) kagentMode {
 	namespace := kagentString(agent, "metadata", cliNamespaceQuery)
 	mode := kagentMode{Revision: kagentString(agent, "status", "latestSuccessfulRevision")}
+	inputs := &kagentInputs{objects: related, read: map[string]map[string]any{}}
 	var reasons []string
 	if relay == "" {
 		reasons = append(reasons, "no relay was named (--relay-url)")
@@ -105,8 +142,8 @@ func classifyKagentAgent(agent map[string]any, related kagentObjects, relay stri
 		reasons = append(reasons, "the latest successful revision is not the one the current spec compiles to")
 	}
 	harnessName := kagentString(agent, "spec", "harnessRef", cliNameKey)
-	reasons = append(reasons, harnessProblems(related.lookup("Harness", namespace, harnessName), harnessName)...)
-	templateReasons, origins := templateProblems(agent, related, namespace)
+	reasons = append(reasons, harnessProblems(inputs.lookup("Harness", namespace, harnessName), harnessName)...)
+	templateReasons, origins := templateProblems(agent, inputs, namespace)
 	reasons = append(reasons, templateReasons...)
 	for _, origin := range origins {
 		if relay != "" && origin != relay {
@@ -114,6 +151,7 @@ func classifyKagentAgent(agent map[string]any, related kagentObjects, relay stri
 		}
 	}
 	reasons = append(reasons, egressProblems(evidence, mode.Revision, relay)...)
+	reasons = append(reasons, sourceProblems(evidence, mode.Revision, agent, inputs.read)...)
 	if len(reasons) > 0 {
 		mode.Mode, mode.Reasons = kagentModeObserved, reasons
 		return mode
@@ -151,7 +189,7 @@ func harnessProblems(harness map[string]any, name string) []string {
 
 // templateProblems checks the Agent's model and tools, and returns the origins
 // their endpoints point at.
-func templateProblems(agent map[string]any, related kagentObjects, namespace string) ([]string, []string) {
+func templateProblems(agent map[string]any, related *kagentInputs, namespace string) ([]string, []string) {
 	template := kagentMap(agent, "spec", "template", "inline")
 	if template == nil {
 		ref := kagentString(agent, "spec", "template", "ref", cliNameKey)
@@ -180,6 +218,10 @@ func templateProblems(agent map[string]any, related kagentObjects, namespace str
 		problems = append(problems, fmt.Sprintf("model config %q does not use the OpenAI provider", modelName))
 	case !kagentBool(model, "spec", "apiKeyPassthrough"):
 		problems = append(problems, fmt.Sprintf("model config %q does not pass the caller's bearer through", modelName))
+	case !slices.Contains([]string{"", "chatCompletions"}, kagentString(model, "spec", "openAI", "apiFormat")):
+		// kagent defaults apiFormat to chatCompletions; the relay serves only
+		// /v1/chat/completions.
+		problems = append(problems, fmt.Sprintf("model config %q uses the %s API; the relay serves only chat completions", modelName, kagentString(model, "spec", "openAI", "apiFormat")))
 	default:
 		if origin, ok := relayOrigin(kagentString(model, "spec", "openAI", "baseUrl"), "/v1"); ok {
 			origins[origin] = true
@@ -204,7 +246,7 @@ func templateProblems(agent map[string]any, related kagentObjects, namespace str
 	return problems, sorted
 }
 
-func toolBindingProblems(binding map[string]any, index int, related kagentObjects, namespace string) ([]string, string) {
+func toolBindingProblems(binding map[string]any, index int, related *kagentInputs, namespace string) ([]string, string) {
 	server := kagentMap(binding, "mcp", "server")
 	if server == nil {
 		return []string{fmt.Sprintf("tool %d is not an MCP binding", index)}, ""
@@ -234,7 +276,7 @@ func toolBindingProblems(binding map[string]any, index int, related kagentObject
 
 // egressProblems requires the pinned revision's compiled egress to reach only
 // the relay and the accepted origins.
-func egressProblems(evidence kagentEgressEvidence, revision, relay string) []string {
+func egressProblems(evidence kagentRevisionEvidence, revision, relay string) []string {
 	egress, ok := evidence.Revisions[revision]
 	if !ok {
 		return []string{fmt.Sprintf("no compiled egress was supplied for revision %q (--revision-egress)", revision)}
@@ -243,6 +285,33 @@ func egressProblems(evidence kagentEgressEvidence, revision, relay string) []str
 	for _, destination := range egress {
 		if origin, ok := relayOrigin(destination, ""); !ok || (origin != relay && !slices.Contains(evidence.Accepted, origin)) {
 			problems = append(problems, "the pinned revision can reach "+destination)
+		}
+	}
+	return problems
+}
+
+// sourceProblems requires the pinned revision to have been compiled from
+// exactly the objects the classification read. kagent does not change an
+// Agent's generation when a referenced object changes, so until kagent
+// recompiles, the latest successful revision can predate the objects in the
+// input. The source snapshot records each input object's UID and generation.
+func sourceProblems(evidence kagentRevisionEvidence, revision string, agent map[string]any, read map[string]map[string]any) []string {
+	source, ok := evidence.Sources[revision]
+	if !ok {
+		return []string{fmt.Sprintf("no source snapshot was supplied for revision %q (--revision-sources)", revision)}
+	}
+	var problems []string
+	if uid := kagentString(agent, "metadata", "uid"); uid == "" || uid != source.AgentUID {
+		problems = append(problems, "the pinned revision was not compiled for this Agent's metadata.uid")
+	}
+	for _, key := range slices.Sorted(maps.Keys(read)) {
+		obj := read[key]
+		kind, name := kagentString(obj, "kind"), kagentString(obj, "metadata", cliNameKey)
+		uid, generation := kagentString(obj, "metadata", "uid"), kagentInt(obj, "metadata", "generation")
+		if uid == "" || generation == 0 || !slices.ContainsFunc(source.Inputs, func(input kagentRevisionInput) bool {
+			return input.APIVersion == kagentV1APIVersion && input.Kind == kind && input.Name == name && input.UID == uid && input.Generation == generation
+		}) {
+			problems = append(problems, fmt.Sprintf("the pinned revision was not compiled from the %s %q in the input (metadata.uid and metadata.generation)", kind, name))
 		}
 	}
 	return problems
@@ -277,8 +346,8 @@ func governedRemoteMCPServerProblems(remote map[string]any) []string {
 	if _, ok := relayOrigin(kagentString(remote, "spec", "url"), "/mcp"); !ok {
 		problems = append(problems, "does not point at a relay's /mcp")
 	}
-	if timeout, err := time.ParseDuration(kagentString(remote, "spec", "timeout")); err != nil || timeout < kagentMinRelayTimeout {
-		problems = append(problems, fmt.Sprintf("needs a timeout of at least %s", kagentMinRelayTimeout))
+	if timeout, err := time.ParseDuration(kagentString(remote, "spec", "timeout")); err != nil || timeout <= kagentRelayTimeout {
+		problems = append(problems, fmt.Sprintf("needs a timeout longer than %s", kagentRelayTimeout))
 	}
 	if labels := kagentMap(remote, "metadata", "labels"); labels == nil || labels[kagentDiscoveryLabel] != "disabled" {
 		problems = append(problems, "does not disable discovery with "+kagentDiscoveryLabel+"=disabled")
@@ -335,6 +404,9 @@ func (o kagentWrapperOptions) validate(wrapped []kagentWrappedAgent) error {
 		return fmt.Errorf("--control-plane-url must be the kagent controller's http(s) base URL")
 	}
 	for _, agent := range wrapped {
+		if agent.SourceNamespace == "" {
+			return fmt.Errorf("kagent Agent %s has no metadata.namespace; the wrapper configuration must name it, so export the Agent with kubectl get -o yaml", agent.Source)
+		}
 		if !kagentRevisionPattern.MatchString(agent.Mode.Revision) {
 			return fmt.Errorf("kagent Agent %s has no status.latestSuccessfulRevision to pin; export it with kubectl get -o yaml after it is Ready", agent.Source)
 		}
@@ -354,9 +426,16 @@ func writeKagentWrapperConfigs(o kagentWrapperOptions, wrapped []kagentWrappedAg
 	if err := os.MkdirAll(o.Dir, 0o750); err != nil {
 		return nil, err
 	}
+	// The root confines every write to the directory; file names are
+	// validated Orka resource names.
+	root, err := os.OpenRoot(o.Dir)
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close() //nolint:errcheck
 	var written []string
 	for _, agent := range wrapped {
-		namespace, name, _ := strings.Cut(agent.Source, "/")
+		namespace, name := agent.SourceNamespace, agent.SourceName
 		config := kagentWrapperConfig{
 			Model: "kagent/" + namespace + "/" + name,
 			Kagent: kagentWrapperTarget{
@@ -371,11 +450,11 @@ func writeKagentWrapperConfigs(o kagentWrapperOptions, wrapped []kagentWrappedAg
 		if err != nil {
 			return nil, err
 		}
-		path := filepath.Join(o.Dir, metadataName(agent.Manifest)+".kagent.json")
-		if err := os.WriteFile(path, append(data, '\n'), 0o600); err != nil {
+		file := metadataName(agent.Manifest) + ".kagent.json"
+		if err := root.WriteFile(file, append(data, '\n'), 0o600); err != nil {
 			return nil, err
 		}
-		written = append(written, path)
+		written = append(written, filepath.Join(o.Dir, file))
 	}
 	slices.Sort(written)
 	return written, nil
@@ -421,9 +500,9 @@ func kagentBool(obj map[string]any, path ...string) bool {
 	return value
 }
 
-// readKagentEgressEvidence loads --revision-egress and --accepted-egress.
-func readKagentEgressEvidence(path string, accepted []string) (kagentEgressEvidence, error) {
-	evidence := kagentEgressEvidence{Revisions: map[string][]string{}}
+// readKagentRevisionEvidence loads --revision-egress and --accepted-egress.
+func readKagentRevisionEvidence(path, sourcesPath string, accepted []string) (kagentRevisionEvidence, error) {
+	evidence := kagentRevisionEvidence{Revisions: map[string][]string{}, Sources: map[string]kagentRevisionSource{}}
 	for _, origin := range accepted {
 		normalized, ok := relayOrigin(origin, "")
 		if !ok {
@@ -431,15 +510,23 @@ func readKagentEgressEvidence(path string, accepted []string) (kagentEgressEvide
 		}
 		evidence.Accepted = append(evidence.Accepted, normalized)
 	}
-	if path == "" {
-		return evidence, nil
+	if path != "" {
+		data, err := readFileOrStdin(path)
+		if err != nil {
+			return evidence, fmt.Errorf("reading --revision-egress: %w", err)
+		}
+		if err := json.Unmarshal(data, &evidence.Revisions); err != nil {
+			return evidence, fmt.Errorf("--revision-egress must be a JSON object of revision to destinations: %w", err)
+		}
 	}
-	data, err := readFileOrStdin(path)
-	if err != nil {
-		return evidence, fmt.Errorf("reading --revision-egress: %w", err)
-	}
-	if err := json.Unmarshal(data, &evidence.Revisions); err != nil {
-		return evidence, fmt.Errorf("--revision-egress must be a JSON object of revision to destinations: %w", err)
+	if sourcesPath != "" {
+		data, err := readFileOrStdin(sourcesPath)
+		if err != nil {
+			return evidence, fmt.Errorf("reading --revision-sources: %w", err)
+		}
+		if err := json.Unmarshal(data, &evidence.Sources); err != nil {
+			return evidence, fmt.Errorf("--revision-sources must be a JSON object of revision to source snapshot: %w", err)
+		}
 	}
 	return evidence, nil
 }
