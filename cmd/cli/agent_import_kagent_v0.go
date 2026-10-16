@@ -10,6 +10,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"maps"
@@ -123,7 +124,9 @@ func classifyKagentV0Agent(agent map[string]any, related kagentObjects, relay st
 	}
 	reasons = append(reasons, mode.PinProblems...)
 	reasons = append(reasons, kagentV0BehaviorProblems(agent)...)
-	compiled, compiledProblems := kagentV0CompiledConfig(related.lookup("Secret", namespace, name), name, mode.Revision)
+	modelName := kagentString(agent, kagentFieldSpec, kagentFieldDeclarative, kagentFieldModelConfig)
+	compiled, compiledProblems := kagentV0CompiledConfig(related.lookup("Secret", namespace, name),
+		related.lookup("ModelConfig", namespace, modelName), name, modelName, mode.Revision)
 	reasons = append(reasons, compiledProblems...)
 	origins := map[string]bool{}
 	if compiled != nil {
@@ -249,14 +252,27 @@ func kagentV0BehaviorProblems(agent map[string]any) []string {
 
 // kagentV0CompiledConfig reads the compiled configuration from the Agent's
 // config Secret and requires it to be the one the Deployment runs. kagent
-// hashes the compiled config.json, the agent card, the secret material the
-// configuration depends on, and any code-sandbox settings, in that order. A
-// governed configuration depends on no secret material, so recomputing the
-// hash over the Secret alone must give the pinned value; anything else
-// (secret material, or a Secret kagent has not rolled out yet) fails closed.
-func kagentV0CompiledConfig(secret map[string]any, name, pinned string) (map[string]any, []string) {
+// hashes the compiled config.json, the agent card, the secret-hash bytes of
+// what the configuration depends on, and any code-sandbox settings, in that
+// order, and pins the first 8 bytes as a decimal. For a governed
+// configuration the only secret-hash bytes are the ModelConfig's
+// status.secretHash: the SHA-256 of the secrets the model uses, or of nothing
+// when it uses none (a relay RemoteMCPServer is plain HTTP, so it pins no TLS
+// Secret). Anything else (more secret material, a stale status, or a Secret
+// kagent has not rolled out yet) fails the comparison and so fails closed.
+func kagentV0CompiledConfig(secret, model map[string]any, name, modelName, pinned string) (map[string]any, []string) {
 	if secret == nil {
 		return nil, []string{fmt.Sprintf("the Agent's config Secret %q is not in the input; a governed verdict reads the compiled configuration it holds", name)}
+	}
+	var problems []string
+	var secretHash []byte
+	secretHashKnown := false
+	if model == nil {
+		problems = append(problems, fmt.Sprintf("model config %q is not in the input; kagent folds its status.secretHash into the config hash", modelName))
+	} else if decoded, err := hex.DecodeString(kagentString(model, "status", "secretHash")); err != nil {
+		problems = append(problems, fmt.Sprintf("model config %q has a status.secretHash the import cannot read", modelName))
+	} else {
+		secretHash, secretHashKnown = decoded, true
 	}
 	data := kagentMap(secret, "data")
 	decode := func(key string) ([]byte, bool) {
@@ -264,23 +280,23 @@ func kagentV0CompiledConfig(secret map[string]any, name, pinned string) (map[str
 		decoded, err := base64.StdEncoding.DecodeString(value)
 		return decoded, value != "" && err == nil
 	}
-	var problems []string
 	cfg, ok := decode("config.json")
 	if !ok {
-		return nil, []string{fmt.Sprintf("config Secret %q has no readable config.json", name)}
+		return nil, append(problems, fmt.Sprintf("config Secret %q has no readable config.json", name))
 	}
 	card, _ := decode("agent-card.json")
 	sandbox, hasSandbox := decode("srt-settings.json")
 	if hasSandbox {
 		problems = append(problems, "the Agent runs a code sandbox (srt-settings.json)")
 	}
-	if pinned != "" {
+	if pinned != "" && secretHashKnown {
 		sum := sha256.New()
 		sum.Write(cfg)
 		sum.Write(card)
+		sum.Write(secretHash)
 		sum.Write(sandbox)
 		if got := strconv.FormatUint(binary.BigEndian.Uint64(sum.Sum(nil)[:8]), 10); got != pinned {
-			problems = append(problems, fmt.Sprintf("config Secret %q hashes to %s, not the pinned %s: kagent has not rolled it out yet, or it depends on secret material", name, got, pinned))
+			problems = append(problems, fmt.Sprintf("config Secret %q hashes to %s, not the pinned %s: kagent has not rolled it out yet, or it depends on secret material beyond its ModelConfig's", name, got, pinned))
 		}
 	}
 	var config map[string]any

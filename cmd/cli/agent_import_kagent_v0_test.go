@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -23,10 +24,15 @@ const governedV0Config = `{"model":{"type":"openai","model":"probe","api_key_pas
 
 const governedV0Card = `{"name":"probe-gov","url":"http://probe-gov.kagent:8080"}`
 
+// noSecretsHash is the status.secretHash kagent gives a ModelConfig that
+// uses no secrets: the SHA-256 of nothing.
+const noSecretsHash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
 // kagentV0ConfigHash is kagent's config hash for a configuration, with the
-// fixture's agent card, that depends on no secret material.
+// fixture's agent card, whose ModelConfig uses no secrets.
 func kagentV0ConfigHash(config string) string {
-	sum := sha256.Sum256([]byte(config + governedV0Card))
+	secretHash, _ := hex.DecodeString(noSecretsHash)
+	sum := sha256.Sum256(append([]byte(config+governedV0Card), secretHash...))
 	return strconv.FormatUint(binary.BigEndian.Uint64(sum[:8]), 10)
 }
 
@@ -37,7 +43,13 @@ func governedV0Input(config, hash string) string {
 		"{{CONFIG}}", base64.StdEncoding.EncodeToString([]byte(config)),
 		"{{CARD}}", base64.StdEncoding.EncodeToString([]byte(governedV0Card)),
 		"{{HASH}}", hash,
-	).Replace(`apiVersion: v1
+	).Replace(`apiVersion: kagent.dev/v1alpha2
+kind: ModelConfig
+metadata: {name: relay-model, namespace: kagent}
+spec: {provider: OpenAI, model: probe, apiKeyPassthrough: true}
+status: {observedGeneration: 1, secretHash: "` + noSecretsHash + `"}
+---
+apiVersion: v1
 kind: Secret
 metadata: {name: probe-gov, namespace: kagent}
 data:
@@ -137,10 +149,16 @@ func TestClassifyKagentV0AgentReadsTheCompiledConfiguration(t *testing.T) {
 		!strings.Contains(strings.Join(mode.Reasons, ";"), "not the pinned "+governedV0Hash) || mode.Revision != governedV0Hash {
 		t.Fatalf("an unbound configuration was governed: %+v", mode)
 	}
-	noSecret := strings.Replace(governedKagentV0Fixture, "metadata: {name: probe-gov, namespace: kagent}\ndata:", "metadata: {name: other, namespace: kagent}\ndata:", 1)
-	if mode := classifyV0Fixture(t, noSecret, governedRelay); mode.Mode != kagentModeObserved ||
-		!strings.Contains(strings.Join(mode.Reasons, ";"), `config Secret "probe-gov" is not in the input`) {
-		t.Fatalf("an Agent was governed without its compiled configuration: %+v", mode)
+	for name, test := range map[string]struct{ old, new, reason string }{
+		"no config Secret": {"metadata: {name: probe-gov, namespace: kagent}\ndata:", "metadata: {name: other, namespace: kagent}\ndata:", `config Secret "probe-gov" is not in the input`},
+		"no model config":  {"metadata: {name: relay-model, namespace: kagent}", "metadata: {name: other-model, namespace: kagent}", `model config "relay-model" is not in the input; kagent folds its status.secretHash`},
+		"stale secrets":    {noSecretsHash, strings.Repeat("ab", 32), "not the pinned " + governedV0Hash},
+		"bad secret hash":  {noSecretsHash, "not-hex", "has a status.secretHash the import cannot read"},
+	} {
+		changed := strings.Replace(governedKagentV0Fixture, test.old, test.new, 1)
+		if mode := classifyV0Fixture(t, changed, governedRelay); mode.Mode != kagentModeObserved || !strings.Contains(strings.Join(mode.Reasons, ";"), test.reason) {
+			t.Errorf("%s: mode = %+v, want observed because %s", name, mode, test.reason)
+		}
 	}
 	for name, test := range map[string]struct{ old, new, reason string }{
 		"anthropic model":     {`"type":"openai"`, `"type":"anthropic"`, `the compiled model is "anthropic"`},
@@ -200,6 +218,61 @@ func TestClassifyKagentV0AgentReadsTheCompiledConfiguration(t *testing.T) {
 	fromConfigMap := strings.Replace(governedKagentV0Fixture, "systemMessage: You call Orka tools.", "systemMessageFrom: {type: ConfigMap, name: prompts, key: gov}", 1)
 	if mode := classifyV0Fixture(t, fromConfigMap, governedRelay); mode.Mode != kagentModeGoverned {
 		t.Errorf("a system message from a ConfigMap was not governed: %+v", mode)
+	}
+}
+
+// The controller-produced pin from kagent v0.10.3's translator golden
+// agent_with_passthrough (go/core/internal/controller/translator/agent/
+// testdata/outputs), whose ModelConfig has no status.secretHash.
+const (
+	kagentGoldenPassthroughConfig = `{"model":{"type":"openai","model":"gpt-4o","api_key_passthrough":true,"base_url":"","temperature":0.7},"description":"","instruction":"You are a helpful assistant.","stream":false}`
+	kagentGoldenPassthroughCard   = `{
+  "defaultInputModes": [
+    "text"
+  ],
+  "defaultOutputModes": [
+    "text"
+  ],
+  "description": "",
+  "name": "passthrough_agent",
+  "version": "",
+  "skills": [],
+  "capabilities": {
+    "streaming": true
+  },
+  "supportedInterfaces": [
+    {
+      "url": "http://passthrough-agent.test:8080",
+      "protocolBinding": "JSONRPC",
+      "protocolVersion": "0.3"
+    },
+    {
+      "url": "http://passthrough-agent.test:8080",
+      "protocolBinding": "JSONRPC",
+      "protocolVersion": "1.0"
+    }
+  ],
+  "url": "http://passthrough-agent.test:8080",
+  "protocolVersion": "0.3",
+  "preferredTransport": "JSONRPC"
+}`
+	kagentGoldenPassthroughHash = "15376076214432010811"
+)
+
+func TestKagentV0CompiledConfigReproducesKagentsHash(t *testing.T) {
+	secret := map[string]any{"data": map[string]any{
+		"config.json":     base64.StdEncoding.EncodeToString([]byte(kagentGoldenPassthroughConfig)),
+		"agent-card.json": base64.StdEncoding.EncodeToString([]byte(kagentGoldenPassthroughCard)),
+	}}
+	unreconciled := map[string]any{"status": map[string]any{}}
+	if config, problems := kagentV0CompiledConfig(secret, unreconciled, "passthrough-agent", "default-model-config", kagentGoldenPassthroughHash); len(problems) != 0 || config == nil {
+		t.Fatalf("kagent's own pin was not reproduced: %v", problems)
+	}
+	// The ModelConfig's secret hash is part of the pin: a reconciled one with
+	// no secrets contributes the SHA-256 of nothing.
+	reconciled := map[string]any{"status": map[string]any{"secretHash": noSecretsHash}}
+	if _, problems := kagentV0CompiledConfig(secret, reconciled, "passthrough-agent", "default-model-config", kagentGoldenPassthroughHash); !strings.Contains(strings.Join(problems, ";"), "not the pinned") {
+		t.Fatalf("a different ModelConfig secret hash still matched: %v", problems)
 	}
 }
 
