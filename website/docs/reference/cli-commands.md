@@ -184,21 +184,43 @@ Use "orka agent import [command] --help" for more information about a command.
 ## `orka agent import kagent`
 
 ```text
-Create one Orka Agent per kagent Agent. Each Orka Agent references the
-AgentRuntime "<name>-kagent-runtime", which must be registered separately and
-serve exactly that kagent Agent. kagent keeps executing the agent and its tools
-with its own credentials; Orka governs who can dispatch work to it.
+Create or update one Orka Agent per kagent Agent. Each Orka Agent references
+the AgentRuntime "<name>-kagent-runtime", which must be registered separately
+and serve exactly that kagent Agent. Re-running the import is safe: Agents that
+already wrap the same kagent Agent are left alone or updated, and any other
+existing Agent is an error.
 
-Accepts api.kagent.dev/v1alpha3 and kagent.dev/v1alpha2 Agents, including lists
-from "kubectl get agents -o yaml". Other objects are skipped.
+Each Agent is reported as governed or observed. A governed Agent runs on the
+ADK harness with every model and tool endpoint pointing at the relay named by
+--relay-url, so Orka executes its tools and serves its model. Its latest
+successful kagent revision must be the one its current spec compiles to, and
+that revision's compiled egress (--revision-egress) may reach only the relay
+and the origins named by --accepted-egress. Any other Agent is
+observed: kagent runs its tools, and Orka governs dispatch and lifecycle.
+Include the Agents' Harness, AgentTemplate, ModelConfig, and RemoteMCPServer
+objects in the input so the import can check them.
+
+Accepts kagent v1 (api.kagent.dev/v1alpha3) Agents, including lists from
+"kubectl get agents -o yaml". Other objects are skipped.
+
+With --wrapper-config-dir, also writes each Agent's wrapper configuration,
+<name>.kagent.json, pinned to the Agent's latest successful revision.
 
 Usage:
   orka agent import kagent -f <file> [flags]
 
 Flags:
-      --dry-run       Print the Orka Agent manifests instead of creating them
-  -f, --file string   Path to kagent Agent YAML/JSON (use - for stdin)
-  -h, --help          help for kagent
+      --accepted-egress stringArray   Origin a governed revision may reach besides its relay, such as the runtime control-plane filter (repeatable)
+      --control-plane-url string      kagent controller base URL the wrapper calls (with --wrapper-config-dir)
+      --dry-run                       Print the Orka Agent manifests instead of creating them
+  -f, --file string                   Path to kagent Agent YAML/JSON (use - for stdin)
+  -h, --help                          help for kagent
+      --model-upstream-model string   Model the relay calls for governed Agents
+      --model-upstream-url string     OpenAI-compatible base URL the relay serves governed Agents from
+      --relay-url string              Origin of each Agent's wrapper relay, such as http://{name}-kagent-relay.orka-system.svc:8092; required for governed Agents
+      --revision-egress string        JSON object mapping each kagent revision to its compiled egress destinations, e.g. {"<revision>": ["http://relay:8092"]}
+      --user-id-prefix string         Prefix of the per-session kagent user identity (with --wrapper-config-dir) (default "orka")
+      --wrapper-config-dir string     Write each Agent's wrapper configuration (<name>.kagent.json) to this directory
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file

@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -43,17 +44,20 @@ spec:
 apiVersion: v1
 kind: List
 items:
-- apiVersion: kagent.dev/v1alpha2
+- apiVersion: api.kagent.dev/v1alpha3
   kind: Agent
   metadata:
     name: helm-agent
     namespace: kagent
   spec:
-    type: Declarative
-    declarative:
-      modelConfig: default-model-config
-      systemMessage: You manage Helm releases.
-- apiVersion: kagent.dev/v1alpha2
+    harnessRef:
+      name: kagent
+    template:
+      inline:
+        modelConfig:
+          name: default-model-config
+        systemPrompt: You manage Helm releases.
+- apiVersion: api.kagent.dev/v1alpha3
   kind: RemoteMCPServer
   metadata:
     name: kagent-tools
@@ -74,16 +78,16 @@ func decodeWrappedAgent(t *testing.T, manifest map[string]any) corev1alpha1.Agen
 }
 
 func TestWrapKagentAgentsConvertsSupportedVersions(t *testing.T) {
-	wrapped, skipped, err := wrapKagentAgents([]byte(kagentImportFixture))
+	wrapped, skipped, err := wrapKagentAgents([]byte(kagentImportFixture), "", kagentEgressEvidence{})
 	if err != nil {
 		t.Fatalf("wrapKagentAgents() error: %v", err)
 	}
-	if want := "api.kagent.dev/v1alpha3 ModelConfig (1), kagent.dev/v1alpha2 RemoteMCPServer (1)"; skipped != want {
+	if want := "api.kagent.dev/v1alpha3 ModelConfig (1), api.kagent.dev/v1alpha3 RemoteMCPServer (1)"; skipped != want {
 		t.Errorf("skipped = %q, want %q", skipped, want)
 	}
 	want := []struct{ name, runtime, source string }{
 		{"k8s-agent", "k8s-agent-kagent-runtime", "api.kagent.dev/v1alpha3 kagent/k8s-agent"},
-		{"helm-agent", "helm-agent-kagent-runtime", "kagent.dev/v1alpha2 kagent/helm-agent"},
+		{"helm-agent", "helm-agent-kagent-runtime", "api.kagent.dev/v1alpha3 kagent/helm-agent"},
 	}
 	if len(wrapped) != len(want) {
 		t.Fatalf("wrapped %d agents, want %d", len(wrapped), len(want))
@@ -127,8 +131,13 @@ func TestWrapKagentAgentsRejectsUnsafeInput(t *testing.T) {
 			want:  `unsupported kagent Agent version "kagent.dev/v1alpha1"`,
 		},
 		{
+			name:  "kagent v0 agent",
+			input: agentDoc("kagent.dev/v1alpha2", "kagent", "helm-agent"),
+			want:  `unsupported kagent Agent version "kagent.dev/v1alpha2": only kagent v1`,
+		},
+		{
 			name:  "same name from two namespaces",
-			input: agentDoc("api.kagent.dev/v1alpha3", "team-a", "triage") + "---\n" + agentDoc("kagent.dev/v1alpha2", "team-b", "triage"),
+			input: agentDoc("api.kagent.dev/v1alpha3", "team-a", "triage") + "---\n" + agentDoc("api.kagent.dev/v1alpha3", "team-b", "triage"),
 			want:  `kagent Agents team-a/triage and team-b/triage would both become Orka Agent "triage"`,
 		},
 		{
@@ -206,7 +215,7 @@ func TestWrapKagentAgentsRejectsUnsafeInput(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, _, err := wrapKagentAgents([]byte(tt.input))
+			_, _, err := wrapKagentAgents([]byte(tt.input), "", kagentEgressEvidence{})
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("error = %v, want it to contain %q", err, tt.want)
 			}
@@ -228,7 +237,7 @@ func TestRequireSingleYAMLDocument(t *testing.T) {
 
 func TestWrapKagentAgentsReadsEveryJSONValue(t *testing.T) {
 	input := `{"apiVersion":"api.kagent.dev/v1alpha3","kind":"Agent","metadata":{"namespace":"kagent","name":"a"}}
-{"apiVersion":"kagent.dev/v1alpha2","kind":"Agent","metadata":{"namespace":"kagent","name":"b"}}
+{"apiVersion":"api.kagent.dev/v1alpha3","kind":"Agent","metadata":{"namespace":"kagent","name":"b"}}
 ---
 apiVersion: api.kagent.dev/v1alpha3
 kind: Agent
@@ -238,7 +247,7 @@ metadata:
 ---
 {apiVersion: api.kagent.dev/v1alpha3, kind: Agent, metadata: {namespace: kagent, name: d}}
 `
-	wrapped, _, err := wrapKagentAgents([]byte(input))
+	wrapped, _, err := wrapKagentAgents([]byte(input), "", kagentEgressEvidence{})
 	if err != nil {
 		t.Fatalf("wrapKagentAgents() error: %v", err)
 	}
@@ -252,7 +261,7 @@ metadata:
 }
 
 func TestWrapKagentAgentsAcceptsListsAndJSONEscapes(t *testing.T) {
-	input := `apiVersion: kagent.dev/v1alpha2
+	input := `apiVersion: api.kagent.dev/v1alpha3
 kind: AgentList
 items:
 - metadata:
@@ -273,7 +282,7 @@ items:
       namespace: kagent
       name: nested
 `
-	wrapped, skipped, err := wrapKagentAgents([]byte(input))
+	wrapped, skipped, err := wrapKagentAgents([]byte(input), "", kagentEgressEvidence{})
 	if err != nil {
 		t.Fatalf("wrapKagentAgents() error: %v", err)
 	}
@@ -283,7 +292,7 @@ items:
 	if len(wrapped) != 3 || wrapped[0].Source != "kagent/typed" || wrapped[1].Source != "kagent/emoji" || wrapped[2].Source != "kagent/nested" {
 		t.Fatalf("wrapped = %+v, want kagent/typed, kagent/emoji and kagent/nested", wrapped)
 	}
-	if got := decodeWrappedAgent(t, wrapped[0].Manifest).Annotations[kagentSourceAnnotation]; got != "kagent.dev/v1alpha2 kagent/typed" {
+	if got := decodeWrappedAgent(t, wrapped[0].Manifest).Annotations[kagentSourceAnnotation]; got != "api.kagent.dev/v1alpha3 kagent/typed" {
 		t.Errorf("typed list item source = %q, want the list's apiVersion", got)
 	}
 }
@@ -328,75 +337,280 @@ func TestAgentImportKagentCmdDryRunPrintsManifests(t *testing.T) {
 	}
 }
 
-func kagentImportAPIServer(t *testing.T, failOn string) (*httptest.Server, *[]map[string]any) {
-	t.Helper()
-	var mu sync.Mutex
-	var bodies []map[string]any
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != agentsAPIPath {
-			http.Error(w, "unexpected request", http.StatusBadRequest)
-			return
-		}
-		raw, _ := io.ReadAll(r.Body)
-		var body map[string]any
-		if err := json.Unmarshal(raw, &body); err != nil {
-			http.Error(w, "bad json", http.StatusBadRequest)
-			return
-		}
-		if metadataName(body) == failOn {
-			http.Error(w, `{"error":"agent already exists"}`, http.StatusConflict)
-			return
-		}
-		mu.Lock()
-		bodies = append(bodies, body)
-		mu.Unlock()
-		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(body) //nolint:errcheck
-	}))
-	t.Cleanup(srv.Close)
-	return srv, &bodies
+// kagentImportAPIServer is a stateful fake of the Orka Agents API.
+type kagentImportAPI struct {
+	mu      sync.Mutex
+	agents  map[string]map[string]any
+	failOn  string
+	creates int
+	updates int
 }
 
-func TestAgentImportKagentCmdCreatesAgents(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	srv, bodies := kagentImportAPIServer(t, "")
+func kagentImportAPIServer(t *testing.T, api *kagentImportAPI) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		api.mu.Lock()
+		defer api.mu.Unlock()
+		name := strings.TrimPrefix(r.URL.Path, agentsAPIPath+"/")
+		raw, _ := io.ReadAll(r.Body)
+		var body map[string]any
+		_ = json.Unmarshal(raw, &body)
+		switch {
+		case r.Method == http.MethodGet && name != r.URL.Path:
+			agent, ok := api.agents[name]
+			if !ok {
+				http.Error(w, `{"error":"agent not found"}`, http.StatusNotFound)
+				return
+			}
+			json.NewEncoder(w).Encode(agent) //nolint:errcheck
+		case r.Method == http.MethodPost && r.URL.Path == agentsAPIPath:
+			if metadataName(body) == api.failOn {
+				http.Error(w, `{"error":"unavailable"}`, http.StatusServiceUnavailable)
+				return
+			}
+			// The server defaults fields the import never sets.
+			spec, _ := body["spec"].(map[string]any)
+			spec["resources"] = map[string]any{}
+			api.agents[metadataName(body)] = body
+			api.creates++
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(body) //nolint:errcheck
+		case r.Method == http.MethodPut && name != r.URL.Path:
+			api.agents[name]["spec"] = body["spec"]
+			api.updates++
+			json.NewEncoder(w).Encode(api.agents[name]) //nolint:errcheck
+		default:
+			http.Error(w, "unexpected request", http.StatusBadRequest)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
 
+func runKagentImport(t *testing.T, args ...string) (string, error) {
+	t.Helper()
 	var stdout bytes.Buffer
 	root := newRootCmd()
 	root.SetOut(&stdout)
 	root.SetErr(io.Discard)
-	root.SetArgs([]string{"agent", "import", "kagent", "-f", writeKagentFixture(t), "--server", srv.URL, "-n", "team"})
-	if err := root.Execute(); err != nil {
+	root.SetArgs(append([]string{"agent", "import", "kagent"}, args...))
+	err := root.Execute()
+	return stdout.String(), err
+}
+
+func TestAgentImportKagentCmdCreatesAgents(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	api := &kagentImportAPI{agents: map[string]map[string]any{}}
+	srv := kagentImportAPIServer(t, api)
+	out, err := runKagentImport(t, "-f", writeKagentFixture(t), "--server", srv.URL, "-n", "team")
+	if err != nil {
 		t.Fatalf("Execute() error: %v", err)
 	}
-
-	if len(*bodies) != 2 {
-		t.Fatalf("created %d Agents, want 2", len(*bodies))
+	if api.creates != 2 {
+		t.Fatalf("created %d Agents, want 2", api.creates)
 	}
-	for _, body := range *bodies {
-		agent := decodeWrappedAgent(t, body)
-		if agent.Namespace != "team" {
+	for _, body := range api.agents {
+		if agent := decodeWrappedAgent(t, body); agent.Namespace != "team" {
 			t.Errorf("Agent %s namespace = %q, want team", agent.Name, agent.Namespace)
 		}
 	}
-	if !strings.Contains(stdout.String(), "Agent created: k8s-agent (wraps kagent Agent kagent/k8s-agent; needs AgentRuntime k8s-agent-kagent-runtime)") {
-		t.Errorf("stdout = %q, want the created Agent and its required AgentRuntime", stdout.String())
+	if !strings.Contains(out, "Agent created: k8s-agent (wraps kagent Agent kagent/k8s-agent; observed: ") ||
+		!strings.Contains(out, "needs AgentRuntime k8s-agent-kagent-runtime)") {
+		t.Errorf("stdout = %q, want the created Agent, its mode, and its required AgentRuntime", out)
 	}
 }
 
-func TestAgentImportKagentCmdReportsPartialFailure(t *testing.T) {
+func TestAgentImportKagentCmdResumesAfterPartialFailure(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	srv, bodies := kagentImportAPIServer(t, "helm-agent")
-
-	root := newRootCmd()
-	root.SetOut(io.Discard)
-	root.SetErr(io.Discard)
-	root.SetArgs([]string{"agent", "import", "kagent", "-f", writeKagentFixture(t), "--server", srv.URL, "-n", "team"})
-	err := root.Execute()
-	if err == nil || !strings.Contains(err.Error(), `creating Agent "helm-agent"`) || !strings.Contains(err.Error(), "already created: k8s-agent") {
-		t.Fatalf("error = %v, want the failed Agent and the ones already created", err)
+	api := &kagentImportAPI{agents: map[string]map[string]any{}, failOn: "helm-agent"}
+	srv := kagentImportAPIServer(t, api)
+	path := writeKagentFixture(t)
+	if _, err := runKagentImport(t, "-f", path, "--server", srv.URL, "-n", "team"); err == nil || !strings.Contains(err.Error(), `creating Agent "helm-agent"`) {
+		t.Fatalf("error = %v, want the failed Agent", err)
 	}
-	if len(*bodies) != 1 {
-		t.Fatalf("created %d Agents before the failure, want 1", len(*bodies))
+	api.failOn = ""
+	out, err := runKagentImport(t, "-f", path, "--server", srv.URL, "-n", "team")
+	if err != nil {
+		t.Fatalf("re-run error: %v", err)
+	}
+	if !strings.Contains(out, "Agent unchanged: k8s-agent") || !strings.Contains(out, "Agent created: helm-agent") || api.creates != 2 || api.updates != 0 {
+		t.Fatalf("re-run = %q (creates %d, updates %d)", out, api.creates, api.updates)
+	}
+}
+
+func TestAgentImportKagentCmdUpdatesItsOwnAgentsOnly(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	api := &kagentImportAPI{agents: map[string]map[string]any{}}
+	srv := kagentImportAPIServer(t, api)
+	path := writeKagentFixture(t)
+	if _, err := runKagentImport(t, "-f", path, "--server", srv.URL, "-n", "team"); err != nil {
+		t.Fatal(err)
+	}
+	api.agents["k8s-agent"]["spec"] = map[string]any{"runtime": map[string]any{"runtimeRef": map[string]any{"name": "drifted"}}}
+	out, err := runKagentImport(t, "-f", path, "--server", srv.URL, "-n", "team")
+	if err != nil || !strings.Contains(out, "Agent updated: k8s-agent") || api.updates != 1 {
+		t.Fatalf("drift repair = %q %v (updates %d)", out, err, api.updates)
+	}
+	api.agents["helm-agent"]["metadata"] = map[string]any{"name": "helm-agent", "annotations": map[string]any{}}
+	if _, err := runKagentImport(t, "-f", path, "--server", srv.URL, "-n", "team"); err == nil || !strings.Contains(err.Error(), `agent "helm-agent" already exists and does not wrap kagent Agent kagent/helm-agent`) {
+		t.Fatalf("foreign Agent error = %v", err)
+	}
+}
+
+const governedKagentFixture = `apiVersion: api.kagent.dev/v1alpha3
+kind: Harness
+metadata: {name: kagent, namespace: kagent}
+spec: {kagent: {}}
+---
+apiVersion: api.kagent.dev/v1alpha3
+kind: ModelConfig
+metadata: {name: relay-model, namespace: kagent}
+spec:
+  provider: OpenAI
+  model: probe
+  apiKeyPassthrough: true
+  openAI: {baseUrl: "http://probe-gov-relay.orka-system.svc:8092/v1"}
+---
+apiVersion: api.kagent.dev/v1alpha3
+kind: RemoteMCPServer
+metadata:
+  name: orka-relay
+  namespace: kagent
+  labels: {kagent.dev/discovery: disabled}
+spec:
+  protocol: STREAMABLE_HTTP
+  url: http://probe-gov-relay.orka-system.svc:8092/mcp
+  timeout: 30m
+---
+apiVersion: api.kagent.dev/v1alpha3
+kind: Agent
+metadata: {name: probe-gov, namespace: kagent, generation: 3}
+spec:
+  harnessRef: {name: kagent}
+  template:
+    inline:
+      modelConfig: {name: relay-model}
+      tools:
+      - mcp:
+          server: {kind: RemoteMCPServer, name: orka-relay}
+          tools: [probe-orka]
+status:
+  observedGeneration: 3
+  desiredRevision: 11d7665dfb79fda2112d61af3b32b10f9c8a196f5741e1f7e8e8e686147b927b
+  latestSuccessfulRevision: 11d7665dfb79fda2112d61af3b32b10f9c8a196f5741e1f7e8e8e686147b927b
+`
+
+const governedRelay = "http://{name}-relay.orka-system.svc:8092"
+
+var governedEvidence = kagentEgressEvidence{
+	Revisions: map[string][]string{"11d7665dfb79fda2112d61af3b32b10f9c8a196f5741e1f7e8e8e686147b927b": {
+		"http://probe-cpfilter.probe.svc:8083", "http://probe-gov-relay.orka-system.svc:8092", "https://api.openai.com:443",
+	}},
+	Accepted: []string{"http://probe-cpfilter.probe.svc:8083", "https://api.openai.com:443"},
+}
+
+func TestClassifyKagentAgentRequiresEveryEndpointOnOneRelay(t *testing.T) {
+	wrapped, _, err := wrapKagentAgents([]byte(governedKagentFixture), governedRelay, governedEvidence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode := wrapped[0].Mode; mode.Mode != kagentModeGoverned || mode.RelayOrigin != "http://probe-gov-relay.orka-system.svc:8092" {
+		t.Fatalf("mode = %+v", mode)
+	}
+	if wrapped, _, _ := wrapKagentAgents([]byte(governedKagentFixture), "", governedEvidence); wrapped[0].Mode.Mode != kagentModeObserved ||
+		!strings.Contains(strings.Join(wrapped[0].Mode.Reasons, ";"), "no relay was named") {
+		t.Fatalf("an Agent was governed without a named relay: %+v", wrapped[0].Mode)
+	}
+	for name, test := range map[string]struct{ old, new, reason string }{
+		"claude harness":      {"spec: {kagent: {}}", "spec: {claude: {}}", `harness "kagent" is not the ADK (kagent) harness`},
+		"memory":              {"spec: {kagent: {}}", "spec: {kagent: {memory: {modelConfig: {name: m}}}}", "enables memory"},
+		"no passthrough":      {"apiKeyPassthrough: true", "apiKeyPassthrough: false", "does not pass the caller's bearer through"},
+		"model elsewhere":     {"8092/v1", "8092/other", "does not point at a relay's /v1"},
+		"short timeout":       {"timeout: 30m", "timeout: 30s", "needs a timeout of at least 20m0s"},
+		"discovery enabled":   {"labels: {kagent.dev/discovery: disabled}", "labels: {}", "does not disable discovery"},
+		"two relays":          {"svc:8092/mcp", "svc:9000/mcp", "not the relay http://probe-gov-relay.orka-system.svc:8092"},
+		"lookalike endpoint":  {"http://probe-gov-relay.orka-system.svc:8092/v1", "http://ollama:11434/v1", "points at http://ollama:11434"},
+		"stale revision":      {"  desiredRevision: 11d7665d", "  desiredRevision: 22d7665d", "not the one the current spec compiles to"},
+		"unobserved spec":     {"observedGeneration: 3", "observedGeneration: 2", "has not observed the Agent's current generation"},
+		"missing tool server": {"name: orka-relay\n  namespace", "name: other\n  namespace", `tool server "orka-relay" is not in the input`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			changed := strings.Replace(governedKagentFixture, test.old, test.new, 1)
+			if changed == governedKagentFixture {
+				t.Fatalf("fixture has no %q", test.old)
+			}
+			wrapped, _, err := wrapKagentAgents([]byte(changed), governedRelay, governedEvidence)
+			if err != nil {
+				t.Fatal(err)
+			}
+			mode := wrapped[0].Mode
+			if mode.Mode != kagentModeObserved || !strings.Contains(strings.Join(mode.Reasons, "; "), test.reason) {
+				t.Fatalf("mode = %+v, want observed because %s", mode, test.reason)
+			}
+		})
+	}
+	override := strings.Replace(governedKagentFixture, "spec: {kagent: {}}", "spec: {kagent: {}, workload: {image: custom/adk:latest}}", 1)
+	if wrapped, _, _ := wrapKagentAgents([]byte(override), governedRelay, governedEvidence); !strings.Contains(strings.Join(wrapped[0].Mode.Reasons, ";"), "overrides the workload image") {
+		t.Fatalf("a workload override was governed: %+v", wrapped[0].Mode)
+	}
+	// The pinned revision's compiled egress is the boundary, not the current specs.
+	for name, evidence := range map[string]kagentEgressEvidence{
+		"no evidence":   {Accepted: governedEvidence.Accepted},
+		"direct egress": {Revisions: map[string][]string{"11d7665dfb79fda2112d61af3b32b10f9c8a196f5741e1f7e8e8e686147b927b": {"http://mcp.example.com:80"}}},
+	} {
+		if wrapped, _, _ := wrapKagentAgents([]byte(governedKagentFixture), governedRelay, evidence); wrapped[0].Mode.Mode != kagentModeObserved {
+			t.Fatalf("%s: governed without proof of the revision's egress: %+v", name, wrapped[0].Mode)
+		}
+	}
+}
+
+func TestAgentImportKagentCmdWritesDeterministicWrapperConfig(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := t.TempDir()
+	path := filepath.Join(t.TempDir(), "agents.yaml")
+	if err := os.WriteFile(path, []byte(governedKagentFixture), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	egress := filepath.Join(t.TempDir(), "egress.json")
+	raw, _ := json.Marshal(governedEvidence.Revisions)
+	if err := os.WriteFile(egress, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	base := []string{"-f", path, "--dry-run", "--wrapper-config-dir", dir, "--control-plane-url", "http://kagent-controller.kagent.svc:8083",
+		"--relay-url", governedRelay, "--revision-egress", egress,
+		"--accepted-egress", "http://probe-cpfilter.probe.svc:8083", "--accepted-egress", "https://api.openai.com:443"}
+	if _, err := runKagentImport(t, base...); err == nil || !strings.Contains(err.Error(), "--model-upstream-url") {
+		t.Fatalf("governed Agent without an upstream: %v", err)
+	}
+	args := append(slices.Clone(base), "--model-upstream-url", "http://vekil.vekil-system.svc:8080/v1", "--model-upstream-model", "gpt-4.1")
+	if _, err := runKagentImport(t, args...); err != nil {
+		t.Fatal(err)
+	}
+	first, err := os.ReadFile(filepath.Join(dir, "probe-gov.kagent.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runKagentImport(t, args...); err != nil {
+		t.Fatal(err)
+	}
+	second, _ := os.ReadFile(filepath.Join(dir, "probe-gov.kagent.json"))
+	if !bytes.Equal(first, second) {
+		t.Fatal("wrapper configuration is not deterministic")
+	}
+	var config kagentWrapperConfig
+	if err := json.Unmarshal(first, &config); err != nil || config.Model != "kagent/kagent/probe-gov" ||
+		config.Kagent.ExpectedRevision != "11d7665dfb79fda2112d61af3b32b10f9c8a196f5741e1f7e8e8e686147b927b" ||
+		config.Governed == nil || config.Governed.UpstreamModel != "gpt-4.1" || config.Kagent.UserIDPrefix != "orka" {
+		t.Fatalf("wrapper configuration = %s", first)
+	}
+	unpinned := strings.Replace(governedKagentFixture, "  latestSuccessfulRevision: 11d7665dfb79fda2112d61af3b32b10f9c8a196f5741e1f7e8e8e686147b927b\n", "", 1)
+	if unpinned == governedKagentFixture {
+		t.Fatal("fixture has no latestSuccessfulRevision")
+	}
+	if err := os.WriteFile(path, []byte(unpinned), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runKagentImport(t, args...); err == nil || !strings.Contains(err.Error(), "no status.latestSuccessfulRevision") {
+		t.Fatalf("unpinned Agent error = %v", err)
 	}
 }

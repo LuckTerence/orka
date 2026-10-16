@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 
@@ -35,17 +36,16 @@ const (
 	kagentRuntimeSuffix = "-kagent-runtime"
 )
 
-// kagentAgentAPIVersions are the kagent Agent versions that expose A2A and can be wrapped.
-var kagentAgentAPIVersions = map[string]bool{
-	"api.kagent.dev/v1alpha3": true,
-	"kagent.dev/v1alpha2":     true,
-}
+// kagentV1APIVersion is kagent v1, the Substrate-based design the wrapper
+// targets. Earlier kagent versions expose a different control plane.
+const kagentV1APIVersion = "api.kagent.dev/v1alpha3"
 
 // kagentWrappedAgent is one Orka Agent generated from a kagent Agent.
 type kagentWrappedAgent struct {
 	Source      string
 	RuntimeName string
 	Manifest    map[string]any
+	Mode        kagentMode
 }
 
 func newAgentImportCmd() *cobra.Command {
@@ -60,16 +60,33 @@ func newAgentImportCmd() *cobra.Command {
 func newAgentImportKagentCmd() *cobra.Command {
 	var file string
 	var dryRun bool
+	var wrapper kagentWrapperOptions
+	var relayURL, egressFile string
+	var acceptedEgress []string
 	cmd := &cobra.Command{
 		Use:   "kagent -f <file>",
 		Short: "Wrap kagent Agents as Orka Agents",
-		Long: `Create one Orka Agent per kagent Agent. Each Orka Agent references the
-AgentRuntime "<name>` + kagentRuntimeSuffix + `", which must be registered separately and
-serve exactly that kagent Agent. kagent keeps executing the agent and its tools
-with its own credentials; Orka governs who can dispatch work to it.
+		Long: `Create or update one Orka Agent per kagent Agent. Each Orka Agent references
+the AgentRuntime "<name>` + kagentRuntimeSuffix + `", which must be registered separately
+and serve exactly that kagent Agent. Re-running the import is safe: Agents that
+already wrap the same kagent Agent are left alone or updated, and any other
+existing Agent is an error.
 
-Accepts api.kagent.dev/v1alpha3 and kagent.dev/v1alpha2 Agents, including lists
-from "kubectl get agents -o yaml". Other objects are skipped.`,
+Each Agent is reported as governed or observed. A governed Agent runs on the
+ADK harness with every model and tool endpoint pointing at the relay named by
+--relay-url, so Orka executes its tools and serves its model. Its latest
+successful kagent revision must be the one its current spec compiles to, and
+that revision's compiled egress (--revision-egress) may reach only the relay
+and the origins named by --accepted-egress. Any other Agent is
+observed: kagent runs its tools, and Orka governs dispatch and lifecycle.
+Include the Agents' Harness, AgentTemplate, ModelConfig, and RemoteMCPServer
+objects in the input so the import can check them.
+
+Accepts kagent v1 (api.kagent.dev/v1alpha3) Agents, including lists from
+"kubectl get agents -o yaml". Other objects are skipped.
+
+With --wrapper-config-dir, also writes each Agent's wrapper configuration,
+<name>.kagent.json, pinned to the Agent's latest successful revision.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if file == "" {
@@ -79,33 +96,59 @@ from "kubectl get agents -o yaml". Other objects are skipped.`,
 			if err != nil {
 				return fmt.Errorf("reading file: %w", err)
 			}
-			wrapped, skipped, err := wrapKagentAgents(data)
+			evidence, err := readKagentEgressEvidence(egressFile, acceptedEgress)
 			if err != nil {
+				return err
+			}
+			wrapped, skipped, err := wrapKagentAgents(data, relayURL, evidence)
+			if err != nil {
+				return err
+			}
+			if err := wrapper.validate(wrapped); err != nil {
 				return err
 			}
 			if skipped != "" {
 				fmt.Fprintf(cmd.ErrOrStderr(), "Skipped objects that are not kagent Agents: %s\n", skipped) //nolint:errcheck
 			}
+			written, err := writeKagentWrapperConfigs(wrapper, wrapped)
+			if err != nil {
+				return fmt.Errorf("writing wrapper configuration: %w", err)
+			}
+			for _, path := range written {
+				fmt.Fprintf(cmd.ErrOrStderr(), "Wrapper configuration written: %s\n", path) //nolint:errcheck
+			}
 			if dryRun {
+				for _, agent := range wrapped {
+					fmt.Fprintf(cmd.ErrOrStderr(), "kagent Agent %s: %s\n", agent.Source, describeKagentMode(agent.Mode)) //nolint:errcheck
+				}
 				namespace, _ := cmd.Flags().GetString(cliNamespaceQuery)
 				return printKagentWrappedAgents(cmd.OutOrStdout(), wrapped, strings.TrimSpace(namespace))
 			}
-			return createKagentWrappedAgents(cmd, wrapped)
+			return reconcileKagentWrappedAgents(cmd, wrapped)
 		},
 	}
 	cmd.Flags().StringVarP(&file, "file", "f", "", "Path to kagent Agent YAML/JSON (use - for stdin)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Print the Orka Agent manifests instead of creating them")
+	cmd.Flags().StringVar(&relayURL, "relay-url", "", "Origin of each Agent's wrapper relay, such as http://{name}-kagent-relay.orka-system.svc:8092; required for governed Agents")
+	cmd.Flags().StringVar(&egressFile, "revision-egress", "", `JSON object mapping each kagent revision to its compiled egress destinations, e.g. {"<revision>": ["http://relay:8092"]}`)
+	cmd.Flags().StringArrayVar(&acceptedEgress, "accepted-egress", nil, "Origin a governed revision may reach besides its relay, such as the runtime control-plane filter (repeatable)")
+	cmd.Flags().StringVar(&wrapper.Dir, "wrapper-config-dir", "", "Write each Agent's wrapper configuration (<name>.kagent.json) to this directory")
+	cmd.Flags().StringVar(&wrapper.ControlPlaneURL, "control-plane-url", "", "kagent controller base URL the wrapper calls (with --wrapper-config-dir)")
+	cmd.Flags().StringVar(&wrapper.UserIDPrefix, "user-id-prefix", "orka", "Prefix of the per-session kagent user identity (with --wrapper-config-dir)")
+	cmd.Flags().StringVar(&wrapper.UpstreamURL, "model-upstream-url", "", "OpenAI-compatible base URL the relay serves governed Agents from")
+	cmd.Flags().StringVar(&wrapper.UpstreamModel, "model-upstream-model", "", "Model the relay calls for governed Agents")
 	return cmd
 }
 
 // wrapKagentAgents converts every kagent Agent in a YAML/JSON stream into an
 // Orka Agent whose runtime is a per-agent AgentRuntime. It returns the other
 // object kinds it skipped as a summary.
-func wrapKagentAgents(data []byte) ([]kagentWrappedAgent, string, error) {
+func wrapKagentAgents(data []byte, relayURL string, evidence kagentEgressEvidence) ([]kagentWrappedAgent, string, error) {
 	objects, err := decodeKubernetesObjects(data)
 	if err != nil {
 		return nil, "", err
 	}
+	related := indexKagentObjects(objects)
 	var wrapped []kagentWrappedAgent
 	skipped := map[string]int{}
 	byName := map[string]string{}
@@ -116,13 +159,18 @@ func wrapKagentAgents(data []byte) ([]kagentWrappedAgent, string, error) {
 			skipped[strings.TrimSpace(apiVersion+" "+kind)]++
 			continue
 		}
-		if !kagentAgentAPIVersions[apiVersion] {
-			return nil, "", fmt.Errorf("unsupported kagent Agent version %q: supported versions are api.kagent.dev/v1alpha3 and kagent.dev/v1alpha2", apiVersion)
+		if apiVersion != kagentV1APIVersion {
+			return nil, "", fmt.Errorf("unsupported kagent Agent version %q: only kagent v1 (%s) Agents can be wrapped", apiVersion, kagentV1APIVersion)
 		}
 		agent, err := wrapKagentAgent(apiVersion, obj)
 		if err != nil {
 			return nil, "", err
 		}
+		relay, err := kagentRelayOrigin(relayURL, metadataName(agent.Manifest))
+		if err != nil {
+			return nil, "", err
+		}
+		agent.Mode = classifyKagentAgent(obj, related, relay, evidence)
 		name := metadataName(agent.Manifest)
 		if previous, ok := byName[name]; ok {
 			return nil, "", fmt.Errorf("kagent Agents %s and %s would both become Orka Agent %q; import them into different namespaces", previous, agent.Source, name)
@@ -398,25 +446,72 @@ func printKagentWrappedAgents(w io.Writer, wrapped []kagentWrappedAgent, namespa
 	return nil
 }
 
-func createKagentWrappedAgents(cmd *cobra.Command, wrapped []kagentWrappedAgent) error {
+// reconcileKagentWrappedAgents makes each Orka Agent match its manifest. It
+// creates missing Agents, updates the spec of Agents that already wrap the
+// same kagent Agent, and refuses to change any other existing Agent. Re-runs
+// resume where an earlier run stopped.
+func reconcileKagentWrappedAgents(cmd *cobra.Command, wrapped []kagentWrappedAgent) error {
 	c := newClientFromCmd(cmd)
 	out := cmd.OutOrStdout()
-	var created []string
+	ctx := context.Background()
+	query := map[string]string{cliNamespaceQuery: c.Namespace}
 	for _, agent := range wrapped {
 		ensureManifestNamespace(agent.Manifest, c.Namespace)
 		name := metadataName(agent.Manifest)
-		body, err := json.Marshal(agent.Manifest)
-		if err != nil {
-			return fmt.Errorf("marshaling Agent %q: %w", name, err)
-		}
-		if _, err := c.DoJSON(context.Background(), http.MethodPost, "/api/v1/agents", nil, body); err != nil {
-			if len(created) > 0 {
-				return fmt.Errorf("creating Agent %q for kagent Agent %s: %w (already created: %s)", name, agent.Source, err, strings.Join(created, ", "))
+		path := "/api/v1/agents/" + url.PathEscape(name)
+		action := "created"
+		existing, err := c.DoJSON(ctx, http.MethodGet, path, query, nil)
+		switch {
+		case err != nil && strings.Contains(err.Error(), "HTTP 404"):
+			body, err := json.Marshal(agent.Manifest)
+			if err != nil {
+				return fmt.Errorf("marshaling Agent %q: %w", name, err)
 			}
-			return fmt.Errorf("creating Agent %q for kagent Agent %s: %w", name, agent.Source, err)
+			if _, err := c.DoJSON(ctx, http.MethodPost, "/api/v1/agents", nil, body); err != nil {
+				return fmt.Errorf("creating Agent %q for kagent Agent %s: %w", name, agent.Source, err)
+			}
+		case err != nil:
+			return fmt.Errorf("reading Agent %q: %w", name, err)
+		default:
+			current, _ := existing.(map[string]any)
+			want := kagentString(agent.Manifest, "metadata", "annotations", kagentSourceAnnotation)
+			if got := kagentString(current, "metadata", "annotations", kagentSourceAnnotation); got != want {
+				return fmt.Errorf("agent %q already exists and does not wrap kagent Agent %s; remove it or import into another namespace", name, agent.Source)
+			}
+			action = "unchanged"
+			if !jsonContains(current["spec"], agent.Manifest["spec"]) {
+				body, err := json.Marshal(map[string]any{"spec": agent.Manifest["spec"]})
+				if err != nil {
+					return fmt.Errorf("marshaling Agent %q: %w", name, err)
+				}
+				if _, err := c.DoJSON(ctx, http.MethodPut, path, query, body); err != nil {
+					return fmt.Errorf("updating Agent %q for kagent Agent %s: %w", name, agent.Source, err)
+				}
+				action = "updated"
+			}
 		}
-		created = append(created, name)
-		fmt.Fprintf(out, "Agent created: %s (wraps kagent Agent %s; needs AgentRuntime %s)\n", name, agent.Source, agent.RuntimeName) //nolint:errcheck
+		fmt.Fprintf(out, "Agent %s: %s (wraps kagent Agent %s; %s; needs AgentRuntime %s)\n", action, name, agent.Source, describeKagentMode(agent.Mode), agent.RuntimeName) //nolint:errcheck
 	}
 	return nil
+}
+
+// jsonContains reports whether every field set in want has the same value in
+// got. The server may add defaulted fields that the import never sets.
+func jsonContains(got, want any) bool {
+	wantMap, ok := want.(map[string]any)
+	if !ok {
+		gotJSON, _ := json.Marshal(got)
+		wantJSON, _ := json.Marshal(want)
+		return bytes.Equal(gotJSON, wantJSON)
+	}
+	gotMap, ok := got.(map[string]any)
+	if !ok {
+		return false
+	}
+	for key, value := range wantMap {
+		if !jsonContains(gotMap[key], value) {
+			return false
+		}
+	}
+	return true
 }
