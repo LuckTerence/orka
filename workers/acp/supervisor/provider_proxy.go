@@ -1556,8 +1556,9 @@ func (c *sseTerminalErrorScanner) finishLine() {
 }
 
 // captureResponseUsage reads usage only from a whole data line whose
-// top-level event is response.completed. Model text reaches the stream only
-// JSON-escaped inside other events, so it cannot forge this line.
+// top-level event is response.completed or response.incomplete, the two
+// terminal successes. Model text reaches the stream only JSON-escaped inside
+// other events, so it cannot forge this line.
 func (c *sseTerminalErrorScanner) captureResponseUsage() {
 	if c.usageOverflow {
 		return
@@ -1578,7 +1579,7 @@ func (c *sseTerminalErrorScanner) captureResponseUsage() {
 			} `json:"usage"`
 		} `json:"response"`
 	}
-	if json.Unmarshal(bytes.TrimSpace(payload), &event) != nil || event.Type != "response.completed" ||
+	if json.Unmarshal(bytes.TrimSpace(payload), &event) != nil || (event.Type != "response.completed" && event.Type != "response.incomplete") ||
 		event.Response == nil || event.Response.Usage == nil {
 		return
 	}

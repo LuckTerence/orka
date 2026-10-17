@@ -5,6 +5,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -64,7 +65,9 @@ func run(adapter, configPath string, allowed, approvalRequired []string) error {
 		return fmt.Errorf("kagent configuration must name its profile model")
 	}
 	// A governed Agent may also have no tools: Orka then serves only its model.
-	if len(allowed) != 0 && len(configuration.Governed) == 0 {
+	// The wrapper reads a null governed stanza as observed mode.
+	governed := bytes.TrimSpace(configuration.Governed)
+	if len(allowed) != 0 && (len(governed) == 0 || governed[0] != '{') {
 		return fmt.Errorf("only a governed kagent configuration may list Orka tools")
 	}
 	for _, tool := range approvalRequired {

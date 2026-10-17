@@ -160,6 +160,12 @@ func TestSSETerminalErrorScannerCapturesUsageOnlyWhenAsked(t *testing.T) {
 			t.Fatalf("usage = %#v", scanner.usage)
 		}
 	}
+	// An incomplete response is a terminal success, and its tokens count too.
+	incomplete := &sseTerminalErrorScanner{captureUsage: true}
+	_, _ = incomplete.Write([]byte("data: {\"type\":\"response.incomplete\",\"response\":{\"usage\":{\"input_tokens\":5,\"output_tokens\":9}}}\n"))
+	if !incomplete.completed || incomplete.usage == nil || incomplete.usage.InputTokens != 5 || incomplete.usage.OutputTokens != 9 {
+		t.Fatalf("incomplete: completed=%v usage=%#v", incomplete.completed, incomplete.usage)
+	}
 	// Invalid cache accounting is dropped rather than recorded.
 	scanner := &sseTerminalErrorScanner{captureUsage: true}
 	_, _ = scanner.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"input_tokens_details\":{\"cached_tokens\":5}}}}\n"))
