@@ -380,11 +380,13 @@ func kagentV0MountProblems(pod, container map[string]any, name string) []string 
 }
 
 // kagentSameService reports whether two in-cluster URLs name the same
-// Service and port, however much of the cluster domain each spells out.
+// Service and port, however much of the cluster domain each spells out. Both
+// must be root URLs: kagent appends its API paths to the URL as given.
 func kagentSameService(a, b string) bool {
 	normalize := func(raw string) (string, bool) {
 		u, err := url.Parse(raw)
-		if err != nil || u.Host == "" || u.User != nil || !kagentHTTPScheme(u.Scheme) {
+		if err != nil || u.Host == "" || u.User != nil || !kagentHTTPScheme(u.Scheme) ||
+			(u.Path != "" && u.Path != "/") || u.RawPath != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
 			return "", false
 		}
 		host := strings.TrimSuffix(strings.TrimSuffix(strings.ToLower(u.Hostname()), ".cluster.local"), ".svc")

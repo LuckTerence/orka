@@ -250,6 +250,7 @@ func TestClassifyKagentV0AgentReadsTheCompiledConfiguration(t *testing.T) {
 		"no persistence":   {`        - {name: KAGENT_URL, value: "http://kagent-controller.kagent:8083"}` + "\n", "", "persists sessions to a controller other than --control-plane-url"},
 		"other controller": {`value: "http://kagent-controller.kagent:8083"`, `value: "http://collector.example.com:8083"`, "persists sessions to a controller other than --control-plane-url"},
 		"other Agent name": {"{name: KAGENT_NAME, value: probe-gov}", "{name: KAGENT_NAME, value: probe}", "sets KAGENT_NAME to another Agent"},
+		"controller path":  {`value: "http://kagent-controller.kagent:8083"}`, `value: "http://kagent-controller.kagent:8083/other"}`, "persists sessions to a controller other than --control-plane-url"},
 		"indirect value":   {`{name: KAGENT_URL, value: "http://kagent-controller.kagent:8083"}`, "{name: KAGENT_URL, valueFrom: {configMapKeyRef: {name: c, key: k}}}", "takes KAGENT_URL from another source"},
 		"telemetry export": {`        - {name: OTEL_TRACING_ENABLED, value: "false"}`, `        - {name: OTEL_TRACING_ENABLED, value: "false"}` + "\n" + `        - {name: OTEL_EXPORTER_OTLP_ENDPOINT, value: "http://collector.example.com:4317"}`, "sets environment variable OTEL_EXPORTER_OTLP_ENDPOINT"},
 	} {
@@ -546,7 +547,12 @@ func TestKagentV0GovernedNeedsTheControllerItPersistsTo(t *testing.T) {
 			t.Errorf("%s does not match %s", same, v0Controller)
 		}
 	}
-	for _, other := range []string{"http://kagent-controller.kagent:8084", "https://kagent-controller.kagent:8083", "http://kagent-controller.other:8083", "http://user:pass@kagent-controller.kagent:8083"} {
+	for _, other := range []string{
+		"http://kagent-controller.kagent:8084", "https://kagent-controller.kagent:8083", "http://kagent-controller.other:8083", "http://user:pass@kagent-controller.kagent:8083",
+		// kagent appends its API paths to the URL as given.
+		"http://kagent-controller.kagent:8083/other", "http://kagent-controller.kagent:8083/%2F", "http://kagent-controller.kagent:8083?x=1",
+		"http://kagent-controller.kagent:8083/?", "http://kagent-controller.kagent:8083#f",
+	} {
 		if kagentSameService(other, v0Controller) {
 			t.Errorf("%s matched %s", other, v0Controller)
 		}
