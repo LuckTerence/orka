@@ -739,7 +739,7 @@ func TestStaticChartUsesServicePortForInClusterControllerURLs(t *testing.T) {
 	if got := strings.Count(rendered, "--controller-url="); got != 1 {
 		t.Fatalf("controller URL argument count = %d, want 1", got)
 	}
-	if !strings.Contains(rendered, "--controller-url=http://test-orka.orka-test.svc:18080") {
+	if !strings.Contains(rendered, "--controller-url=http://test-orka-internal.orka-test.svc:18080") {
 		t.Fatalf("controller URL does not use service.port:\n%s", rendered)
 	}
 	for _, variable := range []string{
@@ -747,7 +747,7 @@ func TestStaticChartUsesServicePortForInClusterControllerURLs(t *testing.T) {
 		"ORKA_PUBLISHER_ARTIFACT_API_URL",
 		"ORKA_PUBLISHER_CREDENTIAL_BROKER_URL",
 	} {
-		marker := "name: " + variable + "\n              value: http://test-orka:18080"
+		marker := "name: " + variable + "\n              value: http://test-orka-internal:18080"
 		if !strings.Contains(rendered, marker) {
 			t.Fatalf("%s does not use service.port", variable)
 		}
@@ -760,6 +760,15 @@ func TestStaticChartUsesServicePortForInClusterControllerURLs(t *testing.T) {
 	)
 	if !strings.Contains(service, "port: 18080") || !strings.Contains(service, "targetPort: api") {
 		t.Fatalf("controller Service does not preserve service port to named API target:\n%s", service)
+	}
+
+	internal := requireHelmRender(t,
+		"--set", "service.port=18080",
+		"--set", "controller.apiPort=8080",
+		"--show-only", "templates/controller-internal-service.yaml",
+	)
+	if !strings.Contains(internal, "port: 18080") || !strings.Contains(internal, "targetPort: api") {
+		t.Fatalf("controller internal Service does not preserve service port to named API target:\n%s", internal)
 	}
 }
 

@@ -535,6 +535,10 @@ spec:
 {{- printf "%s-controller" (include "orka.fullname" . | trunc 52 | trimSuffix "-") | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
+{{- define "orka.controllerInternalServiceName" -}}
+{{- printf "%s-internal" (include "orka.fullname" . | trunc 54 | trimSuffix "-") | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
 {{- define "orka.controllerWebhookServiceName" -}}
 {{- printf "%s-webhook" (include "orka.fullname" . | trunc 55 | trimSuffix "-") | trunc 63 | trimSuffix "-" }}
 {{- end }}
