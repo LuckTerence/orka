@@ -346,6 +346,10 @@ func TestWrapKagentV0AgentsRefusesRuntimesTheWrapperCannotRun(t *testing.T) {
 			"    runtime: go\n", "    runtime: go\n    deployment: {replicas: 2}\n",
 			"it asks for 2 replicas (declarative.deployment.replicas); kagent v0 cancels a task only in the pod that runs it",
 		},
+		"sandbox network": {
+			"  type: Declarative\n", "  type: Declarative\n  sandbox: {network: {allowedDomains: [api.github.com]}}\n",
+			"it lets the code its model runs reach the network (spec.sandbox.network.allowedDomains)",
+		},
 		"replicas deployed": {"spec:\n  replicas: 1\n  template:", "spec:\n  replicas: 2\n  template:", "its Deployment runs 1 replicas of 2"},
 		"old pods remain":   {"status: {observedGeneration: 4, replicas: 1", "status: {observedGeneration: 4, replicas: 2", "its Deployment runs 2 replicas of 1"},
 		"no pods":           {"status: {observedGeneration: 4, replicas: 1", "status: {observedGeneration: 4, replicas: 0", "its Deployment runs 0 replicas of 1"},

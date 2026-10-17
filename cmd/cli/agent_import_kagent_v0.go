@@ -82,6 +82,13 @@ func kagentV0WrapRefusals(agent, deployment map[string]any) []string {
 			problems = append(problems, fmt.Sprintf("tool %d requires kagent approval (requireApproval), which a wrapped Agent cannot answer", i))
 		}
 	}
+	// kagent v0 points every Agent pod at its controller, which takes any
+	// caller's word for the user, so nothing the model runs may reach it.
+	// kagent keeps skill commands and code blocks off the network unless the
+	// Agent allows domains.
+	if domains, _ := kagentMap(agent, kagentFieldSpec, "sandbox", "network")["allowedDomains"].([]any); len(domains) > 0 {
+		problems = append(problems, "it lets the code its model runs reach the network (spec.sandbox.network.allowedDomains); in kagent v0 that code could call the controller as any user")
+	}
 	if replicas, set := kagentMap(agent, kagentFieldSpec, kagentFieldDeclarative, "deployment")["replicas"].(float64); set && replicas != 1 {
 		problems = append(problems, fmt.Sprintf("it asks for %d replicas (declarative.deployment.replicas); %s", int64(replicas), kagentV0SingleReplica))
 	}

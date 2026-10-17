@@ -103,7 +103,9 @@ admit only kagent's controller to Substrate's actor router.
 kagent v0: only Declarative Agents on the Go runtime can be wrapped, because
 the Python runtime cannot cancel a task and saves request headers. An Agent
 must run exactly one replica, because kagent v0 cancels a task only in the
-pod that runs it. The wrapper pins the Agent Deployment's
+pod that runs it. Nor can an Agent whose sandboxed code may reach the network
+(spec.sandbox.network.allowedDomains): kagent v0 points Agent pods at its
+controller, which accepts any caller's user ID. The wrapper pins the Agent Deployment's
 kagent.dev/config-hash, so kagent must have accepted the Agent's
 current generation, the Agent must be Ready, and its Deployment must run the
 Go runtime and be fully rolled out. A governed Agent is judged by the
