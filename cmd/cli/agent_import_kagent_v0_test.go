@@ -197,6 +197,8 @@ func TestClassifyKagentV0AgentReadsTheCompiledConfiguration(t *testing.T) {
 		"share tools":         {`"instruction"`, `"share_tools":true,"instruction"`, "share-link tools"},
 		"memory":              {`"instruction"`, `"memory":{"ttl_days":15},"instruction"`, "enables memory"},
 		"context compaction":  {`"instruction"`, `"context_config":{"compaction":{}},"instruction"`, "compacts its context"},
+		"local sessions":      {`"instruction"`, `"session_db_url":"sqlite:////data/sessions.db","instruction"`, "keeps sessions in a local store (session_db_url)"},
+		"unknown field":       {`"instruction"`, `"future_setting":true,"instruction"`, "sets future_setting, which the import does not know"},
 		"tool on second host": {`"tools":["probe-orka"]`, `"tools":["probe-orka"]},{"params":{"url":"http://tools.example.com:80/mcp","timeout":1800},"allowed_headers":["Authorization"],"tools":["x"]`, "points at http://tools.example.com:80, not the relay"},
 	} {
 		t.Run(name, func(t *testing.T) {

@@ -136,7 +136,7 @@ func translateKagentAgent(agent map[string]any, related kagentObjects, options k
 		for _, problem := range modelProblems {
 			refuse("model config %q %s", modelName, problem)
 		}
-		spec["model"] = translatedModel
+		spec[kagentFieldModel] = translatedModel
 		if providerRef != "" {
 			spec["providerRef"] = map[string]any{cliNameKey: providerRef}
 		}
@@ -193,12 +193,12 @@ func translateKagentModel(model map[string]any, providerRef string) (map[string]
 	}
 	for field := range spec {
 		switch field {
-		case "provider", "model", "apiKeySecret", "apiKeySecretKey", "stream", settingsField:
+		case "provider", kagentFieldModel, "apiKeySecret", "apiKeySecretKey", kagentFieldStream, settingsField:
 		default:
 			problems = append(problems, fmt.Sprintf("sets %s, which has no Orka equivalent", field))
 		}
 	}
-	out := map[string]any{"name": kagentString(model, kagentFieldSpec, "model")}
+	out := map[string]any{"name": kagentString(model, kagentFieldSpec, kagentFieldModel)}
 	if provider != "" {
 		out["provider"] = provider
 	}

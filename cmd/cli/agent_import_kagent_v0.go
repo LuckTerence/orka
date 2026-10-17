@@ -44,6 +44,8 @@ const (
 	kagentFieldInline          = "inline"
 	kagentFieldMemory          = "memory"
 	kagentFieldModelConfig     = "modelConfig"
+	kagentFieldModel           = "model"
+	kagentFieldStream          = "stream"
 	kagentToolTypeMCPServer    = "McpServer"
 	// kagentV0Container and kagentV0GoImage name the agent container and the
 	// Go ADK image repository kagent runs it from (both image variants).
@@ -502,7 +504,7 @@ func kagentV0CompiledConfig(secret, model map[string]any, name, modelName, pinne
 // Agent and returns the origins its endpoints point at.
 func kagentV0ConfigProblems(config map[string]any) ([]string, []string) {
 	var problems, origins []string
-	model := kagentMap(config, "model")
+	model := kagentMap(config, kagentFieldModel)
 	switch {
 	case kagentString(model, "type") != "openai":
 		problems = append(problems, fmt.Sprintf("the compiled model is %q, not OpenAI", kagentString(model, "type")))
@@ -573,9 +575,33 @@ func kagentV0ConfigProblems(config map[string]any) ([]string, []string) {
 			problems = append(problems, reason)
 		}
 	}
+	// The runtime prefers a local session store to the controller, where
+	// the broker deletes sessions.
+	if value, set := config["session_db_url"]; set && value != "" {
+		problems = append(problems, "the compiled configuration keeps sessions in a local store (session_db_url), not in kagent's controller")
+	}
+	for field := range config {
+		if slices.Contains(kagentV0ConfigFields, field) {
+			continue
+		}
+		if kagentV0ConfigFieldName.MatchString(field) {
+			problems = append(problems, fmt.Sprintf("the compiled configuration sets %s, which the import does not know", field))
+		} else {
+			problems = append(problems, "the compiled configuration sets a field the import does not know")
+		}
+	}
 	slices.Sort(problems)
 	return problems, origins
 }
+
+// kagentV0ConfigFields are the fields of kagent v0.10's compiled AgentConfig.
+// A configuration with any other field keeps the Agent observed.
+var kagentV0ConfigFields = []string{
+	kagentFieldModel, kagentFieldDescription, "instruction", "http_tools", "sse_tools", "remote_agents", "execute_code",
+	kagentFieldStream, kagentFieldMemory, "network", "context_config", "share_tools", "session_db_url",
+}
+
+var kagentV0ConfigFieldName = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
 
 // kagentV0TranslatedDeploymentFields are deployment settings that only place
 // kagent's pod; a native Orka Agent has none, and dropping them changes no
@@ -612,7 +638,7 @@ func translateKagentV0Agent(agent map[string]any, related kagentObjects, options
 		for _, problem := range modelProblems {
 			problems = append(problems, fmt.Sprintf("model config %q %s", modelName, problem))
 		}
-		spec["model"] = translatedModel
+		spec[kagentFieldModel] = translatedModel
 		if providerRef != "" {
 			spec["providerRef"] = map[string]any{cliNameKey: providerRef}
 		}
@@ -643,7 +669,7 @@ func untranslatableKagentV0Fields(agent map[string]any) []string {
 	declarative := kagentMap(agent, kagentFieldSpec, kagentFieldDeclarative)
 	for field := range declarative {
 		switch field {
-		case "systemMessage", "systemMessageFrom", kagentFieldModelConfig, kagentFieldTools, "stream", kagentFieldRuntime:
+		case "systemMessage", "systemMessageFrom", kagentFieldModelConfig, kagentFieldTools, kagentFieldStream, kagentFieldRuntime:
 		case "executeCodeBlocks", "shareTools":
 			if kagentBool(declarative, field) {
 				problems = append(problems, fmt.Sprintf("declarative.%s is enabled, which Orka Agents do not have", field))

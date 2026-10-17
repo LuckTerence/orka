@@ -649,7 +649,7 @@ func reconcileKagentWrappedAgents(cmd *cobra.Command, wrapped []kagentWrappedAge
 // kagentOwnedSpecFields are the Agent spec fields the import writes in either
 // mode. A field the import no longer sets must be removed, so each one is
 // compared whole; fields the import never writes are left to their owners.
-var kagentOwnedSpecFields = []string{"runtime", "systemPrompt", "model", "providerRef", kagentFieldTools}
+var kagentOwnedSpecFields = []string{"runtime", "systemPrompt", kagentFieldModel, "providerRef", kagentFieldTools}
 
 // kagentRepairedSpec keeps the fields other owners set and replaces or
 // removes only the import-owned ones; the update replaces the whole spec.
