@@ -277,15 +277,19 @@ func kagentV1WrapRefusals(agent map[string]any, related kagentObjects, namespace
 	visited := map[string]bool{}
 	if template == nil {
 		ref := kagentString(agent, kagentFieldSpec, "template", "ref", cliNameKey)
-		template = kagentMap(related.lookup("AgentTemplate", namespace, ref), kagentFieldSpec)
+		found := related.lookup("AgentTemplate", namespace, ref)
+		if found == nil && ref != "" {
+			return []string{fmt.Sprintf("agent template %q is not in the input, so the import cannot confirm it has no kagent approval bindings", ref)}
+		}
+		template = kagentMap(found, kagentFieldSpec)
 		visited[ref] = true
 	}
 	return kagentV1ApprovalRefusals(template, related, namespace, "", visited)
 }
 
 // kagentV1ApprovalRefusals checks a template's bindings and those of the
-// subagent templates kagent compiles into the same runtime. A template the
-// input lacks cannot be checked; an approval pause in it still fails the turn.
+// subagent templates kagent compiles into the same runtime, every one of
+// which must be in the input.
 func kagentV1ApprovalRefusals(template map[string]any, related kagentObjects, namespace, where string, visited map[string]bool) []string {
 	var problems []string
 	tools, _ := template[kagentFieldTools].([]any)
@@ -301,10 +305,13 @@ func kagentV1ApprovalRefusals(template map[string]any, related kagentObjects, na
 			continue
 		}
 		visited[ref] = true
-		if child := related.lookup("AgentTemplate", namespace, ref); child != nil {
-			problems = append(problems, kagentV1ApprovalRefusals(kagentMap(child, kagentFieldSpec), related, namespace,
-				fmt.Sprintf("subagent template %q ", ref), visited)...)
+		child := related.lookup("AgentTemplate", namespace, ref)
+		if child == nil {
+			problems = append(problems, fmt.Sprintf("%stool %d uses subagent template %q, which is not in the input, so the import cannot confirm it has no kagent approval bindings", where, i, ref))
+			continue
 		}
+		problems = append(problems, kagentV1ApprovalRefusals(kagentMap(child, kagentFieldSpec), related, namespace,
+			fmt.Sprintf("subagent template %q ", ref), visited)...)
 	}
 	return problems
 }

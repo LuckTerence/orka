@@ -247,11 +247,7 @@ func TestClassifyKagentV0AgentReadsTheCompiledConfiguration(t *testing.T) {
 		"dns override":     {"      volumes:", "      dnsPolicy: None\n      volumes:", "uses DNS policy None"},
 		"lifecycle hook":   {"        volumeMounts:", "        lifecycle: {postStart: {exec: {command: [sh]}}}\n        volumeMounts:", "sets container field lifecycle"},
 		"exec probe":       {"        volumeMounts:", "        readinessProbe: {exec: {command: [sh]}}\n        volumeMounts:", "runs a command in its readinessProbe"},
-		"no persistence":   {`        - {name: KAGENT_URL, value: "http://kagent-controller.kagent:8083"}` + "\n", "", "persists sessions to a controller other than --control-plane-url"},
-		"other controller": {`value: "http://kagent-controller.kagent:8083"`, `value: "http://collector.example.com:8083"`, "persists sessions to a controller other than --control-plane-url"},
 		"other Agent name": {"{name: KAGENT_NAME, value: probe-gov}", "{name: KAGENT_NAME, value: probe}", "sets KAGENT_NAME to another Agent"},
-		"controller path":  {`value: "http://kagent-controller.kagent:8083"}`, `value: "http://kagent-controller.kagent:8083/other"}`, "persists sessions to a controller other than --control-plane-url"},
-		"indirect value":   {`{name: KAGENT_URL, value: "http://kagent-controller.kagent:8083"}`, "{name: KAGENT_URL, valueFrom: {configMapKeyRef: {name: c, key: k}}}", "takes KAGENT_URL from another source"},
 		"telemetry export": {`        - {name: OTEL_TRACING_ENABLED, value: "false"}`, `        - {name: OTEL_TRACING_ENABLED, value: "false"}` + "\n" + `        - {name: OTEL_EXPORTER_OTLP_ENDPOINT, value: "http://collector.example.com:4317"}`, "sets environment variable OTEL_EXPORTER_OTLP_ENDPOINT"},
 	} {
 		changed := strings.Replace(governedKagentV0Fixture, test.old, test.new, 1)
@@ -372,6 +368,33 @@ func TestWrapKagentV0AgentsRefusesRuntimesTheWrapperCannotRun(t *testing.T) {
 				t.Fatalf("error = %v, want %q", err, test.want)
 			}
 		})
+	}
+}
+
+// The broker reads a v0 Agent's sessions and tasks from the controller, so in
+// either mode the Agent must persist them to the one the wrapper calls.
+func TestWrapKagentV0AgentsRequireControllerPersistence(t *testing.T) {
+	const url = `{name: KAGENT_URL, value: "http://kagent-controller.kagent:8083"}`
+	for name, test := range map[string]struct{ old, new, want string }{
+		"no persistence":  {"        - " + url + "\n", "", "does not set KAGENT_URL to a value"},
+		"indirect value":  {url, "{name: KAGENT_URL, valueFrom: {configMapKeyRef: {name: c, key: k}}}", "does not set KAGENT_URL to a value"},
+		"other service":   {url, `{name: KAGENT_URL, value: "http://other.kagent:8083"}`, "persists sessions to a controller other than --control-plane-url"},
+		"controller path": {url, `{name: KAGENT_URL, value: "http://kagent-controller.kagent:8083/other"}`, "persists sessions to a controller other than --control-plane-url"},
+	} {
+		changed := strings.Replace(governedKagentV0Fixture, test.old, test.new, 1)
+		if changed == governedKagentV0Fixture {
+			t.Fatalf("%s: fixture has no %q", name, test.old)
+		}
+		// No relay is named, so the Agent would otherwise wrap as observed.
+		if _, _, err := wrapKagentAgents([]byte(changed), "", kagentRevisionEvidence{Controller: v0Controller}); err == nil ||
+			!strings.Contains(err.Error(), "cannot be wrapped") || !strings.Contains(err.Error(), test.want) {
+			t.Errorf("%s: err = %v, want %q", name, err, test.want)
+		}
+	}
+	// Without --control-plane-url only the value's presence can be checked.
+	other := strings.Replace(governedKagentV0Fixture, url, `{name: KAGENT_URL, value: "http://other.kagent:8083"}`, 1)
+	if _, _, err := wrapKagentAgents([]byte(other), "", kagentRevisionEvidence{}); err != nil {
+		t.Errorf("an Agent wrapped without --control-plane-url was refused: %v", err)
 	}
 }
 

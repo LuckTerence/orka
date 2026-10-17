@@ -61,7 +61,7 @@ const kagentV0SingleReplica = "kagent v0 cancels a task only in the pod that run
 
 // kagentV0WrapRefusals lists why the wrapper cannot run a v0 Agent at all,
 // in either mode.
-func kagentV0WrapRefusals(agent, deployment map[string]any) []string {
+func kagentV0WrapRefusals(agent, deployment map[string]any, controller string) []string {
 	var problems []string
 	switch kind := kagentString(agent, kagentFieldSpec, "type"); kind {
 	case "Declarative":
@@ -96,6 +96,14 @@ func kagentV0WrapRefusals(agent, deployment map[string]any) []string {
 	}
 	if deployment == nil {
 		return append(problems, "its Deployment is not in the input, so the import cannot confirm it runs exactly one replica; "+kagentV0SingleReplica)
+	}
+	// The broker reads sessions and tasks from the controller, so the Agent
+	// must keep them there; without KAGENT_URL it keeps them in memory.
+	switch persistence, direct := kagentV0PersistenceURL(deployment); {
+	case !direct:
+		problems = append(problems, "its Deployment does not set KAGENT_URL to a value, so the broker could not read the Agent's sessions and tasks")
+	case controller != "" && !kagentSameService(persistence, controller):
+		problems = append(problems, "its Deployment persists sessions to a controller other than --control-plane-url, where the broker reads them")
 	}
 	specReplicas := int64(1) // the Deployment default
 	if value, ok := kagentMap(deployment, kagentFieldSpec)["replicas"].(float64); ok {
@@ -402,6 +410,28 @@ func kagentSameService(a, b string) bool {
 	left, ok := normalize(a)
 	right, ok2 := normalize(b)
 	return ok && ok2 && left == right
+}
+
+// kagentV0PersistenceURL returns the KAGENT_URL the agent container sets as
+// a plain value, and whether it sets one.
+func kagentV0PersistenceURL(deployment map[string]any) (string, bool) {
+	containers, _ := kagentMap(deployment, kagentFieldSpec, "template", kagentFieldSpec)["containers"].([]any)
+	for _, raw := range containers {
+		container, _ := raw.(map[string]any)
+		if container[cliNameKey] != kagentV0Container {
+			continue
+		}
+		env, _ := container["env"].([]any)
+		for _, raw := range env {
+			entry, _ := raw.(map[string]any)
+			if kagentString(entry, cliNameKey) != kagentV0EnvURL {
+				continue
+			}
+			value, literal := entry["value"].(string)
+			return value, literal && value != "" && entry["valueFrom"] == nil
+		}
+	}
+	return "", false
 }
 
 func kagentV0ContainerImage(deployment map[string]any) string {

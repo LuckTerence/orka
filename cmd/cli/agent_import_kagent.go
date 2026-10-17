@@ -90,7 +90,8 @@ model and tool endpoint pointing at the relay named by --relay-url, so Orka
 executes its tools and serves its model. Any other Agent is observed: kagent
 runs its tools, and Orka governs dispatch and lifecycle. An Agent with a kagent
 approval prompt (requireApproval) cannot be wrapped in either mode: a wrapped
-Agent cannot answer it.
+Agent cannot answer it. Include every AgentTemplate a v1 Agent references,
+subagent templates too, so the import can check them.
 
 kagent v1: a governed Agent runs on the ADK harness. Its latest successful
 kagent revision must be the one its current spec compiles to, and must have
@@ -105,7 +106,9 @@ the Python runtime cannot cancel a task and saves request headers. An Agent
 must run exactly one replica, because kagent v0 cancels a task only in the
 pod that runs it. Nor can an Agent whose sandboxed code may reach the network
 (spec.sandbox.network.allowedDomains): kagent v0 points Agent pods at its
-controller, which accepts any caller's user ID. The wrapper pins the Agent Deployment's
+controller, which accepts any caller's user ID. Its Deployment must set
+KAGENT_URL, naming the controller given by --control-plane-url, because the
+wrapper reads the Agent's sessions and tasks there. The wrapper pins the Agent Deployment's
 kagent.dev/config-hash, so kagent must have accepted the Agent's
 current generation, the Agent must be Ready, and its Deployment must run the
 Go runtime and be fully rolled out. A governed Agent is judged by the
@@ -281,7 +284,7 @@ func wrapKagentAgents(data []byte, relayURL string, evidence kagentRevisionEvide
 		if agent.Version == kagentVersionV0 {
 			v0 := related[kagentV0APIVersion]
 			deployment := v0.lookup("Deployment", agent.SourceNamespace, agent.SourceName)
-			if problems := kagentV0WrapRefusals(source.Object, deployment); len(problems) > 0 {
+			if problems := kagentV0WrapRefusals(source.Object, deployment, evidence.Controller); len(problems) > 0 {
 				return nil, "", fmt.Errorf("kagent Agent %s cannot be wrapped: %s", agent.Source, strings.Join(problems, "; "))
 			}
 			agent.Mode = classifyKagentV0Agent(source.Object, v0, relay, evidence.Controller)

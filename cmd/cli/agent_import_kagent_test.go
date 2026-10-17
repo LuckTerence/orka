@@ -33,6 +33,15 @@ spec:
     name: kagent
 ---
 apiVersion: api.kagent.dev/v1alpha3
+kind: AgentTemplate
+metadata:
+  name: shared-context
+  namespace: kagent
+spec:
+  modelConfig:
+    name: default-model-config
+---
+apiVersion: api.kagent.dev/v1alpha3
 kind: ModelConfig
 metadata:
   name: default-model-config
@@ -82,7 +91,7 @@ func TestWrapKagentAgentsConvertsSupportedVersions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wrapKagentAgents() error: %v", err)
 	}
-	if want := "api.kagent.dev/v1alpha3 ModelConfig (1), api.kagent.dev/v1alpha3 RemoteMCPServer (1)"; skipped != want {
+	if want := "api.kagent.dev/v1alpha3 AgentTemplate (1), api.kagent.dev/v1alpha3 ModelConfig (1), api.kagent.dev/v1alpha3 RemoteMCPServer (1)"; skipped != want {
 		t.Errorf("skipped = %q, want %q", skipped, want)
 	}
 	want := []struct{ name, runtime, source string }{
