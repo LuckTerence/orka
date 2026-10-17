@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="generator" content="Docusaurus v3.10.1">
 <title data-rh="true">AgentRuntime adapter contract | Orka</title><meta data-rh="true" name="viewport" content="width=device-width,initial-scale=1"><meta data-rh="true" name="twitter:card" content="summary_large_image"><meta data-rh="true" property="og:url" content="https://orka-agents.github.io/orka/docs/development/agent-runtime-adapter-contract"><meta data-rh="true" property="og:locale" content="en"><meta data-rh="true" name="docusaurus_locale" content="en"><meta data-rh="true" name="docsearch:language" content="en"><meta data-rh="true" name="docusaurus_version" content="current"><meta data-rh="true" name="docusaurus_tag" content="docs-default-current"><meta data-rh="true" name="docsearch:version" content="current"><meta data-rh="true" name="docsearch:docusaurus_tag" content="docs-default-current"><meta data-rh="true" property="og:title" content="AgentRuntime adapter contract | Orka"><meta data-rh="true" name="description" content="The orka.harness.v2 contract an external agent runtime must implement to work with Orka."><meta data-rh="true" property="og:description" content="The orka.harness.v2 contract an external agent runtime must implement to work with Orka."><link data-rh="true" rel="canonical" href="https://orka-agents.github.io/orka/docs/development/agent-runtime-adapter-contract"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/development/agent-runtime-adapter-contract" hreflang="en"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/development/agent-runtime-adapter-contract" hreflang="x-default"><script data-rh="true" type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"AgentRuntime adapter contract","item":"https://orka-agents.github.io/orka/docs/development/agent-runtime-adapter-contract"}]}</script><link rel="stylesheet" href="/orka/assets/css/styles.ecda331d.css">
-<script src="/orka/assets/js/runtime~main.9b759b46.js" defer="defer"></script>
+<script src="/orka/assets/js/runtime~main.96ee435b.js" defer="defer"></script>
 <script src="/orka/assets/js/main.1f4a80eb.js" defer="defer"></script>
 </head>
 <body>
@@ -145,12 +145,14 @@ throughout the wait; extending the MCP timeout does not extend Task or Session
 authority. The supervisor cancels calls when that authority ends.</p>
 <p>Final tool errors use <code>isError: true</code> and an allowlisted <code>code</code> in the MCP
 <code>structuredContent</code> object:</p>
-<table><thead><tr><th>Code</th><th>Meaning</th></tr></thead><tbody><tr><td><code>approval_declined</code></td><td>The reviewer declined; execution did not start.</td></tr><tr><td><code>approval_expired</code></td><td>Review or Task time ran out before execution.</td></tr><tr><td><code>approval_cancelled</code></td><td>The review or Task was cancelled before execution.</td></tr><tr><td><code>approval_stale</code></td><td>The original run, policy, tool definition, or ownership changed.</td></tr><tr><td><code>tool_execution_failed</code></td><td>The approved tool returned a recorded execution error.</td></tr><tr><td><code>tool_outcome_unknown</code></td><td>Execution may have occurred, but a reliable result is unavailable.</td></tr></tbody></table>
-<p>Adapters preserve these codes with fixed safe messages. On
-<code>tool_outcome_unknown</code>, they must stop automatic tool/model continuation and
-must not repeat the action. An exact broker redelivery can return a committed
-receipt; it cannot reclaim an unreceipted started action, even after its
-execution lease expires.</p>
+<table><thead><tr><th>Code</th><th>Meaning</th></tr></thead><tbody><tr><td><code>approval_declined</code></td><td>The reviewer declined; execution did not start.</td></tr><tr><td><code>approval_expired</code></td><td>Review or Task time ran out before execution.</td></tr><tr><td><code>approval_cancelled</code></td><td>The review or Task was cancelled before execution.</td></tr><tr><td><code>approval_stale</code></td><td>The original run, policy, tool definition, or ownership changed.</td></tr><tr><td><code>tool_execution_failed</code></td><td>The approved tool returned a recorded execution error.</td></tr><tr><td><code>tool_failed_without_effect</code></td><td>The approved tool sent nothing or the remote system refused the request; nothing changed.</td></tr><tr><td><code>tool_outcome_unknown</code></td><td>Execution may have occurred, but a reliable result is unavailable.</td></tr></tbody></table>
+<p>Adapters preserve these codes with fixed safe messages. The
+<code>tool_failed_without_effect</code> message is a bounded, redacted summary the
+controller writes, such as the HTTP status GitHub refused the request with,
+and adapters may forward it. On <code>tool_outcome_unknown</code>, they must stop
+automatic tool/model continuation and must not repeat the action. An exact
+broker redelivery can return a committed receipt; it cannot reclaim an
+unreceipted started action, even after its execution lease expires.</p>
 <p>Orka injects <code>AGENTKIT_MCP_TIMEOUT=900</code> for approval-enabled direct AgentKit
 sessions. Foundry reserves 900 seconds for MCP <code>tools/call</code> while discovery
 and model requests retain their separate 120-second limit. For hosted
