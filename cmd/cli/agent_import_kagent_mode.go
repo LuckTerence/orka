@@ -274,18 +274,36 @@ func templateProblems(agent map[string]any, related *kagentInputs, namespace str
 // prompt the wrapper cannot answer, so the broker would cancel every such turn.
 func kagentV1WrapRefusals(agent map[string]any, related kagentObjects, namespace string) []string {
 	template := kagentMap(agent, kagentFieldSpec, "template", "inline")
+	visited := map[string]bool{}
 	if template == nil {
 		ref := kagentString(agent, kagentFieldSpec, "template", "ref", cliNameKey)
 		template = kagentMap(related.lookup("AgentTemplate", namespace, ref), kagentFieldSpec)
+		visited[ref] = true
 	}
+	return kagentV1ApprovalRefusals(template, related, namespace, "", visited)
+}
+
+// kagentV1ApprovalRefusals checks a template's bindings and those of the
+// subagent templates kagent compiles into the same runtime. A template the
+// input lacks cannot be checked; an approval pause in it still fails the turn.
+func kagentV1ApprovalRefusals(template map[string]any, related kagentObjects, namespace, where string, visited map[string]bool) []string {
 	var problems []string
 	tools, _ := template[kagentFieldTools].([]any)
 	for i, raw := range tools {
 		binding, _ := raw.(map[string]any)
 		if approval, set := kagentMap(binding, "mcp")["requireApproval"]; set && approval != nil && approval != false {
 			if list, isList := approval.([]any); !isList || len(list) > 0 {
-				problems = append(problems, fmt.Sprintf("tool %d requires kagent approval (mcp.requireApproval), which a wrapped Agent cannot answer", i))
+				problems = append(problems, fmt.Sprintf("%stool %d requires kagent approval (mcp.requireApproval), which a wrapped Agent cannot answer", where, i))
 			}
+		}
+		ref := kagentString(binding, "subAgent", "templateRef", cliNameKey)
+		if ref == "" || visited[ref] {
+			continue
+		}
+		visited[ref] = true
+		if child := related.lookup("AgentTemplate", namespace, ref); child != nil {
+			problems = append(problems, kagentV1ApprovalRefusals(kagentMap(child, kagentFieldSpec), related, namespace,
+				fmt.Sprintf("subagent template %q ", ref), visited)...)
 		}
 	}
 	return problems

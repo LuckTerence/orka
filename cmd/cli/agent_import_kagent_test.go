@@ -579,6 +579,63 @@ spec:
 	}
 }
 
+// kagent compiles a subagent template into its parent's runtime, so an
+// approval binding anywhere in the tree pauses the parent's turn.
+func TestKagentV1SubagentApprovalBindingsAreRefused(t *testing.T) {
+	subagent := "      - subAgent: {name: helper, description: Helps., templateRef: {name: helper}}\n"
+	templates := `---
+apiVersion: api.kagent.dev/v1alpha3
+kind: AgentTemplate
+metadata: {name: helper, namespace: kagent}
+spec:
+  modelConfig: {name: relay-model}
+  tools:
+  - subAgent: {name: nested, description: Nests., templateRef: {name: nested}}
+---
+apiVersion: api.kagent.dev/v1alpha3
+kind: AgentTemplate
+metadata: {name: nested, namespace: kagent}
+spec:
+  modelConfig: {name: relay-model}
+  tools:
+  - subAgent: {name: helper, description: Loops., templateRef: {name: helper}}
+  - mcp:
+      server: {kind: RemoteMCPServer, name: orka-relay}
+      requireApproval: true
+`
+	inline := strings.Replace(governedKagentFixture, "      tools:\n      - mcp:", "      tools:\n"+subagent+"      - mcp:", 1) + templates
+	referenced := strings.Replace(inline, `  template:
+    inline:
+      modelConfig: {name: relay-model}
+      tools:
+`+subagent+`      - mcp:
+          server: {kind: RemoteMCPServer, name: orka-relay}
+          tools: [probe-orka]
+`, "  template:\n    ref: {name: root}\n", 1) + `---
+apiVersion: api.kagent.dev/v1alpha3
+kind: AgentTemplate
+metadata: {name: root, namespace: kagent}
+spec:
+  modelConfig: {name: relay-model}
+  tools:
+  - subAgent: {name: helper, description: Helps., templateRef: {name: helper}}
+`
+	for name, input := range map[string]string{"inline": inline, "referenced": referenced} {
+		if input == governedKagentFixture+templates || (name == "referenced" && !strings.Contains(input, "ref: {name: root}")) {
+			t.Fatalf("%s fixture did not change", name)
+		}
+		want := `subagent template "nested" tool 1 requires kagent approval`
+		if _, _, err := wrapKagentAgents([]byte(input), "", governedEvidence); err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("%s template: err = %v, want %q", name, err, want)
+		}
+	}
+	// Without the approval binding the same tree wraps.
+	clean := strings.Replace(inline, "      requireApproval: true\n", "", 1)
+	if _, _, err := wrapKagentAgents([]byte(clean), "", governedEvidence); err != nil {
+		t.Fatalf("a subagent tree without approval was refused: %v", err)
+	}
+}
+
 func TestClassifyKagentAgentRequiresEveryEndpointOnOneRelay(t *testing.T) {
 	wrapped, _, err := wrapKagentAgents([]byte(governedKagentFixture), governedRelay, governedEvidence)
 	if err != nil {
