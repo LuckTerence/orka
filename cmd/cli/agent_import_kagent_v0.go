@@ -99,7 +99,9 @@ func kagentV0WrapRefusals(agent, deployment map[string]any, controller string) [
 	}
 	// The broker reads sessions and tasks from the controller, so the Agent
 	// must keep them there; without KAGENT_URL it keeps them in memory.
-	switch persistence, direct := kagentV0PersistenceURL(deployment); {
+	switch persistence, direct, repeated := kagentV0PersistenceURL(deployment); {
+	case repeated:
+		problems = append(problems, "its Deployment sets KAGENT_URL more than once")
 	case !direct:
 		problems = append(problems, "its Deployment does not set KAGENT_URL to a value, so the broker could not read the Agent's sessions and tasks")
 	case controller != "" && !kagentSameService(persistence, controller):
@@ -413,8 +415,9 @@ func kagentSameService(a, b string) bool {
 }
 
 // kagentV0PersistenceURL returns the KAGENT_URL the agent container sets as
-// a plain value, and whether it sets one.
-func kagentV0PersistenceURL(deployment map[string]any) (string, bool) {
+// a plain value, and whether it sets one. kagent renders a single entry;
+// Kubernetes would use the last of repeated ones, so they are reported.
+func kagentV0PersistenceURL(deployment map[string]any) (value string, direct, repeated bool) {
 	containers, _ := kagentMap(deployment, kagentFieldSpec, "template", kagentFieldSpec)["containers"].([]any)
 	for _, raw := range containers {
 		container, _ := raw.(map[string]any)
@@ -422,16 +425,22 @@ func kagentV0PersistenceURL(deployment map[string]any) (string, bool) {
 			continue
 		}
 		env, _ := container["env"].([]any)
+		seen := false
 		for _, raw := range env {
 			entry, _ := raw.(map[string]any)
 			if kagentString(entry, cliNameKey) != kagentV0EnvURL {
 				continue
 			}
-			value, literal := entry["value"].(string)
-			return value, literal && value != "" && entry["valueFrom"] == nil
+			if seen {
+				return "", false, true
+			}
+			seen = true
+			var literal bool
+			value, literal = entry["value"].(string)
+			direct = literal && value != "" && entry["valueFrom"] == nil
 		}
 	}
-	return "", false
+	return value, direct, false
 }
 
 func kagentV0ContainerImage(deployment map[string]any) string {

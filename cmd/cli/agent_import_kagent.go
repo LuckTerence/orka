@@ -160,6 +160,13 @@ and refuses everything else, listing every problem:
 					return err
 				}
 				wrapped, skipped, err = translateKagentAgents(data, translateOptions)
+				if err == nil {
+					destination, _ := cmd.Flags().GetString(cliNamespaceQuery)
+					if !dryRun {
+						destination = newClientFromCmd(cmd).Namespace
+					}
+					err = kagentPromptNamespaceProblem(wrapped, strings.TrimSpace(destination))
+				}
 			} else {
 				var evidence kagentRevisionEvidence
 				if evidence, err = readKagentRevisionEvidence(egressFile, sourcesFile, acceptedEgress); err != nil {
@@ -591,6 +598,28 @@ func printKagentWrappedAgents(w io.Writer, wrapped []kagentWrappedAgent, namespa
 		}
 		if _, err := w.Write(out); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// kagentPromptNamespaceProblem refuses a translated Agent whose system prompt
+// is a ConfigMap in another namespace: Orka resolves the reference in the
+// Agent's own namespace, and the import does not copy ConfigMaps.
+func kagentPromptNamespaceProblem(translated []kagentWrappedAgent, destination string) error {
+	for _, agent := range translated {
+		ref := kagentMap(agent.Manifest, kagentFieldSpec, "systemPrompt", "configMapRef")
+		if ref == nil {
+			continue
+		}
+		name := kagentString(ref, cliNameKey)
+		switch {
+		case agent.SourceNamespace == "":
+			return fmt.Errorf("kagent Agent %s reads its system prompt from ConfigMap %q in a namespace the input does not name; export it with kubectl get -o yaml", agent.Source, name)
+		case destination == "":
+			return fmt.Errorf("kagent Agent %s reads its system prompt from ConfigMap %q in namespace %q; pass -n %s so the Agent is created beside it", agent.Source, name, agent.SourceNamespace, agent.SourceNamespace)
+		case destination != agent.SourceNamespace:
+			return fmt.Errorf("kagent Agent %s reads its system prompt from ConfigMap %q in namespace %q, but Orka would look for it in %q; import into %q or copy the ConfigMap there first", agent.Source, name, agent.SourceNamespace, destination, agent.SourceNamespace)
 		}
 	}
 	return nil

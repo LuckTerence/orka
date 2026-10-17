@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -380,6 +381,8 @@ func TestWrapKagentV0AgentsRequireControllerPersistence(t *testing.T) {
 		"indirect value":  {url, "{name: KAGENT_URL, valueFrom: {configMapKeyRef: {name: c, key: k}}}", "does not set KAGENT_URL to a value"},
 		"other service":   {url, `{name: KAGENT_URL, value: "http://other.kagent:8083"}`, "persists sessions to a controller other than --control-plane-url"},
 		"controller path": {url, `{name: KAGENT_URL, value: "http://kagent-controller.kagent:8083/other"}`, "persists sessions to a controller other than --control-plane-url"},
+		// Kubernetes uses the last of repeated entries.
+		"repeated value": {"        - " + url + "\n", "        - " + url + "\n" + `        - {name: KAGENT_URL, value: "http://other.kagent:8083"}` + "\n", "sets KAGENT_URL more than once"},
 	} {
 		changed := strings.Replace(governedKagentV0Fixture, test.old, test.new, 1)
 		if changed == governedKagentV0Fixture {
@@ -524,6 +527,33 @@ func TestTranslateKagentV0AgentsMapsOnlyKnownFields(t *testing.T) {
 	if prompt := decodeWrappedAgent(t, translated[0].Manifest).Spec.SystemPrompt; prompt == nil || prompt.ConfigMapRef == nil ||
 		prompt.ConfigMapRef.Name != "prompts" || prompt.ConfigMapRef.Key != "k8s" {
 		t.Fatalf("system prompt = %+v", prompt)
+	}
+}
+
+// Orka resolves a ConfigMap prompt in the Agent's own namespace, so a
+// translated Agent must be created beside the ConfigMap it reads.
+func TestAgentImportKagentCmdTranslateKeepsConfigMapPromptsBesideTheAgent(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	fromConfigMap := strings.Replace(translatableKagentV0Fixture, "systemMessage: You are a Kubernetes expert.", "systemMessageFrom: {type: ConfigMap, name: prompts, key: k8s}", 1)
+	path := filepath.Join(t.TempDir(), "agents.yaml")
+	if err := os.WriteFile(path, []byte(fromConfigMap), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"-f", path, "--translate", "--dry-run", "--tool", "k8s/list_pods=k8s-list-pods"}
+	for namespace, want := range map[string]string{
+		"":     "pass -n kagent",
+		"team": `but Orka would look for it in "team"`,
+	} {
+		flags := args
+		if namespace != "" {
+			flags = append(slices.Clone(args), "-n", namespace)
+		}
+		if _, err := runKagentImport(t, flags...); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("namespace %q: err = %v, want %q", namespace, err, want)
+		}
+	}
+	if _, err := runKagentImport(t, append(slices.Clone(args), "-n", "kagent")...); err != nil {
+		t.Fatalf("an Agent created beside its ConfigMap was refused: %v", err)
 	}
 }
 
