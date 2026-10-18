@@ -955,3 +955,52 @@ func TestLoadAgentExecutionSnapshotCipherAcceptsDeploymentKeyFormats(t *testing.
 		})
 	}
 }
+
+func TestValidateAgentHostConfig(t *testing.T) {
+	image := "registry.example/orka@sha256:" + strings.Repeat("a", 64)
+	reserved := []string{"orka-system", "orka-runtimes", "orka-controller"}
+	if err := validateAgentHostConfig(false, "", ""); err != nil {
+		t.Fatalf("disabled config rejected: %v", err)
+	}
+	if err := validateAgentHostConfig(true, "orka-agent-hosts", image, reserved...); err != nil {
+		t.Fatalf("valid config rejected: %v", err)
+	}
+	for name, args := range map[string][2]string{
+		"no namespace":         {"", image},
+		"watch namespace":      {"orka-system", image},
+		"runtime namespace":    {"orka-runtimes", image},
+		"controller namespace": {"orka-controller", image},
+		"no agent image":       {"orka-agent-hosts", ""},
+		"tagged image":         {"orka-agent-hosts", "registry.example/orka:latest"},
+	} {
+		if err := validateAgentHostConfig(true, args[0], args[1], reserved...); err == nil {
+			t.Errorf("%s: config accepted", name)
+		}
+	}
+}
+
+func TestAgentHostCacheOptionsAddsTheHostNamespace(t *testing.T) {
+	base := managerCacheOptions("orka-system", "orka-runtimes", "orka-system")
+	options := agentHostCacheOptions(base, "orka-agent-hosts")
+	objects := []client.Object{
+		&corev1.Pod{}, &corev1.Secret{}, &corev1.PersistentVolumeClaim{}, &networkingv1.NetworkPolicy{},
+	}
+	for _, object := range objects {
+		found := false
+		for candidate, byObject := range options.ByObject {
+			if reflect.TypeOf(candidate) != reflect.TypeOf(object) {
+				continue
+			}
+			found = true
+			if _, ok := byObject.Namespaces["orka-agent-hosts"]; !ok {
+				t.Errorf("%T cache omits the host namespace", object)
+			}
+			if _, ok := byObject.Namespaces["orka-system"]; !ok {
+				t.Errorf("%T cache lost the watch namespace", object)
+			}
+		}
+		if !found {
+			t.Errorf("%T has no cache entry", object)
+		}
+	}
+}

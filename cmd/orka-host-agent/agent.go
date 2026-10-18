@@ -1,0 +1,223 @@
+/*
+Copyright (c) 2026.
+
+MIT License - see LICENSE file for details.
+*/
+
+package main
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log"
+	"net"
+	"net/http"
+	"net/url"
+	"os"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/microsoft/agent-host-protocol/clients/go/ahp"
+	"github.com/microsoft/agent-host-protocol/clients/go/ahptypes"
+	"github.com/microsoft/agent-host-protocol/clients/go/ahpws"
+
+	"github.com/orka-agents/orka/internal/agenthost"
+)
+
+const (
+	maxTokenBytes  = 4096
+	maxStatusBytes = 64 << 10
+	// staleAfter marks an idle status the host has not refreshed recently.
+	staleAfter = 5 * time.Minute
+)
+
+// handshaker completes an AHP initialize and ping at a WebSocket URL.
+type handshaker func(ctx context.Context, target string) error
+
+type agent struct {
+	listenPort       int
+	tokenFile        string
+	statusFile       string
+	dialTimeout      time.Duration
+	handshakeTimeout time.Duration
+	handshake        handshaker
+	now              func() time.Time
+	logger           *log.Logger
+
+	started atomic.Bool
+	mu      sync.Mutex
+}
+
+func (a *agent) routes() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { writeText(w, http.StatusOK, "ok") })
+	mux.HandleFunc("GET /startupz", a.startupz)
+	mux.HandleFunc("GET /readyz", a.readyz)
+	mux.HandleFunc("GET /status", a.status)
+	return mux
+}
+
+// startupz answers the host container's startup probe. It completes one AHP
+// handshake without authenticating, so it never claims a single-user host,
+// and then stops talking AHP so it cannot keep the host from being idle.
+func (a *agent) startupz(w http.ResponseWriter, r *http.Request) {
+	if a.started.Load() {
+		writeText(w, http.StatusOK, "started")
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.started.Load() {
+		writeText(w, http.StatusOK, "started")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), a.handshakeTimeout)
+	defer cancel()
+	if err := a.probe(ctx); err != nil {
+		a.logger.Printf("startup check failed: %v", err)
+		writeText(w, http.StatusServiceUnavailable, "host is not answering the Agent Host Protocol")
+		return
+	}
+	a.started.Store(true)
+	a.logger.Printf("host answered the Agent Host Protocol handshake")
+	writeText(w, http.StatusOK, "started")
+}
+
+// readyz answers the readiness probe after startup by checking that the
+// loopback listener still accepts connections. It opens no AHP session.
+func (a *agent) readyz(w http.ResponseWriter, _ *http.Request) {
+	if !a.started.Load() {
+		writeText(w, http.StatusServiceUnavailable, "not started")
+		return
+	}
+	conn, err := net.DialTimeout("tcp", a.listenAddress(), a.dialTimeout)
+	if err != nil {
+		writeText(w, http.StatusServiceUnavailable, "host listener is not accepting connections")
+		return
+	}
+	_ = conn.Close()
+	writeText(w, http.StatusOK, "ready")
+}
+
+// status serves the host's idle status, limited to the fields Orka reads.
+func (a *agent) status(w http.ResponseWriter, _ *http.Request) {
+	if a.statusFile == "" {
+		writeText(w, http.StatusNotFound, "this host does not report idle status")
+		return
+	}
+	file, err := os.Open(a.statusFile)
+	if err != nil {
+		writeText(w, http.StatusServiceUnavailable, "idle status is not available")
+		return
+	}
+	defer func() { _ = file.Close() }()
+	raw, err := io.ReadAll(io.LimitReader(file, maxStatusBytes+1))
+	if err != nil {
+		writeText(w, http.StatusServiceUnavailable, "idle status is not readable")
+		return
+	}
+	parsed, err := agenthost.ParseIdleStatus(raw)
+	if err != nil {
+		writeText(w, http.StatusServiceUnavailable, "idle status is not valid")
+		return
+	}
+	// The host does not choose staleness; the agent judges it from updatedAt.
+	response := parsed
+	response.Stale = parsed.UpdatedAt == nil || a.now().Sub(*parsed.UpdatedAt) > staleAfter
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(response)
+}
+
+func (a *agent) probe(ctx context.Context) error {
+	token, err := readToken(a.tokenFile)
+	if err != nil {
+		return err
+	}
+	target := (&url.URL{
+		Scheme:   "ws",
+		Host:     a.listenAddress(),
+		Path:     "/",
+		RawQuery: url.Values{"tkn": []string{token}}.Encode(),
+	}).String()
+	if err := a.handshake(ctx, target); err != nil {
+		return redact(err, token)
+	}
+	return nil
+}
+
+func (a *agent) listenAddress() string {
+	return net.JoinHostPort("127.0.0.1", strconv.Itoa(a.listenPort))
+}
+
+// ahpHandshake offers every protocol version the AHP Go client supports,
+// then pings. It never sends authenticate.
+func ahpHandshake(ctx context.Context, target string) error {
+	transport, err := ahpws.Connect(ctx, target)
+	if err != nil {
+		return err
+	}
+	client, err := ahp.Connect(ctx, transport, ahp.DefaultConfig())
+	if err != nil {
+		_ = transport.Close(ctx)
+		return err
+	}
+	defer func() { _ = client.Shutdown(context.WithoutCancel(ctx)) }()
+	if _, err := client.Initialize(ctx, clientID(), ahptypes.SupportedProtocolVersions(), nil); err != nil {
+		return fmt.Errorf("initialize: %w", err)
+	}
+	if err := client.Ping(ctx); err != nil {
+		return fmt.Errorf("ping: %w", err)
+	}
+	return nil
+}
+
+func clientID() string {
+	buf := make([]byte, 6)
+	if _, err := rand.Read(buf); err != nil {
+		return "orka-host-agent"
+	}
+	return "orka-host-agent-" + hex.EncodeToString(buf)
+}
+
+func readToken(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", errors.New("connection token is not available")
+	}
+	defer func() { _ = file.Close() }()
+	raw, err := io.ReadAll(io.LimitReader(file, maxTokenBytes+1))
+	if err != nil || len(raw) > maxTokenBytes {
+		return "", errors.New("connection token is not readable")
+	}
+	token := strings.TrimSpace(string(raw))
+	if token == "" {
+		return "", errors.New("connection token is empty")
+	}
+	return token, nil
+}
+
+// redact removes the token, raw and query-escaped, from an error message.
+func redact(err error, token string) error {
+	message := err.Error()
+	for _, secret := range []string{token, url.QueryEscape(token)} {
+		if secret != "" {
+			message = strings.ReplaceAll(message, secret, "REDACTED")
+		}
+	}
+	return errors.New(message)
+}
+
+func writeText(w http.ResponseWriter, status int, body string) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(status)
+	_, _ = io.WriteString(w, body+"\n")
+}

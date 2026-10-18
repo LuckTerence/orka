@@ -471,6 +471,18 @@ See [charts/orka/values.yaml](https://github.com/orka-agents/orka/blob/main/char
 | `--enable-http2` | `false` | Enable HTTP/2 for metrics and webhook servers |
 | `--enable-telemetry` / `--enable-tracing` | `false` | Enable OpenTelemetry traces and metrics (requires worker-reachable OTLP endpoint for worker telemetry) |
 
+### Agent hosts {#agent-hosts}
+
+Long-lived, single-user agent hosts on Orka-owned Pods. Off by default. See
+[Agent hosts](../operations/agent-hosts.md).
+
+| Flag | Environment variable | Default | Purpose |
+| --- | --- | --- | --- |
+| `--enable-agent-hosts` | `ORKA_ENABLE_AGENT_HOSTS` | `false` | Serves `AgentHostTemplate` and `AgentHost`. |
+| `--agent-host-namespace` | `ORKA_AGENT_HOST_NAMESPACE` | `orka-agent-hosts` | Namespace for host Pods, volumes, NetworkPolicies and Secrets. Must differ from `--watch-namespace`. |
+| `--agent-host-agent-image` | `ORKA_AGENT_HOST_AGENT_IMAGE` | — | Digest-pinned image with the `orka-host-agent` sidecar, normally the controller image. Required with `--enable-agent-hosts`. |
+| `--agent-host-controller-pod-labels` | `ORKA_AGENT_HOST_CONTROLLER_POD_LABELS` | `app.kubernetes.io/name=orka` | Labels of the controller Pods that may read host status through each host's NetworkPolicy. |
+
 ### Workspace providers (`workspace.orka.ai/v1alpha1`) {#workspace-providers}
 
 A separately deployed **workspace provider** realizes Orka's frozen public runtime
