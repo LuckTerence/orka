@@ -139,6 +139,11 @@ connections. It never keeps the host from being idle.
 
 Hosts stay on unless a template enables idle suspension.
 
+copilotd counts a session as busy while its runtime refuses to list dynamic-workflow runs,
+so a host with such a session never reports idle. Its `--idle-ignore-unobservable-factories`
+flag lets those sessions reach idle; set it only where dynamic workflows are not in use,
+because a pending or running workflow can be lost to suspension.
+
 ## Troubleshooting
 
 | `Ready` reason | Meaning |
