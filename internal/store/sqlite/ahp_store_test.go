@@ -1,0 +1,160 @@
+/*
+Copyright (c) 2026.
+
+MIT License - see LICENSE file for details.
+*/
+
+package sqlite
+
+import (
+	"fmt"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+
+	"github.com/orka-agents/orka/internal/store"
+)
+
+func TestAHPTokensAreScopedToTheirUser(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := t.Context()
+	now := time.Date(2026, 10, 17, 22, 0, 0, 0, time.UTC)
+	token := store.AHPToken{
+		ID: "tok-1", TokenHash: "hash-1", UserKey: "alice", Issuer: "https://issuer", Subject: "alice",
+		Username: "alice@example.com", Namespace: "team", Constraints: []byte(`{"scopes":["orka.ahp"]}`),
+		CreatedAt: now, ExpiresAt: now.Add(time.Hour),
+	}
+	require.NoError(t, s.CreateAHPToken(ctx, token))
+	require.Error(t, s.CreateAHPToken(ctx, token), "token hashes and ids are unique")
+
+	got, err := s.GetAHPTokenByHash(ctx, "hash-1")
+	require.NoError(t, err)
+	require.Equal(t, "alice", got.UserKey)
+	require.JSONEq(t, `{"scopes":["orka.ahp"]}`, string(got.Constraints))
+	require.Nil(t, got.RevokedAt)
+	_, err = s.GetAHPTokenByHash(ctx, "missing")
+	require.ErrorIs(t, err, store.ErrNotFound)
+
+	require.ErrorIs(t, s.RevokeAHPToken(ctx, "bob", "tok-1", now), store.ErrNotFound, "only the owner revokes")
+	require.NoError(t, s.RevokeAHPToken(ctx, "alice", "tok-1", now))
+	require.NoError(t, s.RevokeAHPToken(ctx, "alice", "tok-1", now.Add(time.Minute)))
+	got, err = s.GetAHPTokenByHash(ctx, "hash-1")
+	require.NoError(t, err)
+	require.NotNil(t, got.RevokedAt)
+	require.True(t, got.RevokedAt.Equal(now), "the first revocation time is kept")
+
+	list, err := s.ListAHPTokens(ctx, "alice")
+	require.NoError(t, err)
+	require.Len(t, list, 1)
+	list, err = s.ListAHPTokens(ctx, "bob")
+	require.NoError(t, err)
+	require.Empty(t, list)
+}
+
+func TestAHPClientsStayBoundToTheirFirstUser(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := t.Context()
+	now := time.Now().UTC()
+	_, err := s.GetAHPClient(ctx, "client-1")
+	require.ErrorIs(t, err, store.ErrNotFound)
+	require.NoError(t, s.PutAHPClient(ctx, store.AHPClient{ClientID: "client-1", UserKey: "alice", ProtocolVersion: "0.9.0", Dialect: "default", UpdatedAt: now}))
+	require.NoError(t, s.PutAHPClient(ctx, store.AHPClient{ClientID: "client-1", UserKey: "alice", ProtocolVersion: "1.0.0", Dialect: "default", UpdatedAt: now}))
+	require.ErrorIs(t, s.PutAHPClient(ctx, store.AHPClient{ClientID: "client-1", UserKey: "bob", ProtocolVersion: "1.0.0", Dialect: "default", UpdatedAt: now}), store.ErrConflict)
+	client, err := s.GetAHPClient(ctx, "client-1")
+	require.NoError(t, err)
+	require.Equal(t, "alice", client.UserKey)
+	require.Equal(t, "1.0.0", client.ProtocolVersion)
+}
+
+func ahpEntries(from, count int) []store.AHPJournalEntry {
+	entries := make([]store.AHPJournalEntry, count)
+	for i := range entries {
+		seq := int64(from + i)
+		entries[i] = store.AHPJournalEntry{Seq: seq, Channel: "ahp-root://", Envelope: []byte(fmt.Sprintf(`{"serverSeq":%d}`, seq))}
+	}
+	return entries
+}
+
+func TestAHPJournalAppendsPrunesAndReportsGaps(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := t.Context()
+	limits := store.AHPJournalLimits{MaxEntries: 5}
+	require.NoError(t, s.AppendAHPJournal(ctx, "alice", 0, ahpEntries(1, 3), []store.AHPChannelState{{Channel: "ahp-root://", State: []byte(`{}`), FromSeq: 3}}, limits))
+	require.ErrorIs(t, s.AppendAHPJournal(ctx, "alice", 0, ahpEntries(1, 1), nil, limits), store.ErrConflict, "a stale previous sequence is refused")
+	require.Error(t, s.AppendAHPJournal(ctx, "alice", 3, ahpEntries(5, 1), nil, limits), "entries must continue the sequence")
+	require.NoError(t, s.AppendAHPJournal(ctx, "alice", 3, ahpEntries(4, 4), nil, limits))
+
+	seq, err := s.AHPServerSeq(ctx, "alice")
+	require.NoError(t, err)
+	require.EqualValues(t, 7, seq)
+
+	entries, complete, err := s.ReadAHPJournal(ctx, "alice", 4)
+	require.NoError(t, err)
+	require.True(t, complete)
+	require.Len(t, entries, 3)
+	require.EqualValues(t, 5, entries[0].Seq)
+
+	_, complete, err = s.ReadAHPJournal(ctx, "alice", 1)
+	require.NoError(t, err)
+	require.False(t, complete, "entries 2 was pruned, so replay from 1 is incomplete")
+
+	entries, complete, err = s.ReadAHPJournal(ctx, "alice", 7)
+	require.NoError(t, err)
+	require.True(t, complete)
+	require.Empty(t, entries)
+
+	_, complete, err = s.ReadAHPJournal(ctx, "alice", 9)
+	require.NoError(t, err)
+	require.False(t, complete, "a cursor from the future is never complete")
+
+	_, complete, err = s.ReadAHPJournal(ctx, "bob", 0)
+	require.NoError(t, err)
+	require.True(t, complete, "a user with no journal has nothing to replay")
+
+	state, err := s.GetAHPChannelState(ctx, "alice", "ahp-root://")
+	require.NoError(t, err)
+	require.EqualValues(t, 3, state.FromSeq)
+	_, err = s.GetAHPChannelState(ctx, "bob", "ahp-root://")
+	require.ErrorIs(t, err, store.ErrNotFound)
+	require.NoError(t, s.DeleteAHPChannelStates(ctx, "alice", []string{"ahp-root://"}))
+	_, err = s.GetAHPChannelState(ctx, "alice", "ahp-root://")
+	require.ErrorIs(t, err, store.ErrNotFound)
+}
+
+func TestAHPJournalPrunesByBytes(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := t.Context()
+	entries := ahpEntries(1, 4)
+	size := int64(len(entries[0].Envelope))
+	require.NoError(t, s.AppendAHPJournal(ctx, "alice", 0, entries, nil, store.AHPJournalLimits{MaxBytes: 2 * size}))
+	kept, complete, err := s.ReadAHPJournal(ctx, "alice", 2)
+	require.NoError(t, err)
+	require.True(t, complete)
+	require.Len(t, kept, 2)
+	_, complete, err = s.ReadAHPJournal(ctx, "alice", 1)
+	require.NoError(t, err)
+	require.False(t, complete)
+}
+
+func TestAHPSessionCatalogIsPerUser(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := t.Context()
+	base := time.Date(2026, 10, 17, 22, 0, 0, 0, time.UTC)
+	for i, name := range []string{"ahp-session:/a", "ahp-session:/b"} {
+		require.NoError(t, s.PutAHPSession(ctx, store.AHPSession{
+			UserKey: "alice", Session: name, Backend: "fake", Summary: []byte(`{}`),
+			CreatedAt: base, ModifiedAt: base.Add(time.Duration(i) * time.Minute),
+		}))
+	}
+	sessions, err := s.ListAHPSessions(ctx, "alice")
+	require.NoError(t, err)
+	require.Len(t, sessions, 2)
+	require.Equal(t, "ahp-session:/b", sessions[0].Session, "most recently modified first")
+	_, err = s.GetAHPSession(ctx, "bob", "ahp-session:/a")
+	require.ErrorIs(t, err, store.ErrNotFound)
+	require.NoError(t, s.DeleteAHPSession(ctx, "alice", "ahp-session:/a"))
+	sessions, err = s.ListAHPSessions(ctx, "alice")
+	require.NoError(t, err)
+	require.Len(t, sessions, 1)
+}
