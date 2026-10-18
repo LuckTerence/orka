@@ -9,6 +9,7 @@ package ahphost
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/microsoft/agent-host-protocol/clients/go/ahptypes"
@@ -45,17 +46,45 @@ type CreateSessionRequest struct {
 	Config             map[string]json.RawMessage
 }
 
-// CreatedSession is a new session's initial state and the states of the chats it lists.
+// CreatedSession is a new session's initial state and the states of the
+// chats and changesets it lists.
 type CreatedSession struct {
-	State ahptypes.SessionState
-	Chats map[string]ahptypes.ChatState
+	State      ahptypes.SessionState
+	Chats      map[string]ahptypes.ChatState
+	Changesets map[string]ahptypes.ChangesetState
 }
 
 // Emitter delivers a backend's actions for one user through the host, which
-// reduces, journals and fans them out.
+// reduces, journals and fans them out. On the root channel only configuration
+// and agent changes are accepted.
 type Emitter interface {
 	Emit(ctx context.Context, channel string, actions ...ahptypes.StateAction) error
 }
+
+// RootContributor adds a backend's extensions to each user's root state:
+// _meta entries and configuration values. Both are merged across backends.
+type RootContributor interface {
+	RootExtensions(ctx context.Context, principal Principal) (meta, config map[string]json.RawMessage, err error)
+}
+
+// ErrUnknownExtension is returned by an ExtensionHandler for a method it does not serve.
+var ErrUnknownExtension = errors.New("unknown extension method")
+
+// ExtensionHandler serves host-specific commands in the extensions/ namespace.
+// Errors other than ErrUnknownExtension and *Rejection reach the client as an
+// internal error.
+type ExtensionHandler interface {
+	HandleExtension(ctx context.Context, principal Principal, method string, params json.RawMessage, emit Emitter) (any, error)
+}
+
+// ResourceReader serves resourceRead for the channels of a backend's sessions.
+// It returns ErrResourceNotFound for anything it does not serve.
+type ResourceReader interface {
+	ReadResource(ctx context.Context, principal Principal, session, channel, uri string) (ahptypes.ResourceReadResult, error)
+}
+
+// ErrResourceNotFound reports a resource the backend does not serve.
+var ErrResourceNotFound = errors.New("resource not found")
 
 // Rejection rejects a client action with a reason the client sees.
 type Rejection struct {
@@ -128,4 +157,53 @@ func (r *Registry) Named(name string) (SessionBackend, bool) {
 		}
 	}
 	return nil, false
+}
+
+// rootExtensions merges every backend's root extensions.
+func (r *Registry) rootExtensions(ctx context.Context, principal Principal) (map[string]json.RawMessage, map[string]json.RawMessage, error) {
+	if r == nil {
+		return nil, nil, nil
+	}
+	var meta, config map[string]json.RawMessage
+	for _, backend := range r.backends {
+		contributor, ok := backend.(RootContributor)
+		if !ok {
+			continue
+		}
+		m, c, err := contributor.RootExtensions(ctx, principal)
+		if err != nil {
+			return nil, nil, err
+		}
+		for key, value := range m {
+			if meta == nil {
+				meta = map[string]json.RawMessage{}
+			}
+			meta[key] = value
+		}
+		for key, value := range c {
+			if config == nil {
+				config = map[string]json.RawMessage{}
+			}
+			config[key] = value
+		}
+	}
+	return meta, config, nil
+}
+
+// extension routes an extensions/ method to the first backend that serves it.
+func (r *Registry) extension(ctx context.Context, principal Principal, method string, params json.RawMessage, emit Emitter) (any, error) {
+	if r != nil {
+		for _, backend := range r.backends {
+			handler, ok := backend.(ExtensionHandler)
+			if !ok {
+				continue
+			}
+			result, err := handler.HandleExtension(ctx, principal, method, params, emit)
+			if errors.Is(err, ErrUnknownExtension) {
+				continue
+			}
+			return result, err
+		}
+	}
+	return nil, ErrUnknownExtension
 }

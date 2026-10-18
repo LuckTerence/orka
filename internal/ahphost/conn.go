@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 	"unicode"
@@ -29,17 +30,19 @@ const (
 	closeGoingAway    = websocket.StatusGoingAway
 	closeSlowClient   = websocket.StatusTryAgainLater
 
-	maxFrameBytes        = 4 << 20
-	maxClientIDLength    = 256
-	maxURILength         = 2048
-	defaultListLimit     = 100
-	maxListLimit         = 1000
-	writeTimeout         = 10 * time.Second
-	defaultDialect       = "default"
-	jsonRPCVersion       = "2.0"
-	methodAction         = "action"
-	methodSessionAdded   = "root/sessionAdded"
-	methodSessionRemoved = "root/sessionRemoved"
+	maxFrameBytes               = 4 << 20
+	maxClientIDLength           = 256
+	maxURILength                = 2048
+	defaultListLimit            = 100
+	maxListLimit                = 1000
+	writeTimeout                = 10 * time.Second
+	defaultDialect              = "default"
+	jsonRPCVersion              = "2.0"
+	methodAction                = "action"
+	methodSessionAdded          = "root/sessionAdded"
+	methodSessionRemoved        = "root/sessionRemoved"
+	methodSessionSummaryChanged = "root/sessionSummaryChanged"
+	extensionMethodPrefix       = "extensions/"
 )
 
 type rpcError struct {
@@ -326,9 +329,74 @@ func (c *conn) dispatch(ctx context.Context, msg inbound) (any, error) {
 		// No agent advertises a protected resource yet. The params are never
 		// logged: they carry the client's credential.
 		return nil, rpcErr(ahptypes.ErrorCodeInvalidParams, "the resource is not advertised by any agent")
+	case "completions":
+		// No agent offers completions; an empty list keeps clients' input working.
+		return ahptypes.CompletionsResult{Items: []ahptypes.CompletionItem{}}, nil
+	case "resourceRead":
+		return c.resourceRead(ctx, msg.Params)
 	default:
+		if strings.HasPrefix(msg.Method, extensionMethodPrefix) {
+			return c.extension(ctx, msg.Method, msg.Params)
+		}
 		return nil, rpcErr(ahptypes.ErrorCodeMethodNotFound, "method %q is not supported", msg.Method)
 	}
+}
+
+// extension serves a host-specific extensions/ command through the backend
+// that offers it.
+func (c *conn) extension(ctx context.Context, method string, raw json.RawMessage) (any, error) {
+	result, err := c.host.cfg.Backends.extension(ctx, c.principal, method, raw, emitter{host: c.host, principal: c.principal})
+	if errors.Is(err, ErrUnknownExtension) {
+		return nil, rpcErr(ahptypes.ErrorCodeMethodNotFound, "method %q is not supported", method)
+	}
+	if rejection, ok := errors.AsType[*Rejection](err); ok {
+		return nil, rpcErr(ahptypes.ErrorCodeInvalidParams, "%s", rejection.Reason)
+	}
+	return result, err
+}
+
+// resourceRead serves content a session's channel advertises, such as the
+// before and after files of a changeset. The host reads nothing else: no
+// path on the server is reachable through it.
+func (c *conn) resourceRead(ctx context.Context, raw json.RawMessage) (any, error) {
+	var params ahptypes.ResourceReadParams
+	if err := decodeParams(raw, &params); err != nil {
+		return nil, err
+	}
+	notFound := rpcErr(ahptypes.ErrorCodeNotFound, "not found")
+	if params.Channel == rootChannel || !validURI(params.Channel) || params.Uri == "" || len(params.Uri) > maxURILength {
+		return nil, notFound
+	}
+	stored, _, err := c.host.readChannel(ctx, c.principal.UserKey, params.Channel)
+	if errors.Is(err, errUnknownChannel) {
+		return nil, notFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	record, err := c.host.cfg.Store.GetAHPSession(ctx, c.principal.UserKey, stored.Session)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, notFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	backend, ok := c.host.cfg.Backends.Named(record.Backend)
+	if !ok {
+		return nil, notFound
+	}
+	reader, ok := backend.(ResourceReader)
+	if !ok {
+		return nil, notFound
+	}
+	result, err := reader.ReadResource(ctx, c.principal, stored.Session, params.Channel, params.Uri)
+	if errors.Is(err, ErrResourceNotFound) {
+		return nil, notFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 func (c *conn) handleNotification(ctx context.Context, msg inbound) {
@@ -658,13 +726,30 @@ func (c *conn) createSession(ctx context.Context, raw json.RawMessage) (err erro
 	state := created.State
 	state.Provider = provider
 	state.Lifecycle = ahptypes.SessionLifecycleCreating
+	if state.ActiveClients == nil {
+		state.ActiveClients = []ahptypes.SessionActiveClient{}
+	}
+	if state.Chats == nil {
+		state.Chats = []ahptypes.ChatSummary{}
+	}
 	channels := map[string]storedChannel{session: {Session: session, State: ahptypes.SnapshotState{Session: &state}}}
 	for chat, chatState := range created.Chats {
 		if !validURI(chat) || chat == session {
 			return fmt.Errorf("backend returned an invalid chat URI")
 		}
-
+		if chatState.Turns == nil {
+			chatState.Turns = []ahptypes.Turn{}
+		}
 		channels[chat] = storedChannel{Session: session, State: ahptypes.SnapshotState{Chat: &chatState}}
+	}
+	for changeset, changesetState := range created.Changesets {
+		if _, taken := channels[changeset]; taken || !validURI(changeset) {
+			return fmt.Errorf("backend returned an invalid changeset URI")
+		}
+		if changesetState.Files == nil {
+			changesetState.Files = []ahptypes.ChangesetFile{}
+		}
+		channels[changeset] = storedChannel{Session: session, State: ahptypes.SnapshotState{Changeset: &changesetState}}
 	}
 	// Subscribe before the channels exist so no action on them is missed.
 	c.subscribeTo(session)
@@ -679,8 +764,8 @@ func (c *conn) createSession(ctx context.Context, raw json.RawMessage) (err erro
 	now := c.host.cfg.Now().UTC()
 	summary := ahptypes.SessionSummary{
 		Resource: session, Provider: provider, Title: state.Title, Status: state.Status,
-		WorkingDirectories: state.WorkingDirectories,
-		CreatedAt:          now.Format(time.RFC3339Nano), ModifiedAt: now.Format(time.RFC3339Nano),
+		Project: state.Project, WorkingDirectories: state.WorkingDirectories,
+		CreatedAt: now.Format(time.RFC3339Nano), ModifiedAt: now.Format(time.RFC3339Nano),
 	}
 	rawSummary, err := json.Marshal(summary)
 	if err != nil {
@@ -722,6 +807,11 @@ func (c *conn) disposeSession(ctx context.Context, raw json.RawMessage) error {
 	if stored, _, err := c.host.readChannel(ctx, c.principal.UserKey, session); err == nil && stored.State.Session != nil {
 		for _, chat := range stored.State.Session.Chats {
 			channels = append(channels, chat.Resource)
+		}
+		for _, changeset := range stored.State.Session.Changesets {
+			if !strings.Contains(changeset.UriTemplate, "{") {
+				channels = append(channels, changeset.UriTemplate)
+			}
 		}
 	}
 	if err := c.host.cfg.Store.DeleteAHPSession(ctx, c.principal.UserKey, session); err != nil {

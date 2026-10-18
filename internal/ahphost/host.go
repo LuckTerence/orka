@@ -314,7 +314,118 @@ func (h *Host) apply(
 			c.deliverAction(envelope)
 		}
 	}
+	if stored.State.Session != nil && stored.Session == channel {
+		return h.syncSessionSummaryLocked(ctx, hub, principal, channel, stored.State.Session)
+	}
 	return nil
+}
+
+// syncSessionSummaryLocked keeps a session's catalog summary in step with its
+// state and tells the user's root subscribers what changed. hub.mu must be held.
+func (h *Host) syncSessionSummaryLocked(
+	ctx context.Context, hub *userHub, principal Principal, session string, state *ahptypes.SessionState,
+) error {
+	record, err := h.cfg.Store.GetAHPSession(ctx, principal.UserKey, session)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var summary ahptypes.SessionSummary
+	if err := json.Unmarshal(record.Summary, &summary); err != nil {
+		return fmt.Errorf("decode session summary: %w", err)
+	}
+	next := summary
+	next.Title, next.Status, next.Changes = state.Title, summaryStatus(state), summaryChanges(state.Chats)
+	next.Project, next.WorkingDirectories = state.Project, state.WorkingDirectories
+	var changes ahptypes.PartialSessionSummary
+	changed := false
+	if next.Title != summary.Title {
+		changes.Title, changed = &next.Title, true
+	}
+	if next.Status != summary.Status {
+		changes.Status, changed = &next.Status, true
+	}
+	if !jsonEqual(next.Changes, summary.Changes) {
+		changes.Changes, changed = next.Changes, true
+	}
+	if !changed {
+		return nil
+	}
+	now := h.cfg.Now().UTC()
+	next.ModifiedAt = now.Format(time.RFC3339Nano)
+	changes.ModifiedAt = &next.ModifiedAt
+	raw, err := json.Marshal(next)
+	if err != nil {
+		return err
+	}
+	record.Summary, record.ModifiedAt = raw, now
+	if err := h.cfg.Store.PutAHPSession(ctx, record); err != nil {
+		return err
+	}
+	params, err := json.Marshal(ahptypes.SessionSummaryChangedParams{Channel: rootChannel, Session: session, Changes: changes})
+	if err != nil {
+		return err
+	}
+	for c := range hub.conns {
+		c.deliverNotification(rootChannel, methodSessionSummaryChanged, params)
+	}
+	return nil
+}
+
+// summaryStatus is the session's status as a list shows it: what its busiest
+// chat is doing, plus the session's read and archived flags.
+func summaryStatus(state *ahptypes.SessionState) ahptypes.SessionStatus {
+	flags := state.Status & (ahptypes.SessionStatusIsRead | ahptypes.SessionStatusIsArchived)
+	activity := ahptypes.SessionStatusIdle
+	rank := func(status ahptypes.SessionStatus) int {
+		switch status &^ (ahptypes.SessionStatusIsRead | ahptypes.SessionStatusIsArchived) {
+		case ahptypes.SessionStatusInputNeeded:
+			return 3
+		case ahptypes.SessionStatusInProgress:
+			return 2
+		case ahptypes.SessionStatusError:
+			return 1
+		default:
+			return 0
+		}
+	}
+	for _, chat := range state.Chats {
+		if rank(chat.Status) > rank(activity) {
+			activity = chat.Status &^ (ahptypes.SessionStatusIsRead | ahptypes.SessionStatusIsArchived)
+		}
+	}
+	if rank(state.Status) > rank(activity) {
+		activity = state.Status &^ (ahptypes.SessionStatusIsRead | ahptypes.SessionStatusIsArchived)
+	}
+	return activity | flags
+}
+
+func summaryChanges(chats []ahptypes.ChatSummary) *ahptypes.ChangesSummary {
+	var additions, deletions, files int64
+	seen := false
+	for _, chat := range chats {
+		if chat.Changes == nil {
+			continue
+		}
+		seen = true
+		for target, value := range map[*int64]*int64{&additions: chat.Changes.Additions, &deletions: chat.Changes.Deletions, &files: chat.Changes.Files} {
+			if value != nil {
+				*target += *value
+			}
+		}
+	}
+	if !seen {
+		return nil
+	}
+	return &ahptypes.ChangesSummary{Additions: &additions, Deletions: &deletions, Files: &files}
+}
+
+func jsonEqual(a, b any) bool {
+	left, errA := json.Marshal(a)
+	right, errB := json.Marshal(b)
+	return errA == nil && errB == nil && string(left) == string(right)
 }
 
 // storeChannels records new channel states without journaling actions.
@@ -393,7 +504,18 @@ func (h *Host) rootState(ctx context.Context, principal Principal) (*ahptypes.Ro
 		return nil, err
 	}
 	active := int64(len(sessions))
-	return &ahptypes.RootState{Agents: agents, ActiveSessions: &active}, nil
+	meta, config, err := h.cfg.Backends.rootExtensions(ctx, principal)
+	if err != nil {
+		return nil, err
+	}
+	root := &ahptypes.RootState{Agents: agents, ActiveSessions: &active, Meta: meta}
+	if config != nil {
+		root.Config = &ahptypes.RootConfigState{
+			Schema: ahptypes.ConfigSchema{Type: "object", Properties: map[string]ahptypes.ConfigPropertySchema{}},
+			Values: config,
+		}
+	}
+	return root, nil
 }
 
 // emitter delivers a backend's actions for one principal.
@@ -404,7 +526,13 @@ type emitter struct {
 
 func (e emitter) Emit(ctx context.Context, channel string, actions ...ahptypes.StateAction) error {
 	if channel == rootChannel {
-		return fmt.Errorf("session backends cannot change the root channel")
+		for _, action := range actions {
+			switch action.Value.(type) {
+			case *ahptypes.RootConfigChangedAction, *ahptypes.RootAgentsChangedAction:
+			default:
+				return fmt.Errorf("session backends may change only the root configuration and agents")
+			}
+		}
 	}
 	return e.host.apply(ctx, e.principal, channel, actions, nil)
 }
