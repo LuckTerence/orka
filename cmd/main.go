@@ -1247,15 +1247,16 @@ func main() {
 				controller.WorkspaceClassAuthorizer{Client: mgr.GetClient()},
 			)
 			setupLog.Info("registered Task and Tool workspace class use admission")
-		}
-		if agentHostsEnabled {
-			registered = true
-			orkaadmission.RegisterAgentHostWebhook(
-				webhookServer,
-				mgr.GetScheme(),
-				controller.AgentHostTemplateAuthorizer{Client: mgr.GetClient()},
-			)
-			setupLog.Info("registered AgentHost admission")
+			// Installs that serve admission from the controller also check
+			// AgentHost selections here; others use orka-admission.
+			if agentHostsEnabled {
+				orkaadmission.RegisterAgentHostWebhook(
+					webhookServer,
+					mgr.GetScheme(),
+					controller.AgentHostTemplateAuthorizer{Client: mgr.GetClient()},
+				)
+				setupLog.Info("registered AgentHost admission")
+			}
 		}
 
 		if taskProvenanceAdmissionEnabled {
