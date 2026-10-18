@@ -59,12 +59,12 @@ With the Kustomize install:
    --enable-agent-hosts
    --agent-host-namespace=orka-agent-hosts
    --agent-host-agent-image=<controller image>@sha256:<digest>
-   --agent-host-controller-pod-labels=control-plane=controller-manager,app.kubernetes.io/name=orka
    ```
 
    The agent image is normally the controller image itself; it carries the
-   `orka-host-agent` sidecar. The Pod labels select the controller Pods allowed to read
-   host status through the NetworkPolicy.
+   `orka-host-agent` sidecar. `--agent-host-controller-pod-labels` selects the controller
+   Pods allowed to read host status through each host's NetworkPolicy; its default,
+   `orka.ai/network-role=controller`, matches the shipped controller Pods.
 
 With either install, create an `AgentHostTemplate` (see
 [`config/samples/core_v1alpha1_agenthosttemplate.yaml`](https://github.com/orka-agents/orka/blob/main/config/samples/core_v1alpha1_agenthosttemplate.yaml))

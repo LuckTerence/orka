@@ -804,7 +804,7 @@ func main() {
 	flag.StringVar(&agentHostAgentImage, "agent-host-agent-image", os.Getenv("ORKA_AGENT_HOST_AGENT_IMAGE"),
 		"Digest-pinned image with the orka-host-agent binary, normally the controller image; required with --enable-agent-hosts.")
 	flag.StringVar(&agentHostControllerPodLabels, "agent-host-controller-pod-labels",
-		envutil.String("ORKA_AGENT_HOST_CONTROLLER_POD_LABELS", "app.kubernetes.io/name=orka"),
+		envutil.String("ORKA_AGENT_HOST_CONTROLLER_POD_LABELS", "orka.ai/network-role=controller"),
 		"Comma-separated key=value labels of the controller Pods that may read agent-host status.")
 	flag.Parse()
 	nativeSessionMaxBytes, nativeSessionMaxBytesErr = effectiveNativeSessionMaxBytes(flag.CommandLine, nativeSessionMaxBytes, nativeSessionMaxBytesErr)
