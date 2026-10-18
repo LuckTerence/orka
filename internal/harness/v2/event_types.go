@@ -3,6 +3,7 @@ package v2
 import (
 	"encoding/json"
 	"fmt"
+	"path"
 	"strings"
 	"time"
 )
@@ -137,6 +138,11 @@ type AcceptedEvent struct {
 	AcceptedAt time.Time   `json:"acceptedAt"`
 	Lease      PromptLease `json:"lease"`
 	ACPVersion string      `json:"acpVersion"`
+	// LiveUpdates confirms that the runtime honors the LiveUpdatesHeader for
+	// this prompt: it streams the live-update kinds and fields and redacts
+	// every event's content before it leaves the runtime. A consumer must not
+	// show a prompt's content live without it.
+	LiveUpdates bool `json:"liveUpdates,omitempty"`
 }
 
 func (e AcceptedEvent) Validate() error {
@@ -150,6 +156,15 @@ func (e AcceptedEvent) Validate() error {
 }
 
 type UpdateKind string
+
+// LiveUpdatesHeader, set to "1" on a start-prompt request, asks the runtime
+// to stream the live-update kinds and fields: assistant thoughts and a tool
+// call's name, raw input and file edits. A runtime that does not know the
+// header ignores it and streams the base kinds, and a runtime never sends
+// live updates to a client that did not ask, so neither side's strict
+// decoding meets fields it does not know. A runtime that honors the header
+// confirms it with AcceptedEvent.LiveUpdates.
+const LiveUpdatesHeader = "X-Orka-Live-Updates"
 
 const (
 	UpdateAssistantMessageChunk UpdateKind = "assistant_message_chunk"
@@ -195,11 +210,16 @@ type ToolCallUpdate struct {
 	RawInput json.RawMessage `json:"rawInput,omitempty"`
 	// Diffs are the file edits the tool reports, redacted.
 	Diffs []ToolCallDiff `json:"diffs,omitempty"`
+	// DiffsOmitted reports that one or more of the tool's file edits were not
+	// sent: outside the workspace, or over the update bound. Text content is
+	// unaffected.
+	DiffsOmitted bool `json:"diffsOmitted,omitempty"`
 }
 
 // ToolCallDiff is one file edit a tool reports.
 type ToolCallDiff struct {
-	// Path is the file's absolute path in the runtime workspace.
+	// Path is the file's path relative to the runtime session's workspace
+	// root, in canonical slash form with no ".." segments.
 	Path string `json:"path"`
 	// OldText is the file's previous content; nil for a new file.
 	OldText *string `json:"oldText,omitempty"`
@@ -214,6 +234,25 @@ const (
 	// MaxToolCallDiffBytes bounds the text of all edits in one update.
 	MaxToolCallDiffBytes = 256 << 10
 )
+
+// ValidateWorkspaceRelativePath checks a file path relative to a workspace
+// root: required, bounded, canonical slash form, not absolute, no NUL and no
+// ".." segments.
+func ValidateWorkspaceRelativePath(value string) error {
+	if err := validateBoundedString("workspace path", value, true, MaxResourceURIBytes); err != nil {
+		return err
+	}
+	if strings.ContainsRune(value, 0) {
+		return fmt.Errorf("workspace path must not contain NUL")
+	}
+	if strings.HasPrefix(value, "/") {
+		return fmt.Errorf("workspace path must be relative")
+	}
+	if value == "." || value == ".." || strings.HasPrefix(value, "../") || path.Clean(value) != value {
+		return fmt.Errorf("workspace path must be canonical and stay inside the workspace")
+	}
+	return nil
+}
 
 func validateToolCallLiveFields(u ToolCallUpdate) error {
 	if err := validateBoundedString("tool call name", u.Name, false, 253); err != nil {
@@ -232,11 +271,8 @@ func validateToolCallLiveFields(u ToolCallUpdate) error {
 	}
 	total := 0
 	for i, diff := range u.Diffs {
-		if err := validateBoundedString("tool call diff path", diff.Path, true, MaxResourceURIBytes); err != nil {
+		if err := ValidateWorkspaceRelativePath(diff.Path); err != nil {
 			return fmt.Errorf("tool call diff %d: %w", i, err)
-		}
-		if !strings.HasPrefix(diff.Path, "/") {
-			return fmt.Errorf("tool call diff %d path must be absolute", i)
 		}
 		old := ""
 		if diff.OldText != nil {
