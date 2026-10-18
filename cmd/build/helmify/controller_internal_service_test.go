@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -39,5 +40,33 @@ func TestControllerInternalServiceKeepsDrainingControllerReachable(t *testing.T)
 	}
 	if external.Spec.PublishNotReadyAddresses {
 		t.Fatal("external controller Service must stay readiness-gated during the drain")
+	}
+}
+
+func TestControllerInternalServiceNeverReusesTheExternalServiceName(t *testing.T) {
+	for _, fullname := range []string{
+		strings.Repeat("a", 54) + "-internal",
+		strings.Repeat("a", 53) + "-internal",
+	} {
+		t.Run(fullname, func(t *testing.T) {
+			names := map[string]string{}
+			for _, template := range []string{"templates/service.yaml", "templates/controller-internal-service.yaml"} {
+				rendered := requireHelmRender(t,
+					"--set-string", "fullnameOverride="+fullname,
+					"--show-only", template,
+				)
+				service := corev1.Service{}
+				if err := yaml.Unmarshal([]byte(rendered), &service); err != nil {
+					t.Fatalf("decode %s: %v", template, err)
+				}
+				if len(service.Name) > 63 {
+					t.Fatalf("%s name %q exceeds 63 characters", template, service.Name)
+				}
+				names[template] = service.Name
+			}
+			if names["templates/service.yaml"] == names["templates/controller-internal-service.yaml"] {
+				t.Fatalf("external and internal controller Services share the name %q", names["templates/service.yaml"])
+			}
+		})
 	}
 }

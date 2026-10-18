@@ -536,7 +536,13 @@ spec:
 {{- end }}
 
 {{- define "orka.controllerInternalServiceName" -}}
-{{- printf "%s-internal" (include "orka.fullname" . | trunc 54 | trimSuffix "-") | trunc 63 | trimSuffix "-" }}
+{{- $fullname := include "orka.fullname" . -}}
+{{- $name := printf "%s-internal" ($fullname | trunc 54 | trimSuffix "-") -}}
+{{- if eq $name $fullname -}}
+{{- /* A long fullname that already ends in -internal would name the external Service. */ -}}
+{{- $name = printf "%s-internal-api" ($fullname | trunc 50 | trimSuffix "-") -}}
+{{- end -}}
+{{- $name -}}
 {{- end }}
 
 {{- define "orka.controllerWebhookServiceName" -}}
