@@ -58,6 +58,9 @@ const (
 	ContextTokenScopeConnectorsRead = "orka:connectors:read"
 	// ContextTokenScopeConnectorsManage links, changes, and disconnects them.
 	ContextTokenScopeConnectorsManage = "orka:connectors:manage"
+	// ContextTokenScopeAHPTokens mints, lists, and revokes a person's own
+	// Agent Host Protocol connection tokens.
+	ContextTokenScopeAHPTokens = "orka:ahp:tokens"
 	// ContextTokenScopeToolsRead authorizes context-token callers to read Tool definitions.
 	ContextTokenScopeToolsRead = "orka:tools:read"
 	// ContextTokenScopeToolsUse authorizes context-token callers to execute Orka-managed tools.
@@ -130,6 +133,9 @@ type ContextTokenAuthorizationConfig struct {
 	// context token's access to a person's linked accounts.
 	ConnectorReadScopes   []string
 	ConnectorManageScopes []string
+	// AHPTokenScopes gate a delegated context token's access to a person's
+	// Agent Host Protocol connection tokens.
+	AHPTokenScopes []string
 }
 
 // ContextTokenAuthorizationConfigOptions names the inputs used to build
@@ -164,6 +170,7 @@ type ContextTokenAuthorizationConfigOptions struct {
 	ConfigMapReadScopes        string
 	ConnectorReadScopes        string
 	ConnectorManageScopes      string
+	AHPTokenScopes             string
 }
 
 // NewContextTokenAuthorizationConfig builds context-token authorization config.
@@ -200,6 +207,7 @@ func NewContextTokenAuthorizationConfig(opts ContextTokenAuthorizationConfigOpti
 	monitorWrite := defaultScopes(opts.MonitorWriteScopes, ContextTokenScopeMonitorsWrite)
 	connectorRead := defaultScopes(opts.ConnectorReadScopes, ContextTokenScopeConnectorsRead)
 	connectorManage := defaultScopes(opts.ConnectorManageScopes, ContextTokenScopeConnectorsManage)
+	ahpTokens := defaultScopes(opts.AHPTokenScopes, ContextTokenScopeAHPTokens)
 	monitorOperate := defaultScopes(opts.MonitorOperateScopes, ContextTokenScopeMonitorsOperate)
 	skillRead := defaultScopes(opts.SkillReadScopes, ContextTokenScopeSkillsRead)
 	skillWrite := defaultScopes(opts.SkillWriteScopes, ContextTokenScopeSkillsWrite)
@@ -230,6 +238,7 @@ func NewContextTokenAuthorizationConfig(opts ContextTokenAuthorizationConfigOpti
 		MonitorWriteScopes:            monitorWrite,
 		ConnectorReadScopes:           connectorRead,
 		ConnectorManageScopes:         connectorManage,
+		AHPTokenScopes:                ahpTokens,
 		MonitorOperateScopes:          monitorOperate,
 		SkillReadScopes:               skillRead,
 		SkillWriteScopes:              skillWrite,

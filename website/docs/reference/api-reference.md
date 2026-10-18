@@ -213,6 +213,21 @@ These routes manage [Connections](resources.md#connection) to a
 
 The consent `state` and the completion token are HMACs over random single-use nonces, keyed by a value derived from the controller's snapshot key. The pending consent row, sealed with the controller key, binds the nonce to the Connection UID, owner digest, provider, and a 10 minute expiry. Token material is sealed under a per-Connection data key that is itself wrapped by the controller key. Disconnect deletes both halves and tombstones the Connection, so the live store and later backups hold nothing; a backup taken before the disconnect still contains the sealed material and must be protected like the store itself. See [ADR 0033](https://github.com/orka-agents/orka/blob/main/docs/adr/0033-user-connectors.md). A Connection holds one pending consent at a time: a new authorize replaces the earlier one. A `ConnectorProvider` name is at most 63 characters, since it labels every Connection.
 
+## Agent Host Protocol
+
+With `--enable-ahp-api`, `/ahp` serves the [Agent Host Protocol](https://github.com/microsoft/agent-host-protocol) (versions `1.0.0` and `0.9.0`) over WebSocket, one JSON-RPC message per text frame. See [ADR 0034](https://github.com/orka-agents/orka/blob/main/docs/adr/0034-agent-host-protocol-api.md). No session backend ships yet, so a client can connect, initialize, reconnect, subscribe and list sessions, but cannot start an agent.
+
+`/ahp` does not accept Orka bearer tokens. A client presents an AHP connection token as `?tkn=<token>` or `Authorization: Bearer <token>`; a missing, unknown, revoked or expired token gets 401 before the upgrade, and a browser (`http` or `https`) `Origin` gets 403. The URL is never logged. Revoking or expiring a token closes every connection that uses it.
+
+The token routes require a verified OIDC or context-token identity carrying an issuer and subject; ServiceAccount bearer tokens are refused with 403. Under context-token authorization they need `orka:ahp:tokens`. A token minted from a context token keeps that token's scopes, transaction context and namespace and expires no later than it; the context token itself is never stored. Orka stores only a hash of each token.
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/ahp-tokens` | POST | Body `{"ttl": "720h", "description": "laptop"}`, both optional; `ttl` is at most `--ahp-token-max-ttl`. Returns `201` with `{"id", "token", "expiresAt", ...}`. The token is shown only in this response. |
+| `/api/v1/ahp-tokens` | GET | List the caller's tokens without their secrets. |
+| `/api/v1/ahp-tokens/:id` | DELETE | Revoke one of the caller's tokens and close its connections. Another person's token reads as 404. |
+| `/ahp` | GET | The AHP WebSocket endpoint. |
+
 ## Security
 
 Repository security endpoints manage `RepositoryScan` configurations and their generated threat models, scan runs, findings, patch proposals, and remediation pull requests. Like other `/api/v1/*` endpoints, they require ServiceAccount bearer token authentication.

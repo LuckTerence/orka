@@ -30,6 +30,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/agentcontext"
+	"github.com/orka-agents/orka/internal/ahphost"
 	"github.com/orka-agents/orka/internal/controller"
 	"github.com/orka-agents/orka/internal/executionmode"
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
@@ -126,6 +127,7 @@ type Handlers struct {
 	eventStreamPollInterval   time.Duration
 	eventStreamHeartbeatEvery time.Duration
 	connectors                ConnectorConfig
+	ahp                       *ahphost.Host
 	completionLocks           *completionLocks
 }
 
@@ -154,6 +156,8 @@ type HandlersConfig struct {
 	GatewayDeliveryStore      store.GatewayDeliveryStore
 	GatewayService            *gatewayruntime.Service
 	Connectors                ConnectorConfig
+	// AHP serves the Agent Host Protocol and its connection tokens; nil disables it.
+	AHP *ahphost.Host
 }
 
 // NewHandlers creates a new Handlers instance
@@ -189,6 +193,7 @@ func NewHandlers(cfg HandlersConfig) *Handlers {
 		eventStreamPollInterval:   defaultEventStreamPollInterval,
 		eventStreamHeartbeatEvery: defaultEventStreamHeartbeatEvery,
 		connectors:                cfg.Connectors,
+		ahp:                       cfg.AHP,
 		completionLocks:           newCompletionLocks(),
 	}
 }

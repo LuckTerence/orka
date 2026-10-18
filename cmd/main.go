@@ -56,6 +56,7 @@ import (
 	gatewayv1alpha1 "github.com/orka-agents/orka/api/gateway/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	orkaadmission "github.com/orka-agents/orka/internal/admission"
+	"github.com/orka-agents/orka/internal/ahphost"
 	"github.com/orka-agents/orka/internal/api"
 	"github.com/orka-agents/orka/internal/artifactcap"
 	"github.com/orka-agents/orka/internal/connectors"
@@ -262,6 +263,8 @@ func main() {
 	var chatMaxPrematureEndRetries int
 	var gatewayEnabled bool
 	var connectorsEnabled bool
+	var ahpAPIEnabled bool
+	var ahpTokenMaxTTL time.Duration
 	var dashboardEnabled bool
 	var connectorCallbackBaseURL string
 	var connectorsAllowPrivateEndpointsAck string
@@ -349,6 +352,7 @@ func main() {
 	var contextTokenMonitorOperateScopes string
 	var contextTokenConnectorReadScopes string
 	var contextTokenConnectorManageScopes string
+	var contextTokenAHPTokenScopes string
 	var contextTokenSkillReadScopes string
 	var contextTokenSkillWriteScopes string
 	var contextTokenGatewayReadScopes string
@@ -473,6 +477,10 @@ func main() {
 	flag.BoolVar(&gatewayEnabled, "gateway-enabled", true, "Enable generic gateway reconciliation and ingress.")
 	flag.BoolVar(&connectorsEnabled, "connectors-enabled", envBool("ORKA_CONNECTORS_ENABLED"),
 		"Enable per-user connector reconciliation (ConnectorProvider and Connection).")
+	flag.BoolVar(&ahpAPIEnabled, "enable-ahp-api", envBool("ORKA_ENABLE_AHP_API"),
+		"Serve the Agent Host Protocol at /ahp and the AHP connection token routes. No session backend ships yet, so no agent can be started.")
+	flag.DurationVar(&ahpTokenMaxTTL, "ahp-token-max-ttl", ahphost.DefaultMaxTokenTTL,
+		"Longest lifetime an AHP connection token may be minted with.")
 	flag.BoolVar(&dashboardEnabled, "dashboard-enabled", envBool("ORKA_DASHBOARD_ENABLED"),
 		"Serve the embedded web dashboard on the API port. The API, the CLI, and connector consent work without it.")
 	flag.StringVar(&connectorsAllowPrivateEndpointsAck, "connectors-allow-private-endpoints", os.Getenv("ORKA_CONNECTORS_ALLOW_PRIVATE_ENDPOINTS"),
@@ -782,6 +790,10 @@ func main() {
 		os.Getenv("ORKA_CONTEXT_TOKEN_CONNECTOR_MANAGE_SCOPES"),
 		"Comma-separated context-token scopes that authorize linking, updating, and disconnecting a person's own connector Connections. "+
 			"Defaults to orka:connectors:manage.")
+	flag.StringVar(&contextTokenAHPTokenScopes, "context-token-ahp-token-scopes",
+		os.Getenv("ORKA_CONTEXT_TOKEN_AHP_TOKEN_SCOPES"),
+		"Comma-separated context-token scopes that authorize minting, listing, and revoking a person's own AHP connection tokens. "+
+			"Defaults to orka:ahp:tokens.")
 
 	opts := zap.Options{
 		Development: true,
@@ -966,6 +978,7 @@ func main() {
 		MonitorOperateScopes:       contextTokenMonitorOperateScopes,
 		ConnectorReadScopes:        contextTokenConnectorReadScopes,
 		ConnectorManageScopes:      contextTokenConnectorManageScopes,
+		AHPTokenScopes:             contextTokenAHPTokenScopes,
 		SkillReadScopes:            contextTokenSkillReadScopes,
 		SkillWriteScopes:           contextTokenSkillWriteScopes,
 		GatewayReadScopes:          contextTokenGatewayReadScopes,
@@ -2164,6 +2177,18 @@ func main() {
 		publisherControllerEpochs = api.NewControllerEpochStoreFenceSource(kubeControlStore)
 		connectorToolEffects = kubeControlStore
 	}
+	var ahpHost *ahphost.Host
+	if ahpAPIEnabled {
+		ahpHost, err = newAHPHost(sqliteStore, ahpTokenMaxTTL)
+		if err != nil {
+			setupLog.Error(err, "unable to set up the AHP host")
+			os.Exit(1)
+		}
+		if err := mgr.Add(ahpHost); err != nil {
+			setupLog.Error(err, "unable to add the AHP host")
+			os.Exit(1)
+		}
+	}
 	apiServer := api.NewServer(mgr.GetClient(), sessionManager, api.ServerConfig{
 		Port:                      apiPort,
 		NativeSessionMaxBytes:     nativeSessionMaxBytes,
@@ -2202,6 +2227,7 @@ func main() {
 		TaskProvenanceProtected:   taskProvenanceProtected,
 		E2EPromptFaultEnabled:     strings.TrimSpace(acpE2EPromptWriteAmbiguityMarker) != "",
 		Connectors:                connectorConfig,
+		AHP:                       ahpHost,
 		ConnectorTools: api.ConnectorToolExecutionConfig{
 			Enabled:                          connectorsEnabled,
 			OutboundAccess:                   outboundAccessResolver,

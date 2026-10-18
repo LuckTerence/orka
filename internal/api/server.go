@@ -25,6 +25,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/orka-agents/orka/internal/ahphost"
 	"github.com/orka-agents/orka/internal/artifactcap"
 	"github.com/orka-agents/orka/internal/connectors"
 	"github.com/orka-agents/orka/internal/controller"
@@ -100,6 +101,9 @@ type ServerConfig struct {
 	E2EPromptFaultEnabled     bool
 	Connectors                ConnectorConfig
 	ConnectorTools            ConnectorToolExecutionConfig
+	// AHP serves the Agent Host Protocol at /ahp and its token routes; nil
+	// leaves /ahp unrouted and the token routes answering 501.
+	AHP *ahphost.Host
 	// DashboardEnabled mirrors --dashboard-enabled: only then does the API
 	// port serve the embedded web dashboard and answer unrouted non-API
 	// paths with its index page.
@@ -180,6 +184,7 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		GatewayDeliveryStore:      config.GatewayDeliveryStore,
 		GatewayService:            config.GatewayService,
 		Connectors:                config.Connectors,
+		AHP:                       config.AHP,
 	})
 	resolver := NewProviderResolver(c, config.Chat)
 	server.chatHandler = NewChatHandler(c, config.APIReader, sessionManager, config.Chat, config.WatchNamespace, config.EnforceNamespaceIsolation, config.SessionStore, config.ResultStore, resolver, config.Clientset)
@@ -339,6 +344,12 @@ func (s *Server) setupRoutes() {
 	// person's browser without an Orka bearer token. The signed single-use
 	// state and the sealed PKCE verifier authenticate it instead.
 	s.app.Get(connectors.CallbackPath, s.handlers.ConnectionCallback)
+
+	// The AHP endpoint authenticates its own connection tokens before the
+	// WebSocket upgrade, so it sits outside the bearer-auth group.
+	if s.config.AHP != nil {
+		s.app.Get(ahpEndpointPath, ahpEndpoint(s.config.AHP))
+	}
 
 	externalAuth := NewAuthMiddleware(s.client, AuthConfig{OIDC: s.config.OIDC, ContextTokens: s.config.ContextTokens})
 
@@ -510,6 +521,12 @@ func (s *Server) setupRoutes() {
 	api.Delete("/connections/:name", s.handlers.DeleteConnection)
 	api.Post("/connections/:name/authorize", s.handlers.AuthorizeConnection)
 	api.Post("/connections/:name/complete", s.handlers.CompleteConnection)
+
+	// AHP connection tokens. Every handler re-checks that the caller is a
+	// verified human identity and owns the token.
+	api.Post("/ahp-tokens", s.handlers.CreateAHPToken)
+	api.Get("/ahp-tokens", s.handlers.ListAHPTokens)
+	api.Delete("/ahp-tokens/:id", s.handlers.RevokeAHPToken)
 
 	// Reference endpoints (for dropdowns)
 	api.Get("/secrets", s.handlers.ListSecretNames)

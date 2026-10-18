@@ -245,6 +245,12 @@ var externalAPIPolicies = map[string]apiRoutePolicy{
 	"GET /openai/v1/models":                    coreAPIPolicy("list", "providers", ""),
 	"POST /anthropic/v1/messages":              coreAPIPolicy("create", "chats", ""),
 	"GET /anthropic/v1/models":                 coreAPIPolicy("list", "providers", ""),
+
+	// AHP token routes are identity-only like Connections: the handlers
+	// require a verified OIDC or context-token owner and refuse ServiceAccounts.
+	"POST /api/v1/ahp-tokens":       {identityOnly: true},
+	"GET /api/v1/ahp-tokens":        {identityOnly: true},
+	"DELETE /api/v1/ahp-tokens/:id": {identityOnly: true},
 }
 
 // externalAPIRouter installs authorization on the endpoint, where Fiber has
