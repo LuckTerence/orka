@@ -118,8 +118,9 @@ copilotd's `--idle-status-file` format fits.
 
 The `orka-host-agent` sidecar answers the host's probes. The Pod is Ready only after an AHP
 `initialize` and `ping` succeed against the loopback listener; the check never sends
-`authenticate`, so it cannot claim a single-user host. Afterwards it only checks that the
-listener accepts connections, so it never keeps the host from being idle.
+`authenticate`, so it cannot claim a single-user host. Afterwards it checks that the host
+keeps its idle status file fresh, or, for hosts without one, that the listener accepts
+connections. It never keeps the host from being idle.
 
 ## Restarts, suspension and wake
 

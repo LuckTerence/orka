@@ -91,11 +91,23 @@ func (a *agent) startupz(w http.ResponseWriter, r *http.Request) {
 	writeText(w, http.StatusOK, "started")
 }
 
-// readyz answers the readiness probe after startup by checking that the
-// loopback listener still accepts connections. It opens no AHP session.
+// readyz answers the readiness and liveness probes after startup. A host
+// that reports idle status is alive while it keeps that status fresh, which
+// leaves its listener untouched; hosts may log every connection that never
+// completes a handshake. Otherwise readyz checks that the loopback listener
+// accepts connections. It never opens an AHP session.
 func (a *agent) readyz(w http.ResponseWriter, _ *http.Request) {
 	if !a.started.Load() {
 		writeText(w, http.StatusServiceUnavailable, "not started")
+		return
+	}
+	if a.statusFile != "" {
+		status, err := a.readStatus()
+		if err != nil || status.Stale {
+			writeText(w, http.StatusServiceUnavailable, "host idle status is missing or stale")
+			return
+		}
+		writeText(w, http.StatusOK, "ready")
 		return
 	}
 	conn, err := net.DialTimeout("tcp", a.listenAddress(), a.dialTimeout)
@@ -113,28 +125,34 @@ func (a *agent) status(w http.ResponseWriter, _ *http.Request) {
 		writeText(w, http.StatusNotFound, "this host does not report idle status")
 		return
 	}
+	response, err := a.readStatus()
+	if err != nil {
+		writeText(w, http.StatusServiceUnavailable, err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(response)
+}
+
+// readStatus reads and parses the host's idle status file. The host does not
+// choose staleness; the agent judges it from updatedAt.
+func (a *agent) readStatus() (agenthost.IdleStatus, error) {
 	file, err := os.Open(a.statusFile)
 	if err != nil {
-		writeText(w, http.StatusServiceUnavailable, "idle status is not available")
-		return
+		return agenthost.IdleStatus{}, errors.New("idle status is not available")
 	}
 	defer func() { _ = file.Close() }()
 	raw, err := io.ReadAll(io.LimitReader(file, maxStatusBytes+1))
 	if err != nil {
-		writeText(w, http.StatusServiceUnavailable, "idle status is not readable")
-		return
+		return agenthost.IdleStatus{}, errors.New("idle status is not readable")
 	}
 	parsed, err := agenthost.ParseIdleStatus(raw)
 	if err != nil {
-		writeText(w, http.StatusServiceUnavailable, "idle status is not valid")
-		return
+		return agenthost.IdleStatus{}, errors.New("idle status is not valid")
 	}
-	// The host does not choose staleness; the agent judges it from updatedAt.
-	response := parsed
-	response.Stale = parsed.UpdatedAt == nil || a.now().Sub(*parsed.UpdatedAt) > staleAfter
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(response)
+	parsed.Stale = parsed.UpdatedAt == nil || a.now().Sub(*parsed.UpdatedAt) > staleAfter
+	return parsed, nil
 }
 
 func (a *agent) probe(ctx context.Context) error {

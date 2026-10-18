@@ -117,9 +117,11 @@ image and pinned by digest (`--agent-host-agent-image`):
   AHP Go client supports) and `ping` against the loopback listener with the connection
   token. It never sends `authenticate`, so it cannot claim a single-user host. Pod Ready
   therefore means an AHP client can talk to the host.
-- After startup its readiness check opens no AHP session, because an attached client would
-  reset the host's idle clock. It checks that the listener accepts connections and, when
-  declared, that the idle status file is fresh.
+- After startup its readiness and liveness checks open no AHP session, because an
+  attached client would reset the host's idle clock. A host that declares an idle status
+  file is alive while it keeps that file fresh, so its listener is not touched at all;
+  copilotd logs every connection that never completes a handshake. Other hosts get a TCP
+  check of the listener.
 - It serves the parsed idle status (no other fields) on a port that only the Orka
   controller may reach.
 - It reads the connection token from its own Secret mount, which `host` does not share.

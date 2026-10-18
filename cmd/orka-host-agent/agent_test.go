@@ -250,3 +250,27 @@ func TestRedactRemovesRawAndEscapedTokens(t *testing.T) {
 		t.Fatalf("token survived redaction: %v", wrapped)
 	}
 }
+
+func TestReadinessUsesAFreshStatusFileInsteadOfTheListener(t *testing.T) {
+	host := newFakeHost(t, testToken)
+	now := time.Date(2026, 10, 18, 3, 0, 0, 0, time.UTC)
+	status := writeFile(t, "idle.json", `{"idle":true,"updatedAt":"2026-10-18T02:59:30Z"}`)
+	agent := newAgent(host.port(t), writeFile(t, "token", testToken), status, io.Discard)
+	agent.now = func() time.Time { return now }
+	routes := agent.routes()
+	if got := get(t, routes, "/startupz"); got.Code != http.StatusOK {
+		t.Fatalf("startupz = %d", got.Code)
+	}
+	<-host.methods
+	<-host.methods
+	// The listener is gone, but a fresh status file means the host is alive,
+	// and the check never touches the listener.
+	host.server.Close()
+	if got := get(t, routes, "/readyz"); got.Code != http.StatusOK {
+		t.Fatalf("readyz with a fresh status file = %d", got.Code)
+	}
+	agent.now = func() time.Time { return now.Add(time.Hour) }
+	if got := get(t, routes, "/readyz"); got.Code != http.StatusServiceUnavailable {
+		t.Fatalf("readyz with a stale status file = %d", got.Code)
+	}
+}
