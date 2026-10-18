@@ -1416,6 +1416,55 @@ func TestStaticChartRejectsHarnessV2IdentityChangesOnUpgrade(t *testing.T) {
 	}
 }
 
+func TestStaticChartUpgradesControllersAddressingTheInternalService(t *testing.T) {
+	longFullname := strings.Repeat("a", 60)
+	controllerArgs := func(controllerURL string) []string {
+		return []string{
+			"--controller-mode=harness-v2",
+			"--watch-namespace=orka-test",
+			"--controller-url=" + controllerURL,
+			"--acp-runtime-namespace=orka-runtimes",
+		}
+	}
+	tests := []struct {
+		name          string
+		controllerURL string
+		args          []string
+		wantError     string
+	}{
+		{
+			name:          "internal Service",
+			controllerURL: "http://test-orka-internal.orka-test.svc:8080",
+		},
+		{
+			name:          "truncated internal Service",
+			controllerURL: "http://" + longFullname[:54] + "-internal.orka-test.svc:8080",
+			args:          []string{"--set-string", "fullnameOverride=" + longFullname},
+		},
+		{
+			name:          "fullname override",
+			controllerURL: "http://test-orka-internal.orka-test.svc:8080",
+			args:          []string{"--set-string", "fullnameOverride=renamed"},
+			wantError:     "the effective chart fullname is immutable for harness-v2 upgrades",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			output, err := helmTemplateStaticChartWithExistingController(t, controllerArgs(tt.controllerURL), tt.args...)
+			if tt.wantError == "" {
+				if err != nil {
+					t.Fatalf("upgrade of a controller addressing the internal Service failed: %v\n%s", err, output)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(output, tt.wantError) {
+				t.Fatalf("helm render error = %v, want immutable identity rejection %q:\n%s", err, tt.wantError, output)
+			}
+		})
+	}
+}
+
 func TestStaticChartRejectsAgentExecutionSnapshotIdentityChangesOnUpgrade(t *testing.T) {
 	staticControllerArgs := []string{
 		"--controller-mode=harness-v2",

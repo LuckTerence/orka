@@ -351,8 +351,8 @@ spec:
 {{- end -}}
 {{- end }}
 
-{{/* Read the exact chart fullname from the live controller's in-cluster URL. */}}
-{{- define "orka.existingControllerFullname" -}}
+{{/* Read the Service name from the live controller's in-cluster URL. */}}
+{{- define "orka.existingControllerURLService" -}}
 {{- $fullnames := list -}}
 {{- $namespaceSuffix := printf ".%s.svc" .namespace -}}
 {{- range (dig "spec" "template" "spec" "containers" (list) .controller) -}}
@@ -792,13 +792,15 @@ namespace. There is no dual, automatic, or drain controller mode.
 {{- fail (printf "controller.agentExecutionSnapshot.key is immutable for in-place upgrades; preserve %q so retained encrypted execution snapshots remain decryptable" $existingSnapshotKey) -}}
 {{- end -}}
 {{- if eq .Values.controller.mode "harness-v2" -}}
-{{- $existingFullname := include "orka.existingControllerFullname" (dict "controller" $existingController "namespace" .Release.Namespace) | trim -}}
-{{- if not $existingFullname -}}
+{{- $existingURLService := include "orka.existingControllerURLService" (dict "controller" $existingController "namespace" .Release.Namespace) | trim -}}
+{{- if not $existingURLService -}}
 {{- fail "cannot determine the existing harness-v2 chart fullname from the live controller; restore its exact --controller-url argument before upgrading" -}}
 {{- end -}}
 {{- $desiredFullname := include "orka.fullname" . -}}
-{{- if ne $existingFullname $desiredFullname -}}
-{{- fail (printf "the effective chart fullname is immutable for harness-v2 upgrades; the existing controller uses %q, but this upgrade would use %q" $existingFullname $desiredFullname) -}}
+{{- $desiredInternalService := include "orka.controllerInternalServiceName" . -}}
+{{- /* Older controllers address the fullname Service; newer ones address the internal Service derived from it. */ -}}
+{{- if not (has $existingURLService (list $desiredFullname $desiredInternalService)) -}}
+{{- fail (printf "the effective chart fullname is immutable for harness-v2 upgrades; the existing controller URL uses Service %q, but this upgrade would use %q" $existingURLService $desiredInternalService) -}}
 {{- end -}}
 {{- $existingRuntimeNamespace := include "orka.existingControllerACPRuntimeNamespace" $existingController | trim -}}
 {{- if not $existingRuntimeNamespace -}}
