@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/orka-agents/orka/internal/acp"
@@ -128,6 +129,10 @@ const (
 	defaultWorkspaceArtifactDownloadBytes int64 = artifactcap.DefaultWorkspaceArtifactMaxBytes
 	defaultWorkspaceDeltaUploadBytes      int64 = 100 << 20
 )
+
+// EnvPermissionTimeout is how long a runtime waits for the answer to a
+// permission request, as a Go duration. Empty keeps the default.
+const EnvPermissionTimeout = "ORKA_ACP_PERMISSION_TIMEOUT"
 
 // EnvBrokeredToolApprovalProfileDigest opts an operator-qualified, immutable
 // runtime profile into brokered approvals. Provider identity alone is not proof
@@ -311,6 +316,10 @@ func LoadConfigFromEnv() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	permissionTimeout, err := permissionTimeoutFromEnv()
+	if err != nil {
+		return Config{}, err
+	}
 	bootID := strings.TrimSpace(os.Getenv(EnvSupervisorBootID))
 	if bootID == "" {
 		bootID = uuid.NewString()
@@ -355,6 +364,7 @@ func LoadConfigFromEnv() (Config, error) {
 		E2EPromptWriteAmbiguityMarker: e2ePromptWriteAmbiguityMarker,
 		Toolboxes:                     harnessv2.CloneRuntimeToolboxes(toolboxes),
 		ToolboxMountMethod:            strings.TrimSpace(os.Getenv(EnvToolboxMountMethod)),
+		PermissionTimeout:             permissionTimeout,
 	}
 	cfg.ProviderProxy.ModelOutputLimit = modelOutputLimit
 	if providerKind == providerKindFoundry {
@@ -1120,6 +1130,21 @@ func defaultProtocolLimits() harnessv2.ProtocolLimits {
 		MaxPendingPermissions: 32, MaxWorkspaceDeltaBytes: defaultWorkspaceDeltaUploadBytes,
 		MaxNativeSessionBytes: harnessv2.DefaultMaxNativeSessionBytes,
 	}
+}
+
+func permissionTimeoutFromEnv() (time.Duration, error) {
+	raw := strings.TrimSpace(os.Getenv(EnvPermissionTimeout))
+	if raw == "" {
+		return 0, nil
+	}
+	timeout, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be a duration", EnvPermissionTimeout)
+	}
+	if err := acp.ValidatePermissionTimeout(timeout); err != nil {
+		return 0, fmt.Errorf("%s: %w", EnvPermissionTimeout, err)
+	}
+	return timeout, nil
 }
 
 func nativeSessionMaxBytesFromEnv() (int, error) {

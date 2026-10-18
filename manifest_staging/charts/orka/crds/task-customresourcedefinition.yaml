@@ -92,6 +92,19 @@ spec:
                     maximum: 1000
                     minimum: 1
                     type: integer
+                  permissionDecisions:
+                    description: |-
+                      PermissionDecisions selects who answers the permission requests an ACP
+                      runtime sends before running a tool. Policy, the default, answers each
+                      request from the frozen tool policy. Requester still refuses what that
+                      policy refuses, but holds every request it would allow for the Task's
+                      verified requester to approve or decline through the Task approvals API;
+                      a request nobody answers before it expires is refused. It never enters
+                      the runtime profile, so turns of one Session may use different values.
+                    enum:
+                    - Policy
+                    - Requester
+                    type: string
                   workspace:
                     description: |-
                       Workspace is the legacy harness v1 agent workspace configuration at its

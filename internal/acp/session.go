@@ -17,7 +17,21 @@ const (
 	DefaultBufferedEvents     = 256
 	DefaultBufferedEventBytes = 32 << 20
 	DefaultInitializeTimeout  = 60 * time.Second
+
+	// MinPermissionTimeout and MaxPermissionTimeout bound how long a runtime
+	// waits for the answer to a permission request. A person may answer one,
+	// so the window is configurable; it can never be unbounded.
+	MinPermissionTimeout = time.Minute
+	MaxPermissionTimeout = time.Hour
 )
+
+// ValidatePermissionTimeout checks a configured permission timeout.
+func ValidatePermissionTimeout(timeout time.Duration) error {
+	if timeout < MinPermissionTimeout || timeout > MaxPermissionTimeout {
+		return fmt.Errorf("permission timeout must be between %s and %s", MinPermissionTimeout, MaxPermissionTimeout)
+	}
+	return nil
+}
 
 // ErrPromptCancellationPending rejects admission until an earlier session-scoped
 // cancellation write finishes. The prompt has not been accepted and may be retried.

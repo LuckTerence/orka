@@ -55,6 +55,7 @@ import (
 
 	gatewayv1alpha1 "github.com/orka-agents/orka/api/gateway/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/acp"
 	orkaadmission "github.com/orka-agents/orka/internal/admission"
 	"github.com/orka-agents/orka/internal/ahphost"
 	"github.com/orka-agents/orka/internal/api"
@@ -303,6 +304,7 @@ func main() {
 	var harnessV1DispatchInterval time.Duration
 	var harnessV1DispatchWorkers int
 	var acpIdlePoolTTL time.Duration
+	var acpPermissionTimeout time.Duration
 	var acpCodexRuntimeImage string
 	var acpClaudeRuntimeImage string
 	var acpCopilotRuntimeImage string
@@ -566,6 +568,9 @@ func main() {
 		"Maximum concurrent harness v1 attempt workers.")
 	flag.DurationVar(&acpIdlePoolTTL, "acp-idle-pool-ttl", envDurationDefault("ORKA_ACP_IDLE_POOL_TTL", controller.DefaultACPIdlePoolTTL),
 		"Scale an idle ACP RuntimePool to zero after this duration.")
+	flag.DurationVar(&acpPermissionTimeout, "acp-permission-timeout", envDurationDefault("ORKA_ACP_PERMISSION_TIMEOUT", 0),
+		"How long an ACP runtime waits for the answer to a permission request, between 1m and 1h. "+
+			"Tasks whose requester decides permission requests get at most this long to answer. Zero keeps the 5m default.")
 	flag.StringVar(&acpCodexRuntimeImage, "acp-codex-runtime-image", os.Getenv("ORKA_ACP_CODEX_RUNTIME_IMAGE"),
 		"Codex ACP runtime image with a tag or SHA256 digest. Tags resolve to digests at startup.")
 	flag.StringVar(&acpClaudeRuntimeImage, "acp-claude-runtime-image", os.Getenv("ORKA_ACP_CLAUDE_RUNTIME_IMAGE"),
@@ -1711,6 +1716,13 @@ func main() {
 		runtimePoolReconciler.ControllerAPIPort = int32(apiPort)
 		runtimePoolReconciler.WorkspaceArtifactMaxBytes = publisherWorkspaceArtifactMaxBytes
 		runtimePoolReconciler.NativeSessionMaxBytes = nativeSessionMaxBytes
+		if acpPermissionTimeout != 0 {
+			if err := acp.ValidatePermissionTimeout(acpPermissionTimeout); err != nil {
+				setupLog.Error(err, "invalid --acp-permission-timeout")
+				os.Exit(1)
+			}
+			runtimePoolReconciler.PermissionTimeout = acpPermissionTimeout
+		}
 		runtimePoolReconciler.ProviderProxy = controller.RuntimePoolProviderProxyConfig{
 			BaseURL:         acpProviderProxyBaseURL,
 			Namespace:       acpProviderProxyNamespace,

@@ -130,6 +130,11 @@ type ACPDispatcher struct {
 
 	approvalRecoveryMu sync.Mutex
 	approvalRecovery   map[acpMCPApprovalTaskKey]acpMCPApprovalRecoveryProgress
+
+	// permissionHolds names the permission requests held for a requester.
+	permissionHolds            map[string]struct{}
+	permissionHoldWG           sync.WaitGroup
+	permissionHoldPollInterval time.Duration
 }
 
 // substrateRouteHTTPClient lazily builds the router-pinned transport for
@@ -1971,7 +1976,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 				}
 			case harnessv2.EventPermissionRequested:
 				return d.resolvePromptPermission(
-					runtimeCtx, runtimeClient, createRequest.RuntimeSessionID, task, runtimeFence, mcpConfiguration, createRequest.Profile.ProviderKind, event,
+					runtimeCtx, leaseCtx, runtimeClient, createRequest.RuntimeSessionID, task, runtimeFence, mcpConfiguration, createRequest.Profile.ProviderKind, event,
 				)
 			case harnessv2.EventCompleted, harnessv2.EventCancelled, harnessv2.EventFailed, harnessv2.EventOutcomeUnknown:
 				copy := event
@@ -5948,26 +5953,14 @@ func promptLeaseRenewalRetryable(err error) bool {
 	return true
 }
 
-func (d *ACPDispatcher) resolvePromptPermission(
+// resolvePermissionRequest delivers a sealed permission answer, retrying only
+// writes the runtime provably never received.
+func (d *ACPDispatcher) resolvePermissionRequest(
 	ctx context.Context,
 	runtimeClient *harnessv2.Client,
 	sessionID harnessv2.RuntimeSessionID,
-	task *corev1alpha1.Task,
-	fence harnessv2.Fence,
-	mcpConfiguration harnessv2.MCPPolicyConfiguration,
-	provider string,
-	event harnessv2.Event,
+	request harnessv2.ResolvePermissionRequest,
 ) error {
-	permission := event.PermissionRequested
-	if permission == nil {
-		return nil
-	}
-	decision := frozenMCPPermissionDecision(mcpConfiguration, provider, permission)
-	request := harnessv2.ResolvePermissionRequest{
-		Protocol:  harnessv2.ProtocolVersion,
-		Metadata:  mutationMetadata(fence, task, "permission-"+string(permission.RequestID), true, time.Now().UTC().Add(30*time.Second)),
-		RequestID: permission.RequestID, Decision: decision,
-	}
 	if err := sealMutation(&request.Metadata.RequestDigest, request); err != nil {
 		return err
 	}
@@ -6013,12 +6006,7 @@ func frozenMCPPermissionDecision(
 			}
 		}
 	}
-	for _, option := range permission.Options {
-		if option.Kind == harnessv2.PermissionOptionRejectOnce {
-			return harnessv2.PermissionDecision{Outcome: harnessv2.PermissionDecisionSelected, OptionID: option.OptionID}
-		}
-	}
-	return cancelled
+	return rejectPermissionDecision(permission)
 }
 
 func isACPRateLimitedClientError(err error) bool {

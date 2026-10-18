@@ -65,7 +65,8 @@ resource and subresource fields and to the same slash-separated string in RBAC.
 
 The HTTP method does not define the permission. `PUT /api/v1/agents/:name` patches
 the Kubernetes Agent, so it requires `patch` on `agents`. Approval decisions require
-`update` on `tasks/approvals` and `patch` on the parent Task. A monitor run or
+`update` on `tasks/approvals` and `patch` on the parent Task; a permission request a
+built-in runtime holds for the Task's requester can be decided only by that requester. A monitor run or
 command also needs `patch` on its RepositoryMonitor. Commands also require named
 `create` on `repositorymonitors/runs` before the command or its derived run is
 stored. A scan, validation, or patch request that creates a Task also needs

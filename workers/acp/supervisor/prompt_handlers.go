@@ -920,6 +920,13 @@ func (s *Server) handleResolvePermission(w http.ResponseWriter, r *http.Request)
 			}
 		}
 	}
+	if !permission.expiresAt.After(now) {
+		// The runtime's own permission timer already answered this request; a
+		// late answer must not reach it and poison the session.
+		s.mu.Unlock()
+		writeError(w, http.StatusGone, harnessv2.ErrorCodeSettled, "permission request expired", nil, false)
+		return
+	}
 	replay := reserveOperationReplayLocked(state, request.Metadata, now)
 	mutations := state.promptMutations
 	mcpProxy := state.mcpProxy
