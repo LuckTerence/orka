@@ -420,3 +420,25 @@ func TestAHPBackendKeepsUsersApart(t *testing.T) {
 	require.NoError(t, bob.Request(ctx, "listSessions", ahptypes.ListSessionsParams{}, &listed))
 	require.Empty(t, listed.Items)
 }
+
+func TestAHPBackendAdmitsOneTurnAtATime(t *testing.T) {
+	env := newAHPTestEnv(t)
+	c := env.connect("alice")
+	ctx := ahpCtx(t)
+	chat := env.setUpSession(c, "allow-all")
+	for _, id := range []string{"turn-a", "turn-b"} {
+		_, err := c.Dispatch(ctx, chat, ahptypes.StateAction{Value: &ahptypes.ChatTurnStartedAction{
+			Type: ahptypes.ActionTypeChatTurnStarted, TurnId: id, StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
+			Message: ahptypes.Message{Text: "hello " + id, Origin: ahptypes.MessageOrigin{Kind: ahptypes.MessageKindUser}},
+		}})
+		require.NoError(t, err)
+	}
+	record := ahpSession{}
+	require.NoError(t, env.backend.getRecord(ctx, ahphost.UserKey("https://issuer.example", "alice"), ahpRecordSession, ahpTestSession, &record))
+	first := env.waitForTask(record.OrkaSession + "-t1")
+	require.Equal(t, "hello turn-a", first.Spec.Prompt)
+	time.Sleep(200 * time.Millisecond)
+	var tasks corev1alpha1.TaskList
+	require.NoError(t, env.kube.List(ctx, &tasks, client.InNamespace(ahpTestNamespace)))
+	require.Len(t, tasks.Items, 1, "a message sent while a turn is starting is refused")
+}

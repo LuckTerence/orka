@@ -118,9 +118,36 @@ type ahpBackend struct {
 	// turns a previous leader left running.
 	emitterFor func(ahphost.Principal) ahphost.Emitter
 
-	mu        sync.Mutex
-	turns     map[string]*ahpTurn
+	mu    sync.Mutex
+	turns map[string]*ahpTurn
+	// reserved holds a session's turn slot from the moment a message is
+	// admitted until its turn starts, so a second message cannot slip in.
+	reserved  map[string]time.Time
 	recovered map[string]bool
+}
+
+// ahpReservationTTL frees a slot whose message the host never applied.
+const ahpReservationTTL = 30 * time.Second
+
+// reserveTurn claims a session's turn slot; false means a turn is running or starting.
+func (b *ahpBackend) reserveTurn(userKey, session string) bool {
+	key := ahpTurnKey(userKey, session)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.turns[key] != nil {
+		return false
+	}
+	if at, ok := b.reserved[key]; ok && b.now().Sub(at) < ahpReservationTTL {
+		return false
+	}
+	b.reserved[key] = b.now()
+	return true
+}
+
+func (b *ahpBackend) releaseTurn(userKey, session string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	delete(b.reserved, ahpTurnKey(userKey, session))
 }
 
 func newAHPBackend(h *Handlers, s store.AHPStore, live *liveevents.Broker, cfg AHPBackendConfig) *ahpBackend {
@@ -130,7 +157,7 @@ func newAHPBackend(h *Handlers, s store.AHPStore, live *liveevents.Broker, cfg A
 	return &ahpBackend{
 		h: h, store: s, live: live, cfg: cfg, now: time.Now,
 		applyApprovalMode: ahpApplyApprovalMode, decideApproval: h.DecideTaskApprovalAs,
-		turns: map[string]*ahpTurn{}, recovered: map[string]bool{},
+		turns: map[string]*ahpTurn{}, reserved: map[string]time.Time{}, recovered: map[string]bool{},
 	}
 }
 
@@ -660,14 +687,16 @@ func (b *ahpBackend) AuthorizeClientAction(ctx context.Context, principal ahphos
 		if channel != record.Chat {
 			return &ahphost.Rejection{Reason: "messages go to the session's chat"}
 		}
-		if record.ActiveTurn != "" || b.activeTurn(principal.UserKey, record.Session) != nil {
-			return &ahphost.Rejection{Reason: "a turn is already running"}
-		}
 		if strings.TrimSpace(a.Message.Text) == "" || len(a.Message.Text) > ahpMaxPromptBytes || a.TurnId == "" {
 			return &ahphost.Rejection{Reason: "a message needs text and a turn id"}
 		}
-		_, err := b.resolveModel(ctx, principal, record, a.Message.Model)
-		return err
+		if _, err := b.resolveModel(ctx, principal, record, a.Message.Model); err != nil {
+			return err
+		}
+		if record.ActiveTurn != "" || !b.reserveTurn(principal.UserKey, record.Session) {
+			return &ahphost.Rejection{Reason: "a turn is already running"}
+		}
+		return nil
 	case *ahptypes.ChatTurnCancelledAction:
 		if record.ActiveTurn == "" || a.TurnId != record.ActiveTurn {
 			return &ahphost.Rejection{Reason: "the turn is not running"}

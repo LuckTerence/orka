@@ -89,6 +89,9 @@ func ahpTitle(text string) string {
 // startTurn creates the turn's Task as the person and follows it.
 func (b *ahpBackend) startTurn(ctx context.Context, principal ahphost.Principal, record ahpSession, action *ahptypes.ChatTurnStartedAction, emit ahphost.Emitter) {
 	started := b.now().UTC()
+	// The slot reserved when the message was admitted passes to the running
+	// turn, or is freed if the turn never starts.
+	defer b.releaseTurn(principal.UserKey, record.Session)
 	fail := func(message string) {
 		b.emitTurnError(ctx, emit, record, action.TurnId, started, "TurnNotStarted", message)
 	}
