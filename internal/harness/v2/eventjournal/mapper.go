@@ -1137,6 +1137,11 @@ func mapUpdate(event harnessv2.Event, mapCtx MapContext, options mapUpdateOption
 		mapped.Type = executionevents.ExecutionEventTypeModelMessage
 		mapped.Summary = "Assistant message streamed"
 		content["contentOmitted"] = "streamed_text_pending_terminal_redaction"
+	case harnessv2.UpdateAssistantThoughtChunk:
+		// Reasoning is live-only and never persisted; the journal skips it.
+		mapped.Type = executionevents.ExecutionEventTypeModelMessage
+		mapped.Summary = "Assistant reasoning streamed"
+		content["contentOmitted"] = "reasoning_not_persisted"
 	case harnessv2.UpdateToolCall, harnessv2.UpdateToolCallUpdate:
 		tool := event.Update.ToolCall
 		mapped.ToolCallID = safeMappedToolCallID(tool.ToolCallID)
