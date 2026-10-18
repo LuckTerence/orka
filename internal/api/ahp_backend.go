@@ -187,10 +187,12 @@ type ahpProject struct {
 	CreatedAt     time.Time `json:"createdAt"`
 }
 
-// wire is a project as the Copilot dialect describes it.
+// wire is a project as the Copilot dialect describes it. It is not a git
+// checkout on this host: Orka keeps none, so a client must not run git here.
+// Each turn's Task works in the repository and publishes its changes.
 func (p ahpProject) wire() map[string]any {
 	project := map[string]any{
-		"id": p.ID, apiFieldName: p.Name, "path": p.Path, "git": true, "origin": "cloned",
+		"id": p.ID, apiFieldName: p.Name, "path": p.Path, "git": false, "origin": "cloned",
 		"remoteUrl": p.URL, "status": "ready",
 	}
 	if p.DefaultBranch != "" {
