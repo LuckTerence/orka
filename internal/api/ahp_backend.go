@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"path"
 	"slices"
@@ -104,11 +105,12 @@ type AHPBackendConfig struct {
 type ahpApprovalDecider func(ctx context.Context, ui *UserInfo, namespace, task, approvalID string, approve bool) error
 
 type ahpBackend struct {
-	h     *Handlers
-	store store.AHPStore
-	live  *liveevents.Broker
-	cfg   AHPBackendConfig
-	now   func() time.Time
+	h       *Handlers
+	store   store.AHPStore
+	live    *liveevents.Broker
+	cfg     AHPBackendConfig
+	now     func() time.Time
+	gitHTTP *http.Client
 
 	// applyApprovalMode asks a Task to hold policy-allowed permission
 	// requests for its requester; decideApproval answers one.
@@ -155,7 +157,7 @@ func newAHPBackend(h *Handlers, s store.AHPStore, live *liveevents.Broker, cfg A
 		cfg.TurnTimeout = ahpDefaultTurnTimeout
 	}
 	return &ahpBackend{
-		h: h, store: s, live: live, cfg: cfg, now: time.Now,
+		h: h, store: s, live: live, cfg: cfg, now: time.Now, gitHTTP: ahpGitHTTPClient,
 		applyApprovalMode: ahpApplyApprovalMode, decideApproval: h.DecideTaskApprovalAs,
 		turns: map[string]*ahpTurn{}, reserved: map[string]time.Time{}, recovered: map[string]bool{},
 	}
@@ -187,12 +189,10 @@ type ahpProject struct {
 	CreatedAt     time.Time `json:"createdAt"`
 }
 
-// wire is a project as the Copilot dialect describes it. It is not a git
-// checkout on this host: Orka keeps none, so a client must not run git here.
-// Each turn's Task works in the repository and publishes its changes.
+// wire is a project as the Copilot dialect describes it.
 func (p ahpProject) wire() map[string]any {
 	project := map[string]any{
-		"id": p.ID, apiFieldName: p.Name, "path": p.Path, "git": false, "origin": "cloned",
+		"id": p.ID, apiFieldName: p.Name, "path": p.Path, "git": true, "origin": "cloned",
 		"remoteUrl": p.URL, "status": "ready",
 	}
 	if p.DefaultBranch != "" {
@@ -448,6 +448,12 @@ func (b *ahpBackend) addProject(ctx context.Context, principal ahphost.Principal
 	id := "project-" + ahpHash(repo)[:16]
 	var existing ahpProject
 	if err := b.getRecord(ctx, principal.UserKey, ahpRecordProject, id, &existing); err == nil {
+		if existing.DefaultBranch == "" {
+			existing.DefaultBranch = b.defaultBranch(ctx, principal.Namespace, repo)
+			if existing.DefaultBranch != "" {
+				return existing, b.putRecord(ctx, principal.UserKey, ahpRecordProject, id, existing)
+			}
+		}
 		return existing, nil
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return ahpProject{}, err
@@ -461,6 +467,7 @@ func (b *ahpBackend) addProject(ctx context.Context, principal ahphost.Principal
 	}
 	project := ahpProject{
 		ID: id, Name: name, Owner: owner, URL: repo, Path: path.Join(ahpProjectRoot, owner, name), CreatedAt: b.now().UTC(),
+		DefaultBranch: b.defaultBranch(ctx, principal.Namespace, repo),
 	}
 	return project, b.putRecord(ctx, principal.UserKey, ahpRecordProject, id, project)
 }

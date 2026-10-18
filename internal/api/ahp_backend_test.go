@@ -9,6 +9,9 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
@@ -54,8 +57,21 @@ type ahpTestEnv struct {
 	server  *httptest.Server
 	tokens  *ahphost.TokenService
 
-	mu        sync.Mutex
-	decisions []string
+	mu          sync.Mutex
+	decisions   []string
+	gitRequests []*http.Request
+}
+
+type ahpRoundTrip func(*http.Request) (*http.Response, error)
+
+func (f ahpRoundTrip) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
+// ahpTestAdvertisement is a smart HTTP ref advertisement whose HEAD points at branch.
+func ahpTestAdvertisement(branch string) string {
+	pkt := func(line string) string { return fmt.Sprintf("%04x%s", len(line)+4, line) }
+	return pkt("# service=git-upload-pack\n") + "0000" +
+		pkt("1111111111111111111111111111111111111111 HEAD\x00multi_ack symref=HEAD:refs/heads/"+branch+" agent=git/test\n") +
+		pkt("1111111111111111111111111111111111111111 refs/heads/"+branch+"\n") + "0000"
 }
 
 func ahpTestAgent(name string, runtime corev1alpha1.AgentRuntimeType, model string) *corev1alpha1.Agent {
@@ -111,6 +127,13 @@ func newAHPTestEnvWith(t *testing.T, authz ContextTokenAuthorizationConfig, obje
 		env.decisions = append(env.decisions, strings.Join([]string{ui.Subject, namespace, task, approvalID, map[bool]string{true: "approve", false: "decline"}[approve]}, " "))
 		return nil
 	}
+	backend.gitHTTP = &http.Client{Transport: ahpRoundTrip(func(req *http.Request) (*http.Response, error) {
+		env.mu.Lock()
+		env.gitRequests = append(env.gitRequests, req)
+		env.mu.Unlock()
+		body := ahpTestAdvertisement("main")
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: http.Header{}}, nil
+	})}
 	require.NoError(t, host.RegisterBackend(backend))
 	env.backend = backend
 	env.server = httptest.NewServer(host)
@@ -582,4 +605,44 @@ func TestAHPBackendReopensARefusedApproval(t *testing.T) {
 		defer env.mu.Unlock()
 		return len(env.decisions) == 1 && env.decisions[0] == "approval-1 approve"
 	}, 5*time.Second, 20*time.Millisecond)
+}
+
+func TestAHPBackendResolvesTheDefaultBranchOnGitHubOnly(t *testing.T) {
+	gitSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "git-token", Namespace: ahpTestNamespace}, Data: map[string][]byte{"token": []byte("not-a-real-token")}}
+	env := newAHPTestEnv(t, gitSecret)
+	c := env.connect("alice")
+	ctx := ahpCtx(t)
+	var cloned struct {
+		Project map[string]any `json:"project"`
+	}
+	require.NoError(t, c.Request(ctx, ahpExtensionCloneProject, map[string]string{"url": "https://github.com/octo/widgets"}, &cloned))
+	require.Equal(t, "main", cloned.Project["defaultBranch"])
+	require.Equal(t, true, cloned.Project["git"])
+	env.mu.Lock()
+	require.Len(t, env.gitRequests, 1)
+	request := env.gitRequests[0]
+	env.mu.Unlock()
+	require.Equal(t, "https://github.com/octo/widgets.git/info/refs?service=git-upload-pack", request.URL.String())
+	user, password, ok := request.BasicAuth()
+	require.True(t, ok)
+	require.Equal(t, "x-access-token", user)
+	require.Equal(t, "not-a-real-token", password)
+
+	// Another host is never contacted, so its credential stays home.
+	cloned.Project = nil
+	require.NoError(t, c.Request(ctx, ahpExtensionCloneProject, map[string]string{"url": "https://git.example.com/octo/widgets"}, &cloned))
+	require.Nil(t, cloned.Project["defaultBranch"])
+	env.mu.Lock()
+	require.Len(t, env.gitRequests, 1)
+	env.mu.Unlock()
+}
+
+func TestAHPAdvertisedHead(t *testing.T) {
+	branch, err := ahpAdvertisedHead(strings.NewReader(ahpTestAdvertisement("master")))
+	require.NoError(t, err)
+	require.Equal(t, "master", branch)
+	for _, bad := range []string{"", "zzzz", "0000", "0008abc\n"} {
+		_, err := ahpAdvertisedHead(strings.NewReader(bad))
+		require.Error(t, err, "%q", bad)
+	}
 }
