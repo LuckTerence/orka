@@ -35,6 +35,7 @@ import (
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	v2conformance "github.com/orka-agents/orka/internal/harness/v2/conformance"
 	v2eventjournal "github.com/orka-agents/orka/internal/harness/v2/eventjournal"
+	"github.com/orka-agents/orka/internal/liveevents"
 	publisherservice "github.com/orka-agents/orka/internal/publisher/service"
 	"github.com/orka-agents/orka/internal/redact"
 	"github.com/orka-agents/orka/internal/store"
@@ -115,7 +116,9 @@ type ACPDispatcher struct {
 	RateLimitRetryInterval   time.Duration
 	AdmissionGate            *ACPAdmissionGate
 	ACPRuntimeImages         ACPRuntimeImages
-	runtimeContextFactory    func(context.Context, *corev1alpha1.Task) (context.Context, context.CancelFunc)
+	// LiveEvents receives each running Task's events as they arrive. It may be nil.
+	LiveEvents            *liveevents.Broker
+	runtimeContextFactory func(context.Context, *corev1alpha1.Task) (context.Context, context.CancelFunc)
 
 	mu              sync.Mutex
 	active          map[types.UID]struct{}

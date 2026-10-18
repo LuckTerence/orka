@@ -68,6 +68,7 @@ import (
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/liveevents"
 	_ "github.com/orka-agents/orka/internal/llm/anthropic"
 	_ "github.com/orka-agents/orka/internal/llm/openai"
 	_ "github.com/orka-agents/orka/internal/metrics"
@@ -1510,6 +1511,8 @@ func main() {
 	var controllerEpochManager *controller.ControllerEpochManager
 	var acpSessionContinuity *controller.ACPSessionContinuity
 	acpPromptLeases := &controller.ACPMCPPromptLeaseRegistry{}
+	// The ACP dispatcher publishes running Tasks' events here for in-process consumers.
+	liveEvents := liveevents.NewBroker(0)
 	var kubeControlStore *storekube.Store
 	if controlNamespace != "" {
 		// Session deletion must retain runtime cleanup even when admission is
@@ -1864,6 +1867,7 @@ func main() {
 			IdlePoolTTL:          acpIdlePoolTTL,
 			MCPRegistry:          acpMCPRegistry,
 			PromptLeases:         acpPromptLeases,
+			LiveEvents:           liveEvents,
 			ACPRuntimeImages: controller.ACPRuntimeImages{
 				Codex: acpCodexRuntimeImage, Claude: acpClaudeRuntimeImage, Copilot: acpCopilotRuntimeImage,
 				Opencode: acpOpencodeRuntimeImage,
