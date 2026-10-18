@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/gofiber/fiber/v3"
 	"github.com/microsoft/agent-host-protocol/clients/go/ahp"
 	"github.com/microsoft/agent-host-protocol/clients/go/ahptypes"
 	"github.com/microsoft/agent-host-protocol/clients/go/ahpws"
@@ -69,6 +70,11 @@ func ahpTestAgent(name string, runtime corev1alpha1.AgentRuntimeType, model stri
 
 func newAHPTestEnv(t *testing.T, objects ...client.Object) *ahpTestEnv {
 	t.Helper()
+	return newAHPTestEnvWith(t, ContextTokenAuthorizationConfig{}, objects...)
+}
+
+func newAHPTestEnvWith(t *testing.T, authz ContextTokenAuthorizationConfig, objects ...client.Object) *ahpTestEnv {
+	t.Helper()
 	objects = append(objects,
 		ahpTestAgent("copilot-haiku", corev1alpha1.AgentRuntimeCopilot, "claude-haiku-5.5"),
 		ahpTestAgent("copilot-gpt", corev1alpha1.AgentRuntimeCopilot, "gpt-5.4-nano"),
@@ -93,7 +99,9 @@ func newAHPTestEnv(t *testing.T, objects ...client.Object) *ahpTestEnv {
 	host, err := ahphost.New(ahphost.Config{Store: s, Tokens: tokens, Backends: registry, Logger: logr.Discard()})
 	require.NoError(t, err)
 	live := liveevents.NewBroker(0)
-	handlers := NewHandlers(HandlersConfig{Client: kube, APIReader: kube, ExecutionMode: executionmode.HarnessV2, ResultStore: s})
+	handlers := NewHandlers(HandlersConfig{
+		Client: kube, APIReader: kube, ExecutionMode: executionmode.HarnessV2, ResultStore: s, ContextTokenAuthorization: authz,
+	})
 	env := &ahpTestEnv{t: t, kube: kube, live: live, host: host, tokens: tokens}
 	backend := newAHPBackend(handlers, s, live, AHPBackendConfig{GitCredentialSecret: "git-token"})
 	backend.emitterFor = host.Emitter
@@ -112,8 +120,14 @@ func newAHPTestEnv(t *testing.T, objects ...client.Object) *ahpTestEnv {
 
 func (e *ahpTestEnv) connect(subject string) *ahp.Client {
 	e.t.Helper()
+	return e.connectWith(subject, "client-"+subject, ahphost.Constraints{})
+}
+
+func (e *ahpTestEnv) connectWith(subject, clientID string, constraints ahphost.Constraints) *ahp.Client {
+	e.t.Helper()
 	minted, err := e.tokens.Mint(context.Background(), ahphost.MintRequest{
 		Issuer: "https://issuer.example", Subject: subject, Username: subject, Namespace: ahpTestNamespace,
+		Constraints: constraints,
 	})
 	require.NoError(e.t, err)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -123,7 +137,7 @@ func (e *ahpTestEnv) connect(subject string) *ahp.Client {
 	c, err := ahp.Connect(ctx, transport, ahp.DefaultConfig())
 	require.NoError(e.t, err)
 	e.t.Cleanup(func() { _ = c.Shutdown(context.Background()) })
-	_, err = c.Initialize(ctx, "client-"+subject, []string{"0.9.0"}, nil)
+	_, err = c.Initialize(ctx, clientID, []string{"0.9.0"}, nil)
 	require.NoError(e.t, err)
 	return c
 }
@@ -338,6 +352,15 @@ func TestAHPBackendRunsATurnAsATask(t *testing.T) {
 	require.Equal(t, "// Widgets.\npackage widgets\n", after.Data)
 	require.NoError(t, c.Request(ctx, "resourceRead", ahptypes.ResourceReadParams{Channel: record.Changeset, Uri: files[0].Edit.Before.Content.Uri}, &before))
 	require.Equal(t, old, before.Data)
+	// The protocol's root-channel form serves the same contents.
+	rootAfter, err := c.ResourceRead(ctx, ahptypes.ResourceReadParams{Uri: ahpTestDir + "/widgets.go"})
+	require.NoError(t, err)
+	require.Equal(t, after.Data, rootAfter.Data)
+	rootBefore, err := c.ResourceRead(ctx, ahptypes.ResourceReadParams{Uri: files[0].Edit.Before.Content.Uri})
+	require.NoError(t, err)
+	require.Equal(t, old, rootBefore.Data)
+	_, err = env.connect("bob").ResourceRead(ctx, ahptypes.ResourceReadParams{Uri: ahpTestDir + "/widgets.go"})
+	require.Error(t, err, "another person cannot read the session's files")
 
 	var listed ahptypes.ListSessionsResult
 	require.NoError(t, c.Request(ctx, "listSessions", ahptypes.ListSessionsParams{}, &listed))
@@ -441,4 +464,122 @@ func TestAHPBackendAdmitsOneTurnAtATime(t *testing.T) {
 	var tasks corev1alpha1.TaskList
 	require.NoError(t, env.kube.List(ctx, &tasks, client.InNamespace(ahpTestNamespace)))
 	require.Len(t, tasks.Items, 1, "a message sent while a turn is starting is refused")
+}
+
+func TestAHPBackendDecidesAsTheConfirmingConnection(t *testing.T) {
+	env := newAHPTestEnvWith(t, ContextTokenAuthorizationConfig{
+		Mode: ContextTokenAuthorizationModeEnforce, TaskUpdateScopes: []string{"orka:tasks:update"},
+	})
+	c := env.connect("alice")
+	ctx := ahpCtx(t)
+	chat := env.setUpSession(c, "manual")
+	_, chatSub, err := c.Subscribe(ctx, chat)
+	require.NoError(t, err)
+	_, err = c.Dispatch(ctx, chat, ahptypes.StateAction{Value: &ahptypes.ChatTurnStartedAction{
+		Type: ahptypes.ActionTypeChatTurnStarted, TurnId: "turn-1", StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		Message: ahptypes.Message{Text: "run it", Origin: ahptypes.MessageOrigin{Kind: ahptypes.MessageKindUser}},
+	}})
+	require.NoError(t, err)
+	record := ahpSession{}
+	require.NoError(t, env.backend.getRecord(ctx, ahphost.UserKey("https://issuer.example", "alice"), ahpRecordSession, ahpTestSession, &record))
+	taskName := record.OrkaSession + "-t1"
+	env.waitForTask(taskName)
+
+	// The tool runs, then asks permission: the confirmation opens again.
+	env.publish(taskName, &harnessv2.UpdateEvent{Kind: harnessv2.UpdateToolCall, ToolCall: &harnessv2.ToolCallUpdate{
+		ToolCallID: "tool-1", Name: "bash", Title: "Run", Status: harnessv2.ToolCallStatusInProgress,
+	}})
+	waitForActionType(t, chatSub, "chat/toolCallReady")
+	env.live.Publish(liveevents.Event{Namespace: ahpTestNamespace, Task: taskName, Approval: &liveevents.Approval{
+		ID: "approval-1", State: liveevents.ApprovalPending, ToolCallID: "tool-1", ToolName: "bash", Title: "Run",
+	}})
+	waitForActionType(t, chatSub, "chat/toolCallReady")
+
+	// A narrower token of the same person may not decide.
+	narrow := env.connectWith("alice", "client-narrow", ahphost.Constraints{Delegated: true, Scopes: []string{"orka:ahp:tokens"}})
+	_, _, err = narrow.Subscribe(ctx, chat)
+	require.NoError(t, err)
+	_, err = narrow.Dispatch(ctx, chat, ahptypes.StateAction{Value: &ahptypes.ChatToolCallConfirmedAction{
+		Type: ahptypes.ActionTypeChatToolCallConfirmed, TurnId: "turn-1", ToolCallId: "tool-1", Approved: true,
+	}})
+	require.NoError(t, err)
+	time.Sleep(200 * time.Millisecond)
+	env.mu.Lock()
+	require.Empty(t, env.decisions, "a token without Task update scopes cannot approve")
+	env.mu.Unlock()
+
+	_, err = c.Dispatch(ctx, chat, ahptypes.StateAction{Value: &ahptypes.ChatToolCallConfirmedAction{
+		Type: ahptypes.ActionTypeChatToolCallConfirmed, TurnId: "turn-1", ToolCallId: "tool-1", Approved: false,
+	}})
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		env.mu.Lock()
+		defer env.mu.Unlock()
+		return len(env.decisions) == 1
+	}, 5*time.Second, 20*time.Millisecond)
+	require.Equal(t, "alice team "+taskName+" approval-1 decline", env.decisions[0])
+}
+
+func TestAHPBackendDisposeKeepsOtherSessions(t *testing.T) {
+	env := newAHPTestEnv(t)
+	c := env.connect("alice")
+	ctx := ahpCtx(t)
+	env.setUpSession(c, "manual")
+	provider := "copilot"
+	require.NoError(t, c.Request(ctx, "createSession", ahptypes.CreateSessionParams{
+		Channel: ahpTestSession + "-more", Provider: &provider, WorkingDirectories: []string{ahpTestDir},
+	}, nil))
+	require.NoError(t, c.Request(ctx, "disposeSession", ahptypes.DisposeSessionParams{Channel: ahpTestSession}, nil))
+	userKey := ahphost.UserKey("https://issuer.example", "alice")
+	var kept ahpSession
+	require.NoError(t, env.backend.getRecord(ctx, userKey, ahpRecordSession, ahpTestSession+"-more", &kept))
+	var gone ahpSession
+	require.Error(t, env.backend.getRecord(ctx, userKey, ahpRecordSession, ahpTestSession, &gone))
+}
+
+func TestAHPBackendReopensARefusedApproval(t *testing.T) {
+	env := newAHPTestEnv(t)
+	refusals := 1
+	env.backend.decideApproval = func(_ context.Context, _ *UserInfo, _, _, approvalID string, approve bool) error {
+		env.mu.Lock()
+		defer env.mu.Unlock()
+		if refusals > 0 {
+			refusals--
+			return fiber.NewError(fiber.StatusConflict, "try again")
+		}
+		env.decisions = append(env.decisions, approvalID+" "+map[bool]string{true: "approve", false: "decline"}[approve])
+		return nil
+	}
+	c := env.connect("alice")
+	ctx := ahpCtx(t)
+	chat := env.setUpSession(c, "manual")
+	_, chatSub, err := c.Subscribe(ctx, chat)
+	require.NoError(t, err)
+	_, err = c.Dispatch(ctx, chat, ahptypes.StateAction{Value: &ahptypes.ChatTurnStartedAction{
+		Type: ahptypes.ActionTypeChatTurnStarted, TurnId: "turn-1", StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		Message: ahptypes.Message{Text: "run it", Origin: ahptypes.MessageOrigin{Kind: ahptypes.MessageKindUser}},
+	}})
+	require.NoError(t, err)
+	record := ahpSession{}
+	require.NoError(t, env.backend.getRecord(ctx, ahphost.UserKey("https://issuer.example", "alice"), ahpRecordSession, ahpTestSession, &record))
+	taskName := record.OrkaSession + "-t1"
+	env.waitForTask(taskName)
+	env.live.Publish(liveevents.Event{Namespace: ahpTestNamespace, Task: taskName, Approval: &liveevents.Approval{
+		ID: "approval-1", State: liveevents.ApprovalPending, ToolCallID: "tool-1", ToolName: "bash", Title: "Run",
+	}})
+	waitForActionType(t, chatSub, "chat/toolCallReady")
+	confirm := func() {
+		_, err := c.Dispatch(ctx, chat, ahptypes.StateAction{Value: &ahptypes.ChatToolCallConfirmedAction{
+			Type: ahptypes.ActionTypeChatToolCallConfirmed, TurnId: "turn-1", ToolCallId: "tool-1", Approved: true,
+		}})
+		require.NoError(t, err)
+	}
+	confirm()
+	waitForActionType(t, chatSub, "chat/toolCallReady") // reopened after the refusal
+	confirm()
+	require.Eventually(t, func() bool {
+		env.mu.Lock()
+		defer env.mu.Unlock()
+		return len(env.decisions) == 1 && env.decisions[0] == "approval-1 approve"
+	}, 5*time.Second, 20*time.Millisecond)
 }

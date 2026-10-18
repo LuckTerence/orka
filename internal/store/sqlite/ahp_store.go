@@ -486,3 +486,12 @@ func (s *Store) DeleteAHPRecords(ctx context.Context, userKey, kind, prefix stri
 	}
 	return nil
 }
+
+// DeleteAHPRecord removes one of a user's records.
+func (s *Store) DeleteAHPRecord(ctx context.Context, userKey, kind, key string) error {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM ahp_records WHERE user_key = ? AND kind = ? AND key = ?`,
+		userKey, kind, key); err != nil {
+		return fmt.Errorf("delete AHP record: %w", err)
+	}
+	return nil
+}

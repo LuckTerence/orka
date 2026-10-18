@@ -195,4 +195,14 @@ func TestAHPRecordsAreScopedAndDeletedByLiteralPrefix(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "bob's", string(bobs.Value))
 	require.Error(t, s.PutAHPRecord(ctx, store.AHPRecord{UserKey: "alice", Kind: "content"}))
+
+	// An exact delete leaves keys that merely share the prefix.
+	put("alice", "session", "ahp-session:/one", "one")
+	put("alice", "session", "ahp-session:/one-more", "more")
+	require.NoError(t, s.DeleteAHPRecord(ctx, "alice", "session", "ahp-session:/one"))
+	sessions, err := s.ListAHPRecords(ctx, "alice", "session")
+	require.NoError(t, err)
+	require.Len(t, sessions, 1)
+	require.Equal(t, "ahp-session:/one-more", sessions[0].Key)
+	require.NoError(t, s.DeleteAHPRecord(ctx, "alice", "session", "missing"))
 }

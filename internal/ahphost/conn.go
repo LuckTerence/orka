@@ -364,7 +364,22 @@ func (c *conn) resourceRead(ctx context.Context, raw json.RawMessage) (any, erro
 		return nil, err
 	}
 	notFound := rpcErr(ahptypes.ErrorCodeNotFound, "not found")
-	if params.Channel == rootChannel || !validURI(params.Channel) || params.Uri == "" || len(params.Uri) > maxURILength {
+	if params.Uri == "" || len(params.Uri) > maxURILength {
+		return nil, notFound
+	}
+	if params.Channel == rootChannel {
+		// The protocol scopes resourceRead to the root channel; backends find
+		// the session that owns the resource, within this user's state only.
+		result, err := c.host.cfg.Backends.readRootResource(ctx, c.principal, params.Uri)
+		if errors.Is(err, ErrResourceNotFound) {
+			return nil, notFound
+		}
+		if err != nil {
+			return nil, err
+		}
+		return result, nil
+	}
+	if !validURI(params.Channel) {
 		return nil, notFound
 	}
 	stored, _, err := c.host.readChannel(ctx, c.principal.UserKey, params.Channel)

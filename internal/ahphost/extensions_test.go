@@ -149,9 +149,15 @@ func TestResourceReadServesOnlyASessionsChannels(t *testing.T) {
 	require.Equal(t, "package a\n", got.Data)
 	require.Equal(t, []string{"ahp-session:/one ahp-session:/one/changes file:///work/a.go"}, backend.read)
 
+	// The protocol's root-channel form reaches the backend without a session.
+	root, err := client.ResourceRead(ctx, ahptypes.ResourceReadParams{Uri: "file:///work/a.go"})
+	require.NoError(t, err)
+	require.Equal(t, "package a\n", root.Data)
+	require.Equal(t, " ahp-root:// file:///work/a.go", backend.read[1])
+
 	for _, params := range []ahptypes.ResourceReadParams{
 		{Channel: changesetURI("ahp-session:/one"), Uri: "file:///etc/passwd"},
-		{Channel: rootChannel, Uri: "file:///work/a.go"},
+		{Channel: rootChannel, Uri: "file:///etc/passwd"},
 		{Channel: "ahp-session:/missing", Uri: "file:///work/a.go"},
 	} {
 		_, err := read(client, params)

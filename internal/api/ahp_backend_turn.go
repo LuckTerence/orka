@@ -41,7 +41,6 @@ const (
 type ahpTurn struct {
 	b         *ahpBackend
 	principal ahphost.Principal
-	ui        *UserInfo
 	session   ahpSession
 	id        string
 	task      string
@@ -61,6 +60,7 @@ type ahpTurn struct {
 
 type ahpToolCall struct {
 	started, ready, completed bool
+	title                     string
 	// approval is the held permission request waiting for the person.
 	approval string
 }
@@ -130,7 +130,7 @@ func (b *ahpBackend) startTurn(ctx context.Context, principal ahphost.Principal,
 
 	turnCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	turn := &ahpTurn{
-		b: b, principal: principal, ui: ui, session: record, id: action.TurnId, task: name, startedAt: started, emit: emit,
+		b: b, principal: principal, session: record, id: action.TurnId, task: name, startedAt: started, emit: emit,
 		ctx: turnCtx, cancel: cancel, tools: map[string]*ahpToolCall{},
 	}
 	b.updateSession(ctx, principal.UserKey, record.Session, func(s *ahpSession) {
@@ -383,7 +383,7 @@ func (t *ahpTurn) startTool(id, name, title string) *ahpToolCall {
 		title = name
 	}
 	t.textPart, t.thoughtPart = "", ""
-	call.started = true
+	call.started, call.title = true, title
 	t.chat(ahptypes.StateAction{Value: &ahptypes.ChatToolCallStartAction{
 		Type: ahptypes.ActionTypeChatToolCallStart, TurnId: t.id, ToolCallId: id, ToolName: name, DisplayName: title,
 	}})
@@ -473,22 +473,16 @@ func (t *ahpTurn) onApproval(approval *liveevents.Approval) {
 			name = ahpToolFallbackName
 		}
 		call := t.startTool(id, name, approval.Title)
-		if call.ready || call.completed {
+		// A running call may ask again; each hold reopens its confirmation.
+		if call.completed || call.approval == approval.ID {
 			return
 		}
 		call.ready, call.approval = true, approval.ID
 		title := approval.Title
 		if title == "" {
-			title = name
+			title = call.title
 		}
-		t.chat(ahptypes.StateAction{Value: &ahptypes.ChatToolCallReadyAction{
-			Type: ahptypes.ActionTypeChatToolCallReady, TurnId: t.id, ToolCallId: id,
-			InvocationMessage: ahptypes.StringOrMarkdown{Plain: &title}, ConfirmationTitle: &ahptypes.StringOrMarkdown{Plain: &title},
-			Options: []ahptypes.ConfirmationOption{
-				{Id: ahpOptionApprove, Label: "Allow", Kind: ahptypes.ConfirmationOptionKindApprove},
-				{Id: ahpOptionDeny, Label: "Deny", Kind: ahptypes.ConfirmationOptionKindDeny},
-			},
-		}})
+		t.askForConfirmation(id, title)
 	default:
 		call := t.tools[id]
 		if call == nil || call.approval == "" {
@@ -501,6 +495,18 @@ func (t *ahpTurn) onApproval(approval *liveevents.Approval) {
 			Type: ahptypes.ActionTypeChatToolCallConfirmed, TurnId: t.id, ToolCallId: id, Approved: approved, Confirmed: &reason,
 		}})
 	}
+}
+
+// askForConfirmation shows a tool call as waiting for the person's decision.
+func (t *ahpTurn) askForConfirmation(id, title string) {
+	t.chat(ahptypes.StateAction{Value: &ahptypes.ChatToolCallReadyAction{
+		Type: ahptypes.ActionTypeChatToolCallReady, TurnId: t.id, ToolCallId: id,
+		InvocationMessage: ahptypes.StringOrMarkdown{Plain: &title}, ConfirmationTitle: &ahptypes.StringOrMarkdown{Plain: &title},
+		Options: []ahptypes.ConfirmationOption{
+			{Id: ahpOptionApprove, Label: "Allow", Kind: ahptypes.ConfirmationOptionKindApprove},
+			{Id: ahpOptionDeny, Label: "Deny", Kind: ahptypes.ConfirmationOptionKindDeny},
+		},
+	}})
 }
 
 func ahpOptionAllows(approval *liveevents.Approval) bool {
@@ -519,8 +525,11 @@ func (t *ahpTurn) awaitingConfirmation(toolCallID string) bool {
 	return call != nil && call.approval != ""
 }
 
-// confirm answers a held permission request with the person's decision.
-func (t *ahpTurn) confirm(ctx context.Context, toolCallID string, approved bool) {
+// confirm answers a held permission request with the decision of the
+// connection that confirmed it, as that connection's own identity. A refused
+// approval reopens the confirmation. A refused denial needs nothing: the
+// request expires and is rejected, so the tool does not run either way.
+func (t *ahpTurn) confirm(ctx context.Context, principal ahphost.Principal, toolCallID string, approved bool) {
 	t.mu.Lock()
 	call := t.tools[toolCallID]
 	approval := ""
@@ -531,9 +540,21 @@ func (t *ahpTurn) confirm(ctx context.Context, toolCallID string, approved bool)
 	if approval == "" || t.b.decideApproval == nil {
 		return
 	}
-	if err := t.b.decideApproval(ctx, t.ui, t.session.Namespace, t.task, approval, approved); err != nil {
-		log.Error(err, "decide AHP tool approval", "namespace", t.session.Namespace, "task", t.task)
+	err := t.b.decideApproval(ctx, ahpPrincipalUserInfo(principal), t.session.Namespace, t.task, approval, approved)
+	if err == nil {
+		return
 	}
+	log.Info("an AHP tool decision was refused", "namespace", t.session.Namespace, "task", t.task, "reason", ahpErrorMessage(err))
+	if !approved {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if call.completed || call.approval != "" {
+		return
+	}
+	call.approval = approval
+	t.askForConfirmation(toolCallID, call.title)
 }
 
 // recordDiffs keeps the reported file edits and lists them in the session's
@@ -783,7 +804,7 @@ func (b *ahpBackend) recoverTurns(ctx context.Context, principal ahphost.Princip
 		started, _ := time.Parse(time.RFC3339Nano, record.ActiveStartedAt)
 		turnCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 		turn := &ahpTurn{
-			b: b, principal: principal, ui: ahpPrincipalUserInfo(principal), session: record, id: record.ActiveTurn,
+			b: b, principal: principal, session: record, id: record.ActiveTurn,
 			task: record.ActiveTask, startedAt: started, emit: b.emitterFor(principal), ctx: turnCtx, cancel: cancel,
 			tools: map[string]*ahpToolCall{},
 		}

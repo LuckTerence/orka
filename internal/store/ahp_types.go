@@ -126,4 +126,6 @@ type AHPStore interface {
 	ListAHPRecords(ctx context.Context, userKey, kind string) ([]AHPRecord, error)
 	// DeleteAHPRecords removes the user's records of kind whose key starts with prefix.
 	DeleteAHPRecords(ctx context.Context, userKey, kind, prefix string) error
+	// DeleteAHPRecord removes one record; a missing record is not an error.
+	DeleteAHPRecord(ctx context.Context, userKey, kind, key string) error
 }

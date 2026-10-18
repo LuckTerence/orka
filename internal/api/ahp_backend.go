@@ -621,10 +621,10 @@ func (b *ahpBackend) DisposeSession(ctx context.Context, principal ahphost.Princ
 			return err
 		}
 	}
-	if err := b.store.DeleteAHPRecords(ctx, principal.UserKey, ahpRecordChat, record.Chat); err != nil {
+	if err := b.store.DeleteAHPRecord(ctx, principal.UserKey, ahpRecordChat, record.Chat); err != nil {
 		return err
 	}
-	return b.store.DeleteAHPRecords(ctx, principal.UserKey, ahpRecordSession, session)
+	return b.store.DeleteAHPRecord(ctx, principal.UserKey, ahpRecordSession, session)
 }
 
 func (b *ahpBackend) cancelTask(ctx context.Context, principal ahphost.Principal, namespace, name string) {
@@ -701,8 +701,11 @@ func (b *ahpBackend) AuthorizeClientAction(ctx context.Context, principal ahphos
 		if record.ActiveTurn == "" || a.TurnId != record.ActiveTurn {
 			return &ahphost.Rejection{Reason: "the turn is not running"}
 		}
-		return nil
+		return b.mayOperateTasks(principal)
 	case *ahptypes.ChatToolCallConfirmedAction:
+		if err := b.mayOperateTasks(principal); err != nil {
+			return err
+		}
 		turn := b.activeTurn(principal.UserKey, record.Session)
 		if turn == nil || a.TurnId != turn.id || !turn.awaitingConfirmation(a.ToolCallId) {
 			return &ahphost.Rejection{Reason: "the tool call is not waiting for a decision"}
@@ -733,6 +736,17 @@ func (b *ahpBackend) AuthorizeClientAction(ctx context.Context, principal ahphos
 	}
 }
 
+// mayOperateTasks refuses a delegated token without the scopes that update
+// Tasks, before its decision or cancel is shown as accepted. The decision and
+// cancel paths check the same identity again.
+func (b *ahpBackend) mayOperateTasks(principal ahphost.Principal) error {
+	cfg := b.h.contextTokenAuthorization
+	if principal.Constraints.Delegated && cfg.Enabled() && !hasAnyScope(principal.Constraints.Scopes, cfg.TaskUpdateScopes) {
+		return &ahphost.Rejection{Reason: "this connection's token may not operate Tasks"}
+	}
+	return nil
+}
+
 // HandleClientAction runs what an admitted client action asks for.
 func (b *ahpBackend) HandleClientAction(ctx context.Context, principal ahphost.Principal, channel string, action ahptypes.StateAction, emit ahphost.Emitter) {
 	record, err := b.sessionForChannel(ctx, principal.UserKey, channel)
@@ -751,7 +765,7 @@ func (b *ahpBackend) HandleClientAction(ctx context.Context, principal ahphost.P
 		}
 	case *ahptypes.ChatToolCallConfirmedAction:
 		if turn := b.activeTurn(principal.UserKey, record.Session); turn != nil {
-			turn.confirm(ctx, a.ToolCallId, a.Approved)
+			turn.confirm(ctx, principal, a.ToolCallId, a.Approved)
 		}
 	case *ahptypes.SessionConfigChangedAction:
 		if _, ok := a.Config[ahpConfigApprovalMode]; !ok {
@@ -791,32 +805,64 @@ const ahpContentScheme = "ahp-content:/"
 
 // ReadResource serves the before and after contents of the files in a
 // session's changeset, as the agent reported them. Nothing is read from a
-// workspace or from this server's disk.
+// workspace or from this server's disk. On the root channel the session is
+// found from the resource: a content URI names it, and a file is served from
+// the user's session that last changed it.
 func (b *ahpBackend) ReadResource(ctx context.Context, principal ahphost.Principal, session, channel, uri string) (ahptypes.ResourceReadResult, error) {
-	var record ahpSession
-	if err := b.getRecord(ctx, principal.UserKey, ahpRecordSession, session, &record); err != nil || channel != record.Changeset {
-		return ahptypes.ResourceReadResult{}, ahphost.ErrResourceNotFound
-	}
-	hash := ahpHash(principal.UserKey, session)
-	nonce := ""
-	switch {
-	case strings.HasPrefix(uri, ahpContentScheme+hash[:24]+"/"):
-		nonce = strings.TrimPrefix(uri, ahpContentScheme+hash[:24]+"/")
-	case strings.HasPrefix(uri, "file:///"):
-		var file ahpFileContent
-		if err := b.getRecord(ctx, principal.UserKey, ahpRecordFile, hash+"/"+strings.TrimPrefix(uri, "file://"), &file); err != nil {
+	var sessions []string
+	if session == "" {
+		records, err := b.store.ListAHPRecords(ctx, principal.UserKey, ahpRecordSession)
+		if err != nil {
+			return ahptypes.ResourceReadResult{}, err
+		}
+		for _, record := range records {
+			sessions = append(sessions, record.Key)
+		}
+	} else {
+		var record ahpSession
+		if err := b.getRecord(ctx, principal.UserKey, ahpRecordSession, session, &record); err != nil || channel != record.Changeset {
 			return ahptypes.ResourceReadResult{}, ahphost.ErrResourceNotFound
 		}
-		nonce = file.After
+		sessions = []string{session}
 	}
-	if nonce == "" {
+	var found store.AHPRecord
+	ok := false
+	for _, candidate := range sessions {
+		hash := ahpHash(principal.UserKey, candidate)
+		nonce := ""
+		var updated time.Time
+		switch {
+		case strings.HasPrefix(uri, ahpContentScheme+hash[:24]+"/"):
+			nonce = strings.TrimPrefix(uri, ahpContentScheme+hash[:24]+"/")
+		case strings.HasPrefix(uri, "file:///"):
+			fileRecord, err := b.store.GetAHPRecord(ctx, principal.UserKey, ahpRecordFile, hash+"/"+strings.TrimPrefix(uri, "file://"))
+			if err != nil {
+				continue
+			}
+			var file ahpFileContent
+			if json.Unmarshal(fileRecord.Value, &file) != nil {
+				continue
+			}
+			nonce, updated = file.After, fileRecord.UpdatedAt
+		}
+		if nonce == "" {
+			continue
+		}
+		content, err := b.store.GetAHPRecord(ctx, principal.UserKey, ahpRecordContent, hash+"/"+nonce)
+		if err != nil {
+			continue
+		}
+		if !updated.IsZero() {
+			content.UpdatedAt = updated
+		}
+		if !ok || content.UpdatedAt.After(found.UpdatedAt) {
+			found, ok = content, true
+		}
+	}
+	if !ok {
 		return ahptypes.ResourceReadResult{}, ahphost.ErrResourceNotFound
 	}
-	content, err := b.store.GetAHPRecord(ctx, principal.UserKey, ahpRecordContent, hash+"/"+nonce)
-	if err != nil {
-		return ahptypes.ResourceReadResult{}, ahphost.ErrResourceNotFound
-	}
-	return ahptypes.ResourceReadResult{Data: string(content.Value), Encoding: ahptypes.ContentEncodingUtf8}, nil
+	return ahptypes.ResourceReadResult{Data: string(found.Value), Encoding: ahptypes.ContentEncodingUtf8}, nil
 }
 
 // gitCredential returns the user's repository credential, if configured.

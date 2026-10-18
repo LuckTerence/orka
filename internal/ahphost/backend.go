@@ -79,7 +79,9 @@ type ExtensionHandler interface {
 }
 
 // ResourceReader serves resourceRead for the channels of a backend's sessions.
-// It returns ErrResourceNotFound for anything it does not serve.
+// It returns ErrResourceNotFound for anything it does not serve. A read on the
+// root channel arrives with an empty session: the backend resolves which of
+// the user's sessions, if any, owns the resource.
 type ResourceReader interface {
 	ReadResource(ctx context.Context, principal Principal, session, channel, uri string) (ahptypes.ResourceReadResult, error)
 }
@@ -228,4 +230,22 @@ func (r *Registry) extension(ctx context.Context, principal Principal, method st
 		}
 	}
 	return nil, ErrUnknownExtension
+}
+
+// readRootResource offers a root-channel read to every backend that serves resources.
+func (r *Registry) readRootResource(ctx context.Context, principal Principal, uri string) (ahptypes.ResourceReadResult, error) {
+	if r != nil {
+		for _, backend := range r.list() {
+			reader, ok := backend.(ResourceReader)
+			if !ok {
+				continue
+			}
+			result, err := reader.ReadResource(ctx, principal, "", ahptypes.RootResourceURI, uri)
+			if errors.Is(err, ErrResourceNotFound) {
+				continue
+			}
+			return result, err
+		}
+	}
+	return ahptypes.ResourceReadResult{}, ErrResourceNotFound
 }
