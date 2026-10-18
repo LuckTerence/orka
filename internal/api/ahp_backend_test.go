@@ -259,6 +259,8 @@ func TestAHPBackendRunsATurnAsATask(t *testing.T) {
 	require.Equal(t, "git-token", task.Spec.Workspace.PublicationCredentialRef.Name)
 	require.Equal(t, "alice", task.Spec.RequestedBy.Subject, "the Task is the person's")
 	require.Equal(t, labels.RequestedBySourceAPI, task.Annotations[labels.AnnotationRequestedBySource])
+	require.Equal(t, corev1alpha1.PermissionDecisionsRequester, task.Spec.AgentRuntime.PermissionDecisions,
+		"manual approvals hold permission requests for the person")
 
 	// A second message while the turn runs is refused.
 	_, err = c.Dispatch(ctx, chat, ahptypes.StateAction{Value: &ahptypes.ChatTurnStartedAction{
@@ -376,6 +378,7 @@ func TestAHPBackendCancelsATurn(t *testing.T) {
 	taskName := record.OrkaSession + "-t1"
 	task := env.waitForTask(taskName)
 	require.Equal(t, corev1alpha1.WorkspaceIntentRead, task.Spec.Workspace.Intent, "without a git credential turns are read-only")
+	require.True(t, task.Spec.AgentRuntime == nil || task.Spec.AgentRuntime.PermissionDecisions == "", "allow all leaves decisions to policy")
 	require.Eventually(t, func() bool {
 		return env.backend.activeTurn(ahphost.UserKey("https://issuer.example", "alice"), ahpTestSession) != nil
 	}, 5*time.Second, 20*time.Millisecond)

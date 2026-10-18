@@ -129,9 +129,22 @@ func newAHPBackend(h *Handlers, s store.AHPStore, live *liveevents.Broker, cfg A
 	}
 	return &ahpBackend{
 		h: h, store: s, live: live, cfg: cfg, now: time.Now,
-		applyApprovalMode: func(*corev1alpha1.Task, bool) {},
-		turns:             map[string]*ahpTurn{}, recovered: map[string]bool{},
+		applyApprovalMode: ahpApplyApprovalMode, decideApproval: h.DecideTaskApprovalAs,
+		turns: map[string]*ahpTurn{}, recovered: map[string]bool{},
 	}
+}
+
+// ahpApplyApprovalMode makes a manual-approval turn hold every permission
+// request Orka's policy would allow for the person to decide. Allow all
+// leaves the decision to policy.
+func ahpApplyApprovalMode(task *corev1alpha1.Task, manual bool) {
+	if !manual {
+		return
+	}
+	if task.Spec.AgentRuntime == nil {
+		task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{}
+	}
+	task.Spec.AgentRuntime.PermissionDecisions = corev1alpha1.PermissionDecisionsRequester
 }
 
 func (b *ahpBackend) Name() string { return ahpBackendName }
