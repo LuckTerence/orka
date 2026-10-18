@@ -1,0 +1,388 @@
+/* Copyright (c) 2026. MIT License - see LICENSE file for details. */
+
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+const testConfiguredImage = "registry.example/kagent-configured@sha256:" + "1111111111111111111111111111111111111111111111111111111111111111"
+const testRuntimeImage = "registry.example/kagent-runtime@sha256:" + "2222222222222222222222222222222222222222222222222222222222222222"
+
+func kagentBundleArgs(path, dir string, extra ...string) []string {
+	return append([]string{"-f", path, "--bundle-dir", dir, "--control-plane-url", "http://kagent-controller.kagent.svc:8083",
+		"--relay-url", governedRelay, "--model-upstream-url", "http://vekil.vekil-system.svc:8080/v1", "--model-upstream-model", "gpt-4.1"}, extra...)
+}
+
+func writeTempFile(t *testing.T, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "input.yaml")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func readBundle(t *testing.T, dir string) (kagentBundle, []byte) {
+	t.Helper()
+	bundle, config, err := readKagentBundle(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return bundle, config
+}
+
+// A bundle names its runtime after the pinned configuration, so a changed
+// pin gets a new runtime beside the old one, and the same pin the same one.
+func TestAgentImportKagentCmdWritesABundlePinnedToItsConfiguration(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := t.TempDir()
+	path := writeTempFile(t, governedKagentV0Fixture)
+	out, err := runKagentImport(t, kagentBundleArgs(path, dir, "--dry-run", "--approval-required-tool", "probe-orka",
+		"--unreachable", "kagent-postgresql.kagent.svc:5432", "--accept-kagent-commit", "0123456", "--max-output-tokens", "2048")...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle, config := readBundle(t, filepath.Join(dir, "probe-gov"))
+	if !strings.HasPrefix(bundle.Runtime, "probe-gov-kagent-") || len(bundle.Runtime) != len("probe-gov-kagent-")+kagentBundleDigestChars ||
+		bundle.KagentVersion != kagentVersionV0 || !bundle.Governed || bundle.Model != "kagent/kagent/probe-gov" ||
+		strings.Join(bundle.AllowedTools, ",") != "probe-orka" || strings.Join(bundle.ApprovalRequiredTools, ",") != "probe-orka" {
+		t.Fatalf("bundle = %+v", bundle)
+	}
+	if !strings.Contains(out, "name: "+bundle.Runtime) {
+		t.Fatalf("the Orka Agent does not reference the pinned runtime:\n%s", out)
+	}
+	var wrapper kagentWrapperConfig
+	if err := json.Unmarshal(config, &wrapper); err != nil {
+		t.Fatal(err)
+	}
+	if wrapper.Kagent.ExpectedImageDigest != governedV0Image || strings.Join(wrapper.Unreachable, ",") != "kagent-postgresql.kagent.svc:5432" ||
+		strings.Join(wrapper.Kagent.AcceptedCommits, ",") != "0123456" || wrapper.Governed == nil || wrapper.Governed.MaxOutputTokens != 2048 {
+		t.Fatalf("bundle configuration = %s", config)
+	}
+	again := t.TempDir()
+	if _, err := runKagentImport(t, kagentBundleArgs(path, again, "--dry-run", "--approval-required-tool", "probe-orka",
+		"--unreachable", "kagent-postgresql.kagent.svc:5432", "--accept-kagent-commit", "0123456", "--max-output-tokens", "2048")...); err != nil {
+		t.Fatal(err)
+	}
+	if same, _ := readBundle(t, filepath.Join(again, "probe-gov")); same.Runtime != bundle.Runtime {
+		t.Fatalf("the same pin named runtime %s, then %s", bundle.Runtime, same.Runtime)
+	}
+	if _, err := runKagentImport(t, kagentBundleArgs(path, again, "--dry-run")...); err != nil {
+		t.Fatal(err)
+	}
+	if changed, _ := readBundle(t, filepath.Join(again, "probe-gov")); changed.Runtime == bundle.Runtime {
+		t.Fatal("a changed configuration kept its runtime name")
+	}
+}
+
+func TestAgentImportKagentCmdRefusesBadWrapperFlags(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	path := writeTempFile(t, governedKagentV0Fixture)
+	for name, test := range map[string]struct {
+		args []string
+		want string
+	}{
+		"no config destination":   {[]string{"-f", path, "--dry-run", "--unreachable", "router:8080"}, "pass --wrapper-config-dir or --bundle-dir"},
+		"bad unreachable":         {kagentBundleArgs(path, t.TempDir(), "--dry-run", "--unreachable", "router"), "must be a host:port"},
+		"bad commit":              {kagentBundleArgs(path, t.TempDir(), "--dry-run", "--accept-kagent-commit", "1EB89FB"), "lowercase hex"},
+		"unknown approval tool":   {kagentBundleArgs(path, t.TempDir(), "--dry-run", "--approval-required-tool", "nope"), "not an allowed tool"},
+		"negative output":         {kagentBundleArgs(path, t.TempDir(), "--dry-run", "--max-output-tokens", "-1"), "must not be negative"},
+		"two config destinations": {append(kagentBundleArgs(path, t.TempDir(), "--dry-run"), "--wrapper-config-dir", t.TempDir()), "are exclusive"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := runKagentImport(t, test.args...); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("err = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+// The image digest comes from the Agent's only pod, which must run the
+// pinned config hash.
+func TestKagentV0ImageDigestComesFromTheAgentsPod(t *testing.T) {
+	for name, test := range map[string]struct {
+		input, want string
+	}{
+		"no pod":          {strings.Replace(governedKagentV0Fixture, "kind: Pod\n", "kind: ConfigMap\n", 1), "the Agent's pod is not in the input"},
+		"another hash":    {strings.Replace(governedKagentV0Fixture, `annotations: {kagent.dev/config-hash: "`+governedV0Hash+`"}`+"\nspec:\n  containers:\n  - name: kagent\n    image", `annotations: {kagent.dev/config-hash: "7"}`+"\nspec:\n  containers:\n  - name: kagent\n    image", 1), `runs config hash "7"`},
+		"no image digest": {strings.Replace(governedKagentV0Fixture, "golang-adk@"+governedV0Image, "golang-adk:0.10.3", 1), "reports no image digest"},
+		"not running":     {strings.Replace(governedKagentV0Fixture, "phase: Running", "phase: Pending", 1), "is not running"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			mode := classifyV0Fixture(t, test.input, governedRelay)
+			if mode.ImageDigest != "" || !strings.Contains(mode.ImageProblem, test.want) {
+				t.Fatalf("mode = %+v, want %q", mode, test.want)
+			}
+		})
+	}
+	if mode := classifyV0Fixture(t, governedKagentV0Fixture, governedRelay); mode.ImageDigest != governedV0Image || strings.Join(mode.Tools, ",") != "probe-orka" {
+		t.Fatalf("mode = %+v", mode)
+	}
+}
+
+// Activating a bundle points the Orka Agent at its runtime only once Orka
+// reports that runtime Ready.
+func TestAgentImportKagentCmdActivatesABundleOnlyOnAReadyRuntime(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := t.TempDir()
+	path := writeTempFile(t, governedKagentV0Fixture)
+	if _, err := runKagentImport(t, kagentBundleArgs(path, dir, "--dry-run")...); err != nil {
+		t.Fatal(err)
+	}
+	bundle, _ := readBundle(t, filepath.Join(dir, "probe-gov"))
+	api := &kagentImportAPI{agents: map[string]map[string]any{}, runtimes: map[string]map[string]any{}}
+	srv := kagentImportAPIServer(t, api)
+	args := kagentBundleArgs(path, dir, "--server", srv.URL, "-n", "orka-system")
+	if _, err := runKagentImport(t, args...); err == nil || !strings.Contains(err.Error(), "is not registered") || api.creates != 0 {
+		t.Fatalf("activation before registration = %v (%d creates)", err, api.creates)
+	}
+	notReady := map[string]any{"status": map[string]any{"conditions": []any{map[string]any{"type": "Ready", "status": "False"}}}}
+	api.mu.Lock()
+	api.runtimes[bundle.Runtime] = notReady
+	api.mu.Unlock()
+	// With two Agents, one unready runtime keeps both where they are.
+	two := writeTempFile(t, governedKagentV0Fixture+"---\n"+strings.ReplaceAll(governedKagentV0Fixture, "probe-gov", "probe-two"))
+	twoDir := t.TempDir()
+	if _, err := runKagentImport(t, kagentBundleArgs(two, twoDir, "--dry-run")...); err != nil {
+		t.Fatal(err)
+	}
+	ready := map[string]any{"status": map[string]any{"conditions": []any{map[string]any{"type": "Ready", "status": "True"}}}}
+	other, _ := readBundle(t, filepath.Join(twoDir, "probe-two"))
+	api.mu.Lock()
+	api.runtimes[other.Runtime] = ready
+	api.mu.Unlock()
+	if _, err := runKagentImport(t, kagentBundleArgs(two, twoDir, "--server", srv.URL, "-n", "orka-system")...); err == nil || api.creates != 0 {
+		t.Fatalf("a partial activation = %v (%d creates)", err, api.creates)
+	}
+	if _, err := runKagentImport(t, args...); err == nil || !strings.Contains(err.Error(), "is not Ready") || api.creates != 0 {
+		t.Fatalf("activation on an unready runtime = %v (%d creates)", err, api.creates)
+	}
+	api.mu.Lock()
+	api.runtimes[bundle.Runtime] = map[string]any{"status": map[string]any{"conditions": []any{map[string]any{"type": "Ready", "status": "True"}}}}
+	api.mu.Unlock()
+	if _, err := runKagentImport(t, args...); err != nil || api.creates != 1 {
+		t.Fatalf("activation on a ready runtime = %v (%d creates)", err, api.creates)
+	}
+	api.mu.Lock()
+	ref := kagentString(api.agents["probe-gov"], "spec", "runtime", "runtimeRef", "name")
+	api.mu.Unlock()
+	if ref != bundle.Runtime {
+		t.Fatalf("activated Agent references %q, want %q", ref, bundle.Runtime)
+	}
+}
+
+func renderBundle(t *testing.T, dir string, options kagentRenderOptions) []map[string]any {
+	t.Helper()
+	list, err := renderKagentRuntime(dir, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := list["items"].([]any)
+	items := make([]map[string]any, 0, len(raw))
+	for _, item := range raw {
+		raw, _ := json.Marshal(item)
+		var obj map[string]any
+		_ = json.Unmarshal(raw, &obj)
+		items = append(items, obj)
+	}
+	return items
+}
+
+func findKind(items []map[string]any, kind string) map[string]any {
+	for _, item := range items {
+		if item["kind"] == kind {
+			return item
+		}
+	}
+	return nil
+}
+
+func TestRenderKagentRuntime(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := t.TempDir()
+	path := writeTempFile(t, governedKagentV0Fixture)
+	if _, err := runKagentImport(t, kagentBundleArgs(path, dir, "--dry-run", "--approval-required-tool", "probe-orka")...); err != nil {
+		t.Fatal(err)
+	}
+	bundleDir := filepath.Join(dir, "probe-gov")
+	bundle, config := readBundle(t, bundleDir)
+	options := kagentRenderOptions{ConfiguredImage: testConfiguredImage, RuntimeImage: testRuntimeImage, ControllerEpoch: 3,
+		Namespace: "orka-system", Part: kagentPartWorkload}
+	workload := renderBundle(t, bundleDir, options)
+	deployment := findKind(workload, "Deployment")
+	pod := kagentMap(deployment, "spec", "template", "spec")
+	containers, _ := pod["containers"].([]any)
+	if kagentString(deployment, "metadata", "name") != bundle.Runtime || len(containers) != 2 ||
+		pod["automountServiceAccountToken"] != false || kagentString(deployment, "spec", "strategy", "type") != "Recreate" {
+		t.Fatalf("deployment = %v", deployment)
+	}
+	labels := kagentMap(deployment, "spec", "template", "metadata", "labels")
+	if labels[kagentBrokerLabel] != "true" || labels[kagentRuntimeLabel] != bundle.Runtime || labels[kagentRelayLabel] != "probe-gov" {
+		t.Fatalf("pod labels = %v", labels)
+	}
+	if role := findKind(workload, "Role"); role == nil || kagentString(role, "metadata", "namespace") != "kagent" {
+		t.Fatalf("a v0 runtime needs read access to the Agent's pods: %v", role)
+	}
+	if !bytes.Contains(mustJSON(t, workload), []byte(`"value":"3"`)) || !bytes.Contains(mustJSON(t, workload), []byte(bundle.ConfigDigest)) {
+		t.Fatal("the supervisor is missing the controller epoch or configuration digest")
+	}
+	if _, err := renderKagentRuntime(bundleDir, kagentRenderOptions{ConfiguredImage: "registry.example/kagent:latest", RuntimeImage: testRuntimeImage,
+		ControllerEpoch: 3, Namespace: "orka-system", Part: kagentPartWorkload}); err == nil || !strings.Contains(err.Error(), "pinned by digest") {
+		t.Fatalf("a tag-only image = %v", err)
+	}
+
+	checkRenderedRelay(t, bundleDir, bundle, options)
+	checkRenderedRegistration(t, bundleDir, bundle, config, options)
+	options.Part = kagentPartRegistration
+	options.Capabilities = writeCapabilities(t, "sha256:"+strings.Repeat("9", 64))
+
+	// A bundle edited after the import no longer matches its pin.
+	if err := os.WriteFile(filepath.Join(bundleDir, kagentBundleConfigFile), append(config, ' '), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := renderKagentRuntime(bundleDir, options); err == nil || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("an edited bundle = %v", err)
+	}
+}
+
+// The wrapper reads a missing or null governed stanza as observed mode, which
+// brokers no Orka tools.
+func TestOnlyAGovernedBundleListsTools(t *testing.T) {
+	adapter := "sha256:" + strings.Repeat("a", 64)
+	for _, config := range []string{`{"model":"m"}`, `{"model":"m","governed":null}`} {
+		bundle := kagentBundle{Model: "m", AllowedTools: []string{"probe"}, ConfigDigest: "sha256:" + strings.Repeat("b", 64)}
+		_, err := kagentRuntimeProfileFor(bundle, []byte(config), adapter)
+		if err == nil || !strings.Contains(err.Error(), "only a governed kagent configuration") {
+			t.Errorf("%s: err = %v", config, err)
+		}
+	}
+}
+
+func mustJSON(t *testing.T, value any) []byte {
+	t.Helper()
+	raw, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+func toStrings(value any) []string {
+	items, _ := value.([]any)
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		s, _ := item.(string)
+		out = append(out, s)
+	}
+	return out
+}
+
+func TestKagentRelayService(t *testing.T) {
+	for origin, want := range map[string]string{
+		"http://probe-kagent-relay.orka-system.svc:8092":               "probe-kagent-relay orka-system 8092",
+		"http://probe-kagent-relay.orka-system.svc.cluster.local:8092": "probe-kagent-relay orka-system 8092",
+		"http://probe-kagent-relay.orka-system:9000":                   "probe-kagent-relay orka-system 9000",
+	} {
+		service, namespace, port, err := kagentRelayService(origin)
+		if got := fmt.Sprintf("%s %s %d", service, namespace, port); err != nil || got != want {
+			t.Errorf("%s = %q, %v; want %q", origin, got, err, want)
+		}
+	}
+	for _, origin := range []string{"http://relay.orka-system.svc", "https://relay.orka-system.svc:8092", "http://relay:8092", "http://10.0.0.1:8092", "http://a.b.c.svc:8092"} {
+		if _, _, _, err := kagentRelayService(origin); err == nil {
+			t.Errorf("%s was accepted", origin)
+		}
+	}
+}
+
+func checkRenderedRelay(t *testing.T, bundleDir string, bundle kagentBundle, options kagentRenderOptions) {
+	t.Helper()
+	options.Part = kagentPartRelay
+	service := findKind(renderBundle(t, bundleDir, options), "Service")
+	// The relay Service is the one the kagent Agent's pinned config names.
+	ports, _ := kagentMap(service, "spec")["ports"].([]any)
+	if kagentString(service, "metadata", "name") != "probe-gov-relay" || kagentMap(service, "spec", "selector")[kagentRuntimeLabel] != bundle.Runtime ||
+		len(ports) != 1 || ports[0].(map[string]any)["port"] != float64(8092) {
+		t.Fatalf("relay service = %v", service)
+	}
+	options.Namespace = "team"
+	if _, err := renderKagentRuntime(bundleDir, options); err == nil || !strings.Contains(err.Error(), `in namespace "orka-system"`) {
+		t.Fatalf("a relay rendered outside its namespace = %v", err)
+	}
+}
+
+func writeCapabilities(t *testing.T, digest string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "caps.json")
+	raw, _ := json.Marshal(map[string]any{"runtimeProfileDigest": digest, "limits": map[string]any{"maxResidentSessions": 10},
+		"supportsDrain": true, "supportsPublicationFinalization": true, "workspaceGovernance": map[string]any{"mode": "strict-governed"}})
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func checkRenderedRegistration(t *testing.T, bundleDir string, bundle kagentBundle, config []byte, options kagentRenderOptions) {
+	t.Helper()
+	profile, err := kagentRuntimeProfileFor(bundle, config, "sha256:1111111111111111111111111111111111111111111111111111111111111111")
+	if err != nil {
+		t.Fatal(err)
+	}
+	options.Part, options.Capabilities = kagentPartRegistration, writeCapabilities(t, profile.Profile.Digest)
+	registration := findKind(renderBundle(t, bundleDir, options), "AgentRuntime")
+	if kagentString(registration, "spec", "capabilities", "profile", "digest") != profile.Profile.Digest ||
+		kagentString(registration, "spec", "clientAuth", "controllerBearerTokenSecretRef", "name") != bundle.Runtime+"-auth" ||
+		kagentMap(registration, "spec", "capabilities", "workspaceGovernance")["trusted"] != false ||
+		strings.Join(toStrings(kagentMap(registration, "spec", "capabilities", "mcpPolicy")["approvalRequiredTools"]), ",") != "probe-orka" {
+		t.Fatalf("registration = %v", registration)
+	}
+	options.Capabilities = writeCapabilities(t, "sha256:"+strings.Repeat("9", 64))
+	if _, err := renderKagentRuntime(bundleDir, options); err == nil || !strings.Contains(err.Error(), "not the rendered") {
+		t.Fatalf("a runtime serving another profile = %v", err)
+	}
+}
+
+// A governed binding may name no tools, so kagent calls whatever Orka's MCP
+// server lists; --allowed-tool then names them.
+func TestKagentBundleAllowedToolsComeFromTheFlagFirst(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	unnamed := strings.Replace(governedKagentV0Fixture, ", toolNames: [probe-orka]", "", 1)
+	dir := t.TempDir()
+	if _, err := runKagentImport(t, kagentBundleArgs(writeTempFile(t, unnamed), dir, "--dry-run", "--approval-required-tool", "probe-orka")...); err == nil {
+		t.Fatal("an approval for a tool no binding names was accepted")
+	}
+	if _, err := runKagentImport(t, kagentBundleArgs(writeTempFile(t, unnamed), dir, "--dry-run",
+		"--allowed-tool", "probe-orka", "--allowed-tool", "other", "--approval-required-tool", "probe-orka")...); err != nil {
+		t.Fatal(err)
+	}
+	bundle, _ := readBundle(t, filepath.Join(dir, "probe-gov"))
+	if strings.Join(bundle.AllowedTools, ",") != "other,probe-orka" || strings.Join(bundle.ApprovalRequiredTools, ",") != "probe-orka" {
+		t.Fatalf("bundle tools = %+v", bundle)
+	}
+}
+
+// The Orka tool policy is part of the runtime's profile, so changing only the
+// approvals still names a new runtime; a revision names one for new images.
+func TestKagentBundleRuntimeNameCoversTheToolPolicy(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	path := writeTempFile(t, governedKagentV0Fixture)
+	names := map[string]bool{}
+	for _, extra := range [][]string{nil, {"--approval-required-tool", "probe-orka"}, {"--allowed-tool", "probe-orka", "--allowed-tool", "other"}, {"--runtime-revision", "1"}} {
+		dir := t.TempDir()
+		if _, err := runKagentImport(t, kagentBundleArgs(path, dir, append([]string{"--dry-run"}, extra...)...)...); err != nil {
+			t.Fatal(err)
+		}
+		bundle, _ := readBundle(t, filepath.Join(dir, "probe-gov"))
+		names[bundle.Runtime] = true
+	}
+	if len(names) != 4 {
+		t.Fatalf("runtime names = %v, want one per tool policy and revision", names)
+	}
+}
