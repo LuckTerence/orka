@@ -1037,3 +1037,46 @@ Create release-scoped static worker RoleBinding names.
 {{ printf "%s:%s" $repository $tag }}
 {{- end -}}
 {{- end }}
+
+{{/*
+Agent hosts are an opt-in harness-v2 feature. Their Pods, volumes and Secrets
+live in a namespace the controller never shares with its watch or ACP runtime
+namespaces, and the orka-host-agent sidecar image must be immutable.
+*/}}
+{{- define "orka.agentHostsEnabled" -}}
+{{- if dig "agentHosts" "enabled" false .Values.controller -}}true{{- end -}}
+{{- end }}
+
+{{- define "orka.agentHostNamespace" -}}
+{{- trim (toString (dig "agentHosts" "namespace" "" .Values.controller)) -}}
+{{- end }}
+
+{{- define "orka.agentHostAgentImage" -}}
+{{- $image := trim (toString (dig "agentHosts" "agentImage" "" .Values.controller)) -}}
+{{- if not $image -}}
+{{- if not .Values.controller.image.digest -}}
+{{- fail "controller.agentHosts.agentImage must name a digest-pinned image, or controller.image.digest must pin the controller image it defaults to" -}}
+{{- end -}}
+{{- $image = include "orka.imageRef" .Values.controller.image -}}
+{{- end -}}
+{{- if not (regexMatch `^[^@\s]+@sha256:[a-f0-9]{64}$` $image) -}}
+{{- fail "controller.agentHosts.agentImage must be pinned by digest: <repository>@sha256:<digest>" -}}
+{{- end -}}
+{{- $image -}}
+{{- end }}
+
+{{- define "orka.validateAgentHosts" -}}
+{{- if include "orka.agentHostsEnabled" . -}}
+{{- if ne .Values.controller.mode "harness-v2" -}}
+{{- fail "controller.agentHosts.enabled requires controller.mode=harness-v2" -}}
+{{- end -}}
+{{- $namespace := include "orka.agentHostNamespace" . -}}
+{{- if not $namespace -}}
+{{- fail "controller.agentHosts.namespace is required when controller.agentHosts.enabled=true" -}}
+{{- end -}}
+{{- if or (eq $namespace .Release.Namespace) (eq $namespace .Values.controller.acpRuntime.namespace) -}}
+{{- fail (printf "controller.agentHosts.namespace %q must differ from the Helm release namespace and controller.acpRuntime.namespace" $namespace) -}}
+{{- end -}}
+{{- $_ := include "orka.agentHostAgentImage" . -}}
+{{- end -}}
+{{- end }}

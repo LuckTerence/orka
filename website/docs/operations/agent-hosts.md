@@ -24,6 +24,28 @@ host, what it runs, what it may reach and the policy pinned in its template.
 
 ## Turn it on
 
+With Helm, set:
+
+```yaml
+controller:
+  image:
+    digest: sha256:<controller image digest>
+  agentHosts:
+    enabled: true
+    namespace: orka-agent-hosts
+```
+
+The chart creates the host namespace with the restricted Pod Security profile, the
+controller's Role in it, the controller flags and the AgentHost admission webhook. The
+`orka-host-agent` sidecar comes from the controller image, so pin it by digest, or set
+`controller.agentHosts.agentImage` to another digest-pinned image that carries it. Agent
+hosts need `controller.mode: harness-v2`, and the host namespace must differ from the
+release namespace and `controller.acpRuntime.namespace`. Helm keeps the host namespace,
+with the hosts' volumes, when you disable agent hosts, roll back or uninstall; delete it
+yourself once no AgentHost needs it.
+
+With the Kustomize install:
+
 1. Create the host namespace and the controller's Role in it. The Kustomize install binds
    the controller's manager role per namespace:
 
@@ -44,24 +66,25 @@ host, what it runs, what it may reach and the policy pinned in its template.
    `orka-host-agent` sidecar. The Pod labels select the controller Pods allowed to read
    host status through the NetworkPolicy.
 
-3. Create an `AgentHostTemplate` (see
-   [`config/samples/core_v1alpha1_agenthosttemplate.yaml`](https://github.com/orka-agents/orka/blob/main/config/samples/core_v1alpha1_agenthosttemplate.yaml))
-   and grant `use` on it to the people who may run hosts:
+With either install, create an `AgentHostTemplate` (see
+[`config/samples/core_v1alpha1_agenthosttemplate.yaml`](https://github.com/orka-agents/orka/blob/main/config/samples/core_v1alpha1_agenthosttemplate.yaml))
+and grant `use` on it to the people who may run hosts. Write the Role as a manifest:
+`kubectl create role` refuses `use` because the API does not list that verb.
 
-   ```yaml
-   apiVersion: rbac.authorization.k8s.io/v1
-   kind: Role
-   metadata:
-     name: agent-host-user
-   rules:
-     - apiGroups: ["core.orka.ai"]
-       resources: ["agenthosttemplates"]
-       resourceNames: ["copilotd"]
-       verbs: ["use"]
-     - apiGroups: ["core.orka.ai"]
-       resources: ["agenthosts"]
-       verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-   ```
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: agent-host-user
+rules:
+  - apiGroups: ["core.orka.ai"]
+    resources: ["agenthosttemplates"]
+    resourceNames: ["copilotd"]
+    verbs: ["use"]
+  - apiGroups: ["core.orka.ai"]
+    resources: ["agenthosts"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+```
 
 Creating an `AgentHost` requires `use` on its template, and naming a token Secret requires
 `get` on that Secret, both checked against the caller by an admission policy.

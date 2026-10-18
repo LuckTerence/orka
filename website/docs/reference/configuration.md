@@ -33,6 +33,7 @@ tags; development charts use the rolling `0.0.0-dev` tag. See
 | `controller.logLevel` | `info` | Log level (debug/info/warn/error) |
 | `controller.dashboard.enabled` | `false` | Serve the [web dashboard](../guides/ui.md) on the API port. |
 | `controller.connectors.enabled` / `controller.connectors.callbackBaseUrl` | `false` / `""` | Enable per-person [connectors](../guides/connectors.md), and the public https origin the OAuth provider redirects back to. |
+| `controller.agentHosts.enabled` / `.namespace` / `.agentImage` | `false` / `orka-agent-hosts` / `""` | Run [agent hosts](../operations/agent-hosts.md) in a chart-created namespace with the restricted Pod Security profile. An empty `agentImage` uses the controller image, which then must set `controller.image.digest`. Requires `harness-v2`. |
 | `github.webhook.secretName` / `github.webhook.secretKey` | `""` / `secret` | Secret holding the shared secret for signed GitHub webhooks at `/webhooks/github`, used by [label triggers and pull request events](../guides/issue-to-pr-automation.md#start-from-a-github-label). |
 | `controller.acpRuntime.namespace` | `orka-runtimes` | Namespace for controller-owned RuntimePool workloads. |
 | `controller.acpRuntime.providerProxyNamespace` | `""` | Compatibility guard for the chart-managed provider proxy. Leave empty or set exactly to the Helm release namespace; any other nonempty value is rejected when the proxy is enabled. |
@@ -478,10 +479,10 @@ Long-lived, single-user agent hosts on Orka-owned Pods. Off by default. See
 
 | Flag | Environment variable | Default | Purpose |
 | --- | --- | --- | --- |
-| `--enable-agent-hosts` | `ORKA_ENABLE_AGENT_HOSTS` | `false` | Serves `AgentHostTemplate` and `AgentHost`. |
-| `--agent-host-namespace` | `ORKA_AGENT_HOST_NAMESPACE` | `orka-agent-hosts` | Namespace for host Pods, volumes, NetworkPolicies and Secrets. Must differ from `--watch-namespace`. |
-| `--agent-host-agent-image` | `ORKA_AGENT_HOST_AGENT_IMAGE` | — | Digest-pinned image with the `orka-host-agent` sidecar, normally the controller image. Required with `--enable-agent-hosts`. |
-| `--agent-host-controller-pod-labels` | `ORKA_AGENT_HOST_CONTROLLER_POD_LABELS` | `app.kubernetes.io/name=orka` | Labels of the controller Pods that may read host status through each host's NetworkPolicy. |
+| `--enable-agent-hosts` | `ORKA_ENABLE_AGENT_HOSTS` | `false` | Serves `AgentHostTemplate` and `AgentHost`. Helm: `controller.agentHosts.enabled`. |
+| `--agent-host-namespace` | `ORKA_AGENT_HOST_NAMESPACE` | `orka-agent-hosts` | Namespace for host Pods, volumes, NetworkPolicies and Secrets. Must differ from `--watch-namespace`. Helm: `controller.agentHosts.namespace`. |
+| `--agent-host-agent-image` | `ORKA_AGENT_HOST_AGENT_IMAGE` | — | Digest-pinned image with the `orka-host-agent` sidecar, normally the controller image. Required with `--enable-agent-hosts`. Helm: `controller.agentHosts.agentImage`. |
+| `--agent-host-controller-pod-labels` | `ORKA_AGENT_HOST_CONTROLLER_POD_LABELS` | `app.kubernetes.io/name=orka` | Labels of the controller Pods that may read host status through each host's NetworkPolicy. The chart sets `orka.ai/network-role=controller`. |
 
 ### Workspace providers (`workspace.orka.ai/v1alpha1`) {#workspace-providers}
 
