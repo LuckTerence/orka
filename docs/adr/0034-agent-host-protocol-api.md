@@ -8,7 +8,7 @@ Proposed. Adds an [Agent Host Protocol](https://microsoft.github.io/agent-host-p
 (AHP) endpoint to the Orka API server, behind `--enable-ahp-api` (default off), with
 session backends. The first backend runs each turn as an Orka Task on Orka's built-in
 runtimes over ACP. A backend that re-hosts sessions from per-user agent hosts
-([ADR 0035](0035-agent-hosts.md)) is left for later. Lands in stages; the core
+(ADR 0035, proposed separately) is left for later. Lands in stages; the core
 capabilities listed under **Prerequisites** come first.
 
 ## Context
