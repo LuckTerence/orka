@@ -78,6 +78,14 @@ func ahpSchemaStatements() []string {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_ahp_sessions_modified
 			ON ahp_sessions(user_key, modified_at)`,
+		`CREATE TABLE IF NOT EXISTS ahp_records (
+			user_key   TEXT NOT NULL,
+			kind       TEXT NOT NULL,
+			key        TEXT NOT NULL,
+			value      BLOB NOT NULL,
+			updated_at TIMESTAMP NOT NULL,
+			PRIMARY KEY (user_key, kind, key)
+		)`,
 	}
 }
 
@@ -417,6 +425,64 @@ func (s *Store) DeleteAHPSession(ctx context.Context, userKey, session string) e
 	if _, err := s.db.ExecContext(ctx, `DELETE FROM ahp_sessions WHERE user_key = ? AND session = ?`,
 		userKey, session); err != nil {
 		return fmt.Errorf("delete AHP session: %w", err)
+	}
+	return nil
+}
+
+// PutAHPRecord stores one of a session backend's records for a user.
+func (s *Store) PutAHPRecord(ctx context.Context, record store.AHPRecord) error {
+	if strings.TrimSpace(record.UserKey) == "" || strings.TrimSpace(record.Kind) == "" || strings.TrimSpace(record.Key) == "" {
+		return fmt.Errorf("%w: AHP record user, kind and key are required", store.ErrValidation)
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO ahp_records (user_key, kind, key, value, updated_at)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(user_key, kind, key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+		record.UserKey, record.Kind, record.Key, record.Value, record.UpdatedAt.UTC())
+	if err != nil {
+		return fmt.Errorf("put AHP record: %w", err)
+	}
+	return nil
+}
+
+// GetAHPRecord returns one record, or ErrNotFound.
+func (s *Store) GetAHPRecord(ctx context.Context, userKey, kind, key string) (store.AHPRecord, error) {
+	record := store.AHPRecord{UserKey: userKey, Kind: kind, Key: key}
+	err := s.db.QueryRowContext(ctx, `SELECT value, updated_at FROM ahp_records
+		WHERE user_key = ? AND kind = ? AND key = ?`, userKey, kind, key).Scan(&record.Value, &record.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return store.AHPRecord{}, store.ErrNotFound
+	}
+	if err != nil {
+		return store.AHPRecord{}, fmt.Errorf("get AHP record: %w", err)
+	}
+	return record, nil
+}
+
+// ListAHPRecords returns a user's records of one kind, ordered by key.
+func (s *Store) ListAHPRecords(ctx context.Context, userKey, kind string) ([]store.AHPRecord, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT key, value, updated_at FROM ahp_records
+		WHERE user_key = ? AND kind = ? ORDER BY key`, userKey, kind)
+	if err != nil {
+		return nil, fmt.Errorf("list AHP records: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var records []store.AHPRecord
+	for rows.Next() {
+		record := store.AHPRecord{UserKey: userKey, Kind: kind}
+		if err := rows.Scan(&record.Key, &record.Value, &record.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("list AHP records: %w", err)
+		}
+		records = append(records, record)
+	}
+	return records, rows.Err()
+}
+
+// DeleteAHPRecords removes a user's records of one kind whose key starts with prefix.
+func (s *Store) DeleteAHPRecords(ctx context.Context, userKey, kind, prefix string) error {
+	escaped := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(prefix)
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM ahp_records WHERE user_key = ? AND kind = ? AND key LIKE ? ESCAPE '\'`,
+		userKey, kind, escaped+"%"); err != nil {
+		return fmt.Errorf("delete AHP records: %w", err)
 	}
 	return nil
 }

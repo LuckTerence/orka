@@ -158,3 +158,41 @@ func TestAHPSessionCatalogIsPerUser(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, sessions, 1)
 }
+
+func TestAHPRecordsAreScopedAndDeletedByLiteralPrefix(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := t.Context()
+	now := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
+	put := func(user, kind, key, value string) {
+		t.Helper()
+		require.NoError(t, s.PutAHPRecord(ctx, store.AHPRecord{UserKey: user, Kind: kind, Key: key, Value: []byte(value), UpdatedAt: now}))
+	}
+	put("alice", "content", "s1/a", "one")
+	put("alice", "content", "s1/b", "two")
+	put("alice", "content", "s1_x", "underscore")
+	put("alice", "content", "s10/a", "other session")
+	put("alice", "project", "p1", "project")
+	put("bob", "content", "s1/a", "bob's")
+	put("alice", "content", "s1/a", "updated")
+
+	got, err := s.GetAHPRecord(ctx, "alice", "content", "s1/a")
+	require.NoError(t, err)
+	require.Equal(t, "updated", string(got.Value))
+	_, err = s.GetAHPRecord(ctx, "carol", "content", "s1/a")
+	require.ErrorIs(t, err, store.ErrNotFound)
+
+	// LIKE wildcards in the prefix are literal: "s1_" must not match "s10/".
+	require.NoError(t, s.DeleteAHPRecords(ctx, "alice", "content", "s1_"))
+	require.NoError(t, s.DeleteAHPRecords(ctx, "alice", "content", "s1/"))
+	listed, err := s.ListAHPRecords(ctx, "alice", "content")
+	require.NoError(t, err)
+	require.Len(t, listed, 1)
+	require.Equal(t, "s10/a", listed[0].Key)
+	projects, err := s.ListAHPRecords(ctx, "alice", "project")
+	require.NoError(t, err)
+	require.Len(t, projects, 1)
+	bobs, err := s.GetAHPRecord(ctx, "bob", "content", "s1/a")
+	require.NoError(t, err)
+	require.Equal(t, "bob's", string(bobs.Value))
+	require.Error(t, s.PutAHPRecord(ctx, store.AHPRecord{UserKey: "alice", Kind: "content"}))
+}

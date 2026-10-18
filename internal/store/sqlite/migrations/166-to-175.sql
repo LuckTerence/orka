@@ -1,6 +1,6 @@
--- Additive SQLite transition: 166-to-174.
+-- Additive SQLite transition: 166-to-175.
 -- Source layout: abd2c0406ab660abd37af7c176b4eef610a19ce1 (166 objects).
--- Target definitions: Agent Host Protocol tokens, clients, journal, channel states and sessions (174 objects).
+-- Target definitions: Agent Host Protocol tokens, clients, journal, channel states, sessions and backend records (175 objects).
 -- Frozen from the target's real schema statements; do not use mutable helpers.
 -- Transaction and complete-layout validation are owned by the caller.
 
@@ -66,3 +66,12 @@ CREATE TABLE IF NOT EXISTS ahp_sessions (
 
 CREATE INDEX IF NOT EXISTS idx_ahp_sessions_modified
 			ON ahp_sessions(user_key, modified_at);
+
+CREATE TABLE IF NOT EXISTS ahp_records (
+			user_key   TEXT NOT NULL,
+			kind       TEXT NOT NULL,
+			key        TEXT NOT NULL,
+			value      BLOB NOT NULL,
+			updated_at TIMESTAMP NOT NULL,
+			PRIMARY KEY (user_key, kind, key)
+		);

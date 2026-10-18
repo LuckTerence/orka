@@ -65,6 +65,16 @@ type AHPSession struct {
 	ModifiedAt time.Time
 }
 
+// AHPRecord is a session backend's own record for a user, such as a project
+// or the Orka objects behind a session. Clients never see records directly.
+type AHPRecord struct {
+	UserKey   string
+	Kind      string
+	Key       string
+	Value     []byte
+	UpdatedAt time.Time
+}
+
 // AHPJournalLimits bound how much of a user's journal is kept for replay.
 type AHPJournalLimits struct {
 	MaxEntries int
@@ -109,4 +119,11 @@ type AHPStore interface {
 	// ListAHPSessions returns the user's sessions, most recently modified first.
 	ListAHPSessions(ctx context.Context, userKey string) ([]AHPSession, error)
 	DeleteAHPSession(ctx context.Context, userKey, session string) error
+
+	PutAHPRecord(ctx context.Context, record AHPRecord) error
+	// GetAHPRecord returns ErrNotFound for a record the user does not have.
+	GetAHPRecord(ctx context.Context, userKey, kind, key string) (AHPRecord, error)
+	ListAHPRecords(ctx context.Context, userKey, kind string) ([]AHPRecord, error)
+	// DeleteAHPRecords removes the user's records of kind whose key starts with prefix.
+	DeleteAHPRecords(ctx context.Context, userKey, kind, prefix string) error
 }
