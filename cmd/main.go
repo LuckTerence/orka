@@ -2249,6 +2249,7 @@ func main() {
 		SecurityStore:             sqliteStore,
 		RepositoryMonitorStore:    sqliteStore,
 		ExecutionEventStore:       sqliteStore,
+		LiveEvents:                liveEvents,
 		GatewayEventStore:         sqliteStore,
 		GatewayDeliveryStore:      sqliteStore,
 		GatewayService:            gatewayService,
@@ -2262,7 +2263,6 @@ func main() {
 		AHP:                       ahpHost,
 		AHPBackend:                ahpBackendFor(ahpHost, mode, ahpBackendConfig),
 		RESTConfig:                mgr.GetConfig(),
-		LiveEvents:                liveEvents,
 		ConnectorTools: api.ConnectorToolExecutionConfig{
 			Enabled:                          connectorsEnabled,
 			OutboundAccess:                   outboundAccessResolver,

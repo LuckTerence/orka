@@ -108,7 +108,8 @@ type ServerConfig struct {
 	AHP *ahphost.Host
 	// AHPBackend, with AHP, serves Orka's built-in runtimes as AHP agents.
 	AHPBackend *AHPBackendConfig
-	// LiveEvents carries running Tasks' events from the ACP dispatcher.
+	// LiveEvents carries running Tasks' events from the ACP dispatcher to live
+	// event streams and the AHP backend; nil disables them.
 	LiveEvents *liveevents.Broker
 	// RESTConfig lets the API server run commands in AHP workspaces.
 	RESTConfig *rest.Config
@@ -188,6 +189,7 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		SecurityStore:             config.SecurityStore,
 		RepositoryMonitorStore:    config.RepositoryMonitorStore,
 		ExecutionEventStore:       config.ExecutionEventStore,
+		LiveEvents:                config.LiveEvents,
 		GatewayEventStore:         config.GatewayEventStore,
 		GatewayDeliveryStore:      config.GatewayDeliveryStore,
 		GatewayService:            config.GatewayService,

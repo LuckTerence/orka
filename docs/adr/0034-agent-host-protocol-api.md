@@ -155,8 +155,10 @@ Unknown extension commands are answered with method-not-found.
 
 Each lands separately and is useful without AHP:
 
-1. Extend the existing Task and Session event pipeline to push text deltas, tool calls
-   with names at start, plan updates and diffs, redacted as above.
+1. Extend the existing Task event pipeline to push text and reasoning deltas, tool calls
+   with their name, input and file edits (relative to the workspace), and plan updates,
+   redacted as above. A runtime sends the new fields only to a controller that asks for
+   them; Session streams keep durable events only.
 2. A cancel request for a running Task.
 3. Human decisions for built-in runtimes' permission requests.
 4. Use the existing session-scoped workspace reuse, with its UID, lineage and fencing,
