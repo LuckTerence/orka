@@ -61,6 +61,7 @@ The controller requires `ORKA_GITHUB_WEBHOOK_SECRET` and verifies the `X-Hub-Sig
 | `/api/v1/tasks` | GET | List tasks (paginated; `labelSelector` narrows by label with `kubectl -l` syntax, invalid selectors return 400) |
 | `/api/v1/tasks/:id` | GET | Get task details |
 | `/api/v1/tasks/:id` | DELETE | Cancel/delete task |
+| `/api/v1/tasks/:id/cancel` | POST | Cancel a queued or running task and keep it |
 | `/api/v1/tasks/:id/logs` | GET | Stream task logs |
 | `/api/v1/tasks/:id/result` | GET | Get task result |
 | `/api/v1/tasks/:id/artifacts` | GET | List task artifacts |
@@ -74,6 +75,16 @@ The controller requires `ORKA_GITHUB_WEBHOOK_SECRET` and verifies the `X-Hub-Sig
 `workspace`, `agentRuntime`, `sessionRef`, `schedule`, and a few more — can also go at the
 top level, as in the [example](#example-usage) below. Fields outside that set, such as
 `resources` or the schedule history limits, take effect only under `spec`.
+
+`POST /api/v1/tasks/:id/cancel` records a cancel request and returns `202` with
+`{"status":"cancellation requested"}`, or `{"status":"Cancelled"}` if the Task is already
+cancelled; a Task that already succeeded or failed returns `409`. The Task reaches
+`Cancelled` asynchronously, unless it finished first. For an agent Task the controller
+answers its pending permission requests as cancelled, cancels the prompt, and stops the
+agent if the cancel does not settle in time; the Task keeps its history and result, and
+its Session can continue with another Task. A signed-in person may cancel only the Tasks
+they requested; ServiceAccounts need `patch` on the Task. Agent Tasks can be cancelled
+only in the `harness-v2` execution mode.
 
 Task and Session event history, live streams, traces, forks, and approvals have their own
 endpoints, described in [Execution events](execution-events.md).

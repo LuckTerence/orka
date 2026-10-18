@@ -367,6 +367,7 @@ func (s *Server) setupRoutes() {
 	api.Get("/tasks/:id/trace", s.handlers.GetTaskTrace)
 	api.Get("/tasks/:id/approvals", s.handlers.ListTaskApprovals)
 	api.Post("/tasks/:id/approvals/:approvalID/decision", s.handlers.DecideTaskApproval)
+	api.Post("/tasks/:id/cancel", s.handlers.CancelTask)
 	api.Post("/tasks/:id/fork", s.handlers.ForkTask)
 	api.Get("/tasks/:id/result", s.handlers.GetTaskResult)
 	api.Get("/tasks/:id/plan", s.handlers.GetTaskPlan)

@@ -35,6 +35,7 @@ import (
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	v2conformance "github.com/orka-agents/orka/internal/harness/v2/conformance"
 	v2eventjournal "github.com/orka-agents/orka/internal/harness/v2/eventjournal"
+	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/liveevents"
 	publisherservice "github.com/orka-agents/orka/internal/publisher/service"
 	"github.com/orka-agents/orka/internal/redact"
@@ -807,7 +808,18 @@ func (d *ACPDispatcher) patchPoolCoordinatorCapacity(
 	return result, err
 }
 
-func (d *ACPDispatcher) watchTaskCancellation(ctx context.Context, cancel context.CancelFunc, key types.NamespacedName) {
+// errACPTaskCancelRequested is the runtime context cause of a Task whose
+// cancellation was requested through the API.
+var errACPTaskCancelRequested = errors.New("task cancellation requested")
+
+// acpTaskCancelRequested reports a recorded API cancel request. Only the
+// controller identity may write the annotation.
+func acpTaskCancelRequested(task *corev1alpha1.Task) bool {
+	_, ok := task.Annotations[labels.AnnotationCancelRequested]
+	return ok
+}
+
+func (d *ACPDispatcher) watchTaskCancellation(ctx context.Context, cancel context.CancelCauseFunc, key types.NamespacedName) {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	for {
@@ -818,15 +830,20 @@ func (d *ACPDispatcher) watchTaskCancellation(ctx context.Context, cancel contex
 			task := &corev1alpha1.Task{}
 			if err := d.APIReader.Get(ctx, key, task); err != nil {
 				if apierrors.IsNotFound(err) {
-					cancel()
+					cancel(context.Canceled)
 				}
 				continue
 			}
-			if !task.DeletionTimestamp.IsZero() || task.Status.Phase == corev1alpha1.TaskPhaseCancelled {
+			deleted := !task.DeletionTimestamp.IsZero() || task.Status.Phase == corev1alpha1.TaskPhaseCancelled
+			if deleted || acpTaskCancelRequested(task) {
 				cancelCtx, stop := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 				_, _ = d.cancelPreparedPublication(cancelCtx, task)
 				stop()
-				cancel()
+				cause := context.Canceled
+				if !deleted {
+					cause = errACPTaskCancelRequested
+				}
+				cancel(cause)
 				return
 			}
 		}
@@ -1017,12 +1034,16 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	}
 	runtimeCtx, cancelRuntime := d.newTaskRuntimeContext(ctx, task)
 	defer cancelRuntime()
+	// The cancellation watcher records why it stopped the runtime, so a
+	// requested cancel reaches the runtime as user_requested.
+	runtimeCtx, cancelWithCause := context.WithCancelCause(runtimeCtx)
+	defer cancelWithCause(nil)
 	runtimeCtx, cancelWorkspace, err := d.newWorkspaceRuntimeContext(runtimeCtx, target.pool)
 	if err != nil {
 		return d.requeueReservedTask(ctx, task, acpReservedRetryWorkspaceLifetime, err)
 	}
 	defer cancelWorkspace()
-	go d.watchTaskCancellation(runtimeCtx, cancelRuntime, types.NamespacedName{Namespace: task.Namespace, Name: task.Name})
+	go d.watchTaskCancellation(runtimeCtx, cancelWithCause, types.NamespacedName{Namespace: task.Namespace, Name: task.Name})
 	attemptID, err := promptAttemptIDFromTask(task)
 	if err != nil {
 		return d.failTask(ctx, task, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed, "InvalidAttempt", err.Error())
@@ -3805,6 +3826,8 @@ func (d *ACPDispatcher) settleTaskBeforeRuntimeAdmission(ctx context.Context, ta
 	switch {
 	case !task.DeletionTimestamp.IsZero() || task.Status.Phase == corev1alpha1.TaskPhaseCancelled:
 		operation, reason, message = "cancelled-before-admission", "Cancelled", "task cancelled before runtime admission"
+	case acpTaskCancelRequested(task):
+		operation, reason, message = "cancelled-before-admission", "Cancelled", "task cancelled by request before runtime admission"
 	case hasDeadline && !now.Before(deadline):
 		operation, reason, message = "timeout-before-admission", acpTaskTimeoutReason, "task deadline exceeded before runtime admission"
 	default:
@@ -6504,10 +6527,14 @@ func (d *ACPDispatcher) handlePromptStreamError(
 		reason := harnessv2.CancelReasonControllerShutdown
 		terminalReason := corev1alpha1.TaskExecutionReason("Cancelled")
 		terminalMessage := "prompt cancellation settled"
-		if errors.Is(runtimeContextErr, context.DeadlineExceeded) {
+		switch {
+		case errors.Is(runtimeContextErr, context.DeadlineExceeded):
 			reason = harnessv2.CancelReasonTaskTimeout
 			terminalReason = acpTaskTimeoutReason
 			terminalMessage = acpTaskTimeoutCancellationSettledMessage
+		case errors.Is(runtimeContextErr, errACPTaskCancelRequested):
+			reason = harnessv2.CancelReasonUserRequested
+			terminalMessage = acpRequestedCancellationMessage
 		}
 		if cancellation == nil {
 			cancelCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), acpPromptCancellationTimeout)
@@ -6863,10 +6890,13 @@ func (d *ACPDispatcher) finishNonSuccessWithCancellationReason(
 		operation := acpCancelledOperation
 		reason := corev1alpha1.TaskExecutionReason("Cancelled")
 		message := "prompt cancelled"
-		if cancellationReason == harnessv2.CancelReasonTaskTimeout {
+		switch cancellationReason {
+		case harnessv2.CancelReasonTaskTimeout:
 			operation = "timeout-cancelled"
 			reason = acpTaskTimeoutReason
 			message = acpTaskTimeoutCancellationSettledMessage
+		case harnessv2.CancelReasonUserRequested:
+			message = acpRequestedCancellationMessage
 		}
 		if err := d.transitionAttemptToCancelled(
 			ctx, attemptID, fence, operation, reason, message,
