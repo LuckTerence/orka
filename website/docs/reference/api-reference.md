@@ -226,7 +226,7 @@ The consent `state` and the completion token are HMACs over random single-use no
 
 ## Agent Host Protocol
 
-With `--enable-ahp-api`, `/ahp` serves the [Agent Host Protocol](https://github.com/microsoft/agent-host-protocol) (versions `1.0.0` and `0.9.0`) over WebSocket, one JSON-RPC message per text frame. See [ADR 0034](https://github.com/orka-agents/orka/blob/main/docs/adr/0034-agent-host-protocol-api.md). No session backend ships yet, so a client can connect, initialize, reconnect, subscribe and list sessions, but cannot start an agent.
+With `--enable-ahp-api`, `/ahp` serves the [Agent Host Protocol](https://github.com/microsoft/agent-host-protocol) (versions `1.0.0` and `0.9.0`) over WebSocket, one JSON-RPC message per text frame. See [ADR 0034](https://github.com/orka-agents/orka/blob/main/docs/adr/0034-agent-host-protocol-api.md). In the `harness-v2` execution mode, Orka's built-in runtimes are offered as AHP agents and each message runs as an agent Task; see [Agent Host Protocol clients](../operations/agent-host-protocol.md).
 
 `/ahp` does not accept Orka bearer tokens. A client presents an AHP connection token as `?tkn=<token>` or `Authorization: Bearer <token>`; a missing, unknown, revoked or expired token gets 401 before the upgrade, and a browser (`http` or `https`) `Origin` gets 403. The URL is never logged. Revoking or expiring a token closes every connection that uses it.
 

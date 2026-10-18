@@ -105,22 +105,30 @@ an AHP backend for agent hosts is a later decision.
 
 ### The ACP backend
 
-- Agents: Orka's built-in runtimes (copilot, claude, codex, opencode), filtered by policy.
-  Models are those the provider proxy allows for that runtime.
+- Agents: Orka's built-in runtimes (copilot, claude, codex, opencode). Each Agent in the
+  user's namespace on a built-in runtime with a model is one model of that runtime's AHP
+  agent, offered only when the user's token would let them run it. No agent advertises a
+  protected resource: Orka never asks for the user's own credentials.
 - An AHP session is an Orka Session. An AHP turn is a Task with `sessionRef`, the chosen
-  runtime and a repository in `spec.workspace`. Interactive sessions use session-scoped
-  execution workspaces so turns stay warm.
-- Projects are repositories Orka clones itself; the agent never holds Git credentials.
-  Changesets come from the workspace delta; pushes and pull requests go through the
-  Publisher.
+  Agent and the project's repository in `spec.workspace`, created and authorized as the
+  person. A session keeps the Agent of its first turn, because an Orka Session is bound to
+  one runtime profile; a turn naming another model is refused. When an operator names an
+  execution workspace class, turns use session-scoped workspaces so files stay warm;
+  otherwise each write turn publishes and the next turn starts from it.
+- Projects are repositories the user adds; Orka never clones them on the host, because
+  each turn's Task clones its own workspace. The agent never holds Git credentials. The
+  operator names one credential Secret that is looked up in each user's namespace; without
+  it, sessions clone public repositories read-only. Write turns publish to an Orka-owned
+  session branch through the Publisher.
 - Mapping: text and reasoning chunks stream as deltas; tool calls follow the AHP state
-  machine and are named as soon as they start; the plan is one synthetic tool row
-  rewritten per update; diffs are file edits whose before and after contents the host
-  serves; usage goes only in `_meta`; stop reasons map through one documented table.
-- Approvals: a runtime's permission request becomes an Orka approval. Policy answers what
-  it can, recorded as `confirmed: setting`; anything else is shown to the session owner
-  as an AHP confirmation. Only the session owner may answer. Orka never chooses an
-  "always" option on the user's behalf and re-checks policy against edited input.
+  machine and are named as soon as they start, with their raw input; diffs are file edits
+  the agent reports, listed in the session's changeset, whose before and after contents
+  the host serves; usage is reported per turn. Plan updates are not mapped yet.
+- Approvals: a session's `approvalMode` is `manual` or `allow-all` (`assisted` is treated
+  as `manual`; Orka has no model-reviewed approvals). In `manual`, each turn's Task holds
+  every permission request policy would allow for its requester, shown as an AHP
+  confirmation; policy answers what it rejects. In `allow-all`, policy decides. Only the
+  session owner may answer. Orka never chooses an "always" option on the user's behalf.
 - Cancellation answers pending permissions as cancelled, cancels the Task, and kills the
   agent process if the cancel does not settle in time, so late updates cannot reach the
   next turn.
@@ -130,9 +138,18 @@ an AHP backend for agent hosts is a later decision.
 
 ### Host reach
 
-The TCP channel is not advertised. Client-provided tools are refused. File reads are
-scoped to the session's workspace and read-only. Terminals are not offered in the first
-release.
+The TCP channel is not advertised. Client-provided tools are never offered to agents.
+`resourceRead` serves only the contents a session's changeset lists; nothing on the host
+or in a workspace is readable through it. Terminals and resource watches are not offered
+in the first release, and `completions` answers with an empty list.
+
+### Client dialects
+
+Clients extend the protocol through `_meta` keys and host-specific commands. Orka serves
+the Copilot dialect for every connection, because clients do not identify themselves at
+`initialize`: the `copilot.projectManagement` root extension and the
+`extensions/listProjects`, `extensions/cloneProject` and `extensions/getPlan` commands.
+Unknown extension commands are answered with method-not-found.
 
 ### Prerequisites in Orka core
 
@@ -144,7 +161,8 @@ Each lands separately and is useful without AHP:
 3. Human decisions for built-in runtimes' permission requests.
 4. Use the existing session-scoped workspace reuse, with its UID, lineage and fencing,
    for interactive sessions; no new Session or workspace identity.
-5. Read access to a running session's workspace files and diff.
+5. Read access to a session's changed files. The first release serves the before and
+   after contents the agent reports with each edit, rather than reading a workspace.
 6. AHP connection tokens and identity mapping.
 
 ## Consequences
