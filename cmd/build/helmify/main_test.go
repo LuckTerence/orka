@@ -442,6 +442,26 @@ func helmTemplateStaticChartWithExistingControllerSnapshot(
 	args ...string,
 ) (string, error) {
 	t.Helper()
+	return helmTemplateStaticChartWithAnnotatedController(
+		t,
+		existingControllerArgs,
+		existingSnapshotSecret,
+		existingSnapshotKey,
+		"",
+		args...,
+	)
+}
+
+// existingFullname, when set, is the controller's orka.ai/chart-fullname annotation.
+func helmTemplateStaticChartWithAnnotatedController(
+	t *testing.T,
+	existingControllerArgs []string,
+	existingSnapshotSecret string,
+	existingSnapshotKey string,
+	existingFullname string,
+	args ...string,
+) (string, error) {
+	t.Helper()
 	helm, err := exec.LookPath("helm")
 	if err != nil {
 		t.Skip("helm is required for static chart render tests")
@@ -464,10 +484,14 @@ func helmTemplateStaticChartWithExistingControllerSnapshot(
 		for _, arg := range existingControllerArgs {
 			quotedControllerArgs = append(quotedControllerArgs, strconv.Quote(arg))
 		}
+		annotations := ""
+		if existingFullname != "" {
+			annotations = ` "annotations" (dict "orka.ai/chart-fullname" ` + strconv.Quote(existingFullname) + `)`
+		}
 		forcedLookup = `{{- $existingControllerList := dict "items" (list (dict ` +
 			`"metadata" (dict "name" "test-orka-controller" "labels" (dict ` +
 			`"app.kubernetes.io/instance" "test" "app.kubernetes.io/component" "controller" ` +
-			`"app.kubernetes.io/managed-by" "Helm")) ` +
+			`"app.kubernetes.io/managed-by" "Helm")` + annotations + `) ` +
 			`"spec" (dict "template" (dict "spec" (dict ` +
 			`"containers" (list (dict "name" "controller" "args" (list ` +
 			strings.Join(quotedControllerArgs, " ") + `))) ` +
@@ -1416,45 +1440,75 @@ func TestStaticChartRejectsHarnessV2IdentityChangesOnUpgrade(t *testing.T) {
 	}
 }
 
-func TestStaticChartUpgradesControllersAddressingTheInternalService(t *testing.T) {
+func TestStaticChartPinsTheExactFullnameAcrossUpgrades(t *testing.T) {
+	render := requireHelmRender(t)
+	if !strings.Contains(render, `orka.ai/chart-fullname: "test-orka"`) {
+		t.Fatalf("controller Deployment does not record its exact chart fullname:\n%s", render)
+	}
+
 	longFullname := strings.Repeat("a", 60)
-	controllerArgs := func(controllerURL string) []string {
-		return []string{
-			"--controller-mode=harness-v2",
-			"--watch-namespace=orka-test",
-			"--controller-url=" + controllerURL,
-			"--acp-runtime-namespace=orka-runtimes",
-		}
+	samePrefixFullname := strings.Repeat("a", 59) + "b"
+	internalURL := func(fullname string) string {
+		return "--controller-url=http://" + fullname[:min(len(fullname), 54)] + "-internal.orka-test.svc:8080"
 	}
 	tests := []struct {
-		name          string
-		controllerURL string
-		args          []string
-		wantError     string
+		name             string
+		existingFullname string
+		controllerURL    string
+		args             []string
+		wantError        string
 	}{
 		{
-			name:          "internal Service",
-			controllerURL: "http://test-orka-internal.orka-test.svc:8080",
+			name:             "annotated controller",
+			existingFullname: "test-orka",
+			controllerURL:    internalURL("test-orka"),
 		},
 		{
-			name:          "truncated internal Service",
-			controllerURL: "http://" + longFullname[:54] + "-internal.orka-test.svc:8080",
-			args:          []string{"--set-string", "fullnameOverride=" + longFullname},
+			name:             "annotated long fullname",
+			existingFullname: longFullname,
+			controllerURL:    internalURL(longFullname),
+			args:             []string{"--set-string", "fullnameOverride=" + longFullname},
 		},
 		{
-			name:          "fullname override",
-			controllerURL: "http://test-orka-internal.orka-test.svc:8080",
-			args:          []string{"--set-string", "fullnameOverride=renamed"},
+			name:             "long fullname sharing the internal Service name",
+			existingFullname: longFullname,
+			controllerURL:    internalURL(longFullname),
+			args:             []string{"--set-string", "fullnameOverride=" + samePrefixFullname},
+			wantError:        "the effective chart fullname is immutable for harness-v2 upgrades",
+		},
+		{
+			name:             "annotated fullname override",
+			existingFullname: "test-orka",
+			controllerURL:    internalURL("test-orka"),
+			args:             []string{"--set-string", "fullnameOverride=renamed"},
+			wantError:        "the effective chart fullname is immutable for harness-v2 upgrades",
+		},
+		{
+			name:          "internal Service without the annotation",
+			controllerURL: internalURL("test-orka"),
 			wantError:     "the effective chart fullname is immutable for harness-v2 upgrades",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			output, err := helmTemplateStaticChartWithExistingController(t, controllerArgs(tt.controllerURL), tt.args...)
+			controllerArgs := []string{
+				"--controller-mode=harness-v2",
+				"--watch-namespace=orka-test",
+				tt.controllerURL,
+				"--acp-runtime-namespace=orka-runtimes",
+			}
+			output, err := helmTemplateStaticChartWithAnnotatedController(
+				t,
+				controllerArgs,
+				"snapshot-key",
+				"encryption-key",
+				tt.existingFullname,
+				tt.args...,
+			)
 			if tt.wantError == "" {
 				if err != nil {
-					t.Fatalf("upgrade of a controller addressing the internal Service failed: %v\n%s", err, output)
+					t.Fatalf("upgrade with an unchanged fullname failed: %v\n%s", err, output)
 				}
 				return
 			}
