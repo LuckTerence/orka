@@ -221,6 +221,7 @@ func TestCreateMemoryProposalRejectsClientDecision(t *testing.T) {
 		{name: "review note", body: `"reviewNote":"looks fine"`, field: "reviewNote"},
 		{name: "reviewed at", body: `"reviewedAt":"2026-10-17T00:00:00Z"`, field: "reviewedAt"},
 		{name: "applied memory", body: `"appliedMemoryId":"mem-1"`, field: "appliedMemoryId"},
+		{name: "whitespace applied memory", body: `"appliedMemoryId":" "`, field: "appliedMemoryId"},
 		{name: "applier", body: `"appliedBy":"someone-else"`, field: "appliedBy"},
 		{name: "applier case folded", body: `"APPLIEDBY":"someone-else"`, field: "appliedBy"},
 		{name: "applied at", body: `"appliedAt":"2026-10-17T00:00:00Z"`, field: "appliedAt"},

@@ -630,7 +630,8 @@ func rejectClientProposalDecision(proposal store.MemoryProposal) error {
 		{"reviewer", strings.TrimSpace(proposal.Reviewer) != ""},
 		{"reviewNote", strings.TrimSpace(proposal.ReviewNote) != ""},
 		{"reviewedAt", proposal.ReviewedAt != nil},
-		{"appliedMemoryId", strings.TrimSpace(proposal.AppliedMemoryID) != ""},
+		// The store treats any nonempty ID, even whitespace, as applied.
+		{"appliedMemoryId", proposal.AppliedMemoryID != ""},
 		{"appliedBy", strings.TrimSpace(proposal.AppliedBy) != ""},
 		{"appliedAt", proposal.AppliedAt != nil},
 	} {
