@@ -405,6 +405,15 @@ func (b *ahpBackend) HandleExtension(ctx context.Context, principal ahphost.Prin
 		if err != nil {
 			return nil, err
 		}
+		for i := range projects {
+			// Fill in a default branch an earlier lookup could not find.
+			if projects[i].DefaultBranch == "" {
+				if branch := b.defaultBranch(ctx, principal.Namespace, projects[i].URL); branch != "" {
+					projects[i].DefaultBranch = branch
+					_ = b.putRecord(ctx, principal.UserKey, ahpRecordProject, projects[i].ID, projects[i])
+				}
+			}
+		}
 		return map[string]any{"projects": ahpProjectsWire(projects)}, nil
 	case ahpExtensionCloneProject:
 		var req struct {
