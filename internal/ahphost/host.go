@@ -106,6 +106,20 @@ func New(cfg Config) (*Host, error) {
 // Tokens returns the host's token service.
 func (h *Host) Tokens() *TokenService { return h.cfg.Tokens }
 
+// Store returns the host's store, for session backends' own records.
+func (h *Host) Store() store.AHPStore { return h.cfg.Store }
+
+// RegisterBackend adds a session backend before the host serves connections.
+func (h *Host) RegisterBackend(backend SessionBackend) error {
+	if h.cfg.Backends == nil {
+		return fmt.Errorf("the AHP host has no backend registry")
+	}
+	return h.cfg.Backends.Register(backend)
+}
+
+// Emitter delivers a backend's actions for a user, connected or not.
+func (h *Host) Emitter(principal Principal) Emitter { return emitter{host: h, principal: principal} }
+
 // Start rechecks connected tokens until ctx ends, closing connections whose
 // token was revoked or expired.
 func (h *Host) Start(ctx context.Context) error {

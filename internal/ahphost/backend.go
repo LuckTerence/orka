@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 
 	"github.com/microsoft/agent-host-protocol/clients/go/ahptypes"
 )
@@ -95,7 +96,28 @@ func (r *Rejection) Error() string { return "action rejected: " + r.Reason }
 
 // Registry holds the session backends in the order their agents are listed.
 type Registry struct {
+	mu       sync.RWMutex
 	backends []SessionBackend
+}
+
+// Register adds a backend after the registry was built, before the host
+// serves connections. Backend names must stay unique.
+func (r *Registry) Register(backend SessionBackend) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, existing := range r.backends {
+		if existing.Name() == backend.Name() {
+			return fmt.Errorf("duplicate AHP session backend %q", backend.Name())
+		}
+	}
+	r.backends = append(r.backends, backend)
+	return nil
+}
+
+func (r *Registry) list() []SessionBackend {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return append([]SessionBackend{}, r.backends...)
 }
 
 // NewRegistry builds a registry. Backend names must be unique.
@@ -116,7 +138,7 @@ func (r *Registry) Agents(ctx context.Context, principal Principal) ([]ahptypes.
 	if r == nil {
 		return agents, nil
 	}
-	for _, backend := range r.backends {
+	for _, backend := range r.list() {
 		offered, err := backend.Agents(ctx, principal)
 		if err != nil {
 			return nil, err
@@ -132,7 +154,7 @@ func (r *Registry) ForProvider(ctx context.Context, principal Principal, provide
 	if r == nil {
 		return nil, "", fmt.Errorf("no session backends are configured")
 	}
-	for _, backend := range r.backends {
+	for _, backend := range r.list() {
 		offered, err := backend.Agents(ctx, principal)
 		if err != nil {
 			return nil, "", err
@@ -151,7 +173,7 @@ func (r *Registry) Named(name string) (SessionBackend, bool) {
 	if r == nil {
 		return nil, false
 	}
-	for _, backend := range r.backends {
+	for _, backend := range r.list() {
 		if backend.Name() == name {
 			return backend, true
 		}
@@ -165,7 +187,7 @@ func (r *Registry) rootExtensions(ctx context.Context, principal Principal) (map
 		return nil, nil, nil
 	}
 	var meta, config map[string]json.RawMessage
-	for _, backend := range r.backends {
+	for _, backend := range r.list() {
 		contributor, ok := backend.(RootContributor)
 		if !ok {
 			continue
@@ -193,7 +215,7 @@ func (r *Registry) rootExtensions(ctx context.Context, principal Principal) (map
 // extension routes an extensions/ method to the first backend that serves it.
 func (r *Registry) extension(ctx context.Context, principal Principal, method string, params json.RawMessage, emit Emitter) (any, error) {
 	if r != nil {
-		for _, backend := range r.backends {
+		for _, backend := range r.list() {
 			handler, ok := backend.(ExtensionHandler)
 			if !ok {
 				continue

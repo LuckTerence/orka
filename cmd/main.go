@@ -266,6 +266,7 @@ func main() {
 	var connectorsEnabled bool
 	var ahpAPIEnabled bool
 	var ahpTokenMaxTTL time.Duration
+	var ahpBackendConfig api.AHPBackendConfig
 	var dashboardEnabled bool
 	var connectorCallbackBaseURL string
 	var connectorsAllowPrivateEndpointsAck string
@@ -479,9 +480,15 @@ func main() {
 	flag.BoolVar(&connectorsEnabled, "connectors-enabled", envBool("ORKA_CONNECTORS_ENABLED"),
 		"Enable per-user connector reconciliation (ConnectorProvider and Connection).")
 	flag.BoolVar(&ahpAPIEnabled, "enable-ahp-api", envBool("ORKA_ENABLE_AHP_API"),
-		"Serve the Agent Host Protocol at /ahp and the AHP connection token routes. No session backend ships yet, so no agent can be started.")
+		"Serve the Agent Host Protocol at /ahp and the AHP connection token routes. In harness-v2 mode, Orka's built-in runtimes are offered as AHP agents.")
 	flag.DurationVar(&ahpTokenMaxTTL, "ahp-token-max-ttl", ahphost.DefaultMaxTokenTTL,
 		"Longest lifetime an AHP connection token may be minted with.")
+	flag.StringVar(&ahpBackendConfig.GitCredentialSecret, "ahp-git-credential-secret", os.Getenv("ORKA_AHP_GIT_CREDENTIAL_SECRET"),
+		"Secret in each AHP user's namespace whose token key clones and publishes their repositories. Without it, AHP sessions clone public repositories read-only.")
+	flag.StringVar(&ahpBackendConfig.WorkspaceClass, "ahp-workspace-class", os.Getenv("ORKA_AHP_WORKSPACE_CLASS"),
+		"ExecutionWorkspaceClass for session-scoped AHP workspaces, so a session's files stay warm between turns. Empty publishes each write turn and starts the next from it.")
+	flag.DurationVar(&ahpBackendConfig.TurnTimeout, "ahp-turn-timeout", 2*time.Hour,
+		"Timeout of each AHP turn's Task.")
 	flag.BoolVar(&dashboardEnabled, "dashboard-enabled", envBool("ORKA_DASHBOARD_ENABLED"),
 		"Serve the embedded web dashboard on the API port. The API, the CLI, and connector consent work without it.")
 	flag.StringVar(&connectorsAllowPrivateEndpointsAck, "connectors-allow-private-endpoints", os.Getenv("ORKA_CONNECTORS_ALLOW_PRIVATE_ENDPOINTS"),
@@ -2232,6 +2239,8 @@ func main() {
 		E2EPromptFaultEnabled:     strings.TrimSpace(acpE2EPromptWriteAmbiguityMarker) != "",
 		Connectors:                connectorConfig,
 		AHP:                       ahpHost,
+		AHPBackend:                ahpBackendFor(ahpHost, mode, ahpBackendConfig),
+		LiveEvents:                liveEvents,
 		ConnectorTools: api.ConnectorToolExecutionConfig{
 			Enabled:                          connectorsEnabled,
 			OutboundAccess:                   outboundAccessResolver,

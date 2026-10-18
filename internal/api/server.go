@@ -33,6 +33,7 @@ import (
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	"github.com/orka-agents/orka/internal/gateway/protocol"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	"github.com/orka-agents/orka/internal/liveevents"
 	"github.com/orka-agents/orka/internal/store"
 )
 
@@ -104,6 +105,10 @@ type ServerConfig struct {
 	// AHP serves the Agent Host Protocol at /ahp and its token routes; nil
 	// leaves /ahp unrouted and the token routes answering 501.
 	AHP *ahphost.Host
+	// AHPBackend, with AHP, serves Orka's built-in runtimes as AHP agents.
+	AHPBackend *AHPBackendConfig
+	// LiveEvents carries running Tasks' events from the ACP dispatcher.
+	LiveEvents *liveevents.Broker
 	// DashboardEnabled mirrors --dashboard-enabled: only then does the API
 	// port serve the embedded web dashboard and answer unrouted non-API
 	// paths with its index page.
@@ -186,6 +191,13 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		Connectors:                config.Connectors,
 		AHP:                       config.AHP,
 	})
+	if config.AHP != nil && config.AHPBackend != nil {
+		backend := newAHPBackend(server.handlers, config.AHP.Store(), config.LiveEvents, *config.AHPBackend)
+		backend.emitterFor = config.AHP.Emitter
+		if err := config.AHP.RegisterBackend(backend); err != nil {
+			log.Error(err, "register the AHP session backend")
+		}
+	}
 	resolver := NewProviderResolver(c, config.Chat)
 	server.chatHandler = NewChatHandler(c, config.APIReader, sessionManager, config.Chat, config.WatchNamespace, config.EnforceNamespaceIsolation, config.SessionStore, config.ResultStore, resolver, config.Clientset)
 	server.chatHandler.contextTokenAuthorization = config.ContextTokenAuthorization
