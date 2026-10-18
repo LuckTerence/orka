@@ -1891,7 +1891,9 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			promptRequest.Lease, promptRequest.MCPAuthorization, promptLimits,
 			promptLease,
 		)
+		live := acpLivePublisher{broker: d.LiveEvents, task: task}
 		emit := func(event harnessv2.Event) error {
+			live.observe(event)
 			switch event.Type {
 			case harnessv2.EventAccepted:
 				admitOnce.Do(func() { close(admitted) })
@@ -7225,4 +7227,26 @@ func runtimePoolToolboxUnavailableMessage(pool *corev1alpha1.RuntimePool) (strin
 		message = acpToolboxUnavailablePrefix + "the RuntimePool could not bind a declared toolbox"
 	}
 	return message, true
+}
+
+// acpLivePublisher shows one prompt's events to live consumers. A runtime
+// confirms on acceptance that it redacts every event before it leaves; an
+// older runtime's content is safe only once the journal redacts the complete
+// text, so none of its events are published.
+type acpLivePublisher struct {
+	broker    *liveevents.Broker
+	task      *corev1alpha1.Task
+	confirmed bool
+}
+
+func (p *acpLivePublisher) observe(event harnessv2.Event) {
+	if event.Type == harnessv2.EventAccepted && event.Accepted != nil {
+		p.confirmed = event.Accepted.LiveUpdates
+	}
+	if !p.confirmed {
+		return
+	}
+	p.broker.Publish(liveevents.Event{
+		Namespace: p.task.Namespace, Task: p.task.Name, TaskUID: string(p.task.UID), Runtime: &event,
+	})
 }
