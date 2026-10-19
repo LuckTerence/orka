@@ -295,9 +295,10 @@ The Pod's files are ephemeral: Orka rebuilds the checkouts when it starts again.
 removes the Pod with the person's last session unless a terminal is open, and, with
 `--ahp-workspace-idle-timeout` (default `4h`, `0` turns it off), after that long without
 use. An idle Pod is removed only while no shell or turn of its person runs and nothing in
-it exists only there: no uncommitted files, no commits on any local branch that no
-remote-tracking branch has, no stashes and no files outside the checkouts. When that
-cannot be checked, the Pod stays. Shell history is not kept.
+it exists only there: no uncommitted or untracked files, no commits on any local branch
+or worktree that no remote-tracking branch has, no stashes, no submodules and no files
+outside the checkouts. When that cannot be checked, the Pod stays. Shell history and
+files git ignores inside a checkout are not kept.
 
 For the same reason the chart does not keep the namespace: unsetting `workspaceImage` or
 uninstalling the release deletes it with its Pods. A namespace created earlier with

@@ -214,33 +214,40 @@ const ahpHoldsWorkScript = `for p in "$1"/src/*/*; do
   [ "$n" = 0 ] || echo "unpushed $p"
   s=$(git -C "$p" stash list 2>/dev/null) || { echo "error $p"; continue; }
   [ -z "$s" ] || echo "stashed $p"
+  # A submodule keeps its own branches and stashes: keep any checkout with one.
+  [ ! -e "$p/.git/modules" ] || echo "submodules $p"
   wts=$(git -C "$p" worktree list --porcelain 2>/dev/null) || { echo "error $p"; continue; }
   printf '%s\n' "$wts" | sed -n 's/^worktree //p' | while IFS= read -r wt; do
     c=$(git -C "$wt" status --porcelain --untracked-files=all 2>/dev/null) || { echo "error $wt"; continue; }
     [ -z "$c" ] || echo "changed $wt"
     h=$(git -C "$wt" rev-list --count HEAD --not --remotes 2>/dev/null) || { echo "error $wt"; continue; }
     [ "$h" = 0 ] || echo "unpushed $wt"
+    [ ! -e "$wt/.gitmodules" ] || echo "submodules $wt"
   done
 done
-# Any file outside the checkouts, anywhere under the root.
+# Any file outside the checkouts, anywhere under the root, except shell
+# history in HOME. A traversal that fails keeps the workspace.
 root=$1
-roots=$(mktemp)
+roots=$(mktemp) || { echo "error mktemp"; exit 0; }
+found=$(mktemp) || { echo "error mktemp"; exit 0; }
 for p in "$root"/src/*/*; do
   [ -d "$p/.git" ] || continue
   git -C "$p" worktree list --porcelain 2>/dev/null | sed -n 's/^worktree //p' >> "$roots" || echo "error $p"
 done
-set -- -path "$root/.home" -prune -o -path "$root/.clones" -prune -o
+set -- -path "$root/.clones" -prune -o
+for h in .ash_history .bash_history .sh_history .lesshst; do set -- "$@" -path "$root/.home/$h" -prune -o; done
 while IFS= read -r r; do set -- "$@" -path "$r" -prune -o; done < "$roots"
-rm -f "$roots"
-find "$root" "$@" ! -type d -print | head -n 1 | sed 's/^/other /'
+find "$root" "$@" ! -type d -print > "$found" 2>/dev/null || echo "error find"
+head -n 1 "$found" | sed 's/^/other /'
+rm -f "$roots" "$found"
 echo done`
 
 // holdsWork reports whether a workspace holds work that exists nowhere
 // else: uncommitted or untracked files in a checkout, whatever git's display
 // settings, commits on any local branch or worktree HEAD that no
-// remote-tracking branch has, stashes, or files anywhere outside the
-// checkouts. Files git ignores are not kept. When a check fails, it keeps the
-// workspace.
+// remote-tracking branch has, stashes, any submodule, or any file outside
+// the checkouts other than shell history. Files git ignores inside a
+// checkout are not kept. When a check fails, it keeps the workspace.
 func (w *ahpWorkspaces) holdsWork(ctx context.Context, pod *corev1.Pod) bool {
 	out, err := w.output(ctx, pod, 64<<10, ahpShell, "-c", ahpHoldsWorkScript, "sh", ahpWorkspaceRoot)
 	if err != nil {

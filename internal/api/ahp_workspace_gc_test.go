@@ -134,6 +134,23 @@ func TestAHPHoldsWorkScript(t *testing.T) {
 
 	require.NoError(t, os.WriteFile(filepath.Join(root, ".home", ".ash_history"), []byte("ls\n"), 0o600))
 	require.Equal(t, "done", holds(), "shell history is not kept")
+	require.NoError(t, os.WriteFile(filepath.Join(root, ".home", "notes.txt"), []byte("n\n"), 0o600))
+	require.Contains(t, holds(), "other "+filepath.Join(root, ".home", "notes.txt"), "other files in HOME are kept")
+	require.NoError(t, os.Remove(filepath.Join(root, ".home", "notes.txt")))
+
+	// A directory the scan cannot read keeps the workspace.
+	locked := filepath.Join(root, "locked")
+	require.NoError(t, os.MkdirAll(locked, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(locked, "f"), []byte("f\n"), 0o600))
+	require.NoError(t, os.Chmod(locked, 0))
+	require.Contains(t, holds(), "error find")
+	require.NoError(t, os.Chmod(locked, 0o755))
+	require.NoError(t, os.RemoveAll(locked))
+
+	// Any submodule keeps the workspace.
+	require.NoError(t, os.MkdirAll(filepath.Join(project, ".git", "modules"), 0o755))
+	require.Contains(t, holds(), "submodules "+project)
+	require.NoError(t, os.RemoveAll(filepath.Join(project, ".git", "modules")))
 	for _, stray := range []string{filepath.Join(root, "notes.txt"), filepath.Join(root, "src", "notes.txt"), filepath.Join(root, "worktrees", "o", "x.txt")} {
 		require.NoError(t, os.WriteFile(stray, []byte("n\n"), 0o600))
 		require.Contains(t, holds(), "other "+stray)
