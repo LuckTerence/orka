@@ -189,7 +189,7 @@ func (b *ahpBackend) CreateTerminal(ctx context.Context, principal ahphost.Princ
 		// The shell leads its own session; its PID names that session, so
 		// ending the terminal can stop everything started in it.
 		err := b.workspaces.stream(termCtx, pod,
-			[]string{"/bin/sh", "-c", `echo $$ > "$2"; cd "$1" 2>/dev/null || cd /workspace; exec /bin/sh -i`, "sh", cwd, term.pidFile},
+			[]string{ahpShell, "-c", `echo $$ > "$2"; cd "$1" 2>/dev/null || cd /workspace; exec /bin/sh -i`, "sh", cwd, term.pidFile},
 			stdin, output, true, term)
 		output.close()
 		var exitCode *int64
@@ -284,7 +284,7 @@ func (b *ahpBackend) stopShell(ctx context.Context, principal ahphost.Principal,
 	}
 	killCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()
-	_ = b.workspaces.run(killCtx, pod, "/bin/sh", "-c",
+	_ = b.workspaces.run(killCtx, pod, ahpShell, "-c",
 		`[ -f "$1" ] || exit 0; sid=$(cat "$1"); case "$sid" in ''|*[!0-9]*) exit 0;; esac; pkill -KILL -s "$sid"; rm -f "$1"`,
 		"sh", term.pidFile)
 }

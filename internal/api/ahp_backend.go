@@ -129,6 +129,10 @@ type AHPBackendConfig struct {
 	// turn and nothing unpushed stays after its last use. Zero keeps
 	// workspaces until their user's last session ends.
 	WorkspaceIdleTimeout time.Duration
+	// RepositoryCredential returns a person's own github.com token, valid for
+	// at least AHPWorkspaceTokenHorizon, from their linked account, for their
+	// workspace's git reads. Nil keeps workspaces to public repositories.
+	RepositoryCredential func(ctx context.Context, namespace, issuer, subject string) (string, error)
 }
 
 // ahpApprovalDecider answers a held permission request as its requester.

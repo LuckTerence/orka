@@ -268,6 +268,7 @@ func main() {
 	var ahpAPIEnabled bool
 	var ahpTokenMaxTTL time.Duration
 	var ahpBackendConfig api.AHPBackendConfig
+	var ahpWorkspaceConnectorProvider string
 	var dashboardEnabled bool
 	var connectorCallbackBaseURL string
 	var connectorsAllowPrivateEndpointsAck string
@@ -498,6 +499,8 @@ func main() {
 		"Digest-pinned image with sh and git for AHP workspaces. Empty disables workspaces and terminals.")
 	flag.DurationVar(&ahpBackendConfig.WorkspaceIdleTimeout, "ahp-workspace-idle-timeout", 4*time.Hour,
 		"Remove an AHP workspace this long after its last use when no shell or turn runs and nothing in it is unpushed. Zero keeps workspaces until their user's last session ends.")
+	flag.StringVar(&ahpWorkspaceConnectorProvider, "ahp-workspace-connector-provider", os.Getenv("ORKA_AHP_WORKSPACE_CONNECTOR_PROVIDER"),
+		"ConnectorProvider, in each user's namespace, whose github.com links give that user's AHP workspace read access to their private repositories. Requires --connectors-enabled. Empty keeps workspaces to public repositories.")
 	flag.BoolVar(&dashboardEnabled, "dashboard-enabled", envBool("ORKA_DASHBOARD_ENABLED"),
 		"Serve the embedded web dashboard on the API port. The API, the CLI, and connector consent work without it.")
 	flag.StringVar(&connectorsAllowPrivateEndpointsAck, "connectors-allow-private-endpoints", os.Getenv("ORKA_CONNECTORS_ALLOW_PRIVATE_ENDPOINTS"),
@@ -1483,17 +1486,30 @@ func main() {
 			os.Exit(1)
 		}
 	}
+	if strings.TrimSpace(ahpWorkspaceConnectorProvider) != "" && !connectorsEnabled {
+		setupLog.Error(nil, "--ahp-workspace-connector-provider requires --connectors-enabled")
+		os.Exit(1)
+	}
 	// chatLinkedAccounts lets chat and the compatibility proxies run the
 	// GitHub built-ins as the signed-in person; nil until connectors exist.
 	var chatLinkedAccounts api.LinkedAccountsFactory
 	if connectorsEnabled {
 		// Connection-mode outbound access resolves a person's credential only
 		// here, in the controller. Worker Pods keep a nil source and fail closed.
-		outboundAccessResolver.Connections = &credential.Source{
+		connectionSource := &credential.Source{
 			Client:      mgr.GetClient(),
 			APIReader:   mgr.GetAPIReader(),
 			Credentials: sqliteStore,
 			OAuth:       connectorOAuthClient,
+		}
+		outboundAccessResolver.Connections = connectionSource
+		if provider := strings.TrimSpace(ahpWorkspaceConnectorProvider); provider != "" {
+			// A person's workspace reads their repositories with their own
+			// linked account, and only from github.com.
+			ahpBackendConfig.RepositoryCredential = func(ctx context.Context, namespace, issuer, subject string) (string, error) {
+				linked, err := connectionSource.ResolveGitHubPersonCredential(ctx, namespace, provider, issuer, subject, api.AHPWorkspaceTokenHorizon)
+				return linked.AccessToken, err
+			}
 		}
 		chatLinkedAccounts = func(namespace string, requester *corev1alpha1.RequestedBy) tools.LinkedAccountCredentials {
 			// Fresh point reads from the API server; namespace-wide scans

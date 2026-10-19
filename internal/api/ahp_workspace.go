@@ -90,6 +90,8 @@ type ahpWorkspaces struct {
 	restoring map[string]chan struct{}
 	// active is each user's last use of their workspace, by user label.
 	active map[string]time.Time
+	// provided is when each user's workspace last got their git token.
+	provided map[string]ahpProvidedCredential
 	// git serializes each user's clones and worktree changes, which share
 	// the projects' checkouts.
 	git map[string]chan struct{}
@@ -132,12 +134,17 @@ func (w *ahpWorkspaces) podSpec(principal ahphost.Principal) *corev1.Pod {
 			Containers: []corev1.Container{{
 				Name: ahpWorkspaceContainer, Image: w.image,
 				// Keep the Pod alive for exec; nothing else runs.
-				Command:    []string{"/bin/sh", "-c", "trap 'exit 0' TERM; while :; do sleep 3600 & wait $!; done"},
+				Command:    []string{ahpShell, "-c", "trap 'exit 0' TERM; while :; do sleep 3600 & wait $!; done"},
 				WorkingDir: ahpWorkspaceRoot,
 				Env: []corev1.EnvVar{
 					{Name: "HOME", Value: ahpWorkspaceRoot + "/.home"},
 					{Name: "GIT_TERMINAL_PROMPT", Value: "0"},
 					{Name: "TERM", Value: "xterm-256color"},
+					// Git asks this helper for github.com only. It answers with
+					// the person's own token when Orka has provided one.
+					{Name: "GIT_CONFIG_COUNT", Value: "1"},
+					{Name: "GIT_CONFIG_KEY_0", Value: "credential.https://github.com.helper"},
+					{Name: "GIT_CONFIG_VALUE_0", Value: ahpGitCredentialHelper},
 				},
 				SecurityContext: &corev1.SecurityContext{
 					AllowPrivilegeEscalation: &no, ReadOnlyRootFilesystem: &yes, RunAsNonRoot: &yes,
@@ -187,10 +194,12 @@ func (w *ahpWorkspaces) ensure(ctx context.Context, principal ahphost.Principal,
 		case pod.Status.Phase == corev1.PodFailed || pod.Status.Phase == corev1.PodSucceeded:
 			_ = w.b.h.client.Delete(ctx, pod, client.Preconditions{UID: &pod.UID})
 		case pod.Status.Phase == corev1.PodRunning && ahpContainerRunning(pod):
+			w.touch(principal, pod.DeepCopy())
+			// The token comes first: a restore may clone private repositories.
+			w.provideCredential(ctx, principal, pod)
 			if created || pod.Annotations[ahpWorkspaceRestoredAnnotation] == "" {
 				w.restoreInBackground(principal, pod.DeepCopy())
 			}
-			w.touch(principal, pod.DeepCopy())
 			return pod, nil
 		}
 		if time.Now().After(deadline) {
@@ -432,7 +441,7 @@ func (w *ahpWorkspaces) ensureProject(ctx context.Context, principal ahphost.Pri
 // clone puts a project's checkout at its path only once it is complete, so
 // an interrupted clone never looks like a checkout. Callers hold the git lock.
 func (w *ahpWorkspaces) clone(ctx context.Context, pod *corev1.Pod, project ahpProject) error {
-	return w.runWithin(ctx, ahpWorkspaceGitTimeout, pod, "/bin/sh", "-c", `set -e
+	return w.runWithin(ctx, ahpWorkspaceGitTimeout, pod, ahpShell, "-c", `set -e
 [ -d "$1/.git" ] && exit 0
 if [ -e "$1" ]; then echo "$1 is not a git checkout" >&2; exit 1; fi
 mkdir -p "$(dirname "$1")" "$3"
@@ -463,7 +472,7 @@ func (w *ahpWorkspaces) worktree(ctx context.Context, pod *corev1.Pod, project a
 	if base == "" {
 		base = project.DefaultBranch
 	}
-	return w.run(ctx, pod, "/bin/sh", "-c", `set -e
+	return w.run(ctx, pod, ahpShell, "-c", `set -e
 cd "$1"
 [ -e "$2/.git" ] && exit 0
 mkdir -p "$(dirname "$2")"
@@ -498,7 +507,7 @@ func (w *ahpWorkspaces) follow(ctx context.Context, principal ahphost.Principal,
 		if err := w.worktree(ctx, pod, project, record); err != nil {
 			return err
 		}
-		if err := w.run(ctx, pod, "/bin/sh", "-c", `set -e
+		if err := w.run(ctx, pod, ahpShell, "-c", `set -e
 cd "$1"
 git fetch --quiet origin "+refs/heads/$2:refs/remotes/origin/$2"
 git branch --quiet --set-upstream-to="origin/$2" "$2"

@@ -76,12 +76,12 @@ func (w *ahpWorkspaces) output(ctx context.Context, pod *corev1.Pod, limit int, 
 
 // readFile reads a regular file from the workspace.
 func (w *ahpWorkspaces) readFile(ctx context.Context, pod *corev1.Pod, file string) ([]byte, error) {
-	return w.output(ctx, pod, ahpFileReadMax, "/bin/sh", "-c", `[ -f "$1" ] || exit 3; exec cat -- "$1"`, "sh", file)
+	return w.output(ctx, pod, ahpFileReadMax, ahpShell, "-c", `[ -f "$1" ] || exit 3; exec cat -- "$1"`, "sh", file)
 }
 
 // list lists a directory in the workspace, directories marked with a slash.
 func (w *ahpWorkspaces) list(ctx context.Context, pod *corev1.Pod, dir string) ([]ahptypes.DirectoryEntry, error) {
-	raw, err := w.output(ctx, pod, 1<<20, "/bin/sh", "-c", `[ -d "$1" ] || exit 3; cd "$1" && ls -1Ap`, "sh", dir)
+	raw, err := w.output(ctx, pod, 1<<20, ahpShell, "-c", `[ -d "$1" ] || exit 3; cd "$1" && ls -1Ap`, "sh", dir)
 	if err != nil {
 		return nil, err
 	}
@@ -106,7 +106,7 @@ func (w *ahpWorkspaces) stamps(ctx context.Context, pod *corev1.Pod, root string
 	if recursive {
 		depth = "64"
 	}
-	raw, err := w.output(ctx, pod, 4<<20, "/bin/sh", "-c",
+	raw, err := w.output(ctx, pod, 4<<20, ahpShell, "-c",
 		`[ -e "$1" ] || exit 3; find "$1" -maxdepth "$2" -name .git -prune -o -type f -print | head -n "$3" | while IFS= read -r f; do stat -c '%Y %s %n' -- "$f"; done`,
 		"sh", root, depth, strconv.Itoa(ahpWatchFilesMax))
 	if err != nil {
@@ -312,12 +312,14 @@ const (
 	ahpChangeTooLarge   = "This file is too large to show.\n"
 	ahpChangeBinary     = "This file is binary.\n"
 	ahpGitProgram       = "git"
+	// ahpShell runs the workspace's commands.
+	ahpShell = "/bin/sh"
 )
 
 // branchChanges reads every file a worktree's branch changed since it forked
 // from base, with both sides' contents, keyed by full path.
 func (w *ahpWorkspaces) branchChanges(ctx context.Context, pod *corev1.Pod, worktree, base string) (map[string]ahpGitChange, error) {
-	raw, err := w.output(ctx, pod, 1<<20, "/bin/sh", "-c", `set -e
+	raw, err := w.output(ctx, pod, 1<<20, ahpShell, "-c", `set -e
 cd "$1"
 fork=$(git merge-base HEAD "origin/$2")
 printf '%s\0' "$fork"

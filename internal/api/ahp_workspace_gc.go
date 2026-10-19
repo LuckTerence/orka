@@ -132,7 +132,7 @@ func ahpWorkspaceIdle(now, last time.Time, pod *corev1.Pod, idle time.Duration) 
 // exist nowhere else: uncommitted files or commits its upstream lacks. When
 // it cannot tell, it keeps the workspace.
 func (w *ahpWorkspaces) holdsWork(ctx context.Context, pod *corev1.Pod) bool {
-	out, err := w.output(ctx, pod, 64<<10, "/bin/sh", "-c", `for p in "$1"/*/*; do
+	out, err := w.output(ctx, pod, 64<<10, ahpShell, "-c", `for p in "$1"/*/*; do
   [ -d "$p/.git" ] || continue
   git -C "$p" worktree list --porcelain | sed -n 's/^worktree //p' | while IFS= read -r wt; do
     if [ -n "$(git -C "$wt" status --porcelain 2>/dev/null | head -n 1)" ]; then echo "changed $wt"; continue; fi
