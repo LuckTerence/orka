@@ -140,7 +140,7 @@ restore_relay() {
   [ -n "${relay_rollback}" ] || return 0
   echo "Runtime ${runtime} is not Ready; moving relay ${relay_service} back." >&2
   kc patch service "${relay_service}" --type=json -p "[{\"op\":\"test\",\"path\":\"/spec/selector\",\"value\":{\"orka.ai/kagent-runtime\":\"${runtime}\"}},{\"op\":\"replace\",\"path\":\"/spec/selector\",\"value\":${relay_rollback}},{\"op\":\"replace\",\"path\":\"/spec/ports\",\"value\":${relay_rollback_ports}}]" >/dev/null ||
-    echo "kagent-runtime: relay ${relay_service} was not moved back to ${relay_rollback}; it no longer selects ${runtime}, or the patch failed" >&2
+    echo "kagent-runtime: relay ${relay_service} was not moved back to ${relay_rollback}; it does not select ${runtime}, or the patch failed" >&2
   # The policy goes back too, while it is still the one this deploy applied.
   [ -n "${relay_rollback_policy}" ] && [ -n "${relay_applied_policy}" ] || return 0
   kc patch networkpolicy "${relay_service}" --type=json -p "[{\"op\":\"test\",\"path\":\"/spec\",\"value\":${relay_applied_policy}},{\"op\":\"replace\",\"path\":\"/spec\",\"value\":${relay_rollback_policy}}]" >/dev/null ||
@@ -303,25 +303,24 @@ deploy() {
         # writes back a selector another deploy replaced, nor takes another
         # Agent's relay. It replaces the selector outright, since a merge with
         # an older one would select nothing.
+        # Armed before the patch, since an error may follow a committed one;
+        # the rollback restores only while the relay selects this runtime.
         relay_rollback=${previous}
         relay_rollback_ports=$(jq -c '.spec.ports' <<<"${current}")
         kc patch service "${relay_service}" --type=json -p "[{\"op\":\"test\",\"path\":\"/spec/selector\",\"value\":${previous}},{\"op\":\"test\",\"path\":\"/metadata/labels/orka.ai~1kagent-agent\",\"value\":\"${agent}\"},{\"op\":\"replace\",\"path\":\"/spec/selector\",\"value\":${want}},{\"op\":\"replace\",\"path\":\"/spec/ports\",\"value\":${ports}}]" >/dev/null ||
-          {
-            relay_rollback=""
-            die "relay ${relay_service} changed while this deploy ran; deploy again"
-          }
+          die "relay ${relay_service} did not take the handoff: it changed while this deploy ran, or the patch failed; deploy again"
       fi
     fi
     # The relay is this Agent's now, so its policy is too. A rollback
     # restores the policy it replaced, which the render options, such as
     # SUBSTRATE_NAMESPACE, may have changed.
+    # The fence is the rendered spec, which the API server stores as is, so
+    # it is known before the policy changes.
     if [ -n "${relay_rollback}" ]; then
+      relay_applied_policy=$(jq -ce '.items[] | select(.kind == "NetworkPolicy") | .spec' "${work}/relay.json")
       relay_rollback_policy=$(kc get networkpolicy "${relay_service}" --ignore-not-found -o json | jq -c '.spec // empty')
     fi
     jq '.items |= map(select(.kind == "NetworkPolicy"))' "${work}/relay.json" | apply
-    if [ -n "${relay_rollback_policy}" ]; then
-      relay_applied_policy=$(kc get networkpolicy "${relay_service}" -o json | jq -c '.spec')
-    fi
   fi
   # The API server's service proxy reaches the runtime's public endpoint.
   kubectl --context "${KUBECTL_CONTEXT}" get --raw \
@@ -351,9 +350,21 @@ activate() {
   [ "$#" -gt 0 ] || die "activate needs the import arguments after --"
   # The import activates the bundles in this bundle's directory, the ones the
   # relay checks below cover, so the script names that directory itself.
-  local bundle_dir arg pending=false args=()
+  local bundle_dir arg pending=false file_next=false args=()
   bundle_dir=$(cd "$(dirname "${bundle}")" && pwd -P)
+  # The preview and the import read the same input, so standard input is
+  # read once, into the private work directory.
+  work=$(mktemp -d)
   for arg in "$@"; do
+    if [ "${file_next}" = true ]; then
+      file_next=false
+      if [ "${arg}" = - ]; then
+        cat >"${work}/input"
+        arg=${work}/input
+      fi
+      args+=("${arg}")
+      continue
+    fi
     if [ "${pending}" = true ]; then
       pending=false
       same_bundle_dir "${arg}" "${bundle_dir}" || die "--bundle-dir ${arg} is not ${bundle_dir}, the directory of ${bundle}"
@@ -362,6 +373,14 @@ activate() {
     case "${arg}" in
     --dry-run | --dry-run=*) die "activate runs the import without --dry-run" ;;
     --bundle-dir) pending=true ;;
+    -f | --file)
+      args+=("${arg}")
+      file_next=true
+      ;;
+    -f=- | --file=-)
+      cat >"${work}/input"
+      args+=("${arg%%=*}=${work}/input")
+      ;;
     --bundle-dir=*)
       same_bundle_dir "${arg#--bundle-dir=}" "${bundle_dir}" ||
         die "${arg} is not ${bundle_dir}, the directory of ${bundle}"
@@ -388,7 +407,6 @@ activate() {
   # The import must include this bundle's Agent, or it would switch the
   # others and leave this one: a dry run into a scratch directory shows which
   # Agents these arguments import, without touching the bundles.
-  work=$(mktemp -d)
   "${ORKA}" agent import kagent "${args[@]}" --dry-run --bundle-dir "${work}/preview" -n "${NAMESPACE}" >/dev/null
   [ -f "${work}/preview/${agent}/runtime.json" ] ||
     die "the import arguments do not import Agent ${agent}; check -f"
