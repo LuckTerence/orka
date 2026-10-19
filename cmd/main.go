@@ -491,6 +491,11 @@ func main() {
 		"ExecutionWorkspaceClass for session-scoped AHP workspaces, so a session's files stay warm between turns. Empty publishes each write turn and starts the next from it.")
 	flag.DurationVar(&ahpBackendConfig.TurnTimeout, "ahp-turn-timeout", 2*time.Hour,
 		"Timeout of each AHP turn's Task.")
+	flag.StringVar(&ahpBackendConfig.WorkspaceNamespace, "ahp-workspace-namespace",
+		envutil.String("ORKA_AHP_WORKSPACE_NAMESPACE", "orka-ahp-workspaces"),
+		"Namespace for AHP users' workspace Pods: git checkouts of their projects and sessions, and their terminals.")
+	flag.StringVar(&ahpBackendConfig.WorkspaceImage, "ahp-workspace-image", os.Getenv("ORKA_AHP_WORKSPACE_IMAGE"),
+		"Digest-pinned image with sh and git for AHP workspaces. Empty disables workspaces and terminals.")
 	flag.BoolVar(&dashboardEnabled, "dashboard-enabled", envBool("ORKA_DASHBOARD_ENABLED"),
 		"Serve the embedded web dashboard on the API port. The API, the CLI, and connector consent work without it.")
 	flag.StringVar(&connectorsAllowPrivateEndpointsAck, "connectors-allow-private-endpoints", os.Getenv("ORKA_CONNECTORS_ALLOW_PRIVATE_ENDPOINTS"),
@@ -2202,6 +2207,10 @@ func main() {
 	}
 	var ahpHost *ahphost.Host
 	if ahpAPIEnabled {
+		if err := validateAHPWorkspace(ahpBackendConfig, watchNamespace, controlNamespace); err != nil {
+			setupLog.Error(err, "invalid AHP workspace configuration")
+			os.Exit(1)
+		}
 		ahpHost, err = newAHPHost(sqliteStore, ahpTokenMaxTTL)
 		if err != nil {
 			setupLog.Error(err, "unable to set up the AHP host")
@@ -2252,6 +2261,7 @@ func main() {
 		Connectors:                connectorConfig,
 		AHP:                       ahpHost,
 		AHPBackend:                ahpBackendFor(ahpHost, mode, ahpBackendConfig),
+		RESTConfig:                mgr.GetConfig(),
 		LiveEvents:                liveEvents,
 		ConnectorTools: api.ConnectorToolExecutionConfig{
 			Enabled:                          connectorsEnabled,

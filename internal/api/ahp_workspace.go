@@ -1,0 +1,446 @@
+/*
+Copyright (c) 2026.
+
+MIT License - see LICENSE file for details.
+*/
+
+package api
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"path"
+	"regexp"
+	"strings"
+	"sync"
+	"time"
+
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/remotecommand"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/orka-agents/orka/internal/ahphost"
+)
+
+// An AHP user's workspace is one Pod that stands in for the host clients
+// expect: their projects are git checkouts at their project paths, each
+// session has a git worktree at its working directory, and terminals are
+// shells in it. It holds no credential: repositories are cloned anonymously,
+// agents never run there, and each turn's Task still works in its own
+// workspace and publishes to the session's branch, which the worktree then
+// follows.
+const (
+	ahpWorkspaceContainer = "workspace"
+	ahpWorkspaceRoot      = "/workspace"
+	ahpWorktreeRoot       = "/workspace/worktrees"
+	ahpWorkspaceComponent = "ahp-workspace"
+	ahpWorkspaceUserLabel = "orka.ai/ahp-user"
+	// ahpWorkspaceRestoredAnnotation marks a Pod whose projects and worktrees
+	// were brought back after it started.
+	ahpWorkspaceRestoredAnnotation = "orka.ai/ahp-workspace-restored"
+	ahpWorkspaceStartWait          = 20 * time.Second
+	ahpWorkspaceExecTimeout        = 2 * time.Minute
+	ahpWorkspaceUID                = 1000
+	ahpExecOutputMax               = 64 << 10
+)
+
+var ahpGitRefName = regexp.MustCompile(`^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$`)
+
+// ahpValidBranch accepts branch names that are safe as git refs and paths.
+func ahpValidBranch(branch string) bool {
+	if branch == "" || len(branch) > 200 || !ahpGitRefName.MatchString(branch) || strings.HasPrefix(branch, "-") {
+		return false
+	}
+	for segment := range strings.SplitSeq(branch, "/") {
+		if segment == "." || segment == ".." || strings.HasPrefix(segment, ".") || strings.HasSuffix(segment, ".lock") {
+			return false
+		}
+	}
+	return !strings.Contains(branch, "..")
+}
+
+type ahpWorkspaces struct {
+	b         *ahpBackend
+	clientset kubernetes.Interface
+	rest      *rest.Config
+	namespace string
+	image     string
+
+	// startWait bounds how long a request waits for a starting workspace.
+	startWait time.Duration
+
+	mu        sync.Mutex
+	starting  map[string]chan struct{}
+	restoring map[string]bool
+}
+
+func (w *ahpWorkspaces) enabled() bool {
+	return w != nil && w.image != "" && w.namespace != "" && w.rest != nil && w.clientset != nil
+}
+
+func ahpWorkspacePodName(userKey string) string { return "ahp-ws-" + userKey[:20] }
+
+func (w *ahpWorkspaces) reader() client.Reader {
+	if w.b.h.apiReader != nil {
+		return w.b.h.apiReader
+	}
+	return w.b.h.client
+}
+
+func (w *ahpWorkspaces) podSpec(principal ahphost.Principal) *corev1.Pod {
+	no, yes := false, true
+	uid := int64(ahpWorkspaceUID)
+	workspaceLimit := resource.MustParse("10Gi")
+	tmpLimit := resource.MustParse("1Gi")
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: ahpWorkspacePodName(principal.UserKey), Namespace: w.namespace,
+			Labels: map[string]string{
+				"app.kubernetes.io/name": "orka", "app.kubernetes.io/component": ahpWorkspaceComponent,
+				ahpWorkspaceUserLabel: principal.UserKey[:40],
+			},
+		},
+		Spec: corev1.PodSpec{
+			AutomountServiceAccountToken: &no,
+			EnableServiceLinks:           &no,
+			RestartPolicy:                corev1.RestartPolicyAlways,
+			SecurityContext: &corev1.PodSecurityContext{
+				RunAsNonRoot: &yes, RunAsUser: &uid, RunAsGroup: &uid, FSGroup: &uid,
+				SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+			},
+			Containers: []corev1.Container{{
+				Name: ahpWorkspaceContainer, Image: w.image,
+				// Keep the Pod alive for exec; nothing else runs.
+				Command:    []string{"/bin/sh", "-c", "trap 'exit 0' TERM; while :; do sleep 3600 & wait $!; done"},
+				WorkingDir: ahpWorkspaceRoot,
+				Env: []corev1.EnvVar{
+					{Name: "HOME", Value: ahpWorkspaceRoot + "/.home"},
+					{Name: "GIT_TERMINAL_PROMPT", Value: "0"},
+					{Name: "TERM", Value: "xterm-256color"},
+				},
+				SecurityContext: &corev1.SecurityContext{
+					AllowPrivilegeEscalation: &no, ReadOnlyRootFilesystem: &yes, RunAsNonRoot: &yes,
+					Capabilities: &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+				},
+				Resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("50m"), corev1.ResourceMemory: resource.MustParse("128Mi")},
+					Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1"), corev1.ResourceMemory: resource.MustParse("1Gi")},
+				},
+				VolumeMounts: []corev1.VolumeMount{{Name: "workspace", MountPath: ahpWorkspaceRoot}, {Name: "tmp", MountPath: "/tmp"}},
+			}},
+			Volumes: []corev1.Volume{
+				{Name: "workspace", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: &workspaceLimit}}},
+				{Name: "tmp", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: &tmpLimit}}},
+			},
+		},
+	}
+}
+
+// ensure returns the user's running workspace Pod, creating it if needed and
+// waiting at most wait for it to start. A new Pod gets the user's projects
+// and session worktrees again.
+func (w *ahpWorkspaces) ensure(ctx context.Context, principal ahphost.Principal, wait time.Duration) (*corev1.Pod, error) {
+	if w != nil && w.startWait > 0 && wait > w.startWait {
+		wait = w.startWait
+	}
+	if !w.enabled() {
+		return nil, errors.New("workspaces are not enabled on this host")
+	}
+	name := ahpWorkspacePodName(principal.UserKey)
+	deadline := time.Now().Add(wait)
+	created := false
+	for {
+		pod := &corev1.Pod{}
+		err := w.reader().Get(ctx, types.NamespacedName{Namespace: w.namespace, Name: name}, pod)
+		switch {
+		case apierrors.IsNotFound(err):
+			if err := w.b.h.client.Create(ctx, w.podSpec(principal)); err != nil && !apierrors.IsAlreadyExists(err) {
+				return nil, fmt.Errorf("create the workspace: %w", err)
+			}
+			created = true
+		case err != nil:
+			return nil, err
+		case pod.Labels[ahpWorkspaceUserLabel] != principal.UserKey[:40]:
+			return nil, errors.New("the workspace Pod belongs to someone else")
+		case !pod.DeletionTimestamp.IsZero():
+		case pod.Status.Phase == corev1.PodFailed || pod.Status.Phase == corev1.PodSucceeded:
+			_ = w.b.h.client.Delete(ctx, pod, client.Preconditions{UID: &pod.UID})
+		case pod.Status.Phase == corev1.PodRunning && ahpContainerRunning(pod):
+			if created || pod.Annotations[ahpWorkspaceRestoredAnnotation] == "" {
+				w.restoreInBackground(principal, pod.DeepCopy())
+			}
+			return pod, nil
+		}
+		if time.Now().After(deadline) {
+			return nil, errors.New("the workspace is starting; try again shortly")
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(time.Second):
+		}
+	}
+}
+
+func ahpContainerRunning(pod *corev1.Pod) bool {
+	for _, status := range pod.Status.ContainerStatuses {
+		if status.Name == ahpWorkspaceContainer && status.State.Running != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// warm starts the user's workspace in the background, so the first terminal
+// does not wait for it.
+func (w *ahpWorkspaces) warm(principal ahphost.Principal) {
+	if !w.enabled() {
+		return
+	}
+	w.mu.Lock()
+	if w.starting == nil {
+		w.starting = map[string]chan struct{}{}
+	}
+	if _, running := w.starting[principal.UserKey]; running {
+		w.mu.Unlock()
+		return
+	}
+	done := make(chan struct{})
+	w.starting[principal.UserKey] = done
+	w.mu.Unlock()
+	go func() {
+		defer func() {
+			w.mu.Lock()
+			delete(w.starting, principal.UserKey)
+			w.mu.Unlock()
+			close(done)
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		defer cancel()
+		_, _ = w.ensure(ctx, principal, 2*time.Minute)
+	}()
+}
+
+// restoreInBackground restores a new workspace without holding up a request,
+// once per user at a time.
+func (w *ahpWorkspaces) restoreInBackground(principal ahphost.Principal, pod *corev1.Pod) {
+	w.mu.Lock()
+	if w.restoring == nil {
+		w.restoring = map[string]bool{}
+	}
+	if w.restoring[principal.UserKey] {
+		w.mu.Unlock()
+		return
+	}
+	w.restoring[principal.UserKey] = true
+	w.mu.Unlock()
+	go func() {
+		defer func() {
+			w.mu.Lock()
+			delete(w.restoring, principal.UserKey)
+			w.mu.Unlock()
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+		w.restore(ctx, principal, pod)
+	}()
+}
+
+// restore clones the user's projects and adds their sessions' worktrees in a
+// new workspace Pod, then marks it restored.
+func (w *ahpWorkspaces) restore(ctx context.Context, principal ahphost.Principal, pod *corev1.Pod) {
+	projects, err := w.b.projects(ctx, principal.UserKey)
+	if err != nil {
+		return
+	}
+	for _, project := range projects {
+		_ = w.ensureProject(ctx, pod, project)
+	}
+	sessions, err := w.b.store.ListAHPRecords(ctx, principal.UserKey, ahpRecordSession)
+	if err == nil {
+		for _, raw := range sessions {
+			var record ahpSession
+			if json.Unmarshal(raw.Value, &record) != nil || record.Branch == "" {
+				continue
+			}
+			for _, project := range projects {
+				if project.ID == record.ProjectID {
+					_ = w.ensureWorktree(ctx, pod, project, record)
+				}
+			}
+		}
+	}
+	patch := client.MergeFrom(pod.DeepCopy())
+	if pod.Annotations == nil {
+		pod.Annotations = map[string]string{}
+	}
+	pod.Annotations[ahpWorkspaceRestoredAnnotation] = "true"
+	_ = w.b.h.client.Patch(ctx, pod, patch)
+}
+
+// run executes a program in the workspace without a terminal. A failure
+// carries the program's output, bounded.
+func (w *ahpWorkspaces) run(ctx context.Context, pod *corev1.Pod, argv ...string) error {
+	ctx, cancel := context.WithTimeout(ctx, ahpWorkspaceExecTimeout)
+	defer cancel()
+	var output ahpBoundedBuffer
+	if err := w.stream(ctx, pod, argv, nil, &output, false, nil); err != nil {
+		return fmt.Errorf("%w: %s", err, strings.TrimSpace(output.String()))
+	}
+	return nil
+}
+
+// stream executes argv in the workspace container.
+func (w *ahpWorkspaces) stream(ctx context.Context, pod *corev1.Pod, argv []string, stdin io.Reader, stdout io.Writer, tty bool, sizes remotecommand.TerminalSizeQueue) error {
+	req := w.clientset.CoreV1().RESTClient().Post().Resource("pods").Namespace(pod.Namespace).Name(pod.Name).SubResource("exec").
+		VersionedParams(&corev1.PodExecOptions{
+			Container: ahpWorkspaceContainer, Command: argv, Stdin: stdin != nil, Stdout: true, Stderr: !tty, TTY: tty,
+		}, scheme.ParameterCodec)
+	executor, err := remotecommand.NewWebSocketExecutor(w.rest, "GET", req.URL().String())
+	if err != nil {
+		return err
+	}
+	options := remotecommand.StreamOptions{Stdin: stdin, Stdout: stdout, Tty: tty, TerminalSizeQueue: sizes}
+	if !tty {
+		options.Stderr = stdout
+	}
+	return executor.StreamWithContext(ctx, options)
+}
+
+// ensureProject clones a project at its path if it is not there yet.
+func (w *ahpWorkspaces) ensureProject(ctx context.Context, pod *corev1.Pod, project ahpProject) error {
+	return w.run(ctx, pod, "/bin/sh", "-c",
+		`set -e; [ -d "$1/.git" ] && exit 0; mkdir -p "$(dirname "$1")"; git clone --quiet --filter=blob:none -- "$2" "$1"`,
+		"sh", project.Path, project.URL)
+}
+
+// ahpWorktreePath is a session's worktree: unique per project and branch, and
+// a project's branch belongs to one session.
+func ahpWorktreePath(project ahpProject, branch string) string {
+	return path.Join(ahpWorktreeRoot, project.Owner, project.Name, branch)
+}
+
+// ensureWorktree adds a session's worktree on its branch: the published
+// branch when it exists, otherwise a new branch from the base.
+func (w *ahpWorkspaces) ensureWorktree(ctx context.Context, pod *corev1.Pod, project ahpProject, record ahpSession) error {
+	if err := w.ensureProject(ctx, pod, project); err != nil {
+		return err
+	}
+	base := record.BaseBranch
+	if base == "" {
+		base = project.DefaultBranch
+	}
+	return w.run(ctx, pod, "/bin/sh", "-c", `set -e
+cd "$1"
+[ -e "$2/.git" ] && exit 0
+mkdir -p "$(dirname "$2")"
+if git ls-remote --exit-code --heads origin "$3" >/dev/null 2>&1; then
+  git fetch --quiet origin "+refs/heads/$3:refs/remotes/origin/$3"
+  git worktree add --quiet -B "$3" "$2" "origin/$3"
+  git -C "$2" branch --quiet --set-upstream-to="origin/$3" "$3"
+elif [ -n "$4" ]; then
+  git fetch --quiet origin "+refs/heads/$4:refs/remotes/origin/$4"
+  git worktree add --quiet -b "$3" "$2" "origin/$4"
+else
+  git worktree add --quiet -b "$3" "$2"
+fi`, "sh", project.Path, ahpWorktreePath(project, record.Branch), record.Branch, base)
+}
+
+// follow fast-forwards a session's worktree to what the last turn published.
+// A branch with local commits or conflicting local changes is left alone.
+func (w *ahpWorkspaces) follow(ctx context.Context, principal ahphost.Principal, record ahpSession) {
+	if !w.enabled() || record.Branch == "" {
+		return
+	}
+	var project ahpProject
+	if err := w.b.getRecord(ctx, principal.UserKey, ahpRecordProject, record.ProjectID, &project); err != nil {
+		return
+	}
+	pod, err := w.ensure(ctx, principal, time.Minute)
+	if err != nil {
+		return
+	}
+	if err := w.ensureWorktree(ctx, pod, project, record); err != nil {
+		return
+	}
+	_ = w.run(ctx, pod, "/bin/sh", "-c", `set -e
+cd "$1"
+git fetch --quiet origin "+refs/heads/$2:refs/remotes/origin/$2"
+git branch --quiet --set-upstream-to="origin/$2" "$2"
+git merge --quiet --ff-only "origin/$2"`, "sh", ahpWorktreePath(project, record.Branch), record.Branch)
+}
+
+// dropWorktree removes a disposed session's worktree from a running workspace.
+func (w *ahpWorkspaces) dropWorktree(ctx context.Context, principal ahphost.Principal, project ahpProject, branch string) {
+	if !w.enabled() || branch == "" {
+		return
+	}
+	pod, ok := w.running(ctx, principal)
+	if !ok {
+		return
+	}
+	_ = w.run(ctx, pod, "git", "-C", project.Path, "worktree", "remove", "--force", ahpWorktreePath(project, branch))
+}
+
+// running returns the user's workspace Pod if it is running; it never creates one.
+func (w *ahpWorkspaces) running(ctx context.Context, principal ahphost.Principal) (*corev1.Pod, bool) {
+	if !w.enabled() {
+		return nil, false
+	}
+	pod := &corev1.Pod{}
+	if err := w.reader().Get(ctx, types.NamespacedName{Namespace: w.namespace, Name: ahpWorkspacePodName(principal.UserKey)}, pod); err != nil {
+		return nil, false
+	}
+	return pod, pod.Labels[ahpWorkspaceUserLabel] == principal.UserKey[:40] && pod.DeletionTimestamp.IsZero() &&
+		pod.Status.Phase == corev1.PodRunning && ahpContainerRunning(pod)
+}
+
+// remove deletes the user's workspace Pod.
+func (w *ahpWorkspaces) remove(ctx context.Context, principal ahphost.Principal) {
+	if !w.enabled() {
+		return
+	}
+	pod := &corev1.Pod{}
+	if err := w.reader().Get(ctx, types.NamespacedName{Namespace: w.namespace, Name: ahpWorkspacePodName(principal.UserKey)}, pod); err != nil {
+		return
+	}
+	if pod.Labels[ahpWorkspaceUserLabel] == principal.UserKey[:40] {
+		_ = w.b.h.client.Delete(ctx, pod, client.Preconditions{UID: &pod.UID})
+	}
+}
+
+// ahpBoundedBuffer keeps at most ahpExecOutputMax bytes of output.
+type ahpBoundedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *ahpBoundedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if room := ahpExecOutputMax - b.buf.Len(); room > 0 {
+		if len(p) > room {
+			b.buf.Write(p[:room])
+		} else {
+			b.buf.Write(p)
+		}
+	}
+	return len(p), nil
+}
+
+func (b *ahpBoundedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}

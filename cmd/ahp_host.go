@@ -7,6 +7,9 @@ MIT License - see LICENSE file for details.
 package main
 
 import (
+	"fmt"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/orka-agents/orka/internal/api"
@@ -47,4 +50,21 @@ func ahpBackendFor(host *ahphost.Host, mode executionmode.Mode, cfg api.AHPBacke
 		return nil
 	}
 	return &cfg
+}
+
+var ahpWorkspaceImageDigest = regexp.MustCompile(`^[^@\s]+@sha256:[a-f0-9]{64}$`)
+
+// validateAHPWorkspace checks the workspace settings before anything starts.
+func validateAHPWorkspace(cfg api.AHPBackendConfig, watchNamespace, controlNamespace string) error {
+	if cfg.WorkspaceImage == "" {
+		return nil
+	}
+	if !ahpWorkspaceImageDigest.MatchString(cfg.WorkspaceImage) {
+		return fmt.Errorf("--ahp-workspace-image must be pinned by digest")
+	}
+	switch strings.TrimSpace(cfg.WorkspaceNamespace) {
+	case "", watchNamespace, controlNamespace:
+		return fmt.Errorf("--ahp-workspace-namespace must name a namespace of its own")
+	}
+	return nil
 }

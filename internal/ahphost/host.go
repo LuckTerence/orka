@@ -70,10 +70,76 @@ type userHub struct {
 }
 
 // storedChannel is how a channel's state is stored: the reduced state plus
-// the session that owns the channel, so its actions reach the session's backend.
+// the session that owns the channel, so its actions reach the session's
+// backend. A root-level resource such as a terminal names its backend instead.
 type storedChannel struct {
 	Session string                 `json:"session"`
+	Backend string                 `json:"backend,omitempty"`
 	State   ahptypes.SnapshotState `json:"state"`
+}
+
+// storedChannelJSON names the state's kind. Decoding a snapshot state by its
+// shape alone cannot tell a terminal from a session: both have a lifecycle.
+type storedChannelJSON struct {
+	Session string          `json:"session"`
+	Backend string          `json:"backend,omitempty"`
+	Kind    string          `json:"kind,omitempty"`
+	State   json.RawMessage `json:"state"`
+}
+
+func (s storedChannel) stateKind() (string, any) {
+	switch state := s.State; {
+	case state.Session != nil:
+		return "session", state.Session
+	case state.Chat != nil:
+		return "chat", state.Chat
+	case state.Changeset != nil:
+		return "changeset", state.Changeset
+	case state.Terminal != nil:
+		return "terminal", state.Terminal
+	case state.Annotations != nil:
+		return "annotations", state.Annotations
+	default:
+		return "", state
+	}
+}
+
+func (s storedChannel) MarshalJSON() ([]byte, error) {
+	kind, value := s.stateKind()
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(storedChannelJSON{Session: s.Session, Backend: s.Backend, Kind: kind, State: raw})
+}
+
+func (s *storedChannel) UnmarshalJSON(data []byte) error {
+	var stored storedChannelJSON
+	if err := json.Unmarshal(data, &stored); err != nil {
+		return err
+	}
+	*s = storedChannel{Session: stored.Session, Backend: stored.Backend}
+	var target any
+	switch stored.Kind {
+	case "session":
+		s.State.Session = &ahptypes.SessionState{}
+		target = s.State.Session
+	case "chat":
+		s.State.Chat = &ahptypes.ChatState{}
+		target = s.State.Chat
+	case "changeset":
+		s.State.Changeset = &ahptypes.ChangesetState{}
+		target = s.State.Changeset
+	case "terminal":
+		s.State.Terminal = &ahptypes.TerminalState{}
+		target = s.State.Terminal
+	case "annotations":
+		s.State.Annotations = &ahptypes.AnnotationsState{}
+		target = s.State.Annotations
+	default:
+		target = &s.State
+	}
+	return json.Unmarshal(stored.State, target)
 }
 
 // New builds a Host. Wire its token service's OnRevoke to Host.CloseToken.
@@ -296,6 +362,9 @@ func (h *Host) apply(
 			if reduce(&stored.State, action) == ahp.ReduceOutcomeOutOfScope {
 				return fmt.Errorf("action does not apply to channel %s", channel)
 			}
+		}
+		if stored.State.Terminal != nil {
+			trimTerminalContent(stored.State.Terminal)
 		}
 	}
 	envelopes := make([]ahptypes.ActionEnvelope, len(actions))
@@ -522,7 +591,11 @@ func (h *Host) rootState(ctx context.Context, principal Principal) (*ahptypes.Ro
 	if err != nil {
 		return nil, err
 	}
-	root := &ahptypes.RootState{Agents: agents, ActiveSessions: &active, Meta: meta}
+	terminals, err := h.cfg.Backends.terminals(ctx, principal)
+	if err != nil {
+		return nil, err
+	}
+	root := &ahptypes.RootState{Agents: agents, ActiveSessions: &active, Meta: meta, Terminals: terminals}
 	if config != nil {
 		root.Config = &ahptypes.RootConfigState{
 			Schema: ahptypes.ConfigSchema{Type: "object", Properties: map[string]ahptypes.ConfigPropertySchema{}},

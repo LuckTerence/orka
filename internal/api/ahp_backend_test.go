@@ -292,6 +292,7 @@ func TestAHPBackendRunsATurnAsATask(t *testing.T) {
 	require.True(t, task.Spec.SessionRef.Append)
 	require.Equal(t, ahpTestRepo, task.Spec.Workspace.GitRepo)
 	require.Equal(t, "main", task.Spec.Workspace.Branch)
+	require.True(t, strings.HasPrefix(task.Spec.Workspace.PushBranch, "orka/session-"), "turns publish to the session's branch")
 	require.Equal(t, corev1alpha1.WorkspaceIntentWrite, task.Spec.Workspace.Intent, "a configured git credential makes turns writable")
 	require.Equal(t, "git-token", task.Spec.Workspace.PublicationCredentialRef.Name)
 	require.Equal(t, "alice", task.Spec.RequestedBy.Subject, "the Task is the person's")
@@ -645,4 +646,46 @@ func TestAHPAdvertisedHead(t *testing.T) {
 		_, err := ahpAdvertisedHead(strings.NewReader(bad))
 		require.Error(t, err, "%q", bad)
 	}
+}
+
+func TestAHPBackendSessionsPublishToTheClientsBranch(t *testing.T) {
+	env := newAHPTestEnv(t)
+	c := env.connect("alice")
+	ctx := ahpCtx(t)
+	var cloned map[string]any
+	require.NoError(t, c.Request(ctx, ahpExtensionCloneProject, map[string]string{"url": ahpTestRepo}, &cloned))
+	provider := "copilot"
+	for session, branch := range map[string]string{"ahp-session:/named": `"feature-x"`, "ahp-session:/bad": `"../escape"`, "ahp-session:/base": `"main"`} {
+		require.NoError(t, c.Request(ctx, "createSession", ahptypes.CreateSessionParams{
+			Channel: session, Provider: &provider, WorkingDirectories: []string{ahpTestDir},
+			Config: map[string]json.RawMessage{"branch": json.RawMessage(branch), "baseBranch": json.RawMessage(`"main"`)},
+		}, nil))
+	}
+	userKey := ahphost.UserKey("https://issuer.example", "alice")
+	var named, bad, base ahpSession
+	require.NoError(t, env.backend.getRecord(ctx, userKey, ahpRecordSession, "ahp-session:/named", &named))
+	require.NoError(t, env.backend.getRecord(ctx, userKey, ahpRecordSession, "ahp-session:/bad", &bad))
+	require.NoError(t, env.backend.getRecord(ctx, userKey, ahpRecordSession, "ahp-session:/base", &base))
+	require.Equal(t, "feature-x", named.Branch)
+	require.True(t, strings.HasPrefix(bad.Branch, "orka/session-"), "an unsafe branch name is replaced")
+	require.True(t, strings.HasPrefix(base.Branch, "orka/session-"), "a session never publishes to its base branch")
+	require.Equal(t, "/workspace/src/octo/widgets", named.WorkDir, "without workspaces the session works in the project path")
+}
+
+func TestAHPBackendGivesEachBranchOneSession(t *testing.T) {
+	env := newAHPTestEnv(t)
+	c := env.connect("alice")
+	ctx := ahpCtx(t)
+	var cloned map[string]any
+	require.NoError(t, c.Request(ctx, ahpExtensionCloneProject, map[string]string{"url": ahpTestRepo}, &cloned))
+	provider := "copilot"
+	create := func(session string) error {
+		return c.Request(ctx, "createSession", ahptypes.CreateSessionParams{
+			Channel: session, Provider: &provider, WorkingDirectories: []string{ahpTestDir},
+			Config: map[string]json.RawMessage{"branch": json.RawMessage(`"feature-x"`)},
+		}, nil)
+	}
+	require.NoError(t, create("ahp-session:/first"))
+	require.Error(t, create("ahp-session:/second"), "a second session cannot share the branch and its worktree")
+	require.Equal(t, "/workspace/worktrees/octo/widgets/feature-x", ahpWorktreePath(ahpProject{Owner: "octo", Name: "widgets"}, "feature-x"))
 }

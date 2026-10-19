@@ -164,6 +164,7 @@ func (b *ahpBackend) turnTask(ctx context.Context, principal ahphost.Principal, 
 		workspace.ReadCredentialRef = credential
 		publication := *credential
 		workspace.PublicationCredentialRef = &publication
+		workspace.PushBranch = record.Branch
 	}
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: principal.Namespace},
@@ -562,7 +563,10 @@ func (t *ahpTurn) confirm(ctx context.Context, principal ahphost.Principal, tool
 func (t *ahpTurn) recordDiffs(diffs []harnessv2.ToolCallDiff) {
 	ctx, b := t.ctx, t.b
 	hash := ahpHash(t.principal.UserKey, t.session.Session)
-	project := strings.TrimPrefix(t.sessionProjectDir(), "file://")
+	project := t.session.WorkDir
+	if project == "" {
+		project = strings.TrimPrefix(t.sessionProjectDir(), "file://")
+	}
 	for _, diff := range diffs {
 		rel := path.Clean("/" + diff.Path)
 		full := project + rel
@@ -709,6 +713,8 @@ func (t *ahpTurn) settle(task *corev1alpha1.Task) {
 		if note := ahpDeliveryNote(task); note != "" {
 			t.textPart = ""
 			t.text(note)
+			// The session's worktree on the host follows what the turn published.
+			go t.b.workspaces.follow(context.WithoutCancel(t.ctx), t.principal, t.session)
 		}
 		t.chat(ahptypes.StateAction{Value: &ahptypes.ChatTurnCompleteAction{Type: ahptypes.ActionTypeChatTurnComplete, TurnId: t.id, Duration: duration}})
 	case corev1alpha1.TaskPhaseCancelled:

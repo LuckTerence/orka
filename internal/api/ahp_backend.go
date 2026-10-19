@@ -99,6 +99,11 @@ type AHPBackendConfig struct {
 	WorkspaceClass string
 	// TurnTimeout bounds each turn's Task.
 	TurnTimeout time.Duration
+	// WorkspaceNamespace and WorkspaceImage enable per-user workspaces:
+	// git checkouts of the user's projects and sessions, and terminals. The
+	// image must be digest-pinned and provide sh and git.
+	WorkspaceNamespace string
+	WorkspaceImage     string
 }
 
 // ahpApprovalDecider answers a held permission request as its requester.
@@ -119,13 +124,39 @@ type ahpBackend struct {
 	// emitterFor delivers actions for a user with no connection, to settle
 	// turns a previous leader left running.
 	emitterFor func(ahphost.Principal) ahphost.Emitter
+	// updateTerminals republishes the user's terminal list after a shell exits.
+	updateTerminals func(context.Context, ahphost.Principal) error
+	workspaces      *ahpWorkspaces
 
-	mu    sync.Mutex
-	turns map[string]*ahpTurn
+	mu     sync.Mutex
+	turns  map[string]*ahpTurn
+	shells map[string]*ahpTerminal
+	// retired holds terminal URIs already used, so input queued for an ended
+	// terminal can never reach a new one on the same URI.
+	retired map[string]time.Time
 	// reserved holds a session's turn slot from the moment a message is
 	// admitted until its turn starts, so a second message cannot slip in.
 	reserved  map[string]time.Time
 	recovered map[string]bool
+	// lifecycle serializes, per user, what decides who owns workspace state:
+	// session branch claims, session disposal and terminal creation.
+	lifecycle map[string]*sync.Mutex
+}
+
+// lockUser takes the user's lifecycle lock. It is never taken while mu is held.
+func (b *ahpBackend) lockUser(userKey string) func() {
+	b.mu.Lock()
+	if b.lifecycle == nil {
+		b.lifecycle = map[string]*sync.Mutex{}
+	}
+	lock := b.lifecycle[userKey]
+	if lock == nil {
+		lock = &sync.Mutex{}
+		b.lifecycle[userKey] = lock
+	}
+	b.mu.Unlock()
+	lock.Lock()
+	return lock.Unlock
 }
 
 // ahpReservationTTL frees a slot whose message the host never applied.
@@ -159,7 +190,7 @@ func newAHPBackend(h *Handlers, s store.AHPStore, live *liveevents.Broker, cfg A
 	return &ahpBackend{
 		h: h, store: s, live: live, cfg: cfg, now: time.Now, gitHTTP: ahpGitHTTPClient,
 		applyApprovalMode: ahpApplyApprovalMode, decideApproval: h.DecideTaskApprovalAs,
-		turns: map[string]*ahpTurn{}, reserved: map[string]time.Time{}, recovered: map[string]bool{},
+		turns: map[string]*ahpTurn{}, shells: map[string]*ahpTerminal{}, reserved: map[string]time.Time{}, recovered: map[string]bool{},
 	}
 }
 
@@ -203,15 +234,19 @@ func (p ahpProject) wire() map[string]any {
 
 // ahpSession is what the backend keeps about one AHP session.
 type ahpSession struct {
-	Session      string `json:"session"`
-	Chat         string `json:"chat"`
-	Changeset    string `json:"changeset"`
-	Namespace    string `json:"namespace"`
-	OrkaSession  string `json:"orkaSession"`
-	ProjectID    string `json:"projectId"`
-	RepoURL      string `json:"repoUrl"`
-	BaseBranch   string `json:"baseBranch,omitempty"`
-	Runtime      string `json:"runtime"`
+	Session     string `json:"session"`
+	Chat        string `json:"chat"`
+	Changeset   string `json:"changeset"`
+	Namespace   string `json:"namespace"`
+	OrkaSession string `json:"orkaSession"`
+	ProjectID   string `json:"projectId"`
+	RepoURL     string `json:"repoUrl"`
+	BaseBranch  string `json:"baseBranch,omitempty"`
+	Runtime     string `json:"runtime"`
+	// Branch is where the session's turns publish; WorkDir is the session's
+	// working directory on the host.
+	Branch       string `json:"branch,omitempty"`
+	WorkDir      string `json:"workDir,omitempty"`
 	Agent        string `json:"agent,omitempty"`
 	Model        string `json:"model,omitempty"`
 	ApprovalMode string `json:"approvalMode"`
@@ -325,6 +360,9 @@ func ahpModelConfigSchema() *ahptypes.ConfigSchema {
 // Agents lists one AHP agent per built-in runtime the user has Agents for.
 func (b *ahpBackend) Agents(ctx context.Context, principal ahphost.Principal) ([]ahptypes.AgentInfo, error) {
 	b.recoverTurns(ctx, principal)
+	if b.mayUseWorkspace(principal) == nil {
+		b.workspaces.warm(principal)
+	}
 	choices, err := b.agentChoices(ctx, principal)
 	if err != nil {
 		return nil, err
@@ -425,6 +463,15 @@ func (b *ahpBackend) HandleExtension(ctx context.Context, principal ahphost.Prin
 		project, err := b.addProject(ctx, principal, req.URL)
 		if err != nil {
 			return nil, err
+		}
+		if b.workspaces.enabled() && b.mayUseWorkspace(principal) == nil {
+			go func() {
+				bg, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+				defer cancel()
+				if pod, err := b.workspaces.ensure(bg, principal, 2*time.Minute); err == nil {
+					_ = b.workspaces.ensureProject(bg, pod, project)
+				}
+			}()
 		}
 		projects, err := b.projects(ctx, principal.UserKey)
 		if err != nil {
@@ -576,8 +623,36 @@ func (b *ahpBackend) CreateSession(ctx context.Context, principal ahphost.Princi
 	if raw, ok := req.Config["baseBranch"]; ok {
 		_ = json.Unmarshal(raw, &baseBranch)
 	}
-	if baseBranch == "" {
+	if baseBranch == "" || !ahpValidBranch(baseBranch) {
 		baseBranch = project.DefaultBranch
+	}
+	// Turns publish to the branch the client named for the session, or to an
+	// Orka branch when it named none.
+	branch := ""
+	if raw, ok := req.Config["branch"]; ok {
+		_ = json.Unmarshal(raw, &branch)
+	}
+	if !ahpValidBranch(branch) || branch == baseBranch {
+		branch = "orka/session-" + ahpRandomHex(8)
+	}
+	// One branch of a project belongs to one session: its worktree and its
+	// publications are that session's. The claim and the record are made
+	// under the user's lifecycle lock.
+	unlock := b.lockUser(principal.UserKey)
+	defer unlock()
+	existing, err := b.store.ListAHPRecords(ctx, principal.UserKey, ahpRecordSession)
+	if err != nil {
+		return nil, err
+	}
+	for _, raw := range existing {
+		var other ahpSession
+		if json.Unmarshal(raw.Value, &other) == nil && other.ProjectID == project.ID && other.Branch == branch {
+			return nil, &ahphost.Rejection{Reason: fmt.Sprintf("another session already uses the branch %s", branch)}
+		}
+	}
+	workDir := project.Path
+	if b.workspaces.enabled() {
+		workDir = ahpWorktreePath(project, branch)
 	}
 	chatID := ahpRandomHex(16)
 	chat := "ahp-chat:/" + chatID
@@ -585,10 +660,16 @@ func (b *ahpBackend) CreateSession(ctx context.Context, principal ahphost.Princi
 	record := ahpSession{
 		Session: req.Session, Chat: chat, Changeset: changeset, Namespace: principal.Namespace,
 		OrkaSession: "ahp-" + ahpHash(principal.UserKey, req.Session)[:24], ProjectID: project.ID, RepoURL: project.URL,
-		BaseBranch: baseBranch, Runtime: req.Provider, ApprovalMode: mode,
+		BaseBranch: baseBranch, Runtime: req.Provider, ApprovalMode: mode, Branch: branch, WorkDir: workDir,
 	}
 	if err := b.putRecord(ctx, principal.UserKey, ahpRecordSession, req.Session, record); err != nil {
 		return nil, err
+	}
+	if b.workspaces.enabled() && b.mayUseWorkspace(principal) == nil {
+		// Clients run git in the session's working directory right away.
+		if pod, err := b.workspaces.ensure(ctx, principal, ahpWorkspaceStartWait); err == nil {
+			_ = b.workspaces.ensureWorktree(ctx, pod, project, record)
+		}
 	}
 	if err := b.putRecord(ctx, principal.UserKey, ahpRecordChat, chat, req.Session); err != nil {
 		return nil, err
@@ -601,7 +682,7 @@ func (b *ahpBackend) CreateSession(ctx context.Context, principal ahphost.Princi
 		State: ahptypes.SessionState{
 			Title: title, Status: ahptypes.SessionStatusIdle,
 			Project:            &ahptypes.ProjectInfo{Uri: project.URL, DisplayName: project.Owner + "/" + project.Name},
-			WorkingDirectories: []string{ahpDirectoryURI(project.Path)},
+			WorkingDirectories: []string{ahpDirectoryURI(workDir)},
 			ActiveClients:      []ahptypes.SessionActiveClient{},
 			Chats:              []ahptypes.ChatSummary{{Resource: chat, Title: title, Status: ahptypes.SessionStatusIdle, ModifiedAt: now, Origin: &user}},
 			DefaultChat:        &chat,
@@ -620,6 +701,11 @@ func (b *ahpBackend) CreateSession(ctx context.Context, principal ahphost.Princi
 // DisposeSession cancels a running turn and forgets the session. The Orka
 // Session and its Tasks keep their history.
 func (b *ahpBackend) DisposeSession(ctx context.Context, principal ahphost.Principal, session string) error {
+	// Nothing can claim the branch or start using the workspace until the
+	// worktree, the workspace decision and the records are settled; a session
+	// already disposed by another request is left alone.
+	unlock := b.lockUser(principal.UserKey)
+	defer unlock()
 	var record ahpSession
 	if err := b.getRecord(ctx, principal.UserKey, ahpRecordSession, session, &record); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -632,6 +718,23 @@ func (b *ahpBackend) DisposeSession(ctx context.Context, principal ahphost.Princ
 	}
 	if record.ActiveTask != "" {
 		b.cancelTask(ctx, principal, record.Namespace, record.ActiveTask)
+	}
+	if b.workspaces.enabled() {
+		// Remove the worktree while the session still holds its branch, so a
+		// new session cannot claim the branch and lose its files to this.
+		// Terminals are the user's own and outlive sessions: the workspace
+		// itself goes only with the last session and no terminal running.
+		sessions, err := b.store.ListAHPRecords(ctx, principal.UserKey, ahpRecordSession)
+		if err == nil && len(sessions) <= 1 && !b.hasTerminals(principal.UserKey) {
+			b.workspaces.remove(ctx, principal)
+		} else {
+			var project ahpProject
+			if b.getRecord(ctx, principal.UserKey, ahpRecordProject, record.ProjectID, &project) == nil {
+				dropCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+				b.workspaces.dropWorktree(dropCtx, principal, project, record.Branch)
+				cancel()
+			}
+		}
 	}
 	hash := ahpHash(principal.UserKey, session)
 	for _, kind := range []string{ahpRecordContent, ahpRecordFile} {
@@ -696,6 +799,9 @@ func (b *ahpBackend) resolveModel(ctx context.Context, principal ahphost.Princip
 // AuthorizeClientAction admits the client actions this backend acts on and
 // the harmless view actions; anything else is rejected.
 func (b *ahpBackend) AuthorizeClientAction(ctx context.Context, principal ahphost.Principal, channel string, action ahptypes.StateAction) error {
+	if strings.HasPrefix(channel, ahpTerminalScheme) {
+		return b.authorizeTerminalAction(principal, channel, action)
+	}
 	record, err := b.sessionForChannel(ctx, principal.UserKey, channel)
 	if err != nil {
 		return &ahphost.Rejection{Reason: "unknown session"}
@@ -767,6 +873,10 @@ func (b *ahpBackend) mayOperateTasks(principal ahphost.Principal) error {
 
 // HandleClientAction runs what an admitted client action asks for.
 func (b *ahpBackend) HandleClientAction(ctx context.Context, principal ahphost.Principal, channel string, action ahptypes.StateAction, emit ahphost.Emitter) {
+	if strings.HasPrefix(channel, ahpTerminalScheme) {
+		b.handleTerminalAction(principal, channel, action)
+		return
+	}
 	record, err := b.sessionForChannel(ctx, principal.UserKey, channel)
 	if err != nil {
 		return

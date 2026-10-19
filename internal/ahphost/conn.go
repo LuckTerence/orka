@@ -36,6 +36,7 @@ const (
 	defaultListLimit            = 100
 	maxListLimit                = 1000
 	writeTimeout                = 10 * time.Second
+	defaultHandledQueue         = 256
 	defaultDialect              = "default"
 	jsonRPCVersion              = "2.0"
 	methodAction                = "action"
@@ -97,6 +98,10 @@ type conn struct {
 	done      chan struct{}
 	closeOnce sync.Once
 
+	// handled runs backends' side effects of client actions one at a time, in
+	// the order the client sent them, off the read loop.
+	handled chan func()
+
 	mu          sync.Mutex
 	initialized bool
 	clientID    string
@@ -111,6 +116,7 @@ func newConn(host *Host, principal Principal, ws *websocket.Conn) *conn {
 		principal: principal,
 		ws:        ws,
 		send:      make(chan frame, host.cfg.SendQueue),
+		handled:   make(chan func(), defaultHandledQueue),
 		done:      make(chan struct{}),
 		subs:      map[string]bool{},
 	}
@@ -138,6 +144,10 @@ func (c *conn) run(ctx context.Context) {
 	defer expiry.Stop()
 
 	go c.writeLoop(ctx)
+	go c.handleLoop()
+	// Only the read loop below queues actions; closing after it stops lets
+	// the worker drain them.
+	defer close(c.handled)
 	go func() {
 		<-c.done
 		cancel()
@@ -167,6 +177,15 @@ type frame struct {
 	close  bool
 	code   websocket.StatusCode
 	reason string
+}
+
+// handleLoop runs admitted client actions' side effects in order, including
+// the ones still queued when the connection closes. The read loop is the only
+// producer and closes the queue when it stops.
+func (c *conn) handleLoop() {
+	for handle := range c.handled {
+		handle()
+	}
 }
 
 func (c *conn) writeLoop(ctx context.Context) {
@@ -329,6 +348,10 @@ func (c *conn) dispatch(ctx context.Context, msg inbound) (any, error) {
 		// No agent advertises a protected resource yet. The params are never
 		// logged: they carry the client's credential.
 		return nil, rpcErr(ahptypes.ErrorCodeInvalidParams, "the resource is not advertised by any agent")
+	case "createTerminal":
+		return nil, c.createTerminal(ctx, msg.Params)
+	case "disposeTerminal":
+		return nil, c.disposeTerminal(ctx, msg.Params)
 	case "completions":
 		// No agent offers completions; an empty list keeps clients' input working.
 		return ahptypes.CompletionsResult{Items: []ahptypes.CompletionItem{}}, nil
@@ -895,14 +918,9 @@ func (c *conn) dispatchAction(ctx context.Context, raw json.RawMessage) {
 		reject("unknown channel")
 		return
 	}
-	record, err := c.host.cfg.Store.GetAHPSession(ctx, c.principal.UserKey, stored.Session)
+	backend, err := c.backendForChannel(ctx, stored)
 	if err != nil {
-		reject("unknown session")
-		return
-	}
-	backend, ok := c.host.cfg.Backends.Named(record.Backend)
-	if !ok {
-		reject("the session's backend is not available")
+		reject(err.Error())
 		return
 	}
 	if err := backend.AuthorizeClientAction(ctx, c.principal, params.Channel, action); err != nil {
@@ -918,8 +936,13 @@ func (c *conn) dispatchAction(ctx context.Context, raw json.RawMessage) {
 		return
 	}
 	principal := c.principal
-	go backend.HandleClientAction(context.WithoutCancel(ctx), principal, params.Channel, action,
-		emitter{host: c.host, principal: principal})
+	handleCtx := context.WithoutCancel(ctx)
+	handle := func() {
+		backend.HandleClientAction(handleCtx, principal, params.Channel, action, emitter{host: c.host, principal: principal})
+	}
+	// The action was admitted and applied: its side effect runs even if the
+	// connection closes meanwhile.
+	c.handled <- handle
 }
 
 // updateActiveSessions journals the user's session count on the root channel.

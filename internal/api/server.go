@@ -22,6 +22,7 @@ import (
 	"github.com/gofiber/fiber/v3/middleware/requestid"
 	"github.com/valyala/fasthttp"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -109,6 +110,8 @@ type ServerConfig struct {
 	AHPBackend *AHPBackendConfig
 	// LiveEvents carries running Tasks' events from the ACP dispatcher.
 	LiveEvents *liveevents.Broker
+	// RESTConfig lets the API server run commands in AHP workspaces.
+	RESTConfig *rest.Config
 	// DashboardEnabled mirrors --dashboard-enabled: only then does the API
 	// port serve the embedded web dashboard and answer unrouted non-API
 	// paths with its index page.
@@ -194,6 +197,11 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 	if config.AHP != nil && config.AHPBackend != nil {
 		backend := newAHPBackend(server.handlers, config.AHP.Store(), config.LiveEvents, *config.AHPBackend)
 		backend.emitterFor = config.AHP.Emitter
+		backend.updateTerminals = config.AHP.UpdateTerminals
+		backend.workspaces = &ahpWorkspaces{
+			b: backend, clientset: config.Clientset, rest: config.RESTConfig,
+			namespace: config.AHPBackend.WorkspaceNamespace, image: config.AHPBackend.WorkspaceImage,
+		}
 		if err := config.AHP.RegisterBackend(backend); err != nil {
 			log.Error(err, "register the AHP session backend")
 		}
