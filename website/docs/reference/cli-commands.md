@@ -489,7 +489,8 @@ output is a JSON List for kubectl apply.
   relay         A governed Agent's relay Service and NetworkPolicy. Their name
                 is part of the kagent Agent's config, so it is the same for
                 every runtime of the Agent; applying it moves the relay to
-                this runtime. Apply it when the Agent switches to this runtime.
+                this runtime. Apply it before the registration: Orka's
+                conformance prompt reaches kagent, which calls the relay.
   registration  The AgentRuntime. It needs --capabilities, the runtime's
                 GET /v2/capabilities answer, and is created once the
                 Deployment is ready.
