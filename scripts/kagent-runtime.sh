@@ -127,10 +127,6 @@ same_bundle_dir() {
   [ -d "$1" ] && [ "$(cd "$1" && pwd -P)" = "$2" ]
 }
 
-select_relay() {
-  kc patch service "${relay_service}" --type=json -p "[{\"op\":\"replace\",\"path\":\"/spec/selector\",\"value\":$1}]" >/dev/null
-}
-
 # Until a deployed runtime is Ready, any failure, or an interrupt, moves its
 # Agent's relay back to the runtime it selected before.
 #
@@ -203,9 +199,13 @@ deploy() {
     # Agent imported separately may share.
     local relay_agent
     relay_service=$(relay_service_of "${bundle}")
+    local relay_found
+    relay_found=$(kc get service "${relay_service}" --ignore-not-found -o name)
     relay_agent=$(kc get service "${relay_service}" --ignore-not-found -o jsonpath='{.metadata.labels.orka\.ai/kagent-agent}')
-    [ -z "${relay_agent}" ] || [ "${relay_agent}" = "${agent}" ] ||
-      die "relay ${relay_service} serves Agent ${relay_agent}; give ${agent} its own relay URL"
+    if [ -n "${relay_found}" ] && [ "${relay_agent}" != "${agent}" ]; then
+      [ -n "${relay_agent}" ] && die "relay ${relay_service} serves Agent ${relay_agent}; give ${agent} its own relay URL"
+      die "Service ${relay_service} exists but is not a relay of this script; to let ${agent} use it, label it orka.ai/kagent-agent=${agent}"
+    fi
   fi
   # Only NotFound means the runtime is not deployed yet: rebuilding a deployed
   # runtime would roll new images into it under its registered profile.
@@ -249,12 +249,27 @@ deploy() {
   if [ "${governed}" = true ]; then
     # Orka's conformance prompt reaches kagent, which calls the relay, so the
     # relay must reach this runtime before registration.
-    relay_rollback=$(relay_selector "${relay_service}")
-    [ "${relay_rollback}" != "{}" ] || relay_rollback=""
-    render relay | apply
-    # Replace the selector outright: a merge with an older one would select
-    # nothing.
-    select_relay "{\"orka.ai/kagent-runtime\":\"${runtime}\"}"
+    local previous want
+    previous=$(relay_selector "${relay_service}")
+    want="{\"orka.ai/kagent-runtime\":\"${runtime}\"}"
+    render relay >"${work}/relay.json"
+    jq '.items |= map(select(.kind == "NetworkPolicy"))' "${work}/relay.json" | apply
+    if [ -z "${previous}" ]; then
+      jq '.items |= map(select(.kind == "Service"))' "${work}/relay.json" | apply
+    elif [ "${previous}" != "${want}" ]; then
+      # Apply the Service with what it selects now, so applying moves
+      # nothing; then hand it over in one patch that holds only while it
+      # still selects that, and replaces the selector outright, since a merge
+      # with an older one would select nothing.
+      jq --argjson selector "${previous}" '.items |= map(select(.kind == "Service") | .spec.selector = $selector)' \
+        "${work}/relay.json" | apply
+      relay_rollback=${previous}
+      kc patch service "${relay_service}" --type=json -p "[{\"op\":\"test\",\"path\":\"/spec/selector\",\"value\":${previous}},{\"op\":\"replace\",\"path\":\"/spec/selector\",\"value\":${want}}]" >/dev/null ||
+        {
+          relay_rollback=""
+          die "relay ${relay_service} changed while this deploy ran; deploy again"
+        }
+    fi
   fi
   # The API server's service proxy reaches the runtime's public endpoint.
   kubectl --context "${KUBECTL_CONTEXT}" get --raw \
