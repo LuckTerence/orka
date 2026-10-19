@@ -149,9 +149,10 @@ With --bundle-dir, writes each Agent's deployment bundle instead,
 <agent>/kagent.json and runtime.json, and names its AgentRuntime after the
 pinned configuration, <agent>-kagent-<digest>. A re-pin, after kagent
 recompiles the Agent or is upgraded, so gets a new runtime beside the old one.
-Run with --dry-run to write the bundle; deploy and register its runtime with
-Orka's scripts/kagent-runtime.sh; then run again without --dry-run to point
-the Orka Agent at it, which requires the AgentRuntime to be Ready.
+Run with --dry-run to write the bundle, deploy its runtime with
+"orka agent-runtime kagent deploy", then point the Orka Agent at it with
+"orka agent-runtime kagent activate", which runs this import again without
+--dry-run and requires the AgentRuntime to be Ready.
 
 With --translate, converts each kagent Agent into a native Orka Agent that Orka
 runs itself, with no kagent at run time. Translation maps only these fields

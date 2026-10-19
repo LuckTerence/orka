@@ -1,0 +1,1103 @@
+/*
+Copyright (c) 2026.
+
+MIT License - see LICENSE file for details.
+*/
+
+package main
+
+import (
+	"bytes"
+	"cmp"
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"maps"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"slices"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/spf13/cobra"
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/tools/clientcmd"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+)
+
+const (
+	kagentLockSuffix         = "-kagent-lock"
+	kagentRecoveryAnnotation = "orka.ai/agent-runtime-recovery-uid"
+	kagentFieldOwner         = "orka-agent-runtime-kagent"
+	kagentControllerEpoch    = "orka-controller"
+	kagentAdapterDigestEnv   = "ORKA_ACP_KAGENT_ADAPTER_DIGEST"
+	kagentRollbackTimeout    = time.Minute
+	kagentPatchTest          = "test"
+	kagentPatchReplace       = "replace"
+	kagentSpecPath           = "/spec"
+	kagentSelectorPath       = "/spec/selector"
+)
+
+// kagentRuntimeOptions are the settings of deploy, activate, and retire.
+type kagentRuntimeOptions struct {
+	Context                string
+	ControllerNamespace    string
+	Image                  string
+	ModelUpstreamTokenFile string
+	StorageClass           string
+	OrkaAPIURL             string
+	SubstrateNamespace     string
+	ReadyTimeout           time.Duration
+	RetireTimeout          time.Duration
+}
+
+// kagentRuntimes deploys, activates, and retires the runtimes of wrapped
+// kagent Agents from the bundles "orka agent import kagent --bundle-dir"
+// writes. Every command holds a lock per Agent it changes, so runs for one
+// Agent never overlap.
+type kagentRuntimes struct {
+	c            client.Client
+	capabilities func(ctx context.Context, namespace, service string) ([]byte, error)
+	resolve      func(ctx context.Context, image string) (pinned, adapter string, err error)
+	importer     func(ctx context.Context, args []string, quiet bool) error
+	namespace    string
+	options      kagentRuntimeOptions
+	out          io.Writer
+	holder       string
+	poll         time.Duration
+	locks        []*corev1.ConfigMap
+}
+
+func newAgentRuntimeKagentCmd() *cobra.Command {
+	var options kagentRuntimeOptions
+	cmd := &cobra.Command{
+		Use:   kagentProviderKind,
+		Short: "Deploy, activate, and retire the runtimes of wrapped kagent Agents",
+		Long: `Run wrapped kagent Agents from the deployment bundles that
+"orka agent import kagent --dry-run --bundle-dir <dir>" writes. A bundle names
+its runtime after the configuration it pins, so re-pinning an Agent, after
+kagent recompiles it or after an upgrade, deploys a new runtime beside the old
+one, which keeps serving its sessions until it is retired:
+
+  1. deploy    the new runtime, and wait until Orka reports it Ready;
+  2. activate  it, pointing the Orka Agent at it;
+  3. retire    the Agent's older runtimes.
+
+These commands need Kubernetes access to the Orka namespace (--kubeconfig and
+--context) and, for activate, the Orka API, like "orka agent import kagent".
+Each command holds a lock per Agent it changes, the ConfigMap
+<agent>-kagent-lock; a run that was killed leaves its lock, which you delete
+once no run is left.`,
+	}
+	cmd.PersistentFlags().StringVar(&options.Context, "context", "", "kubeconfig context (default: the current context)")
+	cmd.AddCommand(newKagentDeployCmd(&options), newKagentActivateCmd(&options), newKagentRetireCmd(&options))
+	return cmd
+}
+
+func newKagentDeployCmd(options *kagentRuntimeOptions) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "deploy <bundle>",
+		Short: "Deploy and register the runtime of one bundle",
+		Long: `Deploy the runtime of <bundle>, a directory the import wrote
+(<bundle-dir>/<agent>), register it with Orka under Kubernetes recovery, and
+wait until Orka reports it Ready.
+
+The runtime runs Orka's kagent runtime image, by default the one released
+with this CLI, and mounts the bundle's kagent.json from a ConfigMap. A
+deployed runtime keeps its image; to run another, re-pin under a new
+--runtime-revision.
+
+A governed Agent needs --model-upstream-token-file, Orka's credential for its
+model upstream, which the runtime keeps. Its relay moves to the new runtime
+before registration, because Orka's conformance prompt calls it, and back if
+deploy fails before the runtime is Ready. Until activation, governed turns on
+the old runtime fail their tool and model calls.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			k, ctx, stop, err := newKagentRuntimes(cmd, *options, "deploy")
+			if err != nil {
+				return err
+			}
+			defer stop()
+			return k.deploy(ctx, args[0])
+		},
+	}
+	cmd.Flags().StringVar(&options.Image, "image", "", "Orka kagent runtime image, by tag or digest (default: the image released with this CLI)")
+	cmd.Flags().StringVar(&options.ModelUpstreamTokenFile, "model-upstream-token-file", "", "File holding Orka's credential for a governed Agent's model upstream")
+	cmd.Flags().StringVar(&options.ControllerNamespace, "controller-namespace", "", "Namespace of the Orka controller (default: --namespace)")
+	cmd.Flags().StringVar(&options.StorageClass, "storage-class", "", "StorageClass of the broker ledger volume (default: the cluster default)")
+	cmd.Flags().StringVar(&options.OrkaAPIURL, "orka-api-url", "", "Orka API base URL the supervisor calls (default http://orka-api.<namespace>.svc:8080)")
+	cmd.Flags().StringVar(&options.SubstrateNamespace, "substrate-namespace", "ate-system", "Namespace of kagent v1's Substrate egress, which carries the Agent's calls to the relay")
+	cmd.Flags().DurationVar(&options.ReadyTimeout, "ready-timeout", 5*time.Minute, "How long to wait for the runtime to be Ready")
+	return cmd
+}
+
+func newKagentActivateCmd(options *kagentRuntimeOptions) *cobra.Command {
+	return &cobra.Command{
+		Use:   "activate <bundle> -- <import flags>",
+		Short: "Point the Orka Agents at their deployed runtimes",
+		Long: `Point the Orka Agents at their runtimes by running the import again
+without --dry-run, with the flags that wrote the bundles, after --. The command
+passes --bundle-dir, the directory of <bundle>, itself. It switches every Agent
+in the import's input, and only if all of their runtimes are Ready, so deploy
+them all first. It refuses while the relay of a governed Agent bundled beside
+<bundle> selects another runtime.`,
+		Args: cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if dash := cmd.ArgsLenAtDash(); dash != 1 {
+				return fmt.Errorf("activate takes <bundle>, then -- and the import flags")
+			}
+			k, ctx, stop, err := newKagentRuntimes(cmd, *options, "activate")
+			if err != nil {
+				return err
+			}
+			defer stop()
+			return k.activate(ctx, args[0], args[1:], cmd.InOrStdin())
+		},
+	}
+}
+
+func newKagentRetireCmd(options *kagentRuntimeOptions) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "retire <bundle>",
+		Short: "Delete the Agent's other runtimes",
+		Long: `Delete every runtime of the bundle's Agent and kagent Agent except the
+bundle's own, which the Orka Agent must use. Orka drains each one first, so
+this waits until its sessions are done. It refuses while a governed Agent's
+relay selects another runtime. Running it again finishes an earlier retire
+that stopped: it also finds runtimes whose registration is gone but whose
+objects are left.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			k, ctx, stop, err := newKagentRuntimes(cmd, *options, "retire")
+			if err != nil {
+				return err
+			}
+			defer stop()
+			return k.retire(ctx, args[0])
+		},
+	}
+	cmd.Flags().DurationVar(&options.RetireTimeout, "retire-timeout", 30*time.Minute, "How long to wait for each old runtime to drain")
+	return cmd
+}
+
+// newKagentRuntimes connects to the cluster. An interrupt cancels the
+// returned context, so a deploy moves its relay back before it exits.
+func newKagentRuntimes(cmd *cobra.Command, options kagentRuntimeOptions, command string) (*kagentRuntimes, context.Context, func(), error) {
+	namespace, _ := cmd.Flags().GetString(cliNamespaceQuery)
+	namespace = cmp.Or(strings.TrimSpace(namespace), "orka-system")
+	options.ControllerNamespace = cmp.Or(options.ControllerNamespace, namespace)
+	kubeconfig, _ := cmd.Flags().GetString("kubeconfig")
+	rules := clientcmd.NewDefaultClientConfigLoadingRules()
+	if kubeconfig != "" {
+		rules.ExplicitPath = kubeconfig
+	}
+	config, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, &clientcmd.ConfigOverrides{CurrentContext: options.Context}).ClientConfig()
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("loading kubeconfig: %w", err)
+	}
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		return nil, nil, nil, err
+	}
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		return nil, nil, nil, err
+	}
+	c, err := client.New(config, client.Options{Scheme: scheme})
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	host, _ := os.Hostname()
+	k := &kagentRuntimes{
+		c: c, namespace: namespace, options: options, out: cmd.ErrOrStderr(), poll: 2 * time.Second,
+		holder: fmt.Sprintf("%s pid %d on %s", command, os.Getpid(), host),
+		capabilities: func(ctx context.Context, namespace, service string) ([]byte, error) {
+			// The API server's service proxy reaches the runtime's public endpoint.
+			return clientset.CoreV1().Services(namespace).ProxyGet("http", service, kagentControlPortName, "/v2/capabilities", nil).DoRaw(ctx)
+		},
+		resolve: func(ctx context.Context, image string) (string, string, error) {
+			if image == "" {
+				var err error
+				if image, err = kagentDefaultImage(version); err != nil {
+					return "", "", err
+				}
+			}
+			return resolveKagentRuntimeImage(ctx, image, nil)
+		},
+		importer: func(ctx context.Context, args []string, quiet bool) error {
+			return runKagentImportCmd(ctx, cmd, append(args, "-n", namespace), quiet)
+		},
+	}
+	ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	return k, ctx, func() { k.unlock(); stop() }, nil
+}
+
+// runKagentImportCmd runs "orka agent import kagent" with args, and with the
+// Orka API flags this command was given.
+func runKagentImportCmd(ctx context.Context, cmd *cobra.Command, args []string, quiet bool) error {
+	forwarded := strings.Fields("agent import kagent")
+	for _, name := range []string{"server", "token", "txn-token", "txn-token-file", "kubeconfig"} {
+		if flag := cmd.Flags().Lookup(name); flag != nil && flag.Changed {
+			forwarded = append(forwarded, "--"+name, flag.Value.String())
+		}
+	}
+	root := newRootCmd()
+	root.SetArgs(append(forwarded, args...))
+	root.SetIn(cmd.InOrStdin())
+	root.SetOut(cmd.OutOrStdout())
+	root.SetErr(cmd.ErrOrStderr())
+	if quiet {
+		root.SetOut(io.Discard)
+		root.SetErr(io.Discard)
+	}
+	return root.ExecuteContext(ctx)
+}
+
+func (k *kagentRuntimes) logf(format string, args ...any) {
+	fmt.Fprintf(k.out, format+"\n", args...) //nolint:errcheck
+}
+
+// lock holds a lock for each Agent: a ConfigMap, created atomically and
+// deleted by unlock.
+func (k *kagentRuntimes) lock(ctx context.Context, agents ...string) error {
+	for _, agent := range agents {
+		lock := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: agent + kagentLockSuffix, Namespace: k.namespace},
+			Data: map[string]string{"holder": k.holder}}
+		if err := k.c.Create(ctx, lock); err != nil {
+			if apierrors.IsAlreadyExists(err) {
+				return fmt.Errorf("another deploy, activate, or retire of Agent %s holds ConfigMap %s; if that run is gone, delete it", agent, lock.Name)
+			}
+			return fmt.Errorf("locking Agent %s: %w", agent, err)
+		}
+		k.locks = append(k.locks, lock)
+	}
+	return nil
+}
+
+// unlock deletes the locks this run created, and only those.
+func (k *kagentRuntimes) unlock() {
+	ctx, cancel := context.WithTimeout(context.Background(), kagentRollbackTimeout)
+	defer cancel()
+	for _, lock := range k.locks {
+		err := k.c.Delete(ctx, lock, client.Preconditions{UID: &lock.UID})
+		if err != nil && !apierrors.IsNotFound(err) {
+			k.logf("kagent-runtime: could not delete lock %s: %v", lock.Name, err)
+		}
+	}
+	k.locks = nil
+}
+
+func (k *kagentRuntimes) key(name string) types.NamespacedName {
+	return types.NamespacedName{Namespace: k.namespace, Name: name}
+}
+
+// getOptional reads an object, reporting found=false only for NotFound.
+func (k *kagentRuntimes) getOptional(ctx context.Context, name string, obj client.Object) (bool, error) {
+	switch err := k.c.Get(ctx, k.key(name), obj); {
+	case err == nil:
+		return true, nil
+	case apierrors.IsNotFound(err):
+		return false, nil
+	default:
+		return false, err
+	}
+}
+
+func kagentSource(bundle kagentBundle) string {
+	return bundle.KagentNamespace + "/" + bundle.KagentName
+}
+
+// relayOwned reports whether a relay object serves the Agent and kagent
+// Agent of bundle.
+func relayOwned(obj client.Object, bundle kagentBundle) bool {
+	return obj.GetLabels()[kagentAgentLabel] == bundle.Agent && obj.GetAnnotations()[kagentSourceAnnotation] == kagentSource(bundle)
+}
+
+// kagentRelayRollback is what a deploy changed on its Agent's relay before
+// the runtime was Ready, so that a failure can change it back.
+type kagentRelayRollback struct {
+	service       string
+	selector      map[string]string
+	ports         []corev1.ServicePort
+	createdPolicy types.UID
+	policy        *networkingv1.NetworkPolicySpec
+	applied       *networkingv1.NetworkPolicySpec
+}
+
+func (k *kagentRuntimes) deploy(ctx context.Context, dir string) (err error) {
+	bundle, config, err := readKagentBundle(dir)
+	if err != nil {
+		return err
+	}
+	source := kagentSource(bundle)
+	if err := k.lock(ctx, bundle.Agent); err != nil {
+		return err
+	}
+	// One Orka Agent name may come from kagent Agents of the same name in
+	// different namespaces; a deploy must not take the runtimes or relay of
+	// the one the Orka Agent wraps.
+	agent := &corev1alpha1.Agent{}
+	found, err := k.getOptional(ctx, bundle.Agent, agent)
+	if err != nil {
+		return err
+	}
+	// The annotation is "<apiVersion> <namespace>/<name>".
+	if wraps := agent.Annotations[kagentSourceAnnotation]; found && wraps != "" {
+		if wrapped := wraps[strings.LastIndex(wraps, " ")+1:]; wrapped != source {
+			return fmt.Errorf("the Orka Agent %s wraps kagent Agent %s, not %s; import %s into another Orka namespace", bundle.Agent, wrapped, source, source)
+		}
+	}
+	relay := ""
+	if bundle.Governed {
+		// Both relay objects must be absent, or this Agent's for this kagent
+		// Agent: before activation, no Orka Agent records which kagent Agent
+		// a deployed relay serves.
+		if relay, _, _, err = kagentRelayService(bundle.Relay); err != nil {
+			return err
+		}
+		for kind, obj := range map[string]client.Object{"service": &corev1.Service{}, "networkpolicy": &networkingv1.NetworkPolicy{}} {
+			found, err := k.getOptional(ctx, relay, obj)
+			if err != nil {
+				return err
+			}
+			if found && !relayOwned(obj, bundle) {
+				return fmt.Errorf("%s %s is not %s's relay for kagent Agent %s; give %s its own relay URL, or adopt it by labeling it %s=%s and annotating it %s=%s",
+					kind, relay, bundle.Agent, source, bundle.Agent, kagentAgentLabel, bundle.Agent, kagentSourceAnnotation, source)
+			}
+		}
+	}
+	options := kagentRenderOptions{Namespace: k.namespace, StorageClass: k.options.StorageClass,
+		OrkaAPIURL: k.options.OrkaAPIURL, SubstrateNamespace: k.options.SubstrateNamespace}
+	// The image is part of the runtime's immutable profile: a deployed runtime
+	// keeps its image, and a new one runs under a new --runtime-revision.
+	deployment := &appsv1.Deployment{}
+	deployed, err := k.getOptional(ctx, bundle.Runtime, deployment)
+	if err != nil {
+		return err
+	}
+	if deployed {
+		if options.Image, options.AdapterDigest, err = deployedKagentImage(deployment); err != nil {
+			return err
+		}
+		k.logf("Runtime %s is already deployed; keeping its image.", bundle.Runtime)
+	} else if options.Image, options.AdapterDigest, err = k.resolve(ctx, k.options.Image); err != nil {
+		return err
+	}
+	if err := k.ensureAuthSecret(ctx, bundle); err != nil {
+		return err
+	}
+	if options.ControllerEpoch, err = k.controllerEpoch(ctx); err != nil {
+		return err
+	}
+	options.Part = kagentPartWorkload
+	if err := k.applyPart(ctx, bundle, config, options); err != nil {
+		return err
+	}
+	if err := k.waitRollout(ctx, bundle.Runtime); err != nil {
+		return err
+	}
+	rollback := &kagentRelayRollback{service: relay}
+	// Until the runtime is Ready, any failure, or an interrupt, moves the
+	// Agent's relay back to what it served before.
+	defer func() {
+		if err != nil {
+			k.restoreRelay(bundle, rollback)
+		}
+	}()
+	if bundle.Governed {
+		if err := k.handOffRelay(ctx, bundle, config, options, rollback); err != nil {
+			return err
+		}
+	}
+	return k.register(ctx, dir, bundle, config, options)
+}
+
+// deployedKagentImage reads the image and adapter digest a deployed runtime
+// runs.
+func deployedKagentImage(deployment *appsv1.Deployment) (string, string, error) {
+	for _, container := range deployment.Spec.Template.Spec.Containers {
+		if container.Name != kagentSupervisorContainer {
+			continue
+		}
+		for _, env := range container.Env {
+			if env.Name == kagentAdapterDigestEnv && kagentPinnedImage.MatchString(container.Image) && kagentDigest.MatchString(env.Value) {
+				return container.Image, env.Value, nil
+			}
+		}
+	}
+	return "", "", fmt.Errorf("deployment %s does not run a digest-pinned kagent runtime image; deploy under a new --runtime-revision", deployment.Name)
+}
+
+// ensureAuthSecret creates the runtime's auth Secret, bound to one
+// registration and endpoint. Its values are random and never printed; a
+// governed Agent's upstream credential comes from --model-upstream-token-file.
+func (k *kagentRuntimes) ensureAuthSecret(ctx context.Context, bundle kagentBundle) error {
+	name := bundle.Runtime + "-auth"
+	var upstream []byte
+	if bundle.Governed && k.options.ModelUpstreamTokenFile != "" {
+		raw, err := os.ReadFile(k.options.ModelUpstreamTokenFile)
+		if err != nil {
+			return fmt.Errorf("reading --model-upstream-token-file: %w", err)
+		}
+		// The broker refuses a credential with control characters, such as
+		// the newline a file usually ends with.
+		upstream = bytes.Map(func(r rune) rune {
+			if r == '\r' || r == '\n' {
+				return -1
+			}
+			return r
+		}, raw)
+	}
+	secret := &corev1.Secret{}
+	found, err := k.getOptional(ctx, name, secret)
+	if err != nil {
+		return err
+	}
+	labels := map[string]string{"orka.ai/agent-runtime-auth": cliQueryTrue, "orka.ai/agent-runtime-name": bundle.Runtime,
+		kagentRuntimeLabel: bundle.Runtime, kagentAgentLabel: bundle.Agent}
+	annotations := map[string]string{"orka.ai/agent-runtime-endpoint": "http://" + bundle.Runtime + "." + k.namespace + ".svc.cluster.local:8080",
+		kagentSourceAnnotation: kagentSource(bundle)}
+	if !found {
+		data := map[string][]byte{}
+		for _, key := range []string{"controller-token", "capability-secret", "provider-token"} {
+			value := make([]byte, 32)
+			if _, err := rand.Read(value); err != nil {
+				return err
+			}
+			data[key] = []byte(hex.EncodeToString(value))
+		}
+		if bundle.Governed {
+			if len(upstream) == 0 {
+				return fmt.Errorf("a governed Agent needs --model-upstream-token-file")
+			}
+			data["model-upstream-token"] = upstream
+		}
+		secret = &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: k.namespace, Labels: labels, Annotations: annotations}, Data: data}
+		return k.c.Create(ctx, secret)
+	}
+	if len(upstream) != 0 {
+		// The broker reads the credential once, at start, so a runtime keeps it.
+		stored, given := sha256.Sum256(secret.Data["model-upstream-token"]), sha256.Sum256(upstream)
+		if subtle.ConstantTimeCompare(stored[:], given[:]) != 1 {
+			return fmt.Errorf("runtime %s holds another upstream credential than --model-upstream-token-file; rotate it by deploying under a new --runtime-revision", bundle.Runtime)
+		}
+	}
+	// Orka uses the Secret only with this metadata, which a deploy that stopped
+	// after creating it did not set.
+	patch, _ := json.Marshal(map[string]any{kagentFieldMetadata: map[string]any{"labels": labels, kagentFieldAnnotations: annotations}})
+	return k.c.Patch(ctx, secret, client.RawPatch(types.MergePatchType, patch))
+}
+
+// controllerEpoch reads the Orka controller's epoch, which the supervisor
+// needs at start.
+func (k *kagentRuntimes) controllerEpoch(ctx context.Context) (int64, error) {
+	var epochs corev1alpha1.ControllerEpochList
+	if err := k.c.List(ctx, &epochs, client.InNamespace(k.options.ControllerNamespace)); err != nil {
+		return 0, fmt.Errorf("reading the Orka controller epoch: %w", err)
+	}
+	var found []int64
+	for _, epoch := range epochs.Items {
+		if epoch.Spec.Name == kagentControllerEpoch {
+			found = append(found, epoch.Status.Epoch)
+		}
+	}
+	if len(found) != 1 || found[0] <= 0 {
+		return 0, fmt.Errorf("expected one initialized Orka controller epoch in namespace %s; set --controller-namespace", k.options.ControllerNamespace)
+	}
+	return found[0], nil
+}
+
+// applyPart renders one part and applies it server-side, which keeps the
+// fields others set, such as the recovery annotation and the epoch Orka's
+// recovery writes.
+func (k *kagentRuntimes) applyPart(ctx context.Context, bundle kagentBundle, config []byte, options kagentRenderOptions) error {
+	items, err := renderKagentPart(bundle, config, options)
+	if err != nil {
+		return err
+	}
+	for _, item := range items {
+		obj, ok := item.(client.Object)
+		if !ok {
+			return fmt.Errorf("rendered %T is not an object", item)
+		}
+		if err := k.c.Patch(ctx, obj, client.Apply, client.FieldOwner(kagentFieldOwner), client.ForceOwnership); err != nil { //nolint:staticcheck // typed objects apply as before
+			return fmt.Errorf("applying %s %s: %w", obj.GetObjectKind().GroupVersionKind().Kind, obj.GetName(), err)
+		}
+	}
+	return nil
+}
+
+// waitFor polls check until it reports done, fails, or timeout passes.
+func (k *kagentRuntimes) waitFor(ctx context.Context, timeout time.Duration, what string, check func() (bool, error)) error {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	for {
+		done, err := check()
+		if err != nil || done {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				return fmt.Errorf("timed out after %s waiting for %s", timeout, what)
+			}
+			return ctx.Err()
+		case <-time.After(k.poll):
+		}
+	}
+}
+
+func (k *kagentRuntimes) waitRollout(ctx context.Context, name string) error {
+	return k.waitFor(ctx, k.options.ReadyTimeout, "deployment "+name+" to roll out", func() (bool, error) {
+		deployment := &appsv1.Deployment{}
+		if err := k.c.Get(ctx, k.key(name), deployment); err != nil {
+			return false, err
+		}
+		want := int32(1)
+		if deployment.Spec.Replicas != nil {
+			want = *deployment.Spec.Replicas
+		}
+		status := deployment.Status
+		return status.ObservedGeneration >= deployment.Generation && status.UpdatedReplicas == want &&
+			status.Replicas == want && status.AvailableReplicas == want, nil
+	})
+}
+
+// handOffRelay moves a governed Agent's relay to this runtime. Orka's
+// conformance prompt reaches kagent, which calls the relay, so the relay must
+// reach this runtime before registration.
+func (k *kagentRuntimes) handOffRelay(ctx context.Context, bundle kagentBundle, config []byte, options kagentRenderOptions, rollback *kagentRelayRollback) error {
+	options.Part = kagentPartRelay
+	items, err := renderKagentPart(bundle, config, options)
+	if err != nil {
+		return err
+	}
+	var service *corev1.Service
+	var policy *networkingv1.NetworkPolicy
+	for _, item := range items {
+		switch obj := item.(type) {
+		case *corev1.Service:
+			service = obj
+		case *networkingv1.NetworkPolicy:
+			policy = obj
+		}
+	}
+	want := map[string]string{kagentRuntimeLabel: bundle.Runtime}
+	current := &corev1.Service{}
+	found, err := k.getOptional(ctx, rollback.service, current)
+	if err != nil {
+		return err
+	}
+	if !found {
+		// Create, not apply: a deploy that created it meanwhile makes this fail.
+		if err := k.c.Create(ctx, service); err != nil {
+			return fmt.Errorf("creating relay %s: %w", rollback.service, err)
+		}
+	} else if !maps.Equal(current.Spec.Selector, want) {
+		// One patch that holds only while the Service still selects what it
+		// did and is labeled for this Agent, so it never writes back a
+		// selector another deploy replaced, nor takes another Agent's relay.
+		// It replaces the selector outright, since a merge with an older one
+		// would select nothing. Armed before the patch, since an error may
+		// follow a committed one.
+		// The patch decodes its answer into current, so the rollback keeps a copy.
+		before := current.DeepCopy()
+		rollback.selector, rollback.ports = before.Spec.Selector, before.Spec.Ports
+		ops := append(kagentOwnerTests(bundle),
+			kagentPatchOp{kagentPatchTest, kagentSelectorPath, orEmpty(before.Spec.Selector)},
+			kagentPatchOp{kagentPatchReplace, kagentSelectorPath, want},
+			kagentPatchOp{kagentPatchReplace, "/spec/ports", service.Spec.Ports})
+		if err := k.jsonPatch(ctx, current, ops); err != nil {
+			return fmt.Errorf("relay %s did not take the handoff: it changed while this deploy ran, or the patch failed; deploy again: %w", rollback.service, err)
+		}
+	}
+	// The relay is this Agent's now, so its policy is too. An existing policy
+	// changes only in one tested patch, which replaces its whole spec, so a
+	// rollback's fence is exactly the spec it wrote.
+	existing := &networkingv1.NetworkPolicy{}
+	if found, err = k.getOptional(ctx, rollback.service, existing); err != nil {
+		return err
+	}
+	if !found {
+		if err := k.c.Create(ctx, policy); err != nil {
+			return fmt.Errorf("creating relay policy %s: %w", rollback.service, err)
+		}
+		// A rollback deletes a policy this deploy created, by its UID.
+		rollback.createdPolicy = policy.UID
+		return nil
+	}
+	if equalJSON(existing.Spec, policy.Spec) {
+		return nil
+	}
+	// Armed even when the selector stays, since the policy alone can shut out
+	// the serving runtime's callers.
+	rollback.policy = existing.Spec.DeepCopy()
+	ops := append(kagentOwnerTests(bundle), kagentPatchOp{kagentPatchTest, kagentSpecPath, rollback.policy}, kagentPatchOp{kagentPatchReplace, kagentSpecPath, policy.Spec})
+	if err := k.jsonPatch(ctx, existing, ops); err != nil {
+		rollback.policy = nil
+		return fmt.Errorf("relay policy %s changed while this deploy ran, or the patch failed; deploy again: %w", rollback.service, err)
+	}
+	// The fence is the spec the API server stored, defaults included.
+	rollback.applied = existing.Spec.DeepCopy()
+	return nil
+}
+
+type kagentPatchOp struct {
+	Op    string `json:"op"`
+	Path  string `json:"path"`
+	Value any    `json:"value"`
+}
+
+func kagentOwnerTests(bundle kagentBundle) []kagentPatchOp {
+	return []kagentPatchOp{
+		{kagentPatchTest, "/metadata/labels/" + jsonPointerEscape(kagentAgentLabel), bundle.Agent},
+		{kagentPatchTest, "/metadata/annotations/" + jsonPointerEscape(kagentSourceAnnotation), kagentSource(bundle)},
+	}
+}
+
+func jsonPointerEscape(key string) string {
+	return strings.ReplaceAll(strings.ReplaceAll(key, "~", "~0"), "/", "~1")
+}
+
+func orEmpty(selector map[string]string) map[string]string {
+	if selector == nil {
+		return map[string]string{}
+	}
+	return selector
+}
+
+func equalJSON(a, b any) bool {
+	left, err1 := json.Marshal(a)
+	right, err2 := json.Marshal(b)
+	return err1 == nil && err2 == nil && bytes.Equal(left, right)
+}
+
+func (k *kagentRuntimes) jsonPatch(ctx context.Context, obj client.Object, ops []kagentPatchOp) error {
+	patch, err := json.Marshal(ops)
+	if err != nil {
+		return err
+	}
+	return k.c.Patch(ctx, obj, client.RawPatch(types.JSONPatchType, patch))
+}
+
+// restoreRelay moves a relay back, but only while it still is what this
+// deploy made it: a concurrent deploy of the Agent may have moved it since.
+func (k *kagentRuntimes) restoreRelay(bundle kagentBundle, rollback *kagentRelayRollback) {
+	ctx, cancel := context.WithTimeout(context.Background(), kagentRollbackTimeout)
+	defer cancel()
+	if rollback.selector != nil {
+		k.logf("Runtime %s is not Ready; moving relay %s back.", bundle.Runtime, rollback.service)
+		service := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: rollback.service, Namespace: k.namespace}}
+		ops := []kagentPatchOp{
+			{kagentPatchTest, kagentSelectorPath, map[string]string{kagentRuntimeLabel: bundle.Runtime}},
+			{kagentPatchReplace, kagentSelectorPath, rollback.selector},
+			{kagentPatchReplace, "/spec/ports", rollback.ports},
+		}
+		if err := k.jsonPatch(ctx, service, ops); err != nil {
+			k.logf("kagent-runtime: relay %s was not moved back; it does not select %s, or the patch failed: %v", rollback.service, bundle.Runtime, err)
+		}
+	}
+	policy := &networkingv1.NetworkPolicy{}
+	switch {
+	case rollback.createdPolicy != "":
+		found, err := k.getOptional(ctx, rollback.service, policy)
+		if err == nil && found && policy.UID == rollback.createdPolicy {
+			err = k.c.Delete(ctx, policy, client.Preconditions{UID: &rollback.createdPolicy})
+		}
+		if err != nil && !apierrors.IsNotFound(err) {
+			k.logf("kagent-runtime: could not delete relay policy %s, which this deploy created: %v", rollback.service, err)
+		}
+	case rollback.policy != nil && rollback.applied != nil:
+		policy.Name, policy.Namespace = rollback.service, k.namespace
+		ops := []kagentPatchOp{{kagentPatchTest, kagentSpecPath, rollback.applied}, {kagentPatchReplace, kagentSpecPath, rollback.policy}}
+		if err := k.jsonPatch(ctx, policy, ops); err != nil {
+			k.logf("kagent-runtime: relay policy %s was not restored; it changed since this deploy applied it, or the patch failed: %v", rollback.service, err)
+		}
+	}
+	*rollback = kagentRelayRollback{service: rollback.service}
+}
+
+// register registers the runtime and waits until Orka admits Tasks to it.
+func (k *kagentRuntimes) register(ctx context.Context, dir string, bundle kagentBundle, config []byte, options kagentRenderOptions) error {
+	capabilities, err := k.capabilities(ctx, k.namespace, bundle.Runtime)
+	if err != nil {
+		return fmt.Errorf("reading runtime %s's capabilities: %w", bundle.Runtime, err)
+	}
+	deployment := &appsv1.Deployment{}
+	if err := k.c.Get(ctx, k.key(bundle.Runtime), deployment); err != nil {
+		return err
+	}
+	options.Part, options.CapabilitiesJSON, options.DeploymentUID = kagentPartRegistration, capabilities, string(deployment.UID)
+	if err := k.applyPart(ctx, bundle, config, options); err != nil {
+		return err
+	}
+	registration := &corev1alpha1.AgentRuntime{}
+	if err := k.c.Get(ctx, k.key(bundle.Runtime), registration); err != nil {
+		return err
+	}
+	// Orka recovers the Deployment, restarting it after an Orka controller
+	// restart, once the Deployment names the AgentRuntime.
+	switch owner := deployment.Annotations[kagentRecoveryAnnotation]; owner {
+	case "":
+		patch, _ := json.Marshal(map[string]any{kagentFieldMetadata: map[string]any{kagentFieldAnnotations: map[string]string{kagentRecoveryAnnotation: string(registration.UID)}}})
+		if err := k.c.Patch(ctx, deployment, client.RawPatch(types.MergePatchType, patch)); err != nil {
+			return err
+		}
+	case string(registration.UID):
+	default:
+		return fmt.Errorf("deployment %s is recovered by another AgentRuntime (%s)", bundle.Runtime, owner)
+	}
+	// Activation requires this registration, so it cannot switch Agents
+	// through an Orka API in another cluster.
+	if err := os.WriteFile(filepath.Join(dir, kagentBundleRegistrationFile), []byte(string(registration.UID)+"\n"), 0o644); err != nil { //nolint:gosec // a UID, not a secret
+		return err
+	}
+	err = k.waitFor(ctx, k.options.ReadyTimeout, "runtime "+bundle.Runtime+" to be Ready", func() (bool, error) {
+		current := &corev1alpha1.AgentRuntime{}
+		if err := k.c.Get(ctx, k.key(bundle.Runtime), current); err != nil {
+			return false, err
+		}
+		// Ready alone stays set while a deleted runtime drains: require what
+		// Orka admits Tasks to, the registration this deploy annotated.
+		if current.UID != registration.UID || current.DeletionTimestamp != nil {
+			return false, fmt.Errorf("runtime %s is being deleted or is not the registration this deploy made; deploy under a new --runtime-revision", bundle.Runtime)
+		}
+		return current.Status.Ready && current.Status.ObservedGeneration == current.Generation, nil
+	})
+	if err != nil {
+		return err
+	}
+	k.logf("Runtime %s is Ready. Activate it with: orka agent-runtime kagent activate %s -- <the import flags>", bundle.Runtime, dir)
+	return nil
+}
+
+// requireRelay refuses unless a governed bundle's relay selects the bundle's
+// runtime, which otherwise cannot make its tool and model calls.
+func (k *kagentRuntimes) requireRelay(ctx context.Context, dir string, bundle kagentBundle) error {
+	if !bundle.Governed {
+		return nil
+	}
+	relay, _, _, err := kagentRelayService(bundle.Relay)
+	if err != nil {
+		return err
+	}
+	service := &corev1.Service{}
+	found, err := k.getOptional(ctx, relay, service)
+	if err != nil {
+		return err
+	}
+	if want := map[string]string{kagentRuntimeLabel: bundle.Runtime}; !found || !maps.Equal(service.Spec.Selector, want) {
+		return fmt.Errorf("relay %s selects %v, not runtime %s; move it with: orka agent-runtime kagent deploy %s", relay, service.Spec.Selector, bundle.Runtime, dir)
+	}
+	return nil
+}
+
+// agentRuntimeRef reads the runtime an Orka Agent uses.
+func (k *kagentRuntimes) agentRuntimeRef(ctx context.Context, name string) (string, error) {
+	agent := &corev1alpha1.Agent{}
+	if err := k.c.Get(ctx, k.key(name), agent); err != nil {
+		return "", err
+	}
+	if agent.Spec.Runtime == nil || agent.Spec.Runtime.RuntimeRef == nil {
+		return "", nil
+	}
+	return agent.Spec.Runtime.RuntimeRef.Name, nil
+}
+
+func (k *kagentRuntimes) activate(ctx context.Context, dir string, flags []string, stdin io.Reader) error {
+	bundle, _, err := readKagentBundle(dir)
+	if err != nil {
+		return err
+	}
+	bundleDir, err := filepath.Abs(filepath.Dir(filepath.Clean(dir)))
+	if err != nil {
+		return err
+	}
+	work, err := os.MkdirTemp("", "orka-kagent-activate-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(work) //nolint:errcheck
+	args, err := kagentActivateArgs(flags, bundleDir, work, stdin)
+	if err != nil {
+		return err
+	}
+	// The import switches every Agent in its input, which wrote the bundles
+	// beside this one, and refuses unless Orka reports all of their runtimes
+	// Ready. A governed Agent's relay may have moved since, to a newer runtime.
+	entries, err := os.ReadDir(bundleDir)
+	if err != nil {
+		return err
+	}
+	var siblings []kagentBundle
+	var dirs []string
+	for _, entry := range entries {
+		sibling := filepath.Join(bundleDir, entry.Name())
+		if _, err := os.Stat(filepath.Join(sibling, kagentBundleRuntimeFile)); !entry.IsDir() || err != nil {
+			continue
+		}
+		b, _, err := readKagentBundle(sibling)
+		if err != nil {
+			return err
+		}
+		siblings, dirs = append(siblings, b), append(dirs, sibling)
+	}
+	names := make([]string, 0, len(siblings))
+	for _, sibling := range siblings {
+		names = append(names, sibling.Agent)
+	}
+	if err := k.lock(ctx, names...); err != nil {
+		return err
+	}
+	for i, sibling := range siblings {
+		if err := k.requireRelay(ctx, dirs[i], sibling); err != nil {
+			return err
+		}
+	}
+	// The import must include this bundle's Agent, or it would switch the
+	// others and leave this one: a dry run into a scratch directory shows
+	// which Agents these flags import, without touching the bundles.
+	preview := filepath.Join(work, "preview")
+	if err := k.importer(ctx, append(slices.Clone(args), "--dry-run", "--bundle-dir", preview), true); err != nil {
+		return fmt.Errorf("previewing the import: %w", err)
+	}
+	if _, err := os.Stat(filepath.Join(preview, bundle.Agent, kagentBundleRuntimeFile)); err != nil {
+		return fmt.Errorf("the import flags do not import Agent %s; check -f", bundle.Agent)
+	}
+	if err := k.importer(ctx, append(args, "--bundle-dir", bundleDir), false); err != nil {
+		return err
+	}
+	if ref, err := k.agentRuntimeRef(ctx, bundle.Agent); err != nil || ref != bundle.Runtime {
+		return fmt.Errorf("agent %s does not use %s; were the import flags the ones that wrote this bundle? (%v)", bundle.Agent, bundle.Runtime, err)
+	}
+	k.logf("Agent %s uses %s. Retire its other runtimes with: orka agent-runtime kagent retire %s", bundle.Agent, bundle.Runtime, dir)
+	return nil
+}
+
+// kagentActivateArgs checks the import flags activate forwards: it refuses
+// --dry-run, drops a --bundle-dir that names the bundle's own directory, and
+// reads standard input (-f -) once, so the preview and the import see the
+// same input.
+func kagentActivateArgs(flags []string, bundleDir, work string, stdin io.Reader) ([]string, error) {
+	sameDir := func(path string) error {
+		resolved, err := filepath.EvalSymlinks(path)
+		want, werr := filepath.EvalSymlinks(bundleDir)
+		if err != nil || werr != nil || resolved != want {
+			return fmt.Errorf("--bundle-dir %s is not %s, the directory of the bundle", path, bundleDir)
+		}
+		return nil
+	}
+	readStdin := func() (string, error) {
+		path := filepath.Join(work, "input")
+		raw, err := io.ReadAll(stdin)
+		if err != nil {
+			return "", err
+		}
+		return path, os.WriteFile(path, raw, 0o600)
+	}
+	var args []string
+	for i := 0; i < len(flags); i++ {
+		flag := flags[i]
+		switch {
+		case flag == "--dry-run" || strings.HasPrefix(flag, "--dry-run="):
+			return nil, fmt.Errorf("activate runs the import without --dry-run")
+		case flag == "--bundle-dir":
+			if i+1 == len(flags) {
+				return nil, fmt.Errorf("--bundle-dir needs a directory")
+			}
+			i++
+			if err := sameDir(flags[i]); err != nil {
+				return nil, err
+			}
+		case strings.HasPrefix(flag, "--bundle-dir="):
+			if err := sameDir(strings.TrimPrefix(flag, "--bundle-dir=")); err != nil {
+				return nil, err
+			}
+		case flag == "-f" || flag == "--file":
+			if i+1 == len(flags) {
+				return nil, fmt.Errorf("%s needs a file", flag)
+			}
+			i++
+			file := flags[i]
+			if file == "-" {
+				var err error
+				if file, err = readStdin(); err != nil {
+					return nil, err
+				}
+			}
+			args = append(args, flag, file)
+		case flag == "-f=-" || flag == "--file=-":
+			file, err := readStdin()
+			if err != nil {
+				return nil, err
+			}
+			args = append(args, strings.SplitN(flag, "=", 2)[0]+"="+file)
+		default:
+			args = append(args, flag)
+		}
+	}
+	return args, nil
+}
+
+// kagentRuntimeKinds are the kinds a runtime's objects in its own namespace
+// have, which retire deletes by label.
+func kagentRuntimeKinds() []client.ObjectList {
+	return []client.ObjectList{&appsv1.DeploymentList{}, &corev1.ServiceList{}, &corev1.PersistentVolumeClaimList{},
+		&corev1.ServiceAccountList{}, &corev1.SecretList{}, &corev1.ConfigMapList{}}
+}
+
+func (k *kagentRuntimes) retire(ctx context.Context, dir string) error {
+	bundle, _, err := readKagentBundle(dir)
+	if err != nil {
+		return err
+	}
+	if err := k.lock(ctx, bundle.Agent); err != nil {
+		return err
+	}
+	if ref, err := k.agentRuntimeRef(ctx, bundle.Agent); err != nil || ref != bundle.Runtime {
+		return fmt.Errorf("agent %s does not use %s yet; activate it first (%v)", bundle.Agent, bundle.Runtime, err)
+	}
+	// The relay may select a runtime this would delete.
+	if err := k.requireRelay(ctx, dir, bundle); err != nil {
+		return err
+	}
+	// A runtime's objects may outlive its registration when an earlier retire
+	// timed out or was interrupted, so they name runtimes to retire too. Only
+	// runtimes of this bundle's kagent Agent count: a same-named kagent Agent
+	// of another namespace maps to the same Orka Agent.
+	ofAgent := client.MatchingLabels{kagentAgentLabel: bundle.Agent}
+	olds := map[string]bool{}
+	var registered corev1alpha1.AgentRuntimeList
+	if err := k.c.List(ctx, &registered, client.InNamespace(k.namespace), ofAgent); err != nil {
+		return err
+	}
+	for _, item := range registered.Items {
+		if item.Annotations[kagentSourceAnnotation] == kagentSource(bundle) {
+			olds[item.Name] = true
+		}
+	}
+	for _, list := range kagentRuntimeKinds() {
+		if err := k.c.List(ctx, list, client.InNamespace(k.namespace), ofAgent); err != nil {
+			return err
+		}
+		items, err := metaItems(list)
+		if err != nil {
+			return err
+		}
+		for _, item := range items {
+			if name := item.GetLabels()[kagentRuntimeLabel]; name != "" && item.GetAnnotations()[kagentSourceAnnotation] == kagentSource(bundle) {
+				olds[name] = true
+			}
+		}
+	}
+	delete(olds, bundle.Runtime)
+	for _, old := range slices.Sorted(maps.Keys(olds)) {
+		if err := k.retireRuntime(ctx, old); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func metaItems(list client.ObjectList) ([]metav1.Object, error) {
+	raw, err := json.Marshal(list)
+	if err != nil {
+		return nil, err
+	}
+	var decoded struct {
+		Items []metav1.PartialObjectMetadata `json:"items"`
+	}
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return nil, err
+	}
+	out := make([]metav1.Object, 0, len(decoded.Items))
+	for i := range decoded.Items {
+		out = append(out, &decoded.Items[i])
+	}
+	return out, nil
+}
+
+func (k *kagentRuntimes) retireRuntime(ctx context.Context, old string) error {
+	registration := &corev1alpha1.AgentRuntime{}
+	found, err := k.getOptional(ctx, old, registration)
+	if err != nil {
+		return err
+	}
+	if found {
+		k.logf("Retiring %s; Orka drains it first.", old)
+		if err := k.c.Delete(ctx, registration); err != nil && !apierrors.IsNotFound(err) {
+			return err
+		}
+		err := k.waitFor(ctx, k.options.RetireTimeout, "AgentRuntime "+old+" to drain", func() (bool, error) {
+			found, err := k.getOptional(ctx, old, &corev1alpha1.AgentRuntime{})
+			return !found, err
+		})
+		if err != nil {
+			return err
+		}
+	}
+	// The objects serve the registration until it is gone.
+	if found, err := k.getOptional(ctx, old, &corev1alpha1.AgentRuntime{}); err != nil || found {
+		return fmt.Errorf("AgentRuntime %s is still registered (%v)", old, err)
+	}
+	ofRuntime := client.MatchingLabels{kagentRuntimeLabel: old}
+	for _, obj := range []client.Object{&appsv1.Deployment{}, &corev1.PersistentVolumeClaim{}, &corev1.ServiceAccount{}, &corev1.Secret{}, &corev1.ConfigMap{}} {
+		if err := k.c.DeleteAllOf(ctx, obj, client.InNamespace(k.namespace), ofRuntime); err != nil && !apierrors.IsNotFound(err) {
+			return err
+		}
+	}
+	// Services do not support deleting a collection.
+	var services corev1.ServiceList
+	if err := k.c.List(ctx, &services, client.InNamespace(k.namespace), ofRuntime); err != nil {
+		return err
+	}
+	for i := range services.Items {
+		if err := k.c.Delete(ctx, &services.Items[i]); err != nil && !apierrors.IsNotFound(err) {
+			return err
+		}
+	}
+	// A v0 runtime's pod reader lives in the kagent Agent's namespace.
+	reader := client.MatchingLabels{kagentRuntimeLabel: old, kagentRuntimeNamespaceLabel: k.namespace}
+	var roles rbacv1.RoleList
+	var bindings rbacv1.RoleBindingList
+	if err := k.c.List(ctx, &roles, reader); err != nil {
+		return err
+	}
+	if err := k.c.List(ctx, &bindings, reader); err != nil {
+		return err
+	}
+	for i := range roles.Items {
+		if err := k.c.Delete(ctx, &roles.Items[i]); err != nil && !apierrors.IsNotFound(err) {
+			return err
+		}
+	}
+	for i := range bindings.Items {
+		if err := k.c.Delete(ctx, &bindings.Items[i]); err != nil && !apierrors.IsNotFound(err) {
+			return err
+		}
+	}
+	return nil
+}
