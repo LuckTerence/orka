@@ -42,6 +42,7 @@ Usage:
 Environment:
   KUBECTL_CONTEXT            kubectl context (required)
   NAMESPACE                  namespace of the runtimes (default orka-system)
+  CONTROLLER_NAMESPACE       namespace of the Orka controller (default NAMESPACE)
   ORKA                       orka CLI (default: orka)
   WRAPPER_SRC                orka-runtime-kagent checkout (deploy)
   IMAGE_REPO                 image repository prefix, such as ghcr.io/me (deploy)
@@ -152,8 +153,10 @@ require_relay() {
     die "relay ${service} selects ${got:-nothing}, not ${want}; move it with: $0 deploy ${b}"
 }
 
+# The epoch record lives in the Orka controller's namespace, which several
+# Orka installations in one cluster each have.
 controller_epoch() {
-  kubectl --context "${KUBECTL_CONTEXT}" get cepoch -A -o json |
+  kubectl --context "${KUBECTL_CONTEXT}" -n "${CONTROLLER_NAMESPACE}" get cepoch -o json |
     jq -er '[.items[] | select(.spec.name == "orka-controller") | .status.epoch] |
       if length == 1 and (.[0] | type == "number" and . > 0)
       then .[0] else error("expected one initialized controller epoch") end'
@@ -186,6 +189,15 @@ ensure_auth_secret() {
 
 deploy() {
   need openssl
+  if [ "${governed}" = true ]; then
+    # The relay Service's name comes from the Agent's relay URL, which an
+    # Agent imported separately may share.
+    local relay_agent
+    relay_service=$(relay_service_of "${bundle}")
+    relay_agent=$(kc get service "${relay_service}" --ignore-not-found -o jsonpath='{.metadata.labels.orka\.ai/kagent-agent}')
+    [ -z "${relay_agent}" ] || [ "${relay_agent}" = "${agent}" ] ||
+      die "relay ${relay_service} serves Agent ${relay_agent}; give ${agent} its own relay URL"
+  fi
   # Only NotFound means the runtime is not deployed yet: rebuilding a deployed
   # runtime would roll new images into it under its registered profile.
   local deployed
@@ -197,9 +209,12 @@ deploy() {
     [ -n "${IMAGE_REPO:-}" ] || die "IMAGE_REPO is required"
     need docker
   fi
-  local work digest
+  local digest
+  # The directory may hold the governed upstream credential, so it goes on
+  # every exit, with the relay rollback.
   work=$(mktemp -d)
-  trap 'rm -rf "${work}"' RETURN
+  trap 'restore_relay; rm -rf "${work}"' EXIT
+  trap 'exit 1' INT TERM HUP
   if [ -n "${deployed}" ]; then
     # The images are part of the runtime's immutable profile. A deployed
     # runtime keeps its images; roll new ones under a new name with the
@@ -225,11 +240,8 @@ deploy() {
   if [ "${governed}" = true ]; then
     # Orka's conformance prompt reaches kagent, which calls the relay, so the
     # relay must reach this runtime before registration.
-    relay_service=$(relay_service_of "${bundle}")
     relay_rollback=$(relay_selector "${relay_service}")
     [ "${relay_rollback}" != "{}" ] || relay_rollback=""
-    trap restore_relay EXIT
-    trap 'exit 1' INT TERM HUP
     render relay | apply
     # Replace the selector outright: a merge with an older one would select
     # nothing.
@@ -337,6 +349,7 @@ shift 2
 [ -f "${bundle}/runtime.json" ] && [ -f "${bundle}/kagent.json" ] || die "${bundle} is not a deployment bundle"
 [ -n "${KUBECTL_CONTEXT:-}" ] || die "KUBECTL_CONTEXT is required"
 NAMESPACE=${NAMESPACE:-orka-system}
+CONTROLLER_NAMESPACE=${CONTROLLER_NAMESPACE:-${NAMESPACE}}
 ORKA=${ORKA:-orka}
 BUILD_PLATFORM=${BUILD_PLATFORM:-linux/amd64}
 READY_TIMEOUT=${READY_TIMEOUT:-5m}
@@ -348,6 +361,7 @@ agent=$(bundle_field agent)
 governed=$(bundle_field governed)
 relay_service=""
 relay_rollback=""
+work=""
 
 case "${command}" in
 deploy) deploy ;;
