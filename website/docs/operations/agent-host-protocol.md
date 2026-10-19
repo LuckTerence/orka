@@ -1,29 +1,203 @@
 ---
 title: Agent Host Protocol clients
-description: "Let Agent Host Protocol clients, such as the GitHub Copilot desktop app, run sessions on Orka's built-in runtimes."
+description: "Install, expose and connect desktop Agent Host Protocol clients so they run sessions on Orka's built-in runtimes."
 ---
 
 Orka serves the [Agent Host Protocol](https://microsoft.github.io/agent-host-protocol/specification/overview.html)
-(AHP) at `/ahp`. An AHP client, such as the GitHub Copilot desktop app, connects to Orka
-as a remote agent host. It sees Orka's built-in runtimes as agents, picks a repository,
-and chats. Each message runs as an agent Task in an Orka Session, governed like any other
-Task: Orka's policy, credentials, provider proxy and audit trail apply. The design is
+(AHP) at `/ahp`. A desktop AHP client connects to Orka as a remote agent host. It sees
+Orka's built-in runtimes as agents, picks a repository, and chats. Each message runs as an
+agent Task in an Orka Session, governed like any other Task: Orka's policy, credentials,
+provider proxy and audit trail apply. The design is
 [ADR 0034](https://github.com/orka-agents/orka/blob/main/docs/adr/0034-agent-host-protocol-api.md).
 
-## Turn it on
+Setting it up takes three steps: an operator turns the endpoint on and exposes it over TLS,
+and each person mints a connection token with the CLI and pastes the URL it prints into
+their client.
 
-Start the controller in the `harness-v2` execution mode with:
+## Install with Helm
+
+The endpoint is off by default. It needs the `harness-v2` execution mode, which is the
+chart's default, and a way for people to sign in: AHP connection tokens are minted by
+people signed in with OIDC (or a delegated context token), never by ServiceAccounts.
+
+```bash
+helm upgrade --install orka orka/orka --namespace orka-system --create-namespace \
+  --set controller.ahp.enabled=true \
+  --set controller.oidc.issuer=https://login.example.com \
+  --set controller.oidc.audience=orka \
+  --set controller.oidc.allowedSubjects='*@example.com' \
+  --set controller.oidc.namespace=orka-system \
+  --wait --timeout 10m
+```
+
+Set `controller.oidc.namespace` to the namespace people's sessions run in, normally the
+release namespace: Orka binds OIDC callers to it, and each AHP user's Tasks, Sessions and
+Agents live there. The chart refuses `controller.ahp.enabled` without an OIDC or
+context-token issuer, or outside `harness-v2`.
+
+Optional values:
+
+| Value | Default | Purpose |
+| --- | --- | --- |
+| `controller.ahp.tokenMaxTTL` | `2160h` | Longest lifetime a connection token may be minted with. Tokens default to `720h`. |
+| `controller.ahp.turnTimeout` | `2h` | Timeout of each turn's Task. |
+| `controller.ahp.gitCredentialSecret` | `""` | Secret in the user's namespace whose `token` key clones and publishes their repositories. See [Repositories and credentials](#repositories-and-credentials). |
+| `controller.ahp.workspaceClass` | `""` | ExecutionWorkspaceClass for session-scoped workspaces. Needs an installed workspace provider. |
+| `controller.ahp.workspaceImage` | `""` | Digest-pinned image with `sh` and `git` that turns on [workspaces and terminals](#workspaces-and-terminals). |
+| `controller.ahp.workspaceNamespace` | `orka-ahp-workspaces` | Namespace the chart creates for workspace Pods when `workspaceImage` is set. |
+| `controller.contextToken.scopes.ahpTokens` | `""` | Context-token scopes that may mint, list and revoke AHP tokens. Empty keeps `orka:ahp:tokens`. |
+
+Without Helm, start the controller with the equivalent flags:
 
 ```text
 --enable-ahp-api
---oidc-issuer=<issuer> --oidc-audience=<audience> --oidc-allowed-subjects=<patterns>
+--oidc-issuer=<issuer> --oidc-audience=<audience> --oidc-allowed-subjects=<patterns> --oidc-namespace=<namespace>
 --ahp-git-credential-secret=<secret name>   # optional
 --ahp-workspace-class=<class name>          # optional
 ```
 
-People mint AHP connection tokens with their OIDC or context-token identity; see the
-[API reference](../reference/api-reference.md#agent-host-protocol). ServiceAccounts cannot
-mint them.
+See [Controller flags](../reference/configuration.md#controller-flags) for all of them.
+
+## Expose /ahp over TLS
+
+`/ahp` is served on the API port with the rest of the API, so the chart's controller
+Service (`orka` for a release named `orka`, port `8080`, named `api`) already carries it,
+WebSocket upgrades included. The chart creates no Ingress: put the TLS-terminating
+Ingress, Gateway or load balancer you already use for the API in front of that Service.
+Clients then connect to `wss://<API host>/ahp`.
+
+Whatever sits in front must:
+
+- **Terminate TLS.** The connection token travels in the URL (`?tkn=`), because desktop
+  AHP clients connect by URL alone and send no `Authorization` header. Only `wss://`
+  keeps it off the network in the clear; `orka ahp connect` refuses to print a `ws://`
+  URL for any host but the local machine unless told `--insecure`. The hop from the proxy
+  to the Service is plain HTTP inside the cluster.
+- **Pass WebSocket upgrades.** Most ingress controllers and every Gateway API
+  implementation do this for `GET` requests with `Upgrade: websocket`.
+- **Allow long-lived, idle connections.** A client stays connected while a person works,
+  often idle between messages, and turns can stream for up to `controller.ahp.turnTimeout`.
+  Raise the proxy's read, send and idle timeouts well past a minute; an hour is a
+  reasonable floor. A client that is cut off reconnects and replays what it missed, but
+  short timeouts cause needless churn.
+- **Not log query strings.** Orka logs only the path of `/ahp` requests, never its query.
+  Proxies commonly log the full request line, which would record tokens. Turn access
+  logging off for `/ahp`, or log without the query.
+- **Not rewrite `Origin`.** Orka refuses browser origins (`http` and `https`) at `/ahp`
+  so a web page cannot ride a pasted token; desktop clients send none or a non-web one.
+
+For ingress-nginx, a dedicated Ingress for `/ahp` keeps these settings off the rest of the
+API:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: orka-ahp
+  namespace: orka-system
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    # The request line carries the connection token.
+    nginx.ingress.kubernetes.io/enable-access-log: "false"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [orka.example.com]
+      secretName: orka-example-com-tls
+  rules:
+    - host: orka.example.com
+      http:
+        paths:
+          - path: /ahp
+            pathType: Exact
+            backend:
+              service:
+                name: orka
+                port:
+                  name: api
+```
+
+With the Gateway API, route `/ahp` to the same Service from an HTTPS listener with an
+`HTTPRoute`, and set the implementation's request and idle timeouts. Check the exposure
+from outside the cluster: without a token the door answers `401`, which proves the request
+reached Orka.
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' https://orka.example.com/ahp   # 401
+```
+
+## Connect a desktop client
+
+Each person does this once per device, with the [CLI](../reference/cli.md#desktop-ahp-clients)
+signed in as themselves:
+
+```bash
+orka config set-server https://orka.example.com
+orka config set-namespace orka-system
+orka config set-token --file - < id-token.txt   # an OIDC ID token for you, from your identity provider
+
+orka ahp connect --name work-laptop
+```
+
+`orka ahp connect` mints a token named after the device (the host name unless `--name`
+says otherwise) and prints the URL to paste:
+
+```text
+wss://orka.example.com/ahp?tkn=orka_ahp_...
+```
+
+In the desktop client, add a remote agent host with that WebSocket URL. Pick the host, add
+a repository as a project, choose a model, and send a message.
+
+The URL is shown once and carries the token: anyone who has it acts as you on Orka until it
+expires or you revoke it. Treat it like a password. Only the URL goes to standard output, so
+`orka ahp connect | pbcopy` copies it without echoing it to the terminal. `-o json` prints it
+with the token's ID and expiry instead.
+
+The URL is built from the server the CLI talks to. When the CLI reaches Orka another way, for
+example through a port-forward, pass the public address with `--url https://orka.example.com`.
+To try AHP on a laptop without exposing anything, port-forward the API and use the local URL
+it prints, which works only on that machine and only while the port-forward runs:
+
+```bash
+kubectl -n orka-system port-forward svc/orka 8080:8080 &
+orka ahp connect --server http://localhost:8080   # ws://localhost:8080/ahp?tkn=...
+```
+
+## Manage tokens
+
+AHP connection tokens are made for URLs that stay pasted in an app:
+
+- **Lifetime.** A token lasts `720h` (30 days) unless `--ttl` asks for another lifetime,
+  up to `controller.ahp.tokenMaxTTL` (`2160h`, 90 days, by default). A token minted from a
+  context token never outlives that context token. When a token expires the client is
+  disconnected; run `orka ahp connect` again and paste the new URL.
+- **One per device.** Mint a token for each device, named after it, so a lost or retired
+  device can be cut off alone.
+- **Owned by one person.** A token acts as the person who minted it, in the namespace it was
+  minted in, with no more authority than they had. Only its owner can list or revoke it.
+- **Bound to sign-in.** At connect, and every 30 seconds while connected, Orka checks that the
+  token's owner could still sign in: an OIDC-minted token needs the configured issuer and a
+  subject `controller.oidc.allowedSubjects` still admits, and a token minted from a context
+  token needs its issuer still configured. Removing someone from the allowlist cuts off
+  their tokens, even ones minted before. Disabling a person only in the identity provider
+  does not; revoke their tokens too.
+- **Stored as hashes.** Orka keeps only a SHA-256 hash of each token and never logs one. A
+  lost URL cannot be shown again: mint a new one.
+
+List and revoke your tokens:
+
+```bash
+orka ahp tokens list           # active tokens: ID, name, namespace, created, expires
+orka ahp tokens list --all     # also expired and revoked ones
+orka ahp tokens revoke ahpt_0123456789abcdef
+```
+
+Revoking a token disconnects every client using it within seconds, and its URL stops
+working. To rotate a device's token, connect again, paste the new URL, then revoke the old
+token. The same operations are available over the API; see the
+[API reference](../reference/api-reference.md#agent-host-protocol).
 
 ## What a person sees
 
@@ -45,28 +219,32 @@ mint them.
 
 ## Repositories and credentials
 
-The agent never holds Git credentials. With `--ahp-git-credential-secret`, Orka looks up
-that Secret in each person's namespace and uses its `token` key to clone the repository
-and publish the agent's changes. Each turn that changes files publishes them to the
-session's branch, `orka/session-<uid>`, and the next turn starts from it. Without the
-Secret, sessions clone public repositories read-only, and a turn that changes files
-fails with `ReadOnlyWorkspaceModified`.
+The agent never holds Git credentials. With `controller.ahp.gitCredentialSecret`
+(`--ahp-git-credential-secret`), Orka looks up that Secret in each person's namespace and
+uses its `token` key to clone the repository and publish the agent's changes. Each turn
+that changes files publishes them to the session's branch, `orka/session-<uid>`, and the
+next turn starts from it. Without the Secret, sessions clone public repositories
+read-only, and a turn that changes files fails with `ReadOnlyWorkspaceModified`.
 
-With `--ahp-workspace-class`, turns use session-scoped execution workspaces, so a
-session's files stay warm between turns. This needs an installed workspace provider.
+With `controller.ahp.workspaceClass` (`--ahp-workspace-class`), turns use session-scoped
+execution workspaces, so a session's files stay warm between turns. This needs an
+installed workspace provider.
 
 ## Workspaces and terminals
 
-Clients such as the Copilot app run their own git commands on the host, through
-terminals, before they create a session or send a message. Give them a place to do that:
+Desktop AHP clients run their own git commands on the host, through terminals, before they
+create a session or send a message. Give them a place to do that with
+`controller.ahp.workspaceImage=<image with sh and git>@sha256:<digest>`. The chart then
+creates `controller.ahp.workspaceNamespace` (`orka-ahp-workspaces`) with the restricted Pod
+Security profile, the controller's Role in it, and a NetworkPolicy that admits no inbound
+traffic and allows only DNS and TCP 443. Without Helm, apply the same objects and start the
+controller with `--ahp-workspace-image`:
 
 ```bash
 kubectl apply -k config/ahp-workspaces
 ```
 
-and start the controller with
-`--ahp-workspace-image=<image with sh and git>@sha256:<digest>`. Each AHP user then gets
-one workspace Pod in `orka-ahp-workspaces` (`--ahp-workspace-namespace`):
+Each AHP user then gets one workspace Pod in that namespace (`--ahp-workspace-namespace`):
 
 - each project is cloned at its path, and each session has a git worktree on its branch;
 - terminals are shells in that Pod;
@@ -76,14 +254,10 @@ one workspace Pod in `orka-ahp-workspaces` (`--ahp-workspace-namespace`):
   worktree fast-forwards to it.
 
 The Pod's files are ephemeral: Orka rebuilds the checkouts when it starts again, and
-removes the Pod with the person's last session unless a terminal is open.
-
-## Connect the Copilot app
-
-1. Mint a token: `POST /api/v1/ahp-tokens` with your OIDC token.
-2. In the app, add a remote agent host of type **AHP (WS)** with the URL
-   `wss://<orka-api-host>/ahp?tkn=<token>`.
-3. Pick the host, add a repository as a project, choose a model, and send a message.
+removes the Pod with the person's last session unless a terminal is open. For the same
+reason the chart does not keep the namespace: unsetting `workspaceImage` or uninstalling
+the release deletes it with its Pods. A namespace created earlier with
+`config/ahp-workspaces` is not Helm's; delete it before turning workspaces on with Helm.
 
 ## Not offered yet
 

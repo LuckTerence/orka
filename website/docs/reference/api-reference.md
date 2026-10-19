@@ -228,14 +228,14 @@ The consent `state` and the completion token are HMACs over random single-use no
 
 With `--enable-ahp-api`, `/ahp` serves the [Agent Host Protocol](https://github.com/microsoft/agent-host-protocol) (versions `1.0.0` and `0.9.0`) over WebSocket, one JSON-RPC message per text frame. See [ADR 0034](https://github.com/orka-agents/orka/blob/main/docs/adr/0034-agent-host-protocol-api.md). In the `harness-v2` execution mode, Orka's built-in runtimes are offered as AHP agents and each message runs as an agent Task; see [Agent Host Protocol clients](../operations/agent-host-protocol.md).
 
-`/ahp` does not accept Orka bearer tokens. A client presents an AHP connection token as `?tkn=<token>` or `Authorization: Bearer <token>`; a missing, unknown, revoked or expired token gets 401 before the upgrade, and a browser (`http` or `https`) `Origin` gets 403. The URL is never logged. Revoking or expiring a token closes every connection that uses it.
+`/ahp` does not accept Orka bearer tokens. A client presents an AHP connection token as `?tkn=<token>` or `Authorization: Bearer <token>`; desktop clients that connect by URL alone use `wss://<API host>/ahp?tkn=<token>`, which `orka ahp connect` prints. A missing, unknown, revoked or expired token gets 401 before the upgrade, and a browser (`http` or `https`) `Origin` gets 403. So does a token whose owner the API would no longer sign in: an OIDC-minted token needs the configured issuer and a subject `--oidc-allowed-subjects` still admits, and a token minted from a context token needs its issuer still configured. Orka logs the path of `/ahp` requests, never the query. Revoking or expiring a token, or its owner losing sign-in, closes every connection that uses it; open connections are rechecked every 30 seconds.
 
 The token routes require a verified OIDC or context-token identity carrying an issuer and subject; ServiceAccount bearer tokens are refused with 403. Under context-token authorization they need `orka:ahp:tokens`. A token minted from a context token keeps that token's scopes, transaction context and namespace and expires no later than it; the context token itself is never stored. Orka stores only a hash of each token.
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/v1/ahp-tokens` | POST | Body `{"ttl": "720h", "description": "laptop"}`, both optional; `ttl` is at most `--ahp-token-max-ttl`. Returns `201` with `{"id", "token", "expiresAt", ...}`. The token is shown only in this response. |
-| `/api/v1/ahp-tokens` | GET | List the caller's tokens without their secrets. |
+| `/api/v1/ahp-tokens` | POST | Body `{"ttl": "720h", "description": "laptop"}`, both optional. `ttl` defaults to `720h` and is at most `--ahp-token-max-ttl`. `description` names the token for its owner, such as the device it is for: at most 256 characters, trimmed, no control characters. Returns `201` with `{"id", "token", "description", "namespace", "expiresAt", "delegated"}`. The token is shown only in this response. |
+| `/api/v1/ahp-tokens` | GET | List the caller's tokens, newest first, without their secrets: `{"items": [{"id", "description", "namespace", "createdAt", "expiresAt", "revokedAt", "delegated"}]}`. Expired and revoked tokens stay listed. |
 | `/api/v1/ahp-tokens/:id` | DELETE | Revoke one of the caller's tokens and close its connections. Another person's token reads as 404. |
 | `/ahp` | GET | The AHP WebSocket endpoint. |
 

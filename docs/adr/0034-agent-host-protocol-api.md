@@ -76,6 +76,13 @@ OpenAI- and Anthropic-compatible groups. It is off by default.
   that check, as provenance.
 - Revocation or expiry closes every connection using the token and stops delivery,
   including queued output; passive subscribers are not exempt.
+- A token outlives the sign-in that minted it, so its owner is checked against the
+  controller's current sign-in policy at connect and on every recheck: an OIDC-minted
+  token needs the configured issuer and a subject the allowlist still admits, and a
+  token minted from a context token needs a configured context-token issuer.
+- A pasted host URL is long-lived. Tokens default to 30 days, are capped by
+  `--ahp-token-max-ttl` (90 days by default), carry a description naming the device,
+  and are listed and revoked only by their owner (`orka ahp tokens`).
 - `initialize`, `subscribe` and `reconnect` authorize each channel. Replay and snapshots
   include only what the user may still see; anything else is returned in `missing`.
 
