@@ -376,9 +376,9 @@ docker-build-acp-foundry-runtime: ## Layer the Orka supervisor onto a digest-pin
 		-f workers/acp/images/foundry/Dockerfile .
 
 .PHONY: docker-build-acp-kagent-runtime
-docker-build-acp-kagent-runtime: ## Layer the Orka supervisor onto a digest-pinned configured kagent image.
+docker-build-acp-kagent-runtime: ## Layer the Orka supervisor onto the digest-pinned kagent adapter image.
 	$(CONTAINER_TOOL) build \
-		--build-arg KAGENT_RUNTIME_IMAGE="$(KAGENT_RUNTIME_IMAGE)" \
+		--build-arg KAGENT_ADAPTER_IMAGE="$(KAGENT_ADAPTER_IMAGE)" \
 		--build-arg KAGENT_ADAPTER_DIGEST="$(KAGENT_ADAPTER_DIGEST)" \
 		-t ${ACP_KAGENT_RUNTIME_IMG} \
 		-f workers/acp/images/kagent/Dockerfile .
