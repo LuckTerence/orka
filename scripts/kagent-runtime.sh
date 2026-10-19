@@ -233,6 +233,14 @@ ensure_auth_secret() {
 deploy() {
   need openssl
   lock_agents "${agent}"
+  # One Orka Agent name may come from kagent Agents of the same name in
+  # different namespaces; a deploy must not take the runtimes or relay of the
+  # one the Orka Agent wraps.
+  local kagent_source wraps
+  kagent_source="$(bundle_field kagentNamespace)/$(bundle_field kagentName)"
+  wraps=$(kc get agents.core.orka.ai "${agent}" --ignore-not-found -o json | jq -r '.metadata.annotations["orka.ai/kagent-source"] // empty')
+  [ -z "${wraps}" ] || [ "${wraps##* }" = "${kagent_source}" ] ||
+    die "Orka Agent ${agent} wraps kagent Agent ${wraps##* }, not ${kagent_source}; import ${kagent_source} into another Orka namespace"
   if [ "${governed}" = true ]; then
     # The relay Service's name comes from the Agent's relay URL, which an
     # Agent imported separately may share.
@@ -245,6 +253,12 @@ deploy() {
       [ -n "${relay_agent}" ] && die "relay ${relay_service} serves Agent ${relay_agent}; give ${agent} its own relay URL"
       die "Service ${relay_service} exists but is not a relay of this script; to let ${agent} use it, label it orka.ai/kagent-agent=${agent}"
     fi
+    # The relay's NetworkPolicy has the Service's name, and the same rule.
+    local policy_found policy_agent
+    policy_found=$(kc get networkpolicy "${relay_service}" --ignore-not-found -o name)
+    policy_agent=$(kc get networkpolicy "${relay_service}" --ignore-not-found -o jsonpath='{.metadata.labels.orka\.ai/kagent-agent}')
+    [ -z "${policy_found}" ] || [ "${policy_agent}" = "${agent}" ] ||
+      die "NetworkPolicy ${relay_service} exists but is not ${agent}'s relay policy; to let ${agent} use it, label it orka.ai/kagent-agent=${agent}"
   fi
   # Only NotFound means the runtime is not deployed yet: rebuilding a deployed
   # runtime would roll new images into it under its registered profile.
@@ -342,6 +356,11 @@ deploy() {
   printf '%s\n' "${registered}" >"${bundle}/registration.uid"
   kc wait --for=condition=Ready "agentruntime/${runtime}" --timeout="${READY_TIMEOUT}" ||
     die "runtime ${runtime} did not become Ready"
+  # Ready alone stays set while a deleted runtime drains: require what Orka
+  # admits Tasks to, the registration this deploy annotated.
+  kc get agentruntime "${runtime}" -o json | jq -e --arg uid "${registered}" \
+    '.metadata.uid == $uid and .metadata.deletionTimestamp == null and .status.ready == true and .status.observedGeneration == .metadata.generation' >/dev/null ||
+    die "runtime ${runtime} is Ready but being deleted, not yet current, or not the registration this deploy made; deploy under a new --runtime-revision"
   relay_rollback=""
   echo "Runtime ${runtime} is Ready. Activate it with: $0 activate ${bundle} -- <the import arguments>"
 }
