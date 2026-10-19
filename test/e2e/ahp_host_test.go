@@ -95,8 +95,10 @@ var _ = Describe("Agent Host Protocol host", Ordered, Serial, Label("agent-runti
 		Expect(err).NotTo(HaveOccurred())
 
 		By("offering one built-in runtime model to AHP people")
+		// Codex enforces only its unrestricted policy or a read-only tool set,
+		// so the Agent keeps the default tools, as the other Codex specs do.
 		Expect(applyManifestJSON(runtimeAgentManifest(ahpE2EAgent, "codex", runtimeMatrixMockCodexModel, 4,
-			new(false)))).To(Succeed())
+			nil))).To(Succeed())
 		DeferCleanup(deleteE2EObjects, "agent", ahpE2EAgent)
 
 		// Runs before the Agent is deleted and the controller is restored.
