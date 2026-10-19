@@ -220,8 +220,8 @@ token. The same operations are available over the API; see the
   Cancelling the turn cancels its Task. A failed turn's error carries the runtime's
   reason.
 - **Messages during a turn.** Orka's runtimes take no input mid-turn. A message sent
-  while a turn runs waits and becomes the next turn: steering messages first, then
-  queued messages in the client's order.
+  while a turn runs is queued and becomes a later turn, in the client's order; a
+  steering message is queued first and shown as queued.
 - **Changes.** Files the agent edits appear in the session's changes as it reports them.
   Once a turn's changes land, the changes become exactly what the session's branch
   changed since it forked from the base branch, including files changed with shell

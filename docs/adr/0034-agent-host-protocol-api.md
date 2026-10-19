@@ -126,8 +126,9 @@ an AHP backend for agent hosts is a later decision.
   Orka Session's publication claim, so the new one continues on a new branch based on it.
   When an operator names an execution workspace class, turns use session-scoped workspaces
   so files stay warm; otherwise each write turn publishes and the next turn starts from it.
-- Messages sent while a turn runs (steering or queued) wait: the runtimes take no input
-  mid-turn, so each becomes the next turn, steering messages first.
+- Messages sent while a turn runs wait: the runtimes take no input mid-turn, so each is
+  queued and becomes a later turn. A steering message is queued first and shown as
+  queued, so clients do not also show it as input to the running turn.
 - Projects are repositories the user adds; Orka never clones them on the host, because
   each turn's Task clones its own workspace. The agent never holds Git credentials. The
   operator names one credential Secret that is looked up in each user's namespace; without

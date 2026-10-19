@@ -890,6 +890,21 @@ func TestAHPBackendRunsMessagesSentDuringATurn(t *testing.T) {
 		return env.backend.getRecord(ctx, alice, ahpRecordSession, ahpTestSession, &current) == nil && len(current.Pending) == 2
 	}, 5*time.Second, 20*time.Millisecond)
 
+	// The steering message is queued first, and the chat shows it so.
+	var ids []string
+	require.Eventually(t, func() bool {
+		queued, _, err := c.Subscribe(ctx, chat)
+		if err != nil || queued.Snapshot.State.Chat.SteeringMessage != nil {
+			return false
+		}
+		ids = ids[:0]
+		for _, p := range queued.Snapshot.State.Chat.QueuedMessages {
+			ids = append(ids, p.Id)
+		}
+		return len(ids) == 2
+	}, 5*time.Second, 20*time.Millisecond)
+	require.Equal(t, []string{"s1", "q1"}, ids)
+
 	// When the turn ends, the steering message runs first, then the queued one.
 	env.setPhase(record.OrkaSession+"-t1", corev1alpha1.TaskPhaseSucceeded)
 	second := env.waitForTask(record.OrkaSession + "-t2")

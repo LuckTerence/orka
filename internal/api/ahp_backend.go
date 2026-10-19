@@ -312,8 +312,8 @@ type ahpSession struct {
 }
 
 // ahpPending is a message sent while a turn runs. Orka's runtimes take no
-// input mid-turn, so a steering message runs first once the turn ends and
-// queued messages follow in order.
+// input mid-turn, so every waiting message is queued; a steering message is
+// queued first.
 type ahpPending struct {
 	ID      string           `json:"id"`
 	Kind    string           `json:"kind"`
@@ -1058,16 +1058,36 @@ func (b *ahpBackend) HandleClientAction(ctx context.Context, principal ahphost.P
 		}
 		b.pendingAuth[ahpPendingKey(principal.UserKey, record.Session, a.Id)] = ahpPendingSender{principal: principal, version: version}
 		b.mu.Unlock()
+		// Orka's runtimes take no input mid-turn, so a steering message is
+		// queued first instead, and shown so: it then appears once, when its
+		// turn starts, not also as input to the running turn.
+		steering := a.Kind == ahptypes.PendingMessageKindSteering
+		var order []string
 		b.updateSession(ctx, principal.UserKey, record.Session, func(s *ahpSession) {
 			s.Pending = slices.DeleteFunc(s.Pending, func(p ahpPending) bool { return p.ID == a.Id })
-			entry := ahpPending{ID: a.Id, Kind: string(a.Kind), Message: a.Message, Version: version}
-			if a.Kind == ahptypes.PendingMessageKindSteering {
-				at := len(slices.DeleteFunc(slices.Clone(s.Pending), func(p ahpPending) bool { return p.Kind != string(ahptypes.PendingMessageKindSteering) }))
-				s.Pending = slices.Insert(s.Pending, at, entry)
+			entry := ahpPending{ID: a.Id, Kind: string(ahptypes.PendingMessageKindQueued), Message: a.Message, Version: version}
+			if steering {
+				s.Pending = slices.Insert(s.Pending, 0, entry)
 			} else {
 				s.Pending = append(s.Pending, entry)
 			}
+			order = order[:0]
+			for _, p := range s.Pending {
+				order = append(order, p.ID)
+			}
 		})
+		if steering {
+			actions := []ahptypes.StateAction{
+				{Value: &ahptypes.ChatPendingMessageRemovedAction{Type: ahptypes.ActionTypeChatPendingMessageRemoved, Kind: ahptypes.PendingMessageKindSteering, Id: a.Id}},
+				{Value: &ahptypes.ChatPendingMessageSetAction{Type: ahptypes.ActionTypeChatPendingMessageSet, Kind: ahptypes.PendingMessageKindQueued, Id: a.Id, Message: a.Message}},
+			}
+			if len(order) > 1 {
+				actions = append(actions, ahptypes.StateAction{Value: &ahptypes.ChatQueuedMessagesReorderedAction{
+					Type: ahptypes.ActionTypeChatQueuedMessagesReordered, Order: order,
+				}})
+			}
+			_ = emit.Emit(ctx, record.Chat, actions...)
+		}
 		b.runPending(ctx, principal.UserKey, record.Session, emit)
 	case *ahptypes.ChatPendingMessageRemovedAction:
 		b.updateSession(ctx, principal.UserKey, record.Session, func(s *ahpSession) {
