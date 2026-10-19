@@ -410,11 +410,12 @@ func (t *ahpTurn) readyTool(id string, call *ahpToolCall, title string, input js
 
 // tool advances one tool call through start, ready and complete.
 func (t *ahpTurn) tool(update *harnessv2.ToolCallUpdate) {
+	call := t.startTool(update.ToolCallID, ahpToolName(update), update.Title)
+	// Later updates usually carry no title; keep the one the call started with.
 	title := update.Title
 	if title == "" {
-		title = ahpToolName(update)
+		title = call.title
 	}
-	call := t.startTool(update.ToolCallID, ahpToolName(update), update.Title)
 	if len(update.Diffs) > 0 {
 		t.recordDiffs(update.Diffs)
 	}

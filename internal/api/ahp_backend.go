@@ -469,7 +469,7 @@ func (b *ahpBackend) HandleExtension(ctx context.Context, principal ahphost.Prin
 				bg, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 				defer cancel()
 				if pod, err := b.workspaces.ensure(bg, principal, 2*time.Minute); err == nil {
-					_ = b.workspaces.ensureProject(bg, pod, project)
+					_ = b.workspaces.ensureProject(bg, principal, pod, project)
 				}
 			}()
 		}
@@ -666,9 +666,12 @@ func (b *ahpBackend) CreateSession(ctx context.Context, principal ahphost.Princi
 		return nil, err
 	}
 	if b.workspaces.enabled() && b.mayUseWorkspace(principal) == nil {
-		// Clients run git in the session's working directory right away.
+		// Clients run git in the session's working directory right away. A
+		// worktree that takes longer is finished before a terminal opens in it.
 		if pod, err := b.workspaces.ensure(ctx, principal, ahpWorkspaceStartWait); err == nil {
-			_ = b.workspaces.ensureWorktree(ctx, pod, project, record)
+			setupCtx, cancel := context.WithTimeout(ctx, ahpWorkspaceSetupWait)
+			_ = b.workspaces.ensureWorktree(setupCtx, principal, pod, project, record)
+			cancel()
 		}
 	}
 	if err := b.putRecord(ctx, principal.UserKey, ahpRecordChat, chat, req.Session); err != nil {

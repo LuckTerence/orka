@@ -161,6 +161,7 @@ func (b *ahpBackend) CreateTerminal(ctx context.Context, principal ahphost.Princ
 		cancel()
 		return ahptypes.TerminalState{}, &ahphost.Rejection{Reason: err.Error()}
 	}
+	b.workspaces.prepare(ctx, principal, pod, cwd)
 
 	stdin, stdinWriter := io.Pipe()
 	// Ending the terminal unblocks a write the exec stream will never read.

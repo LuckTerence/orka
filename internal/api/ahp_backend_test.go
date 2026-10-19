@@ -359,6 +359,7 @@ func TestAHPBackendRunsATurnAsATask(t *testing.T) {
 			raw, _ := json.Marshal(p.ToolCall)
 			require.Contains(t, string(raw), `"status":"completed"`)
 			require.Contains(t, string(raw), `"toolName":"bash"`)
+			require.Contains(t, string(raw), `"pastTenseMessage":"Run tests"`, "an untitled update keeps the call's title")
 		}
 	}
 	require.Equal(t, []string{"reasoning", "markdown", "toolCall", "markdown"}, kinds)

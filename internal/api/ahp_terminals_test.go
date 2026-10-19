@@ -177,3 +177,43 @@ func TestAHPTerminalURIsAreNotReused(t *testing.T) {
 	env.backend.mu.Unlock()
 	require.True(t, retired, "the URI cannot name a new terminal")
 }
+
+func TestAHPWorkspaceGitChangesFinishAndTakeTurns(t *testing.T) {
+	w := &ahpWorkspaces{}
+	alice := ahphost.Principal{UserKey: ahphost.UserKey("https://issuer.example", "alice")}
+	release := make(chan struct{})
+	finished := make(chan error, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	first := make(chan error, 1)
+	holding := make(chan struct{})
+	go func() {
+		first <- w.withGit(ctx, alice, func(changeCtx context.Context) error {
+			close(holding)
+			<-release
+			finished <- changeCtx.Err()
+			return nil
+		})
+	}()
+	<-holding
+	ran := make(chan struct{})
+	go func() {
+		_ = w.withGit(context.Background(), alice, func(context.Context) error {
+			close(ran)
+			return nil
+		})
+	}()
+	cancel()
+	require.ErrorIs(t, <-first, context.Canceled, "the caller stops waiting")
+	select {
+	case <-ran:
+		t.Fatal("a second change ran while the first held the lock")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	require.NoError(t, <-finished, "the change kept running after its caller left")
+	select {
+	case <-ran:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the second change never ran")
+	}
+}
