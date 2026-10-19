@@ -28,6 +28,7 @@ const (
 	defaultJournalBytes   = 8 << 20
 	defaultSendQueue      = 1024
 	defaultTokenRecheck   = 30 * time.Second
+	defaultPingInterval   = 30 * time.Second
 )
 
 var errUnknownChannel = errors.New("unknown channel")
@@ -44,6 +45,9 @@ type Config struct {
 	SendQueue int
 	// TokenRecheck is how often connected tokens are checked again.
 	TokenRecheck time.Duration
+	// PingInterval is how often an open connection is pinged; a client that
+	// does not answer within it is disconnected.
+	PingInterval time.Duration
 	Logger       logr.Logger
 	Now          func() time.Time
 }

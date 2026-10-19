@@ -126,6 +126,33 @@ func newConn(host *Host, principal Principal, ws *websocket.Conn) *conn {
 	}
 }
 
+// pingLoop keeps an idle connection alive through proxies that close quiet
+// ones, and closes a connection whose client stopped answering.
+func (c *conn) pingLoop(ctx context.Context) {
+	interval := c.host.cfg.PingInterval
+	if interval <= 0 {
+		interval = defaultPingInterval
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		pingCtx, cancel := context.WithTimeout(ctx, interval)
+		err := c.ws.Ping(pingCtx)
+		cancel()
+		if err != nil {
+			if ctx.Err() == nil {
+				c.closeWith(closeGoingAway, "the client stopped answering pings")
+			}
+			return
+		}
+	}
+}
+
 // run serves the connection until it closes.
 func (c *conn) run(ctx context.Context) {
 	ctx, cancel := context.WithCancel(ctx)
@@ -150,6 +177,7 @@ func (c *conn) run(ctx context.Context) {
 
 	go c.writeLoop(ctx)
 	go c.handleLoop()
+	go c.pingLoop(ctx)
 	// Only the read loop below queues actions; closing after it stops lets
 	// the worker drain them.
 	defer close(c.handled)

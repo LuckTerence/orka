@@ -141,3 +141,15 @@ func TestLeftoverChannelsAreSweptOnce(t *testing.T) {
 		require.ErrorIs(t, err, store.ErrNotFound, channel)
 	}
 }
+
+func TestIdleConnectionsArePinged(t *testing.T) {
+	env, _ := newExtendedEnv(t)
+	env.host.cfg.PingInterval = 50 * time.Millisecond
+	client := env.connect(env.mint("alice").Token)
+	ctx := ctx5(t)
+	_, err := client.Initialize(ctx, "client-a", ahptypes.SupportedProtocolVersions(), nil)
+	require.NoError(t, err)
+	// A client that answers pings stays connected well past several of them.
+	time.Sleep(300 * time.Millisecond)
+	require.NoError(t, client.Request(ctx, "ping", map[string]any{}, nil))
+}
