@@ -183,6 +183,15 @@ ensure_auth_secret() {
       args+=(--from-file=model-upstream-token="${work}/model-upstream-token")
     fi
     kc create secret generic "${secret}" "${args[@]}" >/dev/null
+  elif [ "${governed}" = true ] && [ -n "${MODEL_UPSTREAM_TOKEN_FILE:-}" ]; then
+    # The broker reads the credential once, at start, so a runtime keeps it.
+    # Compare digests only; the credential is never printed.
+    [ -r "${MODEL_UPSTREAM_TOKEN_FILE}" ] || die "cannot read MODEL_UPSTREAM_TOKEN_FILE"
+    local stored given
+    stored=$(kc get secret "${secret}" -o json | jq -er '.data["model-upstream-token"]' | base64 -d | openssl dgst -sha256 -r | cut -d' ' -f1)
+    given=$(tr -d '\r\n' <"${MODEL_UPSTREAM_TOKEN_FILE}" | openssl dgst -sha256 -r | cut -d' ' -f1)
+    [ "${stored}" = "${given}" ] ||
+      die "runtime ${runtime} holds another upstream credential than MODEL_UPSTREAM_TOKEN_FILE; rotate it by deploying under a new --runtime-revision"
   fi
   # Orka uses the Secret only with this metadata, which a deploy that stopped
   # after creating it did not set.

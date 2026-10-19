@@ -89,9 +89,10 @@ each pin gets its own runtime, named `<agent>-kagent-<digest>`:
      --unreachable kagent-postgresql.kagent.svc:5432
    ```
 
-   A governed Agent's tool policy lists the tools its bindings name. If a
-   binding names none, kagent calls whatever the relay lists, so name the
-   Orka tools it may call with `--allowed-tool`. Mark the ones that need an
+   A governed Agent's tool policy lists the tools its bindings name, plus any
+   you add with `--allowed-tool`. If a binding names none, kagent calls
+   whatever the relay lists, so name the Orka tools it may call with
+   `--allowed-tool`. Mark the ones that need an
    Orka approval with `--approval-required-tool`.
 
 2. Build, deploy, and register the runtime of every Agent in the export:
@@ -102,7 +103,9 @@ each pin gets its own runtime, named `<agent>-kagent-<digest>`:
    ```
 
    A governed Agent also needs `MODEL_UPSTREAM_TOKEN_FILE`, Orka's credential
-   for the model upstream. Set `CONTROLLER_NAMESPACE` when the Orka
+   for the model upstream. A runtime keeps the credential it was deployed
+   with: to rotate it, re-pin under a new `--runtime-revision`, and the
+   script refuses to redeploy a runtime with a different one. Set `CONTROLLER_NAMESPACE` when the Orka
    controller runs in another namespace than the runtimes. A governed Agent's
    relay Service may serve only that Agent, so the script refuses one that
    another Agent's deploy created, and one it did not create: label such a

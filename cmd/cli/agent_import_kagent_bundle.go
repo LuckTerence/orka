@@ -139,20 +139,20 @@ func (o kagentWrapperOptions) validateBundle(wrapped []kagentWrappedAgent) error
 }
 
 // kagentBundlePolicy returns a governed Agent's Orka tool policy. Its allowed
-// tools are the ones --allowed-tool names, or else the ones its bindings
-// name; a binding that names none lets kagent call whatever Orka's MCP server
-// lists. An observed Agent brokers no Orka tools.
+// tools are the ones its bindings name and the ones --allowed-tool names; a
+// binding that names none lets kagent call whatever Orka's MCP server lists.
+// An observed Agent brokers no Orka tools.
 func (o kagentWrapperOptions) kagentBundlePolicy(agent kagentWrappedAgent) (allowed, approvalRequired []string) {
 	allowed, approvalRequired = []string{}, []string{}
 	if agent.Mode.Mode != kagentModeGoverned {
 		return allowed, approvalRequired
 	}
 	// The registered policy lists are explicit: an Agent with no tools
-	// allows none, never null.
+	// allows none, never null. --allowed-tool adds to the tools an Agent's
+	// bindings name, so one import can name the tools of an Agent whose
+	// binding names none without dropping another Agent's own.
 	allowed = append(allowed, agent.Mode.Tools...)
-	if len(o.AllowedTools) > 0 {
-		allowed = slices.Clone(o.AllowedTools)
-	}
+	allowed = append(allowed, o.AllowedTools...)
 	slices.Sort(allowed)
 	allowed = slices.Compact(allowed)
 	for _, tool := range o.ApprovalRequiredTools {

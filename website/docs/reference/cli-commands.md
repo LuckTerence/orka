@@ -288,7 +288,7 @@ Usage:
 Flags:
       --accept-kagent-commit stringArray     kagent controller git commit, verified with the release gate, that the wrapper accepts besides the builds it was verified against (repeatable)
       --accepted-egress stringArray          Origin a governed revision may reach besides its relay, such as the runtime control-plane filter (repeatable)
-      --allowed-tool stringArray             With --bundle-dir, an Orka tool governed Agents may call through the relay (repeatable; default: the tools their bindings name)
+      --allowed-tool stringArray             With --bundle-dir, an Orka tool every governed Agent may call through the relay, besides the tools its bindings name (repeatable; required when a binding names no tools)
       --approval-required-tool stringArray   With --bundle-dir, an allowed Orka tool that needs an Orka approval (repeatable)
       --bundle-dir string                    Write each Agent's deployment bundle (<agent>/kagent.json and runtime.json) to this directory, and name its runtime after the pinned configuration; without --dry-run, activate the bundles there, which must be deployed (<agent>/registration.uid)
       --control-plane-url string             kagent controller base URL the wrapper calls (with --wrapper-config-dir); a governed kagent v0 Agent must persist sessions there

@@ -255,7 +255,7 @@ and refuses everything else, listing every problem:
 	cmd.Flags().StringArrayVar(&unreachable, "unreachable", nil, "host:port the wrapper broker must fail to connect to, such as Substrate's router or kagent's database (repeatable)")
 	cmd.Flags().StringArrayVar(&acceptedCommits, "accept-kagent-commit", nil, "kagent controller git commit, verified with the release gate, that the wrapper accepts besides the builds it was verified against (repeatable)")
 	cmd.Flags().StringVar(&wrapper.BundleDir, "bundle-dir", "", "Write each Agent's deployment bundle (<agent>/kagent.json and runtime.json) to this directory, and name its runtime after the pinned configuration; without --dry-run, activate the bundles there, which must be deployed (<agent>/registration.uid)")
-	cmd.Flags().StringArrayVar(&allowedTools, "allowed-tool", nil, "With --bundle-dir, an Orka tool governed Agents may call through the relay (repeatable; default: the tools their bindings name)")
+	cmd.Flags().StringArrayVar(&allowedTools, "allowed-tool", nil, "With --bundle-dir, an Orka tool every governed Agent may call through the relay, besides the tools its bindings name (repeatable; required when a binding names no tools)")
 	cmd.Flags().StringArrayVar(&approvalTools, "approval-required-tool", nil, "With --bundle-dir, an allowed Orka tool that needs an Orka approval (repeatable)")
 	cmd.Flags().IntVar(&runtimeRevision, "runtime-revision", 0, "With --bundle-dir, a number that names new runtimes for unchanged configurations, to deploy them from new images")
 	return cmd

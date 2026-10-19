@@ -426,6 +426,20 @@ func checkRenderedRegistration(t *testing.T, bundleDir string, bundle kagentBund
 	}
 }
 
+// --allowed-tool adds to an Agent's named tools, so naming the tools of one
+// Agent whose binding names none keeps another Agent's own.
+func TestKagentBundleAllowedToolsAddToNamedTools(t *testing.T) {
+	named := kagentWrappedAgent{Mode: kagentMode{Mode: kagentModeGoverned, Tools: []string{"probe-orka"}}}
+	open := kagentWrappedAgent{Mode: kagentMode{Mode: kagentModeGoverned, AnyTool: true}}
+	options := kagentWrapperOptions{AllowedTools: []string{"other"}, ApprovalRequiredTools: []string{"probe-orka"}}
+	if allowed, approvals := options.kagentBundlePolicy(named); strings.Join(allowed, ",") != "other,probe-orka" || strings.Join(approvals, ",") != "probe-orka" {
+		t.Fatalf("named Agent policy = %v, %v", allowed, approvals)
+	}
+	if allowed, approvals := options.kagentBundlePolicy(open); strings.Join(allowed, ",") != "other" || len(approvals) != 0 {
+		t.Fatalf("open Agent policy = %v, %v", allowed, approvals)
+	}
+}
+
 // A relay Service selects one runtime, so governed Agents cannot share one.
 func TestKagentBundleRefusesASharedRelay(t *testing.T) {
 	agent := func(name, relay string) kagentWrappedAgent {
