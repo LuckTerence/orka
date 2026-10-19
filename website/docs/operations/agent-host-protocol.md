@@ -55,6 +55,29 @@ fails with `ReadOnlyWorkspaceModified`.
 With `--ahp-workspace-class`, turns use session-scoped execution workspaces, so a
 session's files stay warm between turns. This needs an installed workspace provider.
 
+## Workspaces and terminals
+
+Clients such as the Copilot app run their own git commands on the host, through
+terminals, before they create a session or send a message. Give them a place to do that:
+
+```bash
+kubectl apply -k config/ahp-workspaces
+```
+
+and start the controller with
+`--ahp-workspace-image=<image with sh and git>@sha256:<digest>`. Each AHP user then gets
+one workspace Pod in `orka-ahp-workspaces` (`--ahp-workspace-namespace`):
+
+- each project is cloned at its path, and each session has a git worktree on its branch;
+- terminals are shells in that Pod;
+- the Pod holds no credentials, so only repositories readable without credentials can be
+  checked out there, and it reaches only DNS and HTTPS;
+- agents never run there: each turn publishes to the session's branch, and the session's
+  worktree fast-forwards to it.
+
+The Pod's files are ephemeral: Orka rebuilds the checkouts when it starts again, and
+removes the Pod with the person's last session unless a terminal is open.
+
 ## Connect the Copilot app
 
 1. Mint a token: `POST /api/v1/ahp-tokens` with your OIDC token.
@@ -64,8 +87,9 @@ session's files stay warm between turns. This needs an installed workspace provi
 
 ## Not offered yet
 
-- Terminals, resource watches and host file browsing. `resourceRead` serves only the
-  contents in a session's changes.
+- Resource watches and host file browsing. `resourceRead` serves only the contents in a
+  session's changes.
+- Workspace checkouts of repositories that need credentials to read.
 - Tools the client offers to agents.
 - Plan updates.
 - Agent hosts as a session backend.

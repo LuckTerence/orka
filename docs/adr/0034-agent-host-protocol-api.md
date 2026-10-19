@@ -140,8 +140,29 @@ an AHP backend for agent hosts is a later decision.
 
 The TCP channel is not advertised. Client-provided tools are never offered to agents.
 `resourceRead` serves only the contents a session's changeset lists; nothing on the host
-or in a workspace is readable through it. Terminals and resource watches are not offered
-in the first release, and `completions` answers with an empty list.
+or in a workspace is readable through it. Resource watches are not offered, and
+`completions` answers with an empty list.
+
+### Workspaces and terminals
+
+Clients treat the host as a machine with git checkouts: they run their own git commands
+in a project's checkout and a session's worktree through AHP terminals, and a client may
+refuse to create a session or send a message until those commands work. When an operator
+names a workspace image, Orka gives each AHP user one workspace Pod in a dedicated,
+restricted namespace:
+
+- the user's projects are cloned at their project paths, without credentials, so only
+  repositories readable anonymously can be checked out there;
+- each session has a git worktree at its working directory, on the session's branch;
+- AHP terminals are shells in the Pod, streamed over the terminal channel.
+
+The Pod holds no credentials, accepts no inbound traffic and reaches only DNS and HTTPS.
+Agents never run there: each turn still runs as a Task in its own workspace, publishes to
+the session's branch, and the worktree fast-forwards to what it published. A project's
+branch belongs to one session. The workspace is ephemeral and is rebuilt from the user's
+projects and sessions when it starts again; it is removed with the user's last session
+unless a terminal still runs. Terminals are usable only by connections allowed to create
+Tasks, and disposing one stops everything its shell started.
 
 ### Client dialects
 
