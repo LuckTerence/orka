@@ -203,28 +203,44 @@ token. The same operations are available over the API; see the
 
 - **Agents and models.** Each Agent in the person's namespace that uses a built-in
   runtime and names a model becomes one model of that runtime's agent: for example an
-  Agent with `runtime.type: copilot` and `model.name: claude-haiku-5.5`. Models the
-  person's token could not run are not offered.
-- **Projects.** The person adds a repository by its https URL. Orka does not clone it on
-  the host: each turn's Task clones it in its own workspace.
-- **Sessions.** A session is an Orka Session. It keeps the model of its first message,
-  because an Orka Session is bound to one runtime profile. Start a new session to use
-  another model.
-- **Turns.** Text, reasoning and tool calls stream while the Task runs. Files the agent
-  edits appear in the session's changes, with their before and after contents.
-  Cancelling the turn cancels its Task.
+  Agent with `runtime.type: copilot` and `model.name: gpt-5-mini`. Models the person's
+  token could not run are not offered. The `copilot` agent, which clients use when they
+  name none, also offers the models only other runtimes serve, labelled with their
+  runtime, and runs them there.
+- **Projects.** The person adds a repository by its https URL. Each turn's Task clones
+  it in its own workspace; with workspaces on, the person's workspace has a checkout too.
+- **Sessions.** A session runs in an Orka Session, which is bound to one runtime profile.
+  When the person picks another model, the session moves to a new Orka Session that
+  starts with the conversation so far as context. A branch a turn already published
+  belongs to the old Orka Session, so the new one continues on `<branch>-<n>`, based on
+  it, and the chat says so.
+- **Turns.** Text, reasoning and tool calls stream while the Task runs, with a running
+  tool's output as it arrives, the agent's plan as one tool call that updates in place
+  (`extensions/getPlan` returns it too), and token usage as the runtime reports it.
+  Cancelling the turn cancels its Task. A failed turn's error carries the runtime's
+  reason.
+- **Messages during a turn.** Orka's runtimes take no input mid-turn. A message sent
+  while a turn runs waits and becomes the next turn: steering messages first, then
+  queued messages in the client's order.
+- **Changes.** Files the agent edits appear in the session's changes as it reports them.
+  Once a turn's changes land, the changes become exactly what the session's branch
+  changed since it forked from the base branch, including files changed with shell
+  commands. Large and binary files show a note instead of their contents.
 - **Approvals.** With `manual` approvals, Orka holds every permission request its policy
   would allow and asks the person; policy still refuses what it refuses. With
   `allow-all`, policy decides alone. `assisted` behaves like `manual`.
+- **New-session form.** `resolveSessionConfig` returns the approval mode and branches a
+  new session would take, with the project's default branch filled in.
 
 ## Repositories and credentials
 
 The agent never holds Git credentials. With `controller.ahp.gitCredentialSecret`
 (`--ahp-git-credential-secret`), Orka looks up that Secret in each person's namespace and
 uses its `token` key to clone the repository and publish the agent's changes. Each turn
-that changes files publishes them to the session's branch, `orka/session-<uid>`, and the
-next turn starts from it. Without the Secret, sessions clone public repositories
-read-only, and a turn that changes files fails with `ReadOnlyWorkspaceModified`.
+that changes files publishes them to the session's branch, `orka/session-<uid>` unless the
+client named one, and the next turn starts from it. Without the Secret, sessions clone
+public repositories read-only, and a turn that changes files fails with
+`ReadOnlyWorkspaceModified`.
 
 With `controller.ahp.workspaceClass` (`--ahp-workspace-class`), turns use session-scoped
 execution workspaces, so a session's files stay warm between turns. This needs an
@@ -248,22 +264,49 @@ Each AHP user then gets one workspace Pod in that namespace (`--ahp-workspace-na
 
 - each project is cloned at its path, and each session has a git worktree on its branch;
 - terminals are shells in that Pod;
-- the Pod holds no credentials, so only repositories readable without credentials can be
-  checked out there, and it reaches only DNS and HTTPS;
+- clients read, list and watch files under `/workspace` through `resourceRead`,
+  `resourceList` and `createResourceWatch`; a watch polls the workspace and lasts as long
+  as its connection keeps it, and reads never start a workspace;
 - agents never run there: each turn publishes to the session's branch, and the session's
-  worktree fast-forwards to it.
+  worktree fast-forwards to it;
+- the Pod reaches only DNS and HTTPS.
 
-The Pod's files are ephemeral: Orka rebuilds the checkouts when it starts again, and
-removes the Pod with the person's last session unless a terminal is open. For the same
-reason the chart does not keep the namespace: unsetting `workspaceImage` or uninstalling
-the release deletes it with its Pods. A namespace created earlier with
+### Private repositories
+
+A workspace reads public repositories anonymously. To let each person's workspace read
+their private repositories, link GitHub through [Connectors](../guides/connectors.md) and start the
+controller with `--ahp-workspace-connector-provider=<ConnectorProvider name>`
+(`--connectors-enabled` is required). The named provider, in each person's namespace, must
+issue github.com tokens. Orka then gives the person's workspace their own token from their
+link, while the link is Ready, its provider is accepted and unchanged since consent:
+
+- it arrives on standard input and sits in a file on the Pod's private `/tmp` that only
+  the person's user can read;
+- git hands it to `https://github.com` only, through a credential helper;
+- it is replaced about every 20 minutes, before it would expire, and removed when the
+  person's link no longer serves it.
+
+The token is the person's own, so their shell in the workspace can read it, as it could
+on their own machine. Agents never run in the workspace.
+
+### Lifetime
+
+The Pod's files are ephemeral: Orka rebuilds the checkouts when it starts again. It
+removes the Pod with the person's last session unless a terminal is open, and, with
+`--ahp-workspace-idle-timeout` (default `4h`, `0` turns it off), after that long without
+use. An idle Pod is removed only while no shell or turn of its person runs and nothing in
+it exists only there: no uncommitted files, no commits on any local branch that no
+remote-tracking branch has, no stashes and no files outside the checkouts. When that
+cannot be checked, the Pod stays. Shell history is not kept.
+
+For the same reason the chart does not keep the namespace: unsetting `workspaceImage` or
+uninstalling the release deletes it with its Pods. A namespace created earlier with
 `config/ahp-workspaces` is not Helm's; delete it before turning workspaces on with Helm.
 
 ## Not offered yet
 
-- Resource watches and host file browsing. `resourceRead` serves only the contents in a
-  session's changes.
-- Workspace checkouts of repositories that need credentials to read.
 - Tools the client offers to agents.
-- Plan updates.
+- Questions from the agent to the person: the built-in runtimes run without them.
+- Changesets per turn, of uncommitted files only, or of the branch alone; the session's
+  changeset covers the whole branch.
 - Agent hosts as a session backend.

@@ -217,6 +217,10 @@ spec:
             {{- if include "orka.ahpWorkspacesEnabled" . }}
             - {{ printf "--ahp-workspace-namespace=%s" (include "orka.ahpWorkspaceNamespace" .) | quote }}
             - {{ printf "--ahp-workspace-image=%s" (include "orka.ahpWorkspaceImage" .) | quote }}
+            - {{ printf "--ahp-workspace-idle-timeout=%s" (toString .Values.controller.ahp.workspaceIdleTimeout) | quote }}
+            {{- if .Values.controller.ahp.workspaceConnectorProvider }}
+            - {{ printf "--ahp-workspace-connector-provider=%s" .Values.controller.ahp.workspaceConnectorProvider | quote }}
+            {{- end }}
             {{- end }}
             {{- end }}
             {{- with .Values.controller.oidc }}

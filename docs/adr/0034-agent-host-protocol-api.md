@@ -114,23 +114,33 @@ an AHP backend for agent hosts is a later decision.
 
 - Agents: Orka's built-in runtimes (copilot, claude, codex, opencode). Each Agent in the
   user's namespace on a built-in runtime with a model is one model of that runtime's AHP
-  agent, offered only when the user's token would let them run it. No agent advertises a
-  protected resource: Orka never asks for the user's own credentials.
-- An AHP session is an Orka Session. An AHP turn is a Task with `sessionRef`, the chosen
-  Agent and the project's repository in `spec.workspace`, created and authorized as the
-  person. A session keeps the Agent of its first turn, because an Orka Session is bound to
-  one runtime profile; a turn naming another model is refused. When an operator names an
-  execution workspace class, turns use session-scoped workspaces so files stay warm;
-  otherwise each write turn publishes and the next turn starts from it.
+  agent, offered only when the user's token would let them run it. The default agent
+  (copilot), which clients use when they name none, also offers the models only other
+  runtimes serve and runs them there. No agent advertises a protected resource: Orka never
+  asks for the user's own credentials.
+- An AHP session runs in an Orka Session. An AHP turn is a Task with `sessionRef`, the
+  chosen Agent and the project's repository in `spec.workspace`, created and authorized as
+  the person. An Orka Session is bound to one runtime profile, so when the person picks
+  another model the AHP session moves to a new Orka Session, which starts with the
+  conversation so far as context. A branch a turn already published belongs to the old
+  Orka Session's publication claim, so the new one continues on a new branch based on it.
+  When an operator names an execution workspace class, turns use session-scoped workspaces
+  so files stay warm; otherwise each write turn publishes and the next turn starts from it.
+- Messages sent while a turn runs (steering or queued) wait: the runtimes take no input
+  mid-turn, so each becomes the next turn, steering messages first.
 - Projects are repositories the user adds; Orka never clones them on the host, because
   each turn's Task clones its own workspace. The agent never holds Git credentials. The
   operator names one credential Secret that is looked up in each user's namespace; without
   it, sessions clone public repositories read-only. Write turns publish to an Orka-owned
   session branch through the Publisher.
 - Mapping: text and reasoning chunks stream as deltas; tool calls follow the AHP state
-  machine and are named as soon as they start, with their raw input; diffs are file edits
-  the agent reports, listed in the session's changeset, whose before and after contents
-  the host serves; usage is reported per turn. Plan updates are not mapped yet.
+  machine and are named as soon as they start, with their raw input, and a running call's
+  output streams as it arrives; diffs are file edits the agent reports, listed in the
+  session's changeset, whose before and after contents the host serves; usage is reported
+  as the runtime sends it; the agent's plan is one tool call that updates in place. Once a
+  turn's changes land and the session's worktree follows them, the changeset becomes
+  exactly what the session's branch changed since it forked from the base branch. A turn
+  that ends clears the session's activity.
 - Approvals: a session's `approvalMode` is `manual` or `allow-all` (`assisted` is treated
   as `manual`; Orka has no model-reviewed approvals). In `manual`, each turn's Task holds
   every permission request policy would allow for its requester, shown as an AHP
@@ -146,9 +156,11 @@ an AHP backend for agent hosts is a later decision.
 ### Host reach
 
 The TCP channel is not advertised. Client-provided tools are never offered to agents.
-`resourceRead` serves only the contents a session's changeset lists; nothing on the host
-or in a workspace is readable through it. Resource watches are not offered, and
-`completions` answers with an empty list.
+`resourceRead` serves the contents a session's changeset lists and, on the root channel,
+files under `/workspace` in the user's own running workspace; `resourceList` lists its
+directories, and `createResourceWatch` polls it for changes for as long as the connection
+keeps the watch. Nothing on the server is readable through them, and reads never start a
+workspace. `completions` answers with an empty list. The host pings open connections.
 
 ### Workspaces and terminals
 
@@ -158,18 +170,22 @@ refuse to create a session or send a message until those commands work. When an 
 names a workspace image, Orka gives each AHP user one workspace Pod in a dedicated,
 restricted namespace:
 
-- the user's projects are cloned at their project paths, without credentials, so only
-  repositories readable anonymously can be checked out there;
+- the user's projects are cloned at their project paths, anonymously unless the operator
+  names a ConnectorProvider whose github.com links serve the user's own reads;
 - each session has a git worktree at its working directory, on the session's branch;
 - AHP terminals are shells in the Pod, streamed over the terminal channel.
 
-The Pod holds no credentials, accepts no inbound traffic and reaches only DNS and HTTPS.
-Agents never run there: each turn still runs as a Task in its own workspace, publishes to
-the session's branch, and the worktree fast-forwards to what it published. A project's
-branch belongs to one session. The workspace is ephemeral and is rebuilt from the user's
-projects and sessions when it starts again; it is removed with the user's last session
-unless a terminal still runs. Terminals are usable only by connections allowed to create
-Tasks, and disposing one stops everything its shell started.
+The Pod holds no Orka credential, accepts no inbound traffic and reaches only DNS and
+HTTPS. When an operator opts in, it holds the user's own github.com token from their
+linked account, refreshed while the link serves it, in a file only the user's shell can
+read, which git hands to github.com only; the user's shell can read it as it could on
+their own machine. Agents never run there: each turn still runs as a Task in its own
+workspace, publishes to the session's branch, and the worktree fast-forwards to what it
+published. A project's branch belongs to one session. The workspace is ephemeral and is
+rebuilt from the user's projects and sessions when it starts again; it is removed with the
+user's last session unless a terminal still runs, and after an idle timeout only while no
+shell or turn runs and it holds nothing unpushed. Terminals are usable only by connections
+allowed to create Tasks, and disposing one stops everything its shell started.
 
 ### Client dialects
 

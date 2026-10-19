@@ -95,10 +95,31 @@ func TestStaticChartAHPWorkspaceFlags(t *testing.T) {
 	for _, want := range []string{
 		"--ahp-workspace-namespace=" + ahpTestWorkspaceNamespace,
 		"--ahp-workspace-image=" + ahpTestWorkspaceImage,
+		"--ahp-workspace-idle-timeout=4h",
 	} {
 		if !containsString(args, want) {
 			t.Errorf("controller args are missing %s:\n%s", want, strings.Join(args, "\n"))
 		}
+	}
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "--ahp-workspace-connector-provider") {
+			t.Errorf("private repository reads are off by default, but the controller gets %s", arg)
+		}
+	}
+	args = ahpControllerArgs(t, ahpWorkspacesEnabled(
+		"--set", "controller.connectors.enabled=true",
+		"--set-string", "controller.connectors.callbackBaseUrl=https://orka.example.com",
+		"--set-string", "controller.ahp.workspaceConnectorProvider=github",
+		"--set-string", "controller.ahp.workspaceIdleTimeout=1h",
+	)...)
+	for _, want := range []string{"--ahp-workspace-connector-provider=github", "--ahp-workspace-idle-timeout=1h"} {
+		if !containsString(args, want) {
+			t.Errorf("controller args are missing %s:\n%s", want, strings.Join(args, "\n"))
+		}
+	}
+	if output, err := helmTemplateStaticChart(t, ahpWorkspacesEnabled("--set-string", "controller.ahp.workspaceConnectorProvider=github")...); err == nil ||
+		!strings.Contains(output, "requires controller.connectors.enabled") {
+		t.Fatalf("a connector provider without connectors rendered: %v\n%s", err, output)
 	}
 }
 

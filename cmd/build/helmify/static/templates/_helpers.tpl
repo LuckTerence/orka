@@ -1078,6 +1078,9 @@ namespace the controller never shares with its watch or ACP runtime namespaces.
 {{- if or (eq $namespace .Release.Namespace) (eq $namespace (include "orka.watchNamespace" .)) (eq $namespace .Values.controller.acpRuntime.namespace) -}}
 {{- fail (printf "controller.ahp.workspaceNamespace %q must differ from the Helm release namespace, controller.watchNamespace and controller.acpRuntime.namespace" $namespace) -}}
 {{- end -}}
+{{- if and .Values.controller.ahp.workspaceConnectorProvider (not .Values.controller.connectors.enabled) -}}
+{{- fail "controller.ahp.workspaceConnectorProvider requires controller.connectors.enabled" -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 {{- end }}
