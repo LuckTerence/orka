@@ -132,8 +132,14 @@ func TestAHPHoldsWorkScript(t *testing.T) {
 	require.Contains(t, holds(), "unpushed "+detached)
 	git(project, "worktree", "remove", "--force", detached)
 
-	require.NoError(t, os.WriteFile(filepath.Join(root, "notes.txt"), []byte("n\n"), 0o600))
-	require.Contains(t, holds(), "other "+filepath.Join(root, "notes.txt"))
+	require.NoError(t, os.WriteFile(filepath.Join(root, ".home", ".ash_history"), []byte("ls\n"), 0o600))
+	require.Equal(t, "done", holds(), "shell history is not kept")
+	for _, stray := range []string{filepath.Join(root, "notes.txt"), filepath.Join(root, "src", "notes.txt"), filepath.Join(root, "worktrees", "o", "x.txt")} {
+		require.NoError(t, os.WriteFile(stray, []byte("n\n"), 0o600))
+		require.Contains(t, holds(), "other "+stray)
+		require.NoError(t, os.Remove(stray))
+	}
+	require.Equal(t, "done", holds())
 }
 
 func TestAHPWorkspaceUseWaitsOutACollection(t *testing.T) {

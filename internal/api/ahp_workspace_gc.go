@@ -222,14 +222,25 @@ const ahpHoldsWorkScript = `for p in "$1"/src/*/*; do
     [ "$h" = 0 ] || echo "unpushed $wt"
   done
 done
-find "$1" -mindepth 1 -maxdepth 1 ! -name src ! -name worktrees ! -name .home ! -name .clones | head -n 1 | sed 's/^/other /'
+# Any file outside the checkouts, anywhere under the root.
+root=$1
+roots=$(mktemp)
+for p in "$root"/src/*/*; do
+  [ -d "$p/.git" ] || continue
+  git -C "$p" worktree list --porcelain 2>/dev/null | sed -n 's/^worktree //p' >> "$roots" || echo "error $p"
+done
+set -- -path "$root/.home" -prune -o -path "$root/.clones" -prune -o
+while IFS= read -r r; do set -- "$@" -path "$r" -prune -o; done < "$roots"
+rm -f "$roots"
+find "$root" "$@" ! -type d -print | head -n 1 | sed 's/^/other /'
 echo done`
 
 // holdsWork reports whether a workspace holds work that exists nowhere
 // else: uncommitted or untracked files in a checkout, whatever git's display
 // settings, commits on any local branch or worktree HEAD that no
-// remote-tracking branch has, stashes, or files outside the checkouts. Files
-// git ignores are not kept. When a check fails, it keeps the workspace.
+// remote-tracking branch has, stashes, or files anywhere outside the
+// checkouts. Files git ignores are not kept. When a check fails, it keeps the
+// workspace.
 func (w *ahpWorkspaces) holdsWork(ctx context.Context, pod *corev1.Pod) bool {
 	out, err := w.output(ctx, pod, 64<<10, ahpShell, "-c", ahpHoldsWorkScript, "sh", ahpWorkspaceRoot)
 	if err != nil {

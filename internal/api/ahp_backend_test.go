@@ -989,9 +989,13 @@ func TestAHPBackendDropsWaitingMessagesWithoutTheirSender(t *testing.T) {
 		defer env.backend.mu.Unlock()
 		return len(env.backend.pendingAuth) == 1
 	}, 5*time.Second, 20*time.Millisecond)
-	// The process that admitted the message is gone, as after a restart.
+	// The sender known for the message is another version's, as when the
+	// message was replaced meanwhile.
 	env.backend.mu.Lock()
-	env.backend.pendingAuth = nil
+	for key, sender := range env.backend.pendingAuth {
+		sender.version = "another version"
+		env.backend.pendingAuth[key] = sender
+	}
 	env.backend.mu.Unlock()
 
 	env.setPhase(record.OrkaSession+"-t1", corev1alpha1.TaskPhaseSucceeded)
@@ -1004,4 +1008,48 @@ func TestAHPBackendDropsWaitingMessagesWithoutTheirSender(t *testing.T) {
 	require.Contains(t, string(raw), "the connection that sent this message is gone")
 	err = env.kube.Get(ctx, types.NamespacedName{Namespace: ahpTestNamespace, Name: record.OrkaSession + "-t2"}, &corev1alpha1.Task{})
 	require.True(t, apierrors.IsNotFound(err), "the message never ran")
+}
+
+func TestAHPBackendSwitchKeepsTheApprovalMode(t *testing.T) {
+	env := newAHPTestEnv(t)
+	c := env.connect("alice")
+	ctx := ahpCtx(t)
+	chat := env.setUpSession(c, "allow-all")
+	_, chatSub, err := c.Subscribe(ctx, chat)
+	require.NoError(t, err)
+	alice := ahphost.UserKey("https://issuer.example", "alice")
+	_, err = c.Dispatch(ctx, chat, ahptypes.StateAction{Value: &ahptypes.ChatTurnStartedAction{
+		Type: ahptypes.ActionTypeChatTurnStarted, TurnId: "turn-1", StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		Message: ahptypes.Message{Text: "first", Origin: ahptypes.MessageOrigin{Kind: ahptypes.MessageKindUser}, Model: &ahptypes.ModelSelection{Id: "claude-sonnet-5"}},
+	}})
+	require.NoError(t, err)
+	record := ahpSession{}
+	require.NoError(t, env.backend.getRecord(ctx, alice, ahpRecordSession, ahpTestSession, &record))
+	first := env.waitForTask(record.OrkaSession + "-t1")
+	require.True(t, first.Spec.AgentRuntime == nil || first.Spec.AgentRuntime.PermissionDecisions == "")
+	env.setPhase(first.Name, corev1alpha1.TaskPhaseSucceeded)
+	waitForActionType(t, chatSub, "chat/turnComplete")
+	require.Eventually(t, func() bool { return env.backend.activeTurn(alice, ahpTestSession) == nil }, 5*time.Second, 20*time.Millisecond)
+
+	// The person asks to approve tool calls, then switches models.
+	_, err = c.Dispatch(ctx, ahpTestSession, ahptypes.StateAction{Value: &ahptypes.SessionConfigChangedAction{
+		Type: ahptypes.ActionTypeSessionConfigChanged, Config: map[string]json.RawMessage{"approvalMode": json.RawMessage(`"manual"`)},
+	}})
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		var current ahpSession
+		return env.backend.getRecord(ctx, alice, ahpRecordSession, ahpTestSession, &current) == nil && current.ApprovalMode == "manual"
+	}, 5*time.Second, 20*time.Millisecond)
+	_, err = c.Dispatch(ctx, chat, ahptypes.StateAction{Value: &ahptypes.ChatTurnStartedAction{
+		Type: ahptypes.ActionTypeChatTurnStarted, TurnId: "turn-2", StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		Message: ahptypes.Message{Text: "second", Origin: ahptypes.MessageOrigin{Kind: ahptypes.MessageKindUser}, Model: &ahptypes.ModelSelection{Id: "gpt-5.4-nano"}},
+	}})
+	require.NoError(t, err)
+	second := env.waitForTask(record.OrkaSession + "-g2-t2")
+	require.NotNil(t, second.Spec.AgentRuntime)
+	require.Equal(t, corev1alpha1.PermissionDecisionsRequester, second.Spec.AgentRuntime.PermissionDecisions, "the switched turn asks the person")
+	var current ahpSession
+	require.NoError(t, env.backend.getRecord(ctx, alice, ahpRecordSession, ahpTestSession, &current))
+	require.Equal(t, "manual", current.ApprovalMode)
+	require.Equal(t, 2, current.Generation)
 }

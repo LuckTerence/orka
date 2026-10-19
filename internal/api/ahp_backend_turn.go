@@ -129,6 +129,12 @@ func (b *ahpBackend) startTurn(ctx context.Context, principal ahphost.Principal,
 		failed = true
 		b.emitTurnError(ctx, emit, record, action.TurnId, started, "TurnNotStarted", message)
 	}
+	// Start from the session as stored now: a change accepted since the
+	// message was admitted, such as the approval mode, applies to this turn.
+	var current ahpSession
+	if err := b.getRecord(ctx, principal.UserKey, ahpRecordSession, record.Session, &current); err == nil {
+		record = current
+	}
 	choice, switching, err := b.resolveModel(ctx, principal, record, action.Message.Model)
 	if err != nil {
 		if rejection, ok := errors.AsType[*ahphost.Rejection](err); ok {
@@ -989,21 +995,25 @@ func (b *ahpBackend) recoverTurns(ctx context.Context, principal ahphost.Princip
 
 // nextGeneration moves a session to a new Orka Session for another model. A
 // branch a turn already published belongs to the old Orka Session, so the
-// new one continues on a new branch based on it, with its own worktree.
-func (b *ahpBackend) nextGeneration(ctx context.Context, principal ahphost.Principal, record ahpSession, choice ahpAgentChoice, emit ahphost.Emitter) (ahpSession, string, error) {
+// new one continues on a new branch based on it, with its own worktree. It
+// changes only the generation's fields of the session as stored now, so a
+// change made meanwhile, such as the approval mode, stays.
+func (b *ahpBackend) nextGeneration(ctx context.Context, principal ahphost.Principal, stale ahpSession, choice ahpAgentChoice, emit ahphost.Emitter) (ahpSession, string, error) {
 	unlock := b.lockUser(principal.UserKey)
 	defer unlock()
+	var record ahpSession
+	if err := b.getRecord(ctx, principal.UserKey, ahpRecordSession, stale.Session, &record); err != nil {
+		return stale, "", err
+	}
 	var project ahpProject
 	if err := b.getRecord(ctx, principal.UserKey, ahpRecordProject, record.ProjectID, &project); err != nil {
 		return record, "", err
 	}
-	next := record
-	next.Generation = max(record.Generation, 1) + 1
-	next.OrkaSession = fmt.Sprintf("ahp-%s-g%d", ahpHash(principal.UserKey, record.Session)[:24], next.Generation)
-	next.Agent, next.Model, next.SessionTurns = "", "", 0
+	generation := max(record.Generation, 1) + 1
 	note := fmt.Sprintf("Switched to %s. Orka continues in a new session with the conversation so far as context.", choice.Model)
+	branch, workDir := record.Branch, record.WorkDir
 	if record.Published {
-		branch := fmt.Sprintf("%s-%d", record.Branch, next.Generation)
+		branch = fmt.Sprintf("%s-%d", record.Branch, generation)
 		if !ahpValidBranch(branch) {
 			return record, "", &ahphost.Rejection{Reason: "the session's branch cannot continue under another model"}
 		}
@@ -1017,14 +1027,23 @@ func (b *ahpBackend) nextGeneration(ctx context.Context, principal ahphost.Princ
 				return record, "", &ahphost.Rejection{Reason: fmt.Sprintf("another session already uses the branch %s", branch)}
 			}
 		}
-		next.SourceBranch, next.Branch, next.Published = record.Branch, branch, false
 		if b.workspaces.enabled() {
-			next.WorkDir = ahpWorktreePath(project, branch)
+			workDir = ahpWorktreePath(project, branch)
 		}
 		note += fmt.Sprintf(" Its changes continue on the branch `%s`, based on `%s`.", branch, record.Branch)
 	}
-	if err := b.putRecord(ctx, principal.UserKey, ahpRecordSession, record.Session, next); err != nil {
-		return record, "", err
+	next := record
+	b.updateSession(ctx, principal.UserKey, record.Session, func(s *ahpSession) {
+		s.Generation = generation
+		s.OrkaSession = fmt.Sprintf("ahp-%s-g%d", ahpHash(principal.UserKey, record.Session)[:24], generation)
+		s.Agent, s.Model, s.SessionTurns = "", "", 0
+		if record.Published {
+			s.SourceBranch, s.Branch, s.Published, s.WorkDir = record.Branch, branch, false, workDir
+		}
+		next = *s
+	})
+	if next.Generation != generation {
+		return record, "", errors.New("the session could not be updated")
 	}
 	if next.WorkDir != record.WorkDir {
 		if b.workspaces.enabled() && b.mayUseWorkspace(principal) == nil {
@@ -1086,14 +1105,20 @@ func (b *ahpBackend) runPending(ctx context.Context, userKey, session string, em
 		}
 		next := record.Pending[0]
 		record.Pending = record.Pending[1:]
+		// Only this version of the message leaves the queue, and only its
+		// own sender may run it; a replacement stays for the next round.
 		b.updateSession(ctx, userKey, session, func(s *ahpSession) {
-			s.Pending = slices.DeleteFunc(s.Pending, func(p ahpPending) bool { return p.ID == next.ID })
+			s.Pending = slices.DeleteFunc(s.Pending, func(p ahpPending) bool { return p.ID == next.ID && p.Version == next.Version })
 		})
 		key := ahpPendingKey(userKey, session, next.ID)
 		b.mu.Lock()
-		sender, known := b.pendingAuth[key]
-		delete(b.pendingAuth, key)
+		stored, found := b.pendingAuth[key]
+		known := found && next.Version != "" && stored.version == next.Version
+		if known {
+			delete(b.pendingAuth, key)
+		}
 		b.mu.Unlock()
+		sender := stored.principal
 		action := &ahptypes.ChatTurnStartedAction{
 			Type: ahptypes.ActionTypeChatTurnStarted, TurnId: "turn-" + ahpRandomHex(16),
 			StartedAt: b.now().UTC().Format(time.RFC3339Nano), Message: next.Message,

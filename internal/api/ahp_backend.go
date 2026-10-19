@@ -155,7 +155,7 @@ type ahpBackend struct {
 	recheckToken func(context.Context, ahphost.Principal) error
 	// pendingAuth is who sent each waiting message, by user, session and
 	// message id. A message runs with its sender's authority only.
-	pendingAuth map[string]ahphost.Principal
+	pendingAuth map[string]ahpPendingSender
 	// emitterFor delivers actions for a user with no connection, to settle
 	// turns a previous leader left running.
 	emitterFor func(ahphost.Principal) ahphost.Emitter
@@ -318,6 +318,15 @@ type ahpPending struct {
 	ID      string           `json:"id"`
 	Kind    string           `json:"kind"`
 	Message ahptypes.Message `json:"message"`
+	// Version names this version of the message: a replaced message gets a
+	// new one, so its sender can never be paired with another version.
+	Version string `json:"version,omitempty"`
+}
+
+// ahpPendingSender is who sent one version of a waiting message.
+type ahpPendingSender struct {
+	principal ahphost.Principal
+	version   string
 }
 
 // ahpExchange is one message and the reply to it.
@@ -1042,15 +1051,16 @@ func (b *ahpBackend) HandleClientAction(ctx context.Context, principal ahphost.P
 			turn.confirm(ctx, principal, a.ToolCallId, a.Approved)
 		}
 	case *ahptypes.ChatPendingMessageSetAction:
+		version := ahpRandomHex(16)
 		b.mu.Lock()
 		if b.pendingAuth == nil {
-			b.pendingAuth = map[string]ahphost.Principal{}
+			b.pendingAuth = map[string]ahpPendingSender{}
 		}
-		b.pendingAuth[ahpPendingKey(principal.UserKey, record.Session, a.Id)] = principal
+		b.pendingAuth[ahpPendingKey(principal.UserKey, record.Session, a.Id)] = ahpPendingSender{principal: principal, version: version}
 		b.mu.Unlock()
 		b.updateSession(ctx, principal.UserKey, record.Session, func(s *ahpSession) {
 			s.Pending = slices.DeleteFunc(s.Pending, func(p ahpPending) bool { return p.ID == a.Id })
-			entry := ahpPending{ID: a.Id, Kind: string(a.Kind), Message: a.Message}
+			entry := ahpPending{ID: a.Id, Kind: string(a.Kind), Message: a.Message, Version: version}
 			if a.Kind == ahptypes.PendingMessageKindSteering {
 				at := len(slices.DeleteFunc(slices.Clone(s.Pending), func(p ahpPending) bool { return p.Kind != string(ahptypes.PendingMessageKindSteering) }))
 				s.Pending = slices.Insert(s.Pending, at, entry)
