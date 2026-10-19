@@ -129,7 +129,7 @@ func TestAHPHoldsWorkScript(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(detached, "e"), []byte("e\n"), 0o600))
 	git(detached, "add", "e")
 	git(detached, "commit", "-m", "e")
-	require.Contains(t, holds(), "unpushed "+detached)
+	require.Contains(t, holds(), "unpushed "+project, "every worktree's HEAD counts")
 	git(project, "worktree", "remove", "--force", detached)
 
 	require.NoError(t, os.WriteFile(filepath.Join(root, ".home", ".ash_history"), []byte("ls\n"), 0o600))
@@ -146,6 +146,32 @@ func TestAHPHoldsWorkScript(t *testing.T) {
 	require.Contains(t, holds(), "error find")
 	require.NoError(t, os.Chmod(locked, 0o755))
 	require.NoError(t, os.RemoveAll(locked))
+
+	// A tag keeps an unpublished commit that no branch has.
+	git(project, "switch", "--detach", "main")
+	require.NoError(t, os.WriteFile(filepath.Join(project, "g"), []byte("g\n"), 0o600))
+	git(project, "add", "g")
+	git(project, "commit", "-m", "g")
+	git(project, "tag", "kept")
+	git(project, "switch", "main")
+	require.Contains(t, holds(), "unpushed "+project)
+	git(project, "tag", "-d", "kept")
+	require.Equal(t, "done", holds(), "commits only the reflog keeps are not kept")
+
+	// A file git was told not to check.
+	git(project, "update-index", "--assume-unchanged", "a")
+	require.Contains(t, holds(), "flagged "+project)
+	git(project, "update-index", "--no-assume-unchanged", "a")
+
+	// An unreadable directory inside a checkout.
+	hidden := filepath.Join(project, "hidden")
+	require.NoError(t, os.MkdirAll(hidden, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(hidden, "h"), []byte("h\n"), 0o600))
+	require.NoError(t, os.Chmod(hidden, 0))
+	require.Contains(t, holds(), "error "+project)
+	require.NoError(t, os.Chmod(hidden, 0o755))
+	require.NoError(t, os.RemoveAll(hidden))
+	require.Equal(t, "done", holds())
 
 	// Any submodule keeps the workspace.
 	require.NoError(t, os.MkdirAll(filepath.Join(project, ".git", "modules"), 0o755))

@@ -210,18 +210,22 @@ func ahpWorkspaceIdle(now, last time.Time, pod *corev1.Pod, idle time.Duration) 
 // ($1) that holds work found nowhere else, then "done".
 const ahpHoldsWorkScript = `for p in "$1"/src/*/*; do
   [ -d "$p/.git" ] || continue
-  n=$(git -C "$p" rev-list --count --branches --not --remotes 2>/dev/null) || { echo "error $p"; continue; }
+  # Every ref and every worktree's HEAD: branches, tags, notes and the stash.
+  n=$(git -C "$p" rev-list --count --all --not --remotes 2>/dev/null) || { echo "error $p"; continue; }
   [ "$n" = 0 ] || echo "unpushed $p"
-  s=$(git -C "$p" stash list 2>/dev/null) || { echo "error $p"; continue; }
-  [ -z "$s" ] || echo "stashed $p"
   # A submodule keeps its own branches and stashes: keep any checkout with one.
   [ ! -e "$p/.git/modules" ] || echo "submodules $p"
   wts=$(git -C "$p" worktree list --porcelain 2>/dev/null) || { echo "error $p"; continue; }
   printf '%s\n' "$wts" | sed -n 's/^worktree //p' | while IFS= read -r wt; do
-    c=$(git -C "$wt" status --porcelain --untracked-files=all 2>/dev/null) || { echo "error $wt"; continue; }
+    warn=$(mktemp) || { echo "error $wt"; continue; }
+    c=$(git -C "$wt" status --porcelain --untracked-files=all 2>"$warn") || echo "error $wt"
+    # A warning, such as an unreadable directory, means git could not look.
+    [ ! -s "$warn" ] || echo "error $wt"
+    rm -f "$warn"
     [ -z "$c" ] || echo "changed $wt"
-    h=$(git -C "$wt" rev-list --count HEAD --not --remotes 2>/dev/null) || { echo "error $wt"; continue; }
-    [ "$h" = 0 ] || echo "unpushed $wt"
+    # Files git was told not to check could hold changes it does not report.
+    f=$(git -C "$wt" ls-files -v 2>/dev/null | grep -E '^([a-z]|S) ' | head -n 1)
+    [ -z "$f" ] || echo "flagged $wt"
     [ ! -e "$wt/.gitmodules" ] || echo "submodules $wt"
   done
 done
@@ -242,12 +246,13 @@ head -n 1 "$found" | sed 's/^/other /'
 rm -f "$roots" "$found"
 echo done`
 
-// holdsWork reports whether a workspace holds work that exists nowhere
+// holdsWork reports whether a workspace may hold work that exists nowhere
 // else: uncommitted or untracked files in a checkout, whatever git's display
-// settings, commits on any local branch or worktree HEAD that no
-// remote-tracking branch has, stashes, any submodule, or any file outside
-// the checkouts other than shell history. Files git ignores inside a
-// checkout are not kept. When a check fails, it keeps the workspace.
+// settings; commits that any local ref or worktree HEAD reaches and no
+// remote-tracking branch does; files git was told not to check; any
+// submodule; or any file outside the checkouts other than shell history.
+// Files git ignores inside a checkout and commits only the reflog keeps are
+// not kept. When git warns or a check fails, it keeps the workspace.
 func (w *ahpWorkspaces) holdsWork(ctx context.Context, pod *corev1.Pod) bool {
 	out, err := w.output(ctx, pod, 64<<10, ahpShell, "-c", ahpHoldsWorkScript, "sh", ahpWorkspaceRoot)
 	if err != nil {
