@@ -26,6 +26,7 @@ import (
 	"github.com/microsoft/agent-host-protocol/clients/go/ahpws"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -959,4 +960,48 @@ func TestAHPChangesFollowTheBranch(t *testing.T) {
 	var read ahptypes.ResourceReadResult
 	require.NoError(t, c.Request(ctx, "resourceRead", ahptypes.ResourceReadParams{Channel: record.Changeset, Uri: deleted.Before.Content.Uri}, &read))
 	require.Equal(t, gone, read.Data)
+}
+
+func TestAHPBackendDropsWaitingMessagesWithoutTheirSender(t *testing.T) {
+	env := newAHPTestEnv(t)
+	c := env.connect("alice")
+	ctx := ahpCtx(t)
+	chat := env.setUpSession(c, "allow-all")
+	_, chatSub, err := c.Subscribe(ctx, chat)
+	require.NoError(t, err)
+	alice := ahphost.UserKey("https://issuer.example", "alice")
+	_, err = c.Dispatch(ctx, chat, ahptypes.StateAction{Value: &ahptypes.ChatTurnStartedAction{
+		Type: ahptypes.ActionTypeChatTurnStarted, TurnId: "turn-1", StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		Message: ahptypes.Message{Text: "first", Origin: ahptypes.MessageOrigin{Kind: ahptypes.MessageKindUser}},
+	}})
+	require.NoError(t, err)
+	record := ahpSession{}
+	require.NoError(t, env.backend.getRecord(ctx, alice, ahpRecordSession, ahpTestSession, &record))
+	env.waitForTask(record.OrkaSession + "-t1")
+	require.Eventually(t, func() bool { return env.backend.activeTurn(alice, ahpTestSession) != nil }, 5*time.Second, 20*time.Millisecond)
+	_, err = c.Dispatch(ctx, chat, ahptypes.StateAction{Value: &ahptypes.ChatPendingMessageSetAction{
+		Type: ahptypes.ActionTypeChatPendingMessageSet, Kind: ahptypes.PendingMessageKindQueued, Id: "q1",
+		Message: ahptypes.Message{Text: "later", Origin: ahptypes.MessageOrigin{Kind: ahptypes.MessageKindUser}},
+	}})
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		env.backend.mu.Lock()
+		defer env.backend.mu.Unlock()
+		return len(env.backend.pendingAuth) == 1
+	}, 5*time.Second, 20*time.Millisecond)
+	// The process that admitted the message is gone, as after a restart.
+	env.backend.mu.Lock()
+	env.backend.pendingAuth = nil
+	env.backend.mu.Unlock()
+
+	env.setPhase(record.OrkaSession+"-t1", corev1alpha1.TaskPhaseSucceeded)
+	waitForActionType(t, chatSub, "chat/error")
+	snapshot, _, err := c.Subscribe(ctx, chat)
+	require.NoError(t, err)
+	turns := snapshot.Snapshot.State.Chat.Turns
+	require.Len(t, turns, 2)
+	raw, _ := json.Marshal(turns[1])
+	require.Contains(t, string(raw), "the connection that sent this message is gone")
+	err = env.kube.Get(ctx, types.NamespacedName{Namespace: ahpTestNamespace, Name: record.OrkaSession + "-t2"}, &corev1alpha1.Task{})
+	require.True(t, apierrors.IsNotFound(err), "the message never ran")
 }

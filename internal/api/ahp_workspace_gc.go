@@ -216,17 +216,20 @@ const ahpHoldsWorkScript = `for p in "$1"/src/*/*; do
   [ -z "$s" ] || echo "stashed $p"
   wts=$(git -C "$p" worktree list --porcelain 2>/dev/null) || { echo "error $p"; continue; }
   printf '%s\n' "$wts" | sed -n 's/^worktree //p' | while IFS= read -r wt; do
-    c=$(git -C "$wt" status --porcelain 2>/dev/null) || { echo "error $wt"; continue; }
+    c=$(git -C "$wt" status --porcelain --untracked-files=all 2>/dev/null) || { echo "error $wt"; continue; }
     [ -z "$c" ] || echo "changed $wt"
+    h=$(git -C "$wt" rev-list --count HEAD --not --remotes 2>/dev/null) || { echo "error $wt"; continue; }
+    [ "$h" = 0 ] || echo "unpushed $wt"
   done
 done
 find "$1" -mindepth 1 -maxdepth 1 ! -name src ! -name worktrees ! -name .home ! -name .clones | head -n 1 | sed 's/^/other /'
 echo done`
 
 // holdsWork reports whether a workspace holds work that exists nowhere
-// else: uncommitted files in a checkout, commits on any local branch that no
-// remote-tracking branch has, stashes, or files outside the checkouts. When a
-// check fails, it keeps the workspace.
+// else: uncommitted or untracked files in a checkout, whatever git's display
+// settings, commits on any local branch or worktree HEAD that no
+// remote-tracking branch has, stashes, or files outside the checkouts. Files
+// git ignores are not kept. When a check fails, it keeps the workspace.
 func (w *ahpWorkspaces) holdsWork(ctx context.Context, pod *corev1.Pod) bool {
 	out, err := w.output(ctx, pod, 64<<10, ahpShell, "-c", ahpHoldsWorkScript, "sh", ahpWorkspaceRoot)
 	if err != nil {

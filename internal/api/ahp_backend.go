@@ -150,6 +150,12 @@ type ahpBackend struct {
 	// requests for its requester; decideApproval answers one.
 	applyApprovalMode func(task *corev1alpha1.Task, manual bool)
 	decideApproval    ahpApprovalDecider
+	// recheckToken reports whether a principal's connection token is still
+	// valid, before a message it sent earlier runs.
+	recheckToken func(context.Context, ahphost.Principal) error
+	// pendingAuth is who sent each waiting message, by user, session and
+	// message id. A message runs with its sender's authority only.
+	pendingAuth map[string]ahphost.Principal
 	// emitterFor delivers actions for a user with no connection, to settle
 	// turns a previous leader left running.
 	emitterFor func(ahphost.Principal) ahphost.Emitter
@@ -1036,6 +1042,12 @@ func (b *ahpBackend) HandleClientAction(ctx context.Context, principal ahphost.P
 			turn.confirm(ctx, principal, a.ToolCallId, a.Approved)
 		}
 	case *ahptypes.ChatPendingMessageSetAction:
+		b.mu.Lock()
+		if b.pendingAuth == nil {
+			b.pendingAuth = map[string]ahphost.Principal{}
+		}
+		b.pendingAuth[ahpPendingKey(principal.UserKey, record.Session, a.Id)] = principal
+		b.mu.Unlock()
 		b.updateSession(ctx, principal.UserKey, record.Session, func(s *ahpSession) {
 			s.Pending = slices.DeleteFunc(s.Pending, func(p ahpPending) bool { return p.ID == a.Id })
 			entry := ahpPending{ID: a.Id, Kind: string(a.Kind), Message: a.Message}
@@ -1046,11 +1058,14 @@ func (b *ahpBackend) HandleClientAction(ctx context.Context, principal ahphost.P
 				s.Pending = append(s.Pending, entry)
 			}
 		})
-		b.runPending(ctx, principal, record.Session, emit)
+		b.runPending(ctx, principal.UserKey, record.Session, emit)
 	case *ahptypes.ChatPendingMessageRemovedAction:
 		b.updateSession(ctx, principal.UserKey, record.Session, func(s *ahpSession) {
 			s.Pending = slices.DeleteFunc(s.Pending, func(p ahpPending) bool { return p.ID == a.Id })
 		})
+		b.mu.Lock()
+		delete(b.pendingAuth, ahpPendingKey(principal.UserKey, record.Session, a.Id))
+		b.mu.Unlock()
 	case *ahptypes.ChatQueuedMessagesReorderedAction:
 		b.updateSession(ctx, principal.UserKey, record.Session, func(s *ahpSession) { s.Pending = ahpReorderPending(s.Pending, a.Order) })
 	case *ahptypes.SessionConfigChangedAction:

@@ -201,6 +201,7 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 	if config.AHP != nil && config.AHPBackend != nil {
 		backend := newAHPBackend(server.handlers, config.AHP.Store(), config.LiveEvents, *config.AHPBackend)
 		backend.emitterFor = config.AHP.Emitter
+		backend.recheckToken = config.AHP.Recheck
 		backend.updateTerminals = config.AHP.UpdateTerminals
 		backend.workspaces = &ahpWorkspaces{
 			b: backend, clientset: config.Clientset, rest: config.RESTConfig,

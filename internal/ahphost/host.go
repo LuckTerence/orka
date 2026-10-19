@@ -197,6 +197,12 @@ func (h *Host) RegisterBackend(backend SessionBackend) error {
 // Emitter delivers a backend's actions for a user, connected or not.
 func (h *Host) Emitter(principal Principal) Emitter { return emitter{host: h, principal: principal} }
 
+// Recheck reports whether a principal's connection token is still valid:
+// not revoked, not expired, and its owner may still sign in.
+func (h *Host) Recheck(ctx context.Context, principal Principal) error {
+	return h.cfg.Tokens.Recheck(ctx, principal)
+}
+
 // Start rechecks connected tokens until ctx ends, closing connections whose
 // token was revoked or expired.
 func (h *Host) Start(ctx context.Context) error {

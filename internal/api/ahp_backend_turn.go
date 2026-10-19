@@ -122,7 +122,7 @@ func (b *ahpBackend) startTurn(ctx context.Context, principal ahphost.Principal,
 	defer func() {
 		b.releaseTurn(principal.UserKey, record.Session)
 		if failed {
-			b.runPending(context.WithoutCancel(ctx), principal, record.Session, emit)
+			b.runPending(context.WithoutCancel(ctx), principal.UserKey, record.Session, emit)
 		}
 	}()
 	fail := func(message string) {
@@ -926,7 +926,7 @@ func (t *ahpTurn) finishSession() {
 	go func() {
 		// The turn's slot frees when its run loop returns.
 		<-t.ctx.Done()
-		t.b.runPending(context.WithoutCancel(t.ctx), t.principal, t.session.Session, t.emit)
+		t.b.runPending(context.WithoutCancel(t.ctx), t.principal.UserKey, t.session.Session, t.emit)
 	}()
 }
 
@@ -1071,35 +1071,60 @@ func ahpKeepHistory(history []ahpExchange) []ahpExchange {
 	return history
 }
 
-// runPending starts the next waiting message as a turn when none is running.
-func (b *ahpBackend) runPending(ctx context.Context, principal ahphost.Principal, session string, emit ahphost.Emitter) {
-	var record ahpSession
-	if err := b.getRecord(ctx, principal.UserKey, ahpRecordSession, session, &record); err != nil ||
-		record.ActiveTurn != "" || len(record.Pending) == 0 || b.activeTurn(principal.UserKey, session) != nil {
-		return
+// runPending starts the next waiting message as a turn when none is running,
+// with the authority of the connection that sent it. A message whose sender
+// is gone, or whose token no longer holds, does not run: the person sees why.
+func (b *ahpBackend) runPending(ctx context.Context, userKey, session string, emit ahphost.Emitter) {
+	for {
+		var record ahpSession
+		if err := b.getRecord(ctx, userKey, ahpRecordSession, session, &record); err != nil ||
+			record.ActiveTurn != "" || len(record.Pending) == 0 || b.activeTurn(userKey, session) != nil {
+			return
+		}
+		if !b.reserveTurn(userKey, session) {
+			return
+		}
+		next := record.Pending[0]
+		record.Pending = record.Pending[1:]
+		b.updateSession(ctx, userKey, session, func(s *ahpSession) {
+			s.Pending = slices.DeleteFunc(s.Pending, func(p ahpPending) bool { return p.ID == next.ID })
+		})
+		key := ahpPendingKey(userKey, session, next.ID)
+		b.mu.Lock()
+		sender, known := b.pendingAuth[key]
+		delete(b.pendingAuth, key)
+		b.mu.Unlock()
+		action := &ahptypes.ChatTurnStartedAction{
+			Type: ahptypes.ActionTypeChatTurnStarted, TurnId: "turn-" + ahpRandomHex(16),
+			StartedAt: b.now().UTC().Format(time.RFC3339Nano), Message: next.Message,
+		}
+		if err := emit.Emit(ctx, record.Chat,
+			ahptypes.StateAction{Value: &ahptypes.ChatPendingMessageRemovedAction{
+				Type: ahptypes.ActionTypeChatPendingMessageRemoved, Kind: ahptypes.PendingMessageKind(next.Kind), Id: next.ID,
+			}},
+			ahptypes.StateAction{Value: action},
+		); err != nil {
+			b.releaseTurn(userKey, session)
+			return
+		}
+		reason := ""
+		switch {
+		case !known:
+			reason = "the connection that sent this message is gone; send it again"
+		case b.recheckToken != nil && b.recheckToken(ctx, sender) != nil:
+			reason = "the token that sent this message is no longer valid; send it again"
+		}
+		if reason == "" {
+			b.startTurn(ctx, sender, record, action, emit)
+			return
+		}
+		b.emitTurnError(ctx, emit, record, action.TurnId, b.now().UTC(), "TurnNotStarted", reason)
+		b.releaseTurn(userKey, session)
 	}
-	if !b.reserveTurn(principal.UserKey, session) {
-		return
-	}
-	next := record.Pending[0]
-	record.Pending = record.Pending[1:]
-	b.updateSession(ctx, principal.UserKey, session, func(s *ahpSession) {
-		s.Pending = slices.DeleteFunc(s.Pending, func(p ahpPending) bool { return p.ID == next.ID })
-	})
-	action := &ahptypes.ChatTurnStartedAction{
-		Type: ahptypes.ActionTypeChatTurnStarted, TurnId: "turn-" + ahpRandomHex(16),
-		StartedAt: b.now().UTC().Format(time.RFC3339Nano), Message: next.Message,
-	}
-	if err := emit.Emit(ctx, record.Chat,
-		ahptypes.StateAction{Value: &ahptypes.ChatPendingMessageRemovedAction{
-			Type: ahptypes.ActionTypeChatPendingMessageRemoved, Kind: ahptypes.PendingMessageKind(next.Kind), Id: next.ID,
-		}},
-		ahptypes.StateAction{Value: action},
-	); err != nil {
-		b.releaseTurn(principal.UserKey, session)
-		return
-	}
-	b.startTurn(ctx, principal, record, action, emit)
+}
+
+func ahpPendingKey(userKey, session, id string) string {
+	return userKey + "\x00" + session + "\x00" + id
 }
 
 // ahpReorderPending puts queued messages in the client's order; steering

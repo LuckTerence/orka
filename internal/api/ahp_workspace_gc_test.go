@@ -116,6 +116,22 @@ func TestAHPHoldsWorkScript(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(worktree, "c"), []byte("c\n"), 0o600))
 	require.Contains(t, holds(), "changed "+worktree)
 	require.NoError(t, os.Remove(filepath.Join(worktree, "c")))
+	// Untracked files show even when the repository hides them.
+	git(project, "config", "status.showUntrackedFiles", "no")
+	require.NoError(t, os.WriteFile(filepath.Join(worktree, "d"), []byte("d\n"), 0o600))
+	require.Contains(t, holds(), "changed "+worktree)
+	require.NoError(t, os.Remove(filepath.Join(worktree, "d")))
+	require.Equal(t, "done", holds())
+
+	// A commit on a detached HEAD in a worktree.
+	detached := filepath.Join(root, "worktrees", "o", "r", "detached")
+	git(project, "worktree", "add", "--detach", detached, "main")
+	require.NoError(t, os.WriteFile(filepath.Join(detached, "e"), []byte("e\n"), 0o600))
+	git(detached, "add", "e")
+	git(detached, "commit", "-m", "e")
+	require.Contains(t, holds(), "unpushed "+detached)
+	git(project, "worktree", "remove", "--force", detached)
+
 	require.NoError(t, os.WriteFile(filepath.Join(root, "notes.txt"), []byte("n\n"), 0o600))
 	require.Contains(t, holds(), "other "+filepath.Join(root, "notes.txt"))
 }
