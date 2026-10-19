@@ -209,6 +209,21 @@ func TestSessionSummaryFollowsItsChats(t *testing.T) {
 			t.Fatalf("summary changes: title=%v status=%v", title, status)
 		}
 	}
+	// A moved working directory reaches the summary too.
+	_, err = client.Dispatch(ctx, "ahp-session:/one", ahptypes.StateAction{Value: &ahptypes.SessionWorkingDirectorySetAction{
+		Type: ahptypes.ActionTypeSessionWorkingDirectorySet, Directory: "file:///work/next"}})
+	require.NoError(t, err)
+	for moved := false; !moved; {
+		select {
+		case event := <-root.Events():
+			if changed, ok := event.(ahp.SubscriptionEventSessionSummaryChanged); ok && changed.Params.Changes.WorkingDirectories != nil {
+				require.Contains(t, changed.Params.Changes.WorkingDirectories, ahptypes.URI("file:///work/next"))
+				moved = true
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("the summary never got the working directory")
+		}
+	}
 	var listed ahptypes.ListSessionsResult
 	require.NoError(t, client.Request(ctx, "listSessions", ahptypes.ListSessionsParams{}, &listed))
 	require.Len(t, listed.Items, 1)

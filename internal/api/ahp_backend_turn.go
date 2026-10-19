@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"path"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -42,6 +43,12 @@ const (
 	ahpToolOutputMax     = 32 << 10
 	ahpPlanToolName      = "plan"
 	ahpUsageScopeSession = "session"
+	// ahpExchangeMax bounds each message and reply the history keeps, and
+	// ahpHistoryMax how many exchanges; ahpCarryOverMax bounds the history a
+	// new Orka Session starts with.
+	ahpExchangeMax  = 4 << 10
+	ahpHistoryMax   = 20
+	ahpCarryOverMax = 24 << 10
 	// ahpGenericPromptFailure is the Task message for a prompt that failed
 	// without a more specific reason.
 	ahpGenericPromptFailure = "prompt failed"
@@ -68,6 +75,8 @@ type ahpTurn struct {
 	streamedText    bool
 	// lastText is the end of the newest markdown part, kept for failures.
 	lastText string
+	// reply is the end of the turn's text, kept as the conversation's history.
+	reply string
 	// failure is the runtime's own reason when the prompt failed.
 	failure string
 	// planCall is the synthetic tool call that shows the agent's plan.
@@ -113,7 +122,7 @@ func (b *ahpBackend) startTurn(ctx context.Context, principal ahphost.Principal,
 	fail := func(message string) {
 		b.emitTurnError(ctx, emit, record, action.TurnId, started, "TurnNotStarted", message)
 	}
-	choice, err := b.resolveModel(ctx, principal, record, action.Message.Model)
+	choice, switching, err := b.resolveModel(ctx, principal, record, action.Message.Model)
 	if err != nil {
 		if rejection, ok := errors.AsType[*ahphost.Rejection](err); ok {
 			fail(rejection.Reason)
@@ -122,9 +131,26 @@ func (b *ahpBackend) startTurn(ctx context.Context, principal ahphost.Principal,
 		}
 		return
 	}
+	note := ""
+	if switching {
+		if record, note, err = b.nextGeneration(ctx, principal, record, choice, emit); err != nil {
+			if rejection, ok := errors.AsType[*ahphost.Rejection](err); ok {
+				fail(rejection.Reason)
+			} else {
+				fail("the session could not switch models")
+				log.Error(err, "switch AHP session model", "session", record.Session)
+			}
+			return
+		}
+	}
 	number := record.Turns + 1
 	name := fmt.Sprintf("%s-t%d", record.OrkaSession, number)
-	task := b.turnTask(ctx, principal, record, choice, name, action.Message.Text, number == 1)
+	first := record.Turns == 0 || (record.Generation > 0 && record.SessionTurns == 0)
+	prompt := action.Message.Text
+	if first && len(record.History) > 0 {
+		prompt = ahpCarryOver(record.History) + prompt
+	}
+	task := b.turnTask(ctx, principal, record, choice, name, prompt, first)
 	ui := ahpPrincipalUserInfo(principal)
 
 	// Subscribe before the Task exists so no event of the turn is missed.
@@ -153,7 +179,9 @@ func (b *ahpBackend) startTurn(ctx context.Context, principal ahphost.Principal,
 	}
 	b.updateSession(ctx, principal.UserKey, record.Session, func(s *ahpSession) {
 		s.Agent, s.Model, s.Turns = choice.Agent, choice.Model, number
+		s.SessionTurns++
 		s.ActiveTurn, s.ActiveTask, s.ActiveStartedAt = action.TurnId, name, started.Format(time.RFC3339Nano)
+		s.History = ahpKeepHistory(append(s.History, ahpExchange{User: ahpBounded(action.Message.Text, ahpExchangeMax)}))
 		turn.session = *s
 	})
 	b.mu.Lock()
@@ -170,13 +198,23 @@ func (b *ahpBackend) startTurn(ctx context.Context, principal ahphost.Principal,
 			Type: ahptypes.ActionTypeSessionTitleChanged, Title: ahpTitle(action.Message.Text),
 		}})
 	}
+	if note != "" {
+		turn.mu.Lock()
+		turn.text(note)
+		turn.textPart, turn.lastText, turn.reply, turn.streamedText = "", "", "", false
+		turn.mu.Unlock()
+	}
 	go turn.run(sub)
 }
 
 // turnTask builds one turn's Task. The Session carries the conversation; the
 // repository comes from the project, cloned by Orka with Orka's credentials.
 func (b *ahpBackend) turnTask(ctx context.Context, principal ahphost.Principal, record ahpSession, choice ahpAgentChoice, name, prompt string, first bool) *corev1alpha1.Task {
-	workspace := &corev1alpha1.WorkspaceConfig{GitRepo: record.RepoURL, Branch: record.BaseBranch, Intent: corev1alpha1.WorkspaceIntentRead}
+	source := record.BaseBranch
+	if record.SourceBranch != "" {
+		source = record.SourceBranch
+	}
+	workspace := &corev1alpha1.WorkspaceConfig{GitRepo: record.RepoURL, Branch: source, Intent: corev1alpha1.WorkspaceIntentRead}
 	if credential := b.gitCredential(ctx, principal.Namespace); credential != nil {
 		workspace.Intent = corev1alpha1.WorkspaceIntentWrite
 		workspace.ReadCredentialRef = credential
@@ -379,6 +417,7 @@ func (t *ahpTurn) text(content string) {
 		}})
 	}
 	t.lastText = ahpTail(t.lastText+content, ahpFailureTextMax)
+	t.reply = ahpTail(t.reply+content, ahpExchangeMax)
 	t.streamedText = true
 	t.chat(ahptypes.StateAction{Value: &ahptypes.ChatDeltaAction{Type: ahptypes.ActionTypeChatDelta, TurnId: t.id, PartId: t.textPart, Content: content}})
 }
@@ -883,6 +922,14 @@ func (t *ahpTurn) settle(task *corev1alpha1.Task) {
 		}
 	}
 	duration := t.b.now().Sub(t.startedAt).Milliseconds()
+	published := task.Status.Phase == corev1alpha1.TaskPhaseSucceeded && ahpDeliveryNote(task) != ""
+	reply := strings.TrimSpace(t.reply)
+	t.b.updateSession(t.ctx, t.principal.UserKey, t.session.Session, func(s *ahpSession) {
+		if n := len(s.History); n > 0 && s.History[n-1].Reply == "" {
+			s.History[n-1].Reply = reply
+		}
+		s.Published = s.Published || published
+	})
 	switch task.Status.Phase {
 	case corev1alpha1.TaskPhaseSucceeded:
 		if note := ahpDeliveryNote(task); note != "" {
@@ -1006,4 +1053,88 @@ func (b *ahpBackend) recoverTurns(ctx context.Context, principal ahphost.Princip
 		b.mu.Unlock()
 		go turn.run(b.live.Subscribe(record.Namespace, record.ActiveTask))
 	}
+}
+
+// nextGeneration moves a session to a new Orka Session for another model. A
+// branch a turn already published belongs to the old Orka Session, so the
+// new one continues on a new branch based on it, with its own worktree.
+func (b *ahpBackend) nextGeneration(ctx context.Context, principal ahphost.Principal, record ahpSession, choice ahpAgentChoice, emit ahphost.Emitter) (ahpSession, string, error) {
+	unlock := b.lockUser(principal.UserKey)
+	defer unlock()
+	var project ahpProject
+	if err := b.getRecord(ctx, principal.UserKey, ahpRecordProject, record.ProjectID, &project); err != nil {
+		return record, "", err
+	}
+	next := record
+	next.Generation = max(record.Generation, 1) + 1
+	next.OrkaSession = fmt.Sprintf("ahp-%s-g%d", ahpHash(principal.UserKey, record.Session)[:24], next.Generation)
+	next.Agent, next.Model, next.SessionTurns = "", "", 0
+	note := fmt.Sprintf("Switched to %s. Orka continues in a new session with the conversation so far as context.", choice.Model)
+	if record.Published {
+		branch := fmt.Sprintf("%s-%d", record.Branch, next.Generation)
+		if !ahpValidBranch(branch) {
+			return record, "", &ahphost.Rejection{Reason: "the session's branch cannot continue under another model"}
+		}
+		sessions, err := b.store.ListAHPRecords(ctx, principal.UserKey, ahpRecordSession)
+		if err != nil {
+			return record, "", err
+		}
+		for _, raw := range sessions {
+			var other ahpSession
+			if json.Unmarshal(raw.Value, &other) == nil && other.Session != record.Session && other.ProjectID == project.ID && other.Branch == branch {
+				return record, "", &ahphost.Rejection{Reason: fmt.Sprintf("another session already uses the branch %s", branch)}
+			}
+		}
+		next.SourceBranch, next.Branch, next.Published = record.Branch, branch, false
+		if b.workspaces.enabled() {
+			next.WorkDir = ahpWorktreePath(project, branch)
+		}
+		note += fmt.Sprintf(" Its changes continue on the branch `%s`, based on `%s`.", branch, record.Branch)
+	}
+	if err := b.putRecord(ctx, principal.UserKey, ahpRecordSession, record.Session, next); err != nil {
+		return record, "", err
+	}
+	if next.WorkDir != record.WorkDir {
+		if b.workspaces.enabled() && b.mayUseWorkspace(principal) == nil {
+			if pod, err := b.workspaces.ensure(ctx, principal, ahpWorkspaceStartWait); err == nil {
+				setupCtx, cancel := context.WithTimeout(ctx, ahpWorkspaceSetupWait)
+				_ = b.workspaces.ensureWorktree(setupCtx, principal, pod, project, next)
+				cancel()
+			}
+			go b.workspaces.dropWorktree(context.WithoutCancel(ctx), principal, project, record.Branch)
+		}
+		_ = emit.Emit(ctx, record.Session, ahptypes.StateAction{Value: &ahptypes.SessionWorkingDirectoryReplacedAction{
+			Type: ahptypes.ActionTypeSessionWorkingDirectoryReplaced, Directory: ahpDirectoryURI(record.WorkDir), Replacement: ahpDirectoryURI(next.WorkDir),
+		}})
+	}
+	return next, note + "\n\n", nil
+}
+
+// ahpCarryOver gives a new Orka Session the conversation so far.
+func ahpCarryOver(history []ahpExchange) string {
+	var kept []string
+	size := 0
+	for _, exchange := range slices.Backward(history) {
+		entry := "User: " + exchange.User
+		if exchange.Reply != "" {
+			entry += "\nAssistant: " + exchange.Reply
+		}
+		if size+len(entry) > ahpCarryOverMax {
+			break
+		}
+		size += len(entry)
+		kept = append([]string{entry}, kept...)
+	}
+	if len(kept) == 0 {
+		return ""
+	}
+	return "The conversation so far, with another model, for context:\n\n" + strings.Join(kept, "\n\n") + "\n\n---\n\n"
+}
+
+// ahpKeepHistory keeps the newest exchanges.
+func ahpKeepHistory(history []ahpExchange) []ahpExchange {
+	if len(history) > ahpHistoryMax {
+		history = append([]ahpExchange(nil), history[len(history)-ahpHistoryMax:]...)
+	}
+	return history
 }

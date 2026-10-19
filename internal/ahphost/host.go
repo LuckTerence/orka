@@ -433,6 +433,9 @@ func (h *Host) syncSessionSummaryLocked(
 	if !jsonEqual(next.Changes, summary.Changes) {
 		changes.Changes, changed = next.Changes, true
 	}
+	if !jsonEqual(next.WorkingDirectories, summary.WorkingDirectories) {
+		changes.WorkingDirectories, changed = next.WorkingDirectories, true
+	}
 	if !changed {
 		return nil
 	}

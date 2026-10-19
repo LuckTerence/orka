@@ -254,7 +254,8 @@ func TestAHPBackendOffersBuiltInRuntimesAndProjects(t *testing.T) {
 		}
 		require.Empty(t, agent.ProtectedResources, "Orka never asks for the person's own credentials")
 	}
-	require.Equal(t, map[string][]string{"copilot": {"gpt-5.4-nano", "claude-haiku-5.5"}, "claude": {"claude-sonnet-5"}}, providers, "Agents are offered in name order")
+	require.Equal(t, map[string][]string{"copilot": {"gpt-5.4-nano", "claude-haiku-5.5", "claude-sonnet-5"}, "claude": {"claude-sonnet-5"}}, providers,
+		"Agents are offered in name order, and the default agent also offers what only other runtimes serve")
 
 	for _, bad := range []string{"http://github.com/a/b", "https://user:pw@github.com/a/b", "https://github.com/a", "https://github.com/a/b?x=1"} {
 		err := c.Request(ctx, ahpExtensionCloneProject, map[string]string{"url": bad}, nil)
@@ -398,12 +399,7 @@ func TestAHPBackendRunsATurnAsATask(t *testing.T) {
 	require.Equal(t, ahptypes.SessionStatusIdle, listed.Items[0].Status)
 	require.Equal(t, int64(1), *listed.Items[0].Changes.Files)
 
-	// The next turn continues the Session; another model is refused.
-	_, err = c.Dispatch(ctx, chat, ahptypes.StateAction{Value: &ahptypes.ChatTurnStartedAction{
-		Type: ahptypes.ActionTypeChatTurnStarted, TurnId: "turn-2", StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
-		Message: ahptypes.Message{Text: "switch", Origin: ahptypes.MessageOrigin{Kind: ahptypes.MessageKindUser}, Model: &ahptypes.ModelSelection{Id: "gpt-5.4-nano"}},
-	}})
-	require.NoError(t, err)
+	// The next turn continues the Session.
 	_, err = c.Dispatch(ctx, chat, ahptypes.StateAction{Value: &ahptypes.ChatTurnStartedAction{
 		Type: ahptypes.ActionTypeChatTurnStarted, TurnId: "turn-2", StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
 		Message: ahptypes.Message{Text: "and again", Origin: ahptypes.MessageOrigin{Kind: ahptypes.MessageKindUser}, Model: &ahptypes.ModelSelection{Id: "claude-haiku-5.5"}},
@@ -412,6 +408,27 @@ func TestAHPBackendRunsATurnAsATask(t *testing.T) {
 	second := env.waitForTask(record.OrkaSession + "-t2")
 	require.False(t, second.Spec.SessionRef.Create)
 	require.Equal(t, "and again", second.Spec.Prompt)
+	env.setPhase(second.Name, corev1alpha1.TaskPhaseSucceeded)
+	require.Eventually(t, func() bool {
+		return env.backend.activeTurn(ahphost.UserKey("https://issuer.example", "alice"), ahpTestSession) == nil
+	}, 5*time.Second, 20*time.Millisecond)
+
+	// Another model moves the session to a new Orka Session, with the
+	// conversation so far as context. Nothing was published, so the branch
+	// stays.
+	_, err = c.Dispatch(ctx, chat, ahptypes.StateAction{Value: &ahptypes.ChatTurnStartedAction{
+		Type: ahptypes.ActionTypeChatTurnStarted, TurnId: "turn-3", StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		Message: ahptypes.Message{Text: "switch", Origin: ahptypes.MessageOrigin{Kind: ahptypes.MessageKindUser}, Model: &ahptypes.ModelSelection{Id: "gpt-5.4-nano"}},
+	}})
+	require.NoError(t, err)
+	third := env.waitForTask(record.OrkaSession + "-g2-t3")
+	require.True(t, third.Spec.SessionRef.Create)
+	require.Equal(t, record.OrkaSession+"-g2", third.Spec.SessionRef.Name)
+	require.Equal(t, "copilot-gpt", third.Spec.AgentRef.Name)
+	require.Contains(t, third.Spec.Prompt, "User: Add a comment and run the tests\nAssistant: Running them.Done.")
+	require.True(t, strings.HasSuffix(third.Spec.Prompt, "---\n\nswitch"))
+	require.Equal(t, record.Branch, third.Spec.Workspace.PushBranch)
+	waitForActionType(t, chatSub, "chat/delta")
 }
 
 func TestAHPBackendCancelsATurn(t *testing.T) {
@@ -790,4 +807,53 @@ func TestAHPRelativeTitle(t *testing.T) {
 	} {
 		require.Equal(t, want, ahpRelativeTitle(title), title)
 	}
+}
+
+func TestAHPBackendSwitchesModelsAcrossRuntimesAndBranches(t *testing.T) {
+	gitSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "git-token", Namespace: ahpTestNamespace}, Data: map[string][]byte{"token": []byte("not-a-real-token")}}
+	env := newAHPTestEnv(t, gitSecret)
+	c := env.connect("alice")
+	ctx := ahpCtx(t)
+	chat := env.setUpSession(c, "allow-all")
+	_, chatSub, err := c.Subscribe(ctx, chat)
+	require.NoError(t, err)
+	alice := ahphost.UserKey("https://issuer.example", "alice")
+
+	// A model only another runtime serves runs there, from the default agent.
+	_, err = c.Dispatch(ctx, chat, ahptypes.StateAction{Value: &ahptypes.ChatTurnStartedAction{
+		Type: ahptypes.ActionTypeChatTurnStarted, TurnId: "turn-1", StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		Message: ahptypes.Message{Text: "start", Origin: ahptypes.MessageOrigin{Kind: ahptypes.MessageKindUser}, Model: &ahptypes.ModelSelection{Id: "claude-sonnet-5"}},
+	}})
+	require.NoError(t, err)
+	record := ahpSession{}
+	require.NoError(t, env.backend.getRecord(ctx, alice, ahpRecordSession, ahpTestSession, &record))
+	first := env.waitForTask(record.OrkaSession + "-t1")
+	require.Equal(t, "claude-sonnet", first.Spec.AgentRef.Name)
+
+	// The turn publishes, so the branch now belongs to that Orka Session.
+	first.Status.Phase = corev1alpha1.TaskPhaseSucceeded
+	first.Status.Delivery = &corev1alpha1.TaskDeliveryStatus{Branch: record.Branch, State: corev1alpha1.TaskDeliveryStateVerifiedExact}
+	require.NoError(t, env.kube.Status().Update(ctx, first))
+	waitForActionType(t, chatSub, "chat/turnComplete")
+	require.Eventually(t, func() bool { return env.backend.activeTurn(alice, ahpTestSession) == nil }, 5*time.Second, 20*time.Millisecond)
+
+	_, err = c.Dispatch(ctx, chat, ahptypes.StateAction{Value: &ahptypes.ChatTurnStartedAction{
+		Type: ahptypes.ActionTypeChatTurnStarted, TurnId: "turn-2", StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		Message: ahptypes.Message{Text: "continue", Origin: ahptypes.MessageOrigin{Kind: ahptypes.MessageKindUser}, Model: &ahptypes.ModelSelection{Id: "gpt-5.4-nano"}},
+	}})
+	require.NoError(t, err)
+	second := env.waitForTask(record.OrkaSession + "-g2-t2")
+	require.Equal(t, "copilot-gpt", second.Spec.AgentRef.Name)
+	require.True(t, second.Spec.SessionRef.Create)
+	require.Equal(t, record.Branch+"-2", second.Spec.Workspace.PushBranch, "the new Orka Session publishes to a new branch")
+	require.Equal(t, record.Branch, second.Spec.Workspace.Branch, "based on the one the old Orka Session published")
+	updated := ahpSession{}
+	require.NoError(t, env.backend.getRecord(ctx, alice, ahpRecordSession, ahpTestSession, &updated))
+	require.Equal(t, record.Branch+"-2", updated.Branch)
+	require.False(t, updated.Published)
+	require.Equal(t, record.WorkDir, updated.WorkDir, "without workspaces the session keeps the project directory")
+	snapshot, _, err := c.Subscribe(ctx, chat)
+	require.NoError(t, err)
+	raw, _ := json.Marshal(snapshot.Snapshot.State.Chat.ActiveTurn)
+	require.Contains(t, string(raw), "Switched to gpt-5.4-nano")
 }

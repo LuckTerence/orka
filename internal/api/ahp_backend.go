@@ -17,7 +17,6 @@ import (
 	"net/http"
 	"net/url"
 	"path"
-	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -58,13 +57,18 @@ const (
 	ahpGitCredentialSecretKey = defaultWorkspaceCredentialKey
 	ahpToolFallbackName       = "tool"
 
-	// ahpProjectRoot is where projects appear on this host. Nothing is cloned
-	// there: each turn's Task clones the repository itself.
+	// ahpProjectRoot is where projects appear on this host: checkouts in the
+	// user's workspace when workspaces are enabled. Each turn's Task still
+	// clones the repository itself.
 	ahpProjectRoot = "/workspace/src"
 
 	ahpDefaultTurnTimeout = 2 * time.Hour
 	ahpMaxPromptBytes     = 256 << 10
 	ahpMaxProjects        = 200
+
+	// ahpDefaultProvider is the agent clients start sessions on when they
+	// name none, and the one that offers every model.
+	ahpDefaultProvider = corev1alpha1.AgentRuntimeCopilot
 )
 
 // The Copilot dialect: the extension keys and commands the GitHub Copilot app
@@ -80,11 +84,22 @@ const (
 var ahpBuiltInRuntimes = []struct {
 	runtime     corev1alpha1.AgentRuntimeType
 	displayName string
+	name        string
 }{
-	{corev1alpha1.AgentRuntimeCopilot, "Copilot CLI on Orka"},
-	{corev1alpha1.AgentRuntimeClaude, "Claude Code on Orka"},
-	{corev1alpha1.AgentRuntimeCodex, "Codex on Orka"},
-	{corev1alpha1.AgentRuntimeOpencode, "OpenCode on Orka"},
+	{corev1alpha1.AgentRuntimeCopilot, "Copilot CLI on Orka", "Copilot CLI"},
+	{corev1alpha1.AgentRuntimeClaude, "Claude Code on Orka", "Claude Code"},
+	{corev1alpha1.AgentRuntimeCodex, "Codex on Orka", "Codex"},
+	{corev1alpha1.AgentRuntimeOpencode, "OpenCode on Orka", "OpenCode"},
+}
+
+// ahpRuntimeName is a built-in runtime's short display name.
+func ahpRuntimeName(runtime corev1alpha1.AgentRuntimeType) string {
+	for _, r := range ahpBuiltInRuntimes {
+		if r.runtime == runtime {
+			return r.name
+		}
+	}
+	return string(runtime)
 }
 
 // AHPBackendConfig configures the ACP session backend.
@@ -258,6 +273,25 @@ type ahpSession struct {
 	ActiveStartedAt string `json:"activeStartedAt,omitempty"`
 	// Plan is the agent's latest plan, as a markdown checklist.
 	Plan string `json:"plan,omitempty"`
+	// Generation counts the Orka Sessions the session has used; a new one
+	// starts when the person switches models. SessionTurns counts the
+	// current one's turns, and SourceBranch is the branch its turns start
+	// from when it is not the base branch.
+	Generation   int    `json:"generation,omitempty"`
+	SessionTurns int    `json:"sessionTurns,omitempty"`
+	SourceBranch string `json:"sourceBranch,omitempty"`
+	// Published reports that a turn pushed to Branch, which then belongs to
+	// the current Orka Session.
+	Published bool `json:"published,omitempty"`
+	// History keeps the conversation's recent exchanges, bounded, so a new
+	// Orka Session can start with them as context.
+	History []ahpExchange `json:"history,omitempty"`
+}
+
+// ahpExchange is one message and the reply to it.
+type ahpExchange struct {
+	User  string `json:"user"`
+	Reply string `json:"reply,omitempty"`
 }
 
 func ahpPrincipalUserInfo(p ahphost.Principal) *UserInfo {
@@ -325,12 +359,7 @@ func (b *ahpBackend) agentChoices(ctx context.Context, principal ahphost.Princip
 			continue
 		}
 		runtime := agent.Spec.Runtime.Type
-		if !slices.ContainsFunc(ahpBuiltInRuntimes, func(r struct {
-			runtime     corev1alpha1.AgentRuntimeType
-			displayName string
-		}) bool {
-			return r.runtime == runtime
-		}) {
+		if ahpRuntimeName(runtime) == string(runtime) {
 			continue
 		}
 		key := string(runtime) + "\x00" + agent.Spec.Model.Name
@@ -375,14 +404,31 @@ func (b *ahpBackend) Agents(ctx context.Context, principal ahphost.Principal) ([
 	enabled := ahptypes.PolicyStateEnabled
 	for _, runtime := range ahpBuiltInRuntimes {
 		var models []ahptypes.SessionModelInfo
+		listed := map[string]bool{}
 		for _, choice := range choices {
 			if choice.Runtime != runtime.runtime {
 				continue
 			}
+			listed[choice.Model] = true
 			models = append(models, ahptypes.SessionModelInfo{
 				Id: choice.Model, Provider: string(runtime.runtime), Name: choice.Model, ConfigSchema: ahpModelConfigSchema(),
 				PolicyState: &enabled,
 			})
+		}
+		if runtime.runtime == ahpDefaultProvider {
+			// Clients that start every session on the default agent still
+			// reach every model: one its runtime does not serve runs on the
+			// runtime that does.
+			for _, choice := range choices {
+				if listed[choice.Model] {
+					continue
+				}
+				listed[choice.Model] = true
+				models = append(models, ahptypes.SessionModelInfo{
+					Id: choice.Model, Provider: string(runtime.runtime), ConfigSchema: ahpModelConfigSchema(), PolicyState: &enabled,
+					Name: choice.Model + " (" + ahpRuntimeName(choice.Runtime) + ")",
+				})
+			}
 		}
 		if len(models) == 0 {
 			continue
@@ -787,32 +833,54 @@ func (b *ahpBackend) sessionForChannel(ctx context.Context, userKey, channel str
 	return record, err
 }
 
-// resolveModel maps a turn's model to the Agent that runs it. A session keeps
-// the Agent of its first turn: an Orka Session is bound to one runtime profile.
-func (b *ahpBackend) resolveModel(ctx context.Context, principal ahphost.Principal, record ahpSession, model *ahptypes.ModelSelection) (ahpAgentChoice, error) {
+// resolveModel maps a turn's model to the Agent that runs it. An Orka Session
+// is bound to one runtime profile, so a session keeps its Agent until the
+// person picks another model; switching reports true and the turn moves the
+// session to a new Orka Session.
+func (b *ahpBackend) resolveModel(ctx context.Context, principal ahphost.Principal, record ahpSession, model *ahptypes.ModelSelection) (ahpAgentChoice, bool, error) {
 	choices, err := b.agentChoices(ctx, principal)
 	if err != nil {
-		return ahpAgentChoice{}, err
+		return ahpAgentChoice{}, false, err
 	}
 	wanted := record.Model
 	if model != nil && model.Id != "" {
 		wanted = model.Id
 	}
-	if record.Agent != "" && wanted != record.Model {
-		return ahpAgentChoice{}, &ahphost.Rejection{Reason: fmt.Sprintf("this session runs %s; start a new session to use another model", record.Model)}
+	if record.Agent != "" && wanted == record.Model {
+		for _, choice := range choices {
+			if choice.Agent == record.Agent {
+				return choice, false, nil
+			}
+		}
+		return ahpAgentChoice{}, false, &ahphost.Rejection{Reason: "this session's agent is no longer available to you"}
 	}
-	for _, choice := range choices {
-		if string(choice.Runtime) != record.Runtime {
+	choice, ok := ahpChooseModel(choices, record.Runtime, wanted)
+	if !ok {
+		return ahpAgentChoice{}, false, &ahphost.Rejection{Reason: "the selected model is not available to you"}
+	}
+	return choice, record.Agent != "", nil
+}
+
+// ahpChooseModel picks the Agent for a model on a session's provider. The
+// default provider also reaches models only other runtimes serve.
+func ahpChooseModel(choices []ahpAgentChoice, provider, model string) (ahpAgentChoice, bool) {
+	var other *ahpAgentChoice
+	for i := range choices {
+		choice := choices[i]
+		if model != "" && choice.Model != model {
 			continue
 		}
-		if record.Agent != "" && choice.Agent == record.Agent {
-			return choice, nil
+		if string(choice.Runtime) == provider {
+			return choice, true
 		}
-		if record.Agent == "" && (wanted == "" || choice.Model == wanted) {
-			return choice, nil
+		if provider == string(ahpDefaultProvider) && other == nil {
+			other = &choices[i]
 		}
 	}
-	return ahpAgentChoice{}, &ahphost.Rejection{Reason: "the selected model is not available to you"}
+	if other != nil {
+		return *other, true
+	}
+	return ahpAgentChoice{}, false
 }
 
 // AuthorizeClientAction admits the client actions this backend acts on and
@@ -833,7 +901,7 @@ func (b *ahpBackend) AuthorizeClientAction(ctx context.Context, principal ahphos
 		if strings.TrimSpace(a.Message.Text) == "" || len(a.Message.Text) > ahpMaxPromptBytes || a.TurnId == "" {
 			return &ahphost.Rejection{Reason: "a message needs text and a turn id"}
 		}
-		if _, err := b.resolveModel(ctx, principal, record, a.Message.Model); err != nil {
+		if _, _, err := b.resolveModel(ctx, principal, record, a.Message.Model); err != nil {
 			return err
 		}
 		if record.ActiveTurn != "" || !b.reserveTurn(principal.UserKey, record.Session) {
