@@ -288,6 +288,13 @@ func TestRenderKagentRuntime(t *testing.T) {
 	if labels[kagentBrokerLabel] != "true" || labels[kagentRuntimeLabel] != bundle.Runtime || labels[kagentRelayLabel] != "probe-gov" {
 		t.Fatalf("pod labels = %v", labels)
 	}
+	// Every object names the kagent Agent the runtime wraps, which retirement
+	// scopes its inventory to.
+	for _, item := range workload {
+		if kagentString(item, "metadata", "annotations", kagentSourceAnnotation) != bundle.KagentNamespace+"/"+bundle.KagentName {
+			t.Fatalf("%v has no kagent source", item["kind"])
+		}
+	}
 	// The same bundle may run in several Orka namespaces, which share the
 	// Agent's namespace.
 	for _, kind := range []string{"Role", "RoleBinding"} {
@@ -415,6 +422,9 @@ func checkRenderedRegistration(t *testing.T, bundleDir string, bundle kagentBund
 	}
 	options.DeploymentUID = "6f1c2b9e-0000-4000-8000-000000000001"
 	registration := findKind(renderBundle(t, bundleDir, options), "AgentRuntime")
+	if kagentString(registration, "metadata", "annotations", kagentSourceAnnotation) != bundle.KagentNamespace+"/"+bundle.KagentName {
+		t.Fatalf("registration has no kagent source: %v", registration["metadata"])
+	}
 	// Orka restarts the supervisor with its new epoch after it restarts.
 	recovery := kagentMap(registration, "spec", "deployment", "kubernetesRecovery")
 	if recovery["deploymentName"] != bundle.Runtime || recovery["deploymentUID"] != options.DeploymentUID || recovery["containerName"] != "supervisor" {

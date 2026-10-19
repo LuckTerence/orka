@@ -245,7 +245,8 @@ ensure_auth_secret() {
   kc label --overwrite secret "${secret}" orka.ai/agent-runtime-auth=true orka.ai/agent-runtime-name="${runtime}" \
     orka.ai/kagent-runtime="${runtime}" orka.ai/kagent-agent="${agent}" >/dev/null
   kc annotate --overwrite secret "${secret}" \
-    orka.ai/agent-runtime-endpoint="http://${runtime}.${NAMESPACE}.svc.cluster.local:8080" >/dev/null
+    orka.ai/agent-runtime-endpoint="http://${runtime}.${NAMESPACE}.svc.cluster.local:8080" \
+    orka.ai/kagent-source="${kagent_source}" >/dev/null
 }
 
 deploy() {
@@ -254,8 +255,7 @@ deploy() {
   # One Orka Agent name may come from kagent Agents of the same name in
   # different namespaces; a deploy must not take the runtimes or relay of the
   # one the Orka Agent wraps.
-  local kagent_source wraps
-  kagent_source="$(bundle_field kagentNamespace)/$(bundle_field kagentName)"
+  local wraps
   wraps=$(kc get agents.core.orka.ai "${agent}" --ignore-not-found -o json | jq -r '.metadata.annotations["orka.ai/kagent-source"] // empty')
   [ -z "${wraps}" ] || [ "${wraps##* }" = "${kagent_source}" ] ||
     die "Orka Agent ${agent} wraps kagent Agent ${wraps##* }, not ${kagent_source}; import ${kagent_source} into another Orka namespace"
@@ -474,10 +474,12 @@ retire() {
   # timed out or was interrupted, so they name runtimes to retire too.
   local old olds present registered workloads
   # Each listing must succeed on its own: a partial inventory would leave
-  # runtimes behind.
-  registered=$(kc get agentruntimes.core.orka.ai -l "orka.ai/kagent-agent=${agent}" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')
-  workloads=$(kc get deployment,service,persistentvolumeclaim,serviceaccount,secret -l "orka.ai/kagent-agent=${agent}" \
-    -o jsonpath='{range .items[*]}{.metadata.labels.orka\.ai/kagent-runtime}{"\n"}{end}')
+  # runtimes behind. Only runtimes of this bundle's kagent Agent count: a
+  # same-named kagent Agent of another namespace maps to the same Orka Agent.
+  registered=$(kc get agentruntimes.core.orka.ai -l "orka.ai/kagent-agent=${agent}" -o json |
+    jq -r --arg source "${kagent_source}" '.items[] | select(.metadata.annotations["orka.ai/kagent-source"] == $source) | .metadata.name')
+  workloads=$(kc get deployment,service,persistentvolumeclaim,serviceaccount,secret -l "orka.ai/kagent-agent=${agent}" -o json |
+    jq -r --arg source "${kagent_source}" '.items[] | select(.metadata.annotations["orka.ai/kagent-source"] == $source) | .metadata.labels["orka.ai/kagent-runtime"] // empty')
   olds=$(printf '%s\n%s\n' "${registered}" "${workloads}" | sort -u)
   for old in ${olds}; do
     [ "${old}" = "${runtime}" ] && continue
@@ -516,6 +518,8 @@ need kubectl
 runtime=$(bundle_field runtime)
 agent=$(bundle_field agent)
 governed=$(bundle_field governed)
+# The kagent Agent this bundle wraps; every runtime object names it.
+kagent_source="$(bundle_field kagentNamespace)/$(bundle_field kagentName)"
 relay_service=""
 relay_rollback=""
 relay_rollback_ports=""

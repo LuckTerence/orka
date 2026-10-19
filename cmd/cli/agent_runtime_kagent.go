@@ -340,8 +340,12 @@ func kagentResources(cpuRequest, memoryRequest, cpuLimit, memoryLimit string) co
 	}
 }
 
-func kagentMeta(name, namespace string, labels map[string]string) metav1.ObjectMeta {
-	return metav1.ObjectMeta{Name: name, Namespace: namespace, Labels: labels}
+// kagentMeta names an object of a runtime. Its annotation names the kagent
+// Agent the runtime wraps: kagent Agents of one name in different namespaces
+// map to one Orka Agent, so a retirement must tell their runtimes apart.
+func kagentMeta(bundle kagentBundle, name, namespace string, labels map[string]string) metav1.ObjectMeta {
+	return metav1.ObjectMeta{Name: name, Namespace: namespace, Labels: labels,
+		Annotations: map[string]string{kagentSourceAnnotation: bundle.KagentNamespace + "/" + bundle.KagentName}}
 }
 
 func kagentSecretVolume(name, secret string, keys ...string) corev1.Volume {
@@ -436,7 +440,7 @@ func kagentWorkload(bundle kagentBundle, profile kagentRuntimeProfile, options k
 		{Name: "broker-state", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: claim}}},
 	}
 	items := []any{&corev1.ServiceAccount{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "ServiceAccount"},
-		ObjectMeta: kagentMeta(account, namespace, labels), AutomountServiceAccountToken: new(false)}}
+		ObjectMeta: kagentMeta(bundle, account, namespace, labels), AutomountServiceAccountToken: new(false)}}
 	if bundle.KagentVersion == kagentVersionV0 {
 		// The v0 broker pins the Agent's pod, so it alone reads pods in the
 		// Agent's namespace with its pod's service account.
@@ -457,16 +461,16 @@ func kagentWorkload(bundle kagentBundle, profile kagentRuntimeProfile, options k
 		readerLabels[kagentRuntimeNamespaceLabel] = namespace
 		items = append(items,
 			&rbacv1.Role{TypeMeta: metav1.TypeMeta{APIVersion: "rbac.authorization.k8s.io/v1", Kind: "Role"},
-				ObjectMeta: kagentMeta(role, bundle.KagentNamespace, readerLabels),
+				ObjectMeta: kagentMeta(bundle, role, bundle.KagentNamespace, readerLabels),
 				Rules:      []rbacv1.PolicyRule{{APIGroups: []string{""}, Resources: []string{"pods"}, Verbs: []string{"get", "list"}}}},
 			&rbacv1.RoleBinding{TypeMeta: metav1.TypeMeta{APIVersion: "rbac.authorization.k8s.io/v1", Kind: "RoleBinding"},
-				ObjectMeta: kagentMeta(role, bundle.KagentNamespace, readerLabels),
+				ObjectMeta: kagentMeta(bundle, role, bundle.KagentNamespace, readerLabels),
 				RoleRef:    rbacv1.RoleRef{APIGroup: "rbac.authorization.k8s.io", Kind: "Role", Name: role},
 				Subjects:   []rbacv1.Subject{{Kind: "ServiceAccount", Name: account, Namespace: namespace}}},
 		)
 	}
 	pvc := &corev1.PersistentVolumeClaim{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "PersistentVolumeClaim"},
-		ObjectMeta: kagentMeta(claim, namespace, labels),
+		ObjectMeta: kagentMeta(bundle, claim, namespace, labels),
 		Spec: corev1.PersistentVolumeClaimSpec{AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
 			Resources: corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("1Gi")}}}}
 	if options.StorageClass != "" {
@@ -474,7 +478,7 @@ func kagentWorkload(bundle kagentBundle, profile kagentRuntimeProfile, options k
 	}
 	selector := map[string]string{kagentRuntimeLabel: name}
 	deployment := &appsv1.Deployment{TypeMeta: metav1.TypeMeta{APIVersion: "apps/v1", Kind: "Deployment"},
-		ObjectMeta: kagentMeta(name, namespace, labels),
+		ObjectMeta: kagentMeta(bundle, name, namespace, labels),
 		Spec: appsv1.DeploymentSpec{Replicas: ptr.To[int32](1), Strategy: appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType},
 			RevisionHistoryLimit: ptr.To[int32](1), Selector: &metav1.LabelSelector{MatchLabels: selector},
 			Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: podLabels}, Spec: corev1.PodSpec{
@@ -488,7 +492,7 @@ func kagentWorkload(bundle kagentBundle, profile kagentRuntimeProfile, options k
 				TerminationGracePeriodSeconds: ptr.To[int64](120), Containers: []corev1.Container{supervisor, broker}, Volumes: volumes,
 			}}}}
 	service := &corev1.Service{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Service"},
-		ObjectMeta: kagentMeta(name, namespace, labels),
+		ObjectMeta: kagentMeta(bundle, name, namespace, labels),
 		Spec: corev1.ServiceSpec{Type: corev1.ServiceTypeClusterIP, Selector: selector,
 			Ports: []corev1.ServicePort{{Name: kagentControlPortName, Port: kagentControlPort, TargetPort: intstr.FromString(kagentControlPortName)}}}}
 	// The broker ledger must survive pod restarts, or a restart drops every
@@ -508,10 +512,7 @@ func kagentRelay(bundle kagentBundle, options kagentRenderOptions) ([]any, error
 		return nil, fmt.Errorf("the Agent's relay %s is in namespace %q; render the runtime there", bundle.Relay, namespace)
 	}
 	labels := map[string]string{kagentAgentLabel: bundle.Agent}
-	// The relay also names the kagent Agent it serves: kagent Agents of one
-	// name in different namespaces map to one Orka Agent name.
-	meta := kagentMeta(name, options.Namespace, labels)
-	meta.Annotations = map[string]string{kagentSourceAnnotation: bundle.KagentNamespace + "/" + bundle.KagentName}
+	meta := kagentMeta(bundle, name, options.Namespace, labels)
 	tcp := corev1.ProtocolTCP
 	port := func(n int) []networkingv1.NetworkPolicyPort {
 		return []networkingv1.NetworkPolicyPort{{Port: new(intstr.FromInt(n)), Protocol: &tcp}}
@@ -586,7 +587,7 @@ func kagentRegistration(bundle kagentBundle, profile kagentRuntimeProfile, optio
 	contract := corev1alpha1.AgentRuntimeContractHarnessV2
 	return &corev1alpha1.AgentRuntime{
 		TypeMeta:   metav1.TypeMeta{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "AgentRuntime"},
-		ObjectMeta: kagentMeta(name, namespace, map[string]string{kagentRuntimeLabel: name, kagentAgentLabel: bundle.Agent}),
+		ObjectMeta: kagentMeta(bundle, name, namespace, map[string]string{kagentRuntimeLabel: name, kagentAgentLabel: bundle.Agent}),
 		Spec: corev1alpha1.AgentRuntimeRegistrySpec{
 			ContractVersion: &contract,
 			Deployment: corev1alpha1.AgentRuntimeDeploymentSpec{Mode: corev1alpha1.AgentRuntimeDeploymentModeExternalEndpoint,
