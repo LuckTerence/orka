@@ -39,6 +39,10 @@ Usage:
 
 <bundle> is a directory the import wrote, <bundle-dir>/<agent>.
 
+Each command holds a lock per Agent it changes, the ConfigMap
+<agent>-kagent-lock, so runs for one Agent never overlap. A run that was
+killed leaves its lock; delete the ConfigMap once no run is left.
+
 Environment:
   KUBECTL_CONTEXT            kubectl context (required)
   NAMESPACE                  namespace of the runtimes (default orka-system)
@@ -135,8 +139,29 @@ same_bundle_dir() {
 restore_relay() {
   [ -n "${relay_rollback}" ] || return 0
   echo "Runtime ${runtime} is not Ready; moving relay ${relay_service} back." >&2
-  kc patch service "${relay_service}" --type=json -p "[{\"op\":\"test\",\"path\":\"/spec/selector\",\"value\":{\"orka.ai/kagent-runtime\":\"${runtime}\"}},{\"op\":\"replace\",\"path\":\"/spec/selector\",\"value\":${relay_rollback}}]" >/dev/null ||
+  kc patch service "${relay_service}" --type=json -p "[{\"op\":\"test\",\"path\":\"/spec/selector\",\"value\":{\"orka.ai/kagent-runtime\":\"${runtime}\"}},{\"op\":\"replace\",\"path\":\"/spec/selector\",\"value\":${relay_rollback}},{\"op\":\"replace\",\"path\":\"/spec/ports\",\"value\":${relay_rollback_ports}}]" >/dev/null ||
     echo "kagent-runtime: relay ${relay_service} was not moved back to ${relay_rollback}; it no longer selects ${runtime}, or the patch failed" >&2
+}
+
+# lock_agents holds a lock for each Agent, so one deploy, activate, or retire
+# at a time changes its runtimes and relay. A lock is a ConfigMap, created
+# atomically and deleted on exit.
+lock_agents() {
+  local name
+  for name in "$@"; do
+    kc create configmap "${name}-kagent-lock" --from-literal=holder="${command} pid $$ on $(hostname)" >/dev/null ||
+      die "another deploy, activate, or retire of Agent ${name} holds ConfigMap ${name}-kagent-lock; if that run is gone, delete it"
+    locks+=("${name}-kagent-lock")
+  done
+}
+
+cleanup() {
+  restore_relay
+  [ -z "${work}" ] || rm -rf "${work}"
+  local lock
+  for lock in "${locks[@]}"; do
+    kc delete configmap "${lock}" --ignore-not-found >/dev/null || echo "kagent-runtime: could not delete lock ${lock}" >&2
+  done
 }
 
 # require_relay refuses unless a governed bundle's relay selects the bundle's
@@ -203,6 +228,7 @@ ensure_auth_secret() {
 
 deploy() {
   need openssl
+  lock_agents "${agent}"
   if [ "${governed}" = true ]; then
     # The relay Service's name comes from the Agent's relay URL, which an
     # Agent imported separately may share.
@@ -231,8 +257,6 @@ deploy() {
   # The directory may hold the governed upstream credential, so it goes on
   # every exit, with the relay rollback.
   work=$(mktemp -d)
-  trap 'restore_relay; rm -rf "${work}"' EXIT
-  trap 'exit 1' INT TERM HUP
   if [ -n "${deployed}" ]; then
     # The images are part of the runtime's immutable profile. A deployed
     # runtime keeps its images; roll new ones under a new name with the
@@ -258,29 +282,35 @@ deploy() {
   if [ "${governed}" = true ]; then
     # Orka's conformance prompt reaches kagent, which calls the relay, so the
     # relay must reach this runtime before registration.
-    local previous want
-    previous=$(relay_selector "${relay_service}")
+    local current previous want ports
+    current=$(kc get service "${relay_service}" --ignore-not-found -o json)
     want="{\"orka.ai/kagent-runtime\":\"${runtime}\"}"
     render relay >"${work}/relay.json"
-    jq '.items |= map(select(.kind == "NetworkPolicy"))' "${work}/relay.json" | apply
-    if [ -z "${previous}" ]; then
+    ports=$(jq -ce '.items[] | select(.kind == "Service") | .spec.ports' "${work}/relay.json")
+    if [ -z "${current}" ]; then
       # Create, not apply: a deploy that created it meanwhile makes this fail.
       jq '.items |= map(select(.kind == "Service"))' "${work}/relay.json" |
         kubectl --context "${KUBECTL_CONTEXT}" create -f - >/dev/null
-    elif [ "${previous}" != "${want}" ]; then
-      # The handoff is one patch that holds only while the Service still
-      # selects what it did, so it never writes back a selector another
-      # deploy replaced. It replaces the selector outright, since a merge
-      # with an older one would select nothing.
-      local ports
-      ports=$(jq -ce '.items[] | select(.kind == "Service") | .spec.ports' "${work}/relay.json")
-      relay_rollback=${previous}
-      kc patch service "${relay_service}" --type=json -p "[{\"op\":\"test\",\"path\":\"/spec/selector\",\"value\":${previous}},{\"op\":\"replace\",\"path\":\"/spec/selector\",\"value\":${want}},{\"op\":\"replace\",\"path\":\"/spec/ports\",\"value\":${ports}}]" >/dev/null ||
-        {
-          relay_rollback=""
-          die "relay ${relay_service} changed while this deploy ran; deploy again"
-        }
+    else
+      previous=$(jq -c '.spec.selector // {}' <<<"${current}")
+      if [ "${previous}" != "${want}" ]; then
+        # The handoff is one patch that holds only while the Service still
+        # selects what it did and is labeled for this Agent, so it never
+        # writes back a selector another deploy replaced, nor takes another
+        # Agent's relay. It replaces the selector outright, since a merge with
+        # an older one would select nothing.
+        relay_rollback=${previous}
+        relay_rollback_ports=$(jq -c '.spec.ports' <<<"${current}")
+        kc patch service "${relay_service}" --type=json -p "[{\"op\":\"test\",\"path\":\"/spec/selector\",\"value\":${previous}},{\"op\":\"test\",\"path\":\"/metadata/labels/orka.ai~1kagent-agent\",\"value\":\"${agent}\"},{\"op\":\"replace\",\"path\":\"/spec/selector\",\"value\":${want}},{\"op\":\"replace\",\"path\":\"/spec/ports\",\"value\":${ports}}]" >/dev/null ||
+          {
+            relay_rollback=""
+            die "relay ${relay_service} changed while this deploy ran; deploy again"
+          }
+      fi
     fi
+    # The relay is this Agent's now, so its policy is too. The policy is the
+    # same for every runtime of the Agent.
+    jq '.items |= map(select(.kind == "NetworkPolicy"))' "${work}/relay.json" | apply
   fi
   # The API server's service proxy reaches the runtime's public endpoint.
   kubectl --context "${KUBECTL_CONTEXT}" get --raw \
@@ -332,7 +362,13 @@ activate() {
   # The import switches every Agent in its input, which wrote the bundles
   # beside this one, and refuses unless Orka reports all of their runtimes
   # Ready. A governed Agent's relay may have moved since, to a newer runtime.
-  local b
+  local b names=()
+  for b in "$(dirname "${bundle}")"/*/; do
+    if [ -f "${b}runtime.json" ]; then
+      names+=("$(jq -er '.agent' "${b}runtime.json")")
+    fi
+  done
+  lock_agents "${names[@]}"
   for b in "$(dirname "${bundle}")"/*/; do
     if [ -f "${b}runtime.json" ]; then
       require_relay "${b%/}"
@@ -345,6 +381,7 @@ activate() {
 }
 
 retire() {
+  lock_agents "${agent}"
   [ "$(kc get agents.core.orka.ai "${agent}" -o jsonpath='{.spec.runtime.runtimeRef.name}')" = "${runtime}" ] ||
     die "Agent ${agent} does not use ${runtime} yet; activate it first"
   # The relay may select a runtime this would delete.
@@ -396,7 +433,11 @@ agent=$(bundle_field agent)
 governed=$(bundle_field governed)
 relay_service=""
 relay_rollback=""
+relay_rollback_ports=""
 work=""
+locks=()
+trap cleanup EXIT
+trap 'exit 1' INT TERM HUP
 
 case "${command}" in
 deploy) deploy ;;

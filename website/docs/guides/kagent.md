@@ -146,7 +146,10 @@ each pin gets its own runtime, named `<agent>-kagent-<digest>`:
    KUBECTL_CONTEXT=<context> scripts/kagent-runtime.sh retire bundle/<agent>
    ```
 
-Re-pinning is the same four steps.
+Re-pinning is the same four steps. Each script command holds a lock per
+Agent it changes, the ConfigMap `<agent>-kagent-lock`, so runs for one Agent
+never overlap. A run that was killed leaves its lock; delete the ConfigMap
+once no run is left.
 
 The supervisor reads Orka's controller epoch once, when it starts, and Orka
 marks a runtime with an older epoch not Ready. The rendered registration
