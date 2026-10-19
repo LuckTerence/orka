@@ -135,11 +135,11 @@ so --revision-egress and --revision-sources do not apply. Dispatch control
 requires the agents' Services to admit only kagent's controller, and the
 controller to admit only the wrapper brokers and the wrapped Agents.
 
-See the orka-runtime-kagent README for both install requirements. Include the
-Agents' related objects in the input so the import can check them: Harness,
-AgentTemplate, ModelConfig, and RemoteMCPServer for v1; the Agent's
-Deployment and pod, and to govern it its config Secret and ModelConfig, for
-v0. Translating a v0 Agent reads its ModelConfig.
+See docs/kagent-install.md in orka-runtime-kagent for both install
+requirements. Include the Agents' related objects in the input so the import
+can check them: Harness, AgentTemplate, ModelConfig, and RemoteMCPServer for
+v1; the Agent's Deployment and pod, and to govern it its config Secret and
+ModelConfig, for v0. Translating a v0 Agent reads its ModelConfig.
 
 With --wrapper-config-dir, also writes each Agent's wrapper configuration,
 <name>.kagent.json, pinned to the Agent's latest successful revision (v1) or

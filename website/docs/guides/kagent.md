@@ -63,8 +63,9 @@ refused in both modes, because a wrapped Agent cannot answer them.
 ## Install prerequisites
 
 kagent ships without NetworkPolicies, and its default authentication accepts
-any caller's user ID. Before wrapping Agents, apply the policies in the
-adapter README for your kagent version. At minimum, admit only kagent's
+any caller's user ID. Before wrapping Agents, apply the policies in
+[Prepare your kagent install](https://github.com/orka-agents/orka-runtime-kagent/blob/main/docs/kagent-install.md)
+for your kagent version. At minimum, admit only kagent's
 controller to Substrate's actor router (v1) and to kagent's database, and, for
 v0, admit only the controller and the adapter to Agent pods. List those
 components with `--unreachable`: the adapter refuses turns while it can
