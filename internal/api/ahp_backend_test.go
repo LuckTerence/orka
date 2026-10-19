@@ -698,3 +698,96 @@ func TestAHPBackendGivesEachBranchOneSession(t *testing.T) {
 	require.Error(t, create("ahp-session:/second"), "a second session cannot share the branch and its worktree")
 	require.Equal(t, "/workspace/worktrees/octo/widgets/feature-x", ahpWorktreePath(ahpProject{Owner: "octo", Name: "widgets"}, "feature-x"))
 }
+
+func TestAHPBackendShowsPlansUsageAndRunningOutput(t *testing.T) {
+	env := newAHPTestEnv(t)
+	c := env.connect("alice")
+	ctx := ahpCtx(t)
+	chat := env.setUpSession(c, "allow-all")
+	_, chatSub, err := c.Subscribe(ctx, chat)
+	require.NoError(t, err)
+	_, err = c.Dispatch(ctx, chat, ahptypes.StateAction{Value: &ahptypes.ChatTurnStartedAction{
+		Type: ahptypes.ActionTypeChatTurnStarted, TurnId: "turn-1", StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		Message: ahptypes.Message{Text: "fix it", Origin: ahptypes.MessageOrigin{Kind: ahptypes.MessageKindUser}},
+	}})
+	require.NoError(t, err)
+	alice := ahphost.UserKey("https://issuer.example", "alice")
+	record := ahpSession{}
+	require.NoError(t, env.backend.getRecord(ctx, alice, ahpRecordSession, ahpTestSession, &record))
+	taskName := record.OrkaSession + "-t1"
+	env.waitForTask(taskName)
+	require.Eventually(t, func() bool { return env.backend.activeTurn(alice, ahpTestSession) != nil }, 5*time.Second, 20*time.Millisecond)
+
+	env.publish(taskName, &harnessv2.UpdateEvent{Kind: harnessv2.UpdatePlan, Plan: &harnessv2.PlanUpdate{Entries: []harnessv2.PlanEntry{
+		{Content: "Read the code", Status: harnessv2.PlanEntryCompleted}, {Content: "Run the tests", Status: harnessv2.PlanEntryInProgress},
+	}}})
+	env.publish(taskName, &harnessv2.UpdateEvent{Kind: harnessv2.UpdateUsage, Usage: &harnessv2.UsageUpdate{InputTokens: 120, OutputTokens: 30}})
+	env.publish(taskName, &harnessv2.UpdateEvent{Kind: harnessv2.UpdateToolCall, ToolCall: &harnessv2.ToolCallUpdate{
+		ToolCallID: "tool-1", Name: "bash", Title: "Viewing .../a1b2-123/workspace/pkg/widgets.go", Status: harnessv2.ToolCallStatusInProgress,
+		Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: "ok  pkg/a\n"}},
+	}})
+	env.publish(taskName, &harnessv2.UpdateEvent{Kind: harnessv2.UpdateToolCallUpdate, ToolCall: &harnessv2.ToolCallUpdate{
+		ToolCallID: "tool-1", Status: harnessv2.ToolCallStatusInProgress,
+		Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: "ok  pkg/b\n"}},
+	}})
+	env.publish(taskName, &harnessv2.UpdateEvent{Kind: harnessv2.UpdateToolCallUpdate, ToolCall: &harnessv2.ToolCallUpdate{
+		ToolCallID: "tool-1", Status: harnessv2.ToolCallStatusCompleted,
+	}})
+	waitForActionType(t, chatSub, "chat/toolCallComplete")
+
+	var plan struct {
+		Plan struct {
+			Exists  bool   `json:"exists"`
+			Content string `json:"content"`
+		} `json:"plan"`
+	}
+	require.NoError(t, c.Request(ctx, ahpExtensionGetPlan, map[string]string{"channel": ahpTestSession}, &plan))
+	require.True(t, plan.Plan.Exists)
+	require.Equal(t, "- [x] Read the code\n- [~] Run the tests\n", plan.Plan.Content)
+
+	snapshot, _, err := c.Subscribe(ctx, chat)
+	require.NoError(t, err)
+	active := snapshot.Snapshot.State.Chat.ActiveTurn
+	require.NotNil(t, active)
+	require.NotNil(t, active.Usage)
+	require.Equal(t, int64(120), *active.Usage.InputTokens)
+	var calls []string
+	for _, part := range active.ResponseParts {
+		if p, ok := part.Value.(*ahptypes.ToolCallResponsePart); ok {
+			raw, _ := json.Marshal(p.ToolCall)
+			calls = append(calls, string(raw))
+		}
+	}
+	require.Len(t, calls, 2, "the plan and the tool call")
+	require.Contains(t, calls[0], "Run the tests")
+	require.Contains(t, calls[1], `"displayName":"Viewing pkg/widgets.go"`, "runtime-private paths become relative")
+	require.Contains(t, calls[1], `ok  pkg/a\nok  pkg/b\n`, "streamed output stays as the result")
+
+	// The turn fails the way a runtime that reports errors as reply text does.
+	env.publish(taskName, &harnessv2.UpdateEvent{Kind: harnessv2.UpdateAssistantMessageChunk, AssistantMessage: &harnessv2.AssistantMessageChunk{Text: "Error: 400 model unavailable"}})
+	waitForActionType(t, chatSub, "chat/delta")
+	task := &corev1alpha1.Task{}
+	require.NoError(t, env.kube.Get(ctx, types.NamespacedName{Namespace: ahpTestNamespace, Name: taskName}, task))
+	task.Status.Phase, task.Status.Message = corev1alpha1.TaskPhaseFailed, "prompt failed"
+	require.NoError(t, env.kube.Status().Update(ctx, task))
+	waitForActionType(t, chatSub, "chat/error")
+	final, _, err := c.Subscribe(ctx, chat)
+	require.NoError(t, err)
+	turns := final.Snapshot.State.Chat.Turns
+	require.Len(t, turns, 1)
+	raw, _ := json.Marshal(turns[0])
+	require.Contains(t, string(raw), "prompt failed: Error: 400 model unavailable")
+	require.Contains(t, string(raw), `"displayName":"Plan"`)
+}
+
+func TestAHPRelativeTitle(t *testing.T) {
+	for title, want := range map[string]string{
+		"Viewing .../abc-123/workspace/README.md":           "Viewing README.md",
+		"Viewing …/abc-123/workspace/README.md":             "Viewing README.md",
+		"Edit /var/lib/orka/sessions/s1/workspace/pkg/a.go": "Edit pkg/a.go",
+		"Run tests in pkg/workspace/":                       "Run tests in pkg/workspace/",
+		"apply_patch":                                       "apply_patch",
+	} {
+		require.Equal(t, want, ahpRelativeTitle(title), title)
+	}
+}

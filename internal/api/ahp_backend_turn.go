@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"path"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -35,6 +36,15 @@ const (
 	ahpTitleRunes       = 60
 	ahpOptionApprove    = "approve"
 	ahpOptionDeny       = "deny"
+	// ahpFailureTextMax bounds the runtime detail a failed turn reports.
+	ahpFailureTextMax = 500
+	// ahpToolOutputMax bounds the output a running tool call shows.
+	ahpToolOutputMax     = 32 << 10
+	ahpPlanToolName      = "plan"
+	ahpUsageScopeSession = "session"
+	// ahpGenericPromptFailure is the Task message for a prompt that failed
+	// without a more specific reason.
+	ahpGenericPromptFailure = "prompt failed"
 )
 
 // ahpTurn follows one turn's Task and turns its events into chat actions.
@@ -56,6 +66,12 @@ type ahpTurn struct {
 	textPart        string
 	thoughtPart     string
 	streamedText    bool
+	// lastText is the end of the newest markdown part, kept for failures.
+	lastText string
+	// failure is the runtime's own reason when the prompt failed.
+	failure string
+	// planCall is the synthetic tool call that shows the agent's plan.
+	planCall string
 }
 
 type ahpToolCall struct {
@@ -63,6 +79,8 @@ type ahpToolCall struct {
 	title                     string
 	// approval is the held permission request waiting for the person.
 	approval string
+	// output is the running call's text output so far, bounded.
+	output string
 }
 
 func ahpTurnKey(userKey, session string) string { return userKey + "\x00" + session }
@@ -313,6 +331,14 @@ func (t *ahpTurn) handle(event liveevents.Event) {
 			t.thought(update.AssistantThought.Text)
 		case update.ToolCall != nil:
 			t.tool(update.ToolCall)
+		case update.Plan != nil:
+			t.showPlan(update.Plan)
+		case update.Usage != nil:
+			t.usage(update.Usage)
+		}
+	case harnessv2.EventFailed:
+		if runtime.Failed != nil {
+			t.failure = ahpBounded(strings.TrimSpace(runtime.Failed.Message), ahpFailureTextMax)
 		}
 	case harnessv2.EventCompleted:
 		if runtime.Completed == nil {
@@ -346,11 +372,13 @@ func (t *ahpTurn) text(content string) {
 	t.thoughtPart = ""
 	if t.textPart == "" {
 		t.textPart = ahpRandomHex(8)
+		t.lastText = ""
 		t.chat(ahptypes.StateAction{Value: &ahptypes.ChatResponsePartAction{
 			Type: ahptypes.ActionTypeChatResponsePart, TurnId: t.id,
 			Part: ahptypes.ResponsePart{Value: &ahptypes.MarkdownResponsePart{Kind: ahptypes.ResponsePartKindMarkdown, Id: t.textPart}},
 		}})
 	}
+	t.lastText = ahpTail(t.lastText+content, ahpFailureTextMax)
 	t.streamedText = true
 	t.chat(ahptypes.StateAction{Value: &ahptypes.ChatDeltaAction{Type: ahptypes.ActionTypeChatDelta, TurnId: t.id, PartId: t.textPart, Content: content}})
 }
@@ -419,9 +447,9 @@ func (t *ahpTurn) readyTool(id string, call *ahpToolCall, title string, input js
 
 // tool advances one tool call through start, ready and complete.
 func (t *ahpTurn) tool(update *harnessv2.ToolCallUpdate) {
-	call := t.startTool(update.ToolCallID, ahpToolName(update), update.Title)
+	call := t.startTool(update.ToolCallID, ahpToolName(update), ahpRelativeTitle(update.Title))
 	// Later updates usually carry no title; keep the one the call started with.
-	title := update.Title
+	title := ahpRelativeTitle(update.Title)
 	if title == "" {
 		title = call.title
 	}
@@ -446,10 +474,146 @@ func (t *ahpTurn) tool(update *harnessv2.ToolCallUpdate) {
 	switch update.Status {
 	case harnessv2.ToolCallStatusInProgress:
 		t.readyTool(update.ToolCallID, call, title, update.RawInput)
+		t.toolOutput(update.ToolCallID, call, update)
 	case harnessv2.ToolCallStatusCompleted, harnessv2.ToolCallStatusFailed:
 		t.readyTool(update.ToolCallID, call, title, update.RawInput)
-		t.completeTool(update.ToolCallID, call, update.Status == harnessv2.ToolCallStatusCompleted, title, update.Content)
+		content := update.Content
+		if !ahpHasText(content) && call.output != "" {
+			// Keep the output the call streamed when its result carries none.
+			content = []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: call.output}}
+		}
+		t.completeTool(update.ToolCallID, call, update.Status == harnessv2.ToolCallStatusCompleted, title, content)
 	}
+}
+
+// toolOutput shows a running call's output as it arrives.
+func (t *ahpTurn) toolOutput(id string, call *ahpToolCall, update *harnessv2.ToolCallUpdate) {
+	if !ahpHasText(update.Content) {
+		return
+	}
+	var text strings.Builder
+	for _, block := range update.Content {
+		if block.Type == harnessv2.ContentBlockText {
+			text.WriteString(block.Text)
+		}
+	}
+	if update.ContentReplace {
+		call.output = ""
+	}
+	call.output = ahpTail(call.output+text.String(), ahpToolOutputMax)
+	t.chat(ahptypes.StateAction{Value: &ahptypes.ChatToolCallContentChangedAction{
+		Type: ahptypes.ActionTypeChatToolCallContentChanged, TurnId: t.id, ToolCallId: id,
+		Content: []ahptypes.ToolResultContent{{Value: &ahptypes.ToolResultTextContent{Type: ahptypes.ToolResultContentTypeText, Text: call.output}}},
+	}})
+}
+
+// showPlan keeps the agent's current plan in one tool call of the turn and
+// on the session, for clients that ask for it.
+func (t *ahpTurn) showPlan(plan *harnessv2.PlanUpdate) {
+	markdown := ahpPlanMarkdown(plan)
+	if t.planCall == "" {
+		t.planCall = "plan-" + ahpRandomHex(8)
+		call := t.startTool(t.planCall, ahpPlanToolName, "Plan")
+		t.readyTool(t.planCall, call, "Plan", nil)
+	}
+	t.chat(ahptypes.StateAction{Value: &ahptypes.ChatToolCallContentChangedAction{
+		Type: ahptypes.ActionTypeChatToolCallContentChanged, TurnId: t.id, ToolCallId: t.planCall,
+		Content: []ahptypes.ToolResultContent{{Value: &ahptypes.ToolResultTextContent{Type: ahptypes.ToolResultContentTypeText, Text: markdown}}},
+	}})
+	if call := t.tools[t.planCall]; call != nil {
+		call.output = markdown
+	}
+	t.b.updateSession(t.ctx, t.principal.UserKey, t.session.Session, func(s *ahpSession) { s.Plan = markdown })
+}
+
+// finishPlan completes the plan's tool call with the last plan.
+func (t *ahpTurn) finishPlan() {
+	if t.planCall == "" {
+		return
+	}
+	if call := t.tools[t.planCall]; call != nil && !call.completed {
+		t.completeTool(t.planCall, call, true, "Plan",
+			[]harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: call.output}})
+	}
+}
+
+// usage reports the prompt's token counts so far. Session-wide totals are
+// left to the completed result.
+func (t *ahpTurn) usage(update *harnessv2.UsageUpdate) {
+	if update.Scope == ahpUsageScopeSession {
+		return
+	}
+	if update.InputTokens == 0 && update.OutputTokens == 0 {
+		return
+	}
+	input, output := int64(update.InputTokens), int64(update.OutputTokens) //nolint:gosec // token counts fit in int64
+	info := ahptypes.UsageInfo{InputTokens: &input, OutputTokens: &output}
+	if update.CachedInputTokens != nil {
+		cached := int64(*update.CachedInputTokens) //nolint:gosec // token counts fit in int64
+		info.CacheReadTokens = &cached
+	}
+	if t.session.Model != "" {
+		model := t.session.Model
+		info.Model = &model
+	}
+	t.chat(ahptypes.StateAction{Value: &ahptypes.ChatUsageAction{Type: ahptypes.ActionTypeChatUsage, TurnId: t.id, Usage: info}})
+}
+
+func ahpPlanMarkdown(plan *harnessv2.PlanUpdate) string {
+	var md strings.Builder
+	for _, entry := range plan.Entries {
+		mark := " "
+		switch entry.Status {
+		case harnessv2.PlanEntryCompleted:
+			mark = "x"
+		case harnessv2.PlanEntryInProgress:
+			mark = "~"
+		}
+		fmt.Fprintf(&md, "- [%s] %s\n", mark, strings.Join(strings.Fields(entry.Content), " "))
+	}
+	return md.String()
+}
+
+func ahpHasText(content []harnessv2.ContentBlock) bool {
+	for _, block := range content {
+		if block.Type == harnessv2.ContentBlockText && block.Text != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// ahpTail keeps the last limit bytes of text without splitting a character.
+func ahpTail(text string, limit int) string {
+	if len(text) <= limit {
+		return text
+	}
+	cut := len(text) - limit
+	for cut < len(text) && !utf8.RuneStart(text[cut]) {
+		cut++
+	}
+	return text[cut:]
+}
+
+// ahpBounded keeps the first limit bytes of text without splitting a character.
+func ahpBounded(text string, limit int) string {
+	if len(text) <= limit {
+		return text
+	}
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(text[cut]) {
+		cut--
+	}
+	return text[:cut]
+}
+
+// ahpRuntimeWorkspacePath matches a path inside a runtime's own session
+// workspace, absolute or shortened with a leading ellipsis. Clients see the
+// session's files relative to its working directory instead.
+var ahpRuntimeWorkspacePath = regexp.MustCompile(`(^|\s)(?:\.\.\.|…|/)\S*?/workspace/`)
+
+func ahpRelativeTitle(title string) string {
+	return ahpRuntimeWorkspacePath.ReplaceAllString(title, "$1")
 }
 
 func (t *ahpTurn) completeTool(id string, call *ahpToolCall, success bool, title string, content []harnessv2.ContentBlock) {
@@ -710,6 +874,7 @@ func (t *ahpTurn) settle(task *corev1alpha1.Task) {
 			t.text(string(data))
 		}
 	}
+	t.finishPlan()
 	for _, id := range t.order {
 		if call := t.tools[id]; call != nil && !call.completed {
 			title := "interrupted"
@@ -739,15 +904,30 @@ func (t *ahpTurn) settle(task *corev1alpha1.Task) {
 		if task.Status.Delivery != nil && task.Status.Delivery.Message != "" {
 			message = task.Status.Delivery.Message
 		}
-		if message == "" {
-			message = "the turn failed"
-		}
+		message = t.failureMessage(message)
 		t.chat(ahptypes.StateAction{Value: &ahptypes.ChatErrorAction{
 			Type: ahptypes.ActionTypeChatError, TurnId: t.id, Duration: duration,
 			Part: ahptypes.ErrorResponsePart{Kind: ahptypes.ResponsePartKindError, Error: ahptypes.ErrorInfo{ErrorType: reason, Message: message}},
 		}})
 	}
 	t.finishSession()
+}
+
+// failureMessage adds the runtime's own reason to a failed turn's message.
+// A runtime that reports a failure as reply text leaves the Task only the
+// generic prompt failure, so that text is the reason the person needs.
+func (t *ahpTurn) failureMessage(message string) string {
+	if message == "" {
+		message = "the turn failed"
+	}
+	detail := t.failure
+	if detail == "" && message == ahpGenericPromptFailure {
+		detail = strings.TrimSpace(t.lastText)
+	}
+	if detail == "" || strings.Contains(message, detail) {
+		return message
+	}
+	return message + ": " + detail
 }
 
 func (t *ahpTurn) settleWithError(kind, message string) {

@@ -256,6 +256,8 @@ type ahpSession struct {
 	ActiveTurn      string `json:"activeTurn,omitempty"`
 	ActiveTask      string `json:"activeTask,omitempty"`
 	ActiveStartedAt string `json:"activeStartedAt,omitempty"`
+	// Plan is the agent's latest plan, as a markdown checklist.
+	Plan string `json:"plan,omitempty"`
 }
 
 func ahpPrincipalUserInfo(p ahphost.Principal) *UserInfo {
@@ -492,7 +494,17 @@ func (b *ahpBackend) HandleExtension(ctx context.Context, principal ahphost.Prin
 		}
 		return map[string]any{"project": project.wire()}, nil
 	case ahpExtensionGetPlan:
-		return map[string]any{"plan": map[string]any{"exists": false, "content": nil}, "todos": []any{}, "dependencies": []any{}}, nil
+		var req struct {
+			Channel string `json:"channel"`
+		}
+		var content *string
+		var record ahpSession
+		if len(params) > 0 && json.Unmarshal(params, &req) == nil && req.Channel != "" &&
+			b.getRecord(ctx, principal.UserKey, ahpRecordSession, req.Channel, &record) == nil && record.Plan != "" {
+			content = &record.Plan
+		}
+		plan := map[string]any{"exists": content != nil, ahpRecordContent: content}
+		return map[string]any{"plan": plan, "todos": []any{}, "dependencies": []any{}}, nil
 	default:
 		return nil, ahphost.ErrUnknownExtension
 	}
