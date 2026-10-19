@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -67,6 +68,9 @@ const (
 	ahpDefaultTurnTimeout = 2 * time.Hour
 	ahpMaxPromptBytes     = 256 << 10
 	ahpMaxProjects        = 200
+	// ahpPendingMax bounds the messages waiting on a session.
+	ahpPendingMax   = 10
+	ahpPendingIDMax = 128
 
 	// ahpDefaultProvider is the agent clients start sessions on when they
 	// name none, and the one that offers every model.
@@ -288,6 +292,18 @@ type ahpSession struct {
 	// History keeps the conversation's recent exchanges, bounded, so a new
 	// Orka Session can start with them as context.
 	History []ahpExchange `json:"history,omitempty"`
+	// Pending are the messages waiting for the running turn to end, steering
+	// messages first.
+	Pending []ahpPending `json:"pending,omitempty"`
+}
+
+// ahpPending is a message sent while a turn runs. Orka's runtimes take no
+// input mid-turn, so a steering message runs first once the turn ends and
+// queued messages follow in order.
+type ahpPending struct {
+	ID      string           `json:"id"`
+	Kind    string           `json:"kind"`
+	Message ahptypes.Message `json:"message"`
 }
 
 // ahpExchange is one message and the reply to it.
@@ -896,20 +912,12 @@ func (b *ahpBackend) AuthorizeClientAction(ctx context.Context, principal ahphos
 		return &ahphost.Rejection{Reason: "unknown session"}
 	}
 	switch a := action.Value.(type) {
-	case *ahptypes.ChatTurnStartedAction:
+	case *ahptypes.ChatTurnStartedAction, *ahptypes.ChatPendingMessageSetAction,
+		*ahptypes.ChatPendingMessageRemovedAction, *ahptypes.ChatQueuedMessagesReorderedAction:
 		if channel != record.Chat {
 			return &ahphost.Rejection{Reason: "messages go to the session's chat"}
 		}
-		if strings.TrimSpace(a.Message.Text) == "" || len(a.Message.Text) > ahpMaxPromptBytes || a.TurnId == "" {
-			return &ahphost.Rejection{Reason: "a message needs text and a turn id"}
-		}
-		if _, _, err := b.resolveModel(ctx, principal, record, a.Message.Model); err != nil {
-			return err
-		}
-		if record.ActiveTurn != "" || !b.reserveTurn(principal.UserKey, record.Session) {
-			return &ahphost.Rejection{Reason: "a turn is already running"}
-		}
-		return nil
+		return b.authorizeMessage(ctx, principal, record, action)
 	case *ahptypes.ChatTurnCancelledAction:
 		if record.ActiveTurn == "" || a.TurnId != record.ActiveTurn {
 			return &ahphost.Rejection{Reason: "the turn is not running"}
@@ -949,6 +957,41 @@ func (b *ahpBackend) AuthorizeClientAction(ctx context.Context, principal ahphos
 	}
 }
 
+// authorizeMessage admits a message for the session's chat: one that starts a
+// turn now, or one that waits for the running turn to end.
+func (b *ahpBackend) authorizeMessage(ctx context.Context, principal ahphost.Principal, record ahpSession, action ahptypes.StateAction) error {
+	switch a := action.Value.(type) {
+	case *ahptypes.ChatTurnStartedAction:
+		if strings.TrimSpace(a.Message.Text) == "" || len(a.Message.Text) > ahpMaxPromptBytes || a.TurnId == "" {
+			return &ahphost.Rejection{Reason: "a message needs text and a turn id"}
+		}
+		if _, _, err := b.resolveModel(ctx, principal, record, a.Message.Model); err != nil {
+			return err
+		}
+		if record.ActiveTurn != "" || !b.reserveTurn(principal.UserKey, record.Session) {
+			return &ahphost.Rejection{Reason: "a turn is already running"}
+		}
+		return nil
+	case *ahptypes.ChatPendingMessageSetAction:
+		if a.Id == "" || len(a.Id) > ahpPendingIDMax || strings.TrimSpace(a.Message.Text) == "" || len(a.Message.Text) > ahpMaxPromptBytes {
+			return &ahphost.Rejection{Reason: "a message needs text and an id"}
+		}
+		if a.Kind != ahptypes.PendingMessageKindSteering && a.Kind != ahptypes.PendingMessageKindQueued {
+			return &ahphost.Rejection{Reason: "unknown pending message kind"}
+		}
+		replacing := slices.ContainsFunc(record.Pending, func(p ahpPending) bool { return p.ID == a.Id })
+		if !replacing && len(record.Pending) >= ahpPendingMax {
+			return &ahphost.Rejection{Reason: "too many messages are waiting"}
+		}
+		if _, _, err := b.resolveModel(ctx, principal, record, a.Message.Model); err != nil {
+			return err
+		}
+		return b.mayOperateTasks(principal)
+	default:
+		return nil
+	}
+}
+
 // mayOperateTasks refuses a delegated token without the scopes that update
 // Tasks, before its decision or cancel is shown as accepted. The decision and
 // cancel paths check the same identity again.
@@ -984,6 +1027,24 @@ func (b *ahpBackend) HandleClientAction(ctx context.Context, principal ahphost.P
 		if turn := b.activeTurn(principal.UserKey, record.Session); turn != nil {
 			turn.confirm(ctx, principal, a.ToolCallId, a.Approved)
 		}
+	case *ahptypes.ChatPendingMessageSetAction:
+		b.updateSession(ctx, principal.UserKey, record.Session, func(s *ahpSession) {
+			s.Pending = slices.DeleteFunc(s.Pending, func(p ahpPending) bool { return p.ID == a.Id })
+			entry := ahpPending{ID: a.Id, Kind: string(a.Kind), Message: a.Message}
+			if a.Kind == ahptypes.PendingMessageKindSteering {
+				at := len(slices.DeleteFunc(slices.Clone(s.Pending), func(p ahpPending) bool { return p.Kind != string(ahptypes.PendingMessageKindSteering) }))
+				s.Pending = slices.Insert(s.Pending, at, entry)
+			} else {
+				s.Pending = append(s.Pending, entry)
+			}
+		})
+		b.runPending(ctx, principal, record.Session, emit)
+	case *ahptypes.ChatPendingMessageRemovedAction:
+		b.updateSession(ctx, principal.UserKey, record.Session, func(s *ahpSession) {
+			s.Pending = slices.DeleteFunc(s.Pending, func(p ahpPending) bool { return p.ID == a.Id })
+		})
+	case *ahptypes.ChatQueuedMessagesReorderedAction:
+		b.updateSession(ctx, principal.UserKey, record.Session, func(s *ahpSession) { s.Pending = ahpReorderPending(s.Pending, a.Order) })
 	case *ahptypes.SessionConfigChangedAction:
 		if _, ok := a.Config[ahpConfigApprovalMode]; !ok {
 			return

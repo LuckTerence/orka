@@ -857,3 +857,62 @@ func TestAHPBackendSwitchesModelsAcrossRuntimesAndBranches(t *testing.T) {
 	raw, _ := json.Marshal(snapshot.Snapshot.State.Chat.ActiveTurn)
 	require.Contains(t, string(raw), "Switched to gpt-5.4-nano")
 }
+
+func TestAHPBackendRunsMessagesSentDuringATurn(t *testing.T) {
+	env := newAHPTestEnv(t)
+	c := env.connect("alice")
+	ctx := ahpCtx(t)
+	chat := env.setUpSession(c, "allow-all")
+	_, chatSub, err := c.Subscribe(ctx, chat)
+	require.NoError(t, err)
+	alice := ahphost.UserKey("https://issuer.example", "alice")
+	_, err = c.Dispatch(ctx, chat, ahptypes.StateAction{Value: &ahptypes.ChatTurnStartedAction{
+		Type: ahptypes.ActionTypeChatTurnStarted, TurnId: "turn-1", StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		Message: ahptypes.Message{Text: "first", Origin: ahptypes.MessageOrigin{Kind: ahptypes.MessageKindUser}},
+	}})
+	require.NoError(t, err)
+	record := ahpSession{}
+	require.NoError(t, env.backend.getRecord(ctx, alice, ahpRecordSession, ahpTestSession, &record))
+	env.waitForTask(record.OrkaSession + "-t1")
+	require.Eventually(t, func() bool { return env.backend.activeTurn(alice, ahpTestSession) != nil }, 5*time.Second, 20*time.Millisecond)
+
+	user := ahptypes.MessageOrigin{Kind: ahptypes.MessageKindUser}
+	for _, pending := range []*ahptypes.ChatPendingMessageSetAction{
+		{Type: ahptypes.ActionTypeChatPendingMessageSet, Kind: ahptypes.PendingMessageKindQueued, Id: "q1", Message: ahptypes.Message{Text: "queued", Origin: user}},
+		{Type: ahptypes.ActionTypeChatPendingMessageSet, Kind: ahptypes.PendingMessageKindSteering, Id: "s1", Message: ahptypes.Message{Text: "steer", Origin: user}},
+	} {
+		_, err = c.Dispatch(ctx, chat, ahptypes.StateAction{Value: pending})
+		require.NoError(t, err)
+	}
+	require.Eventually(t, func() bool {
+		var current ahpSession
+		return env.backend.getRecord(ctx, alice, ahpRecordSession, ahpTestSession, &current) == nil && len(current.Pending) == 2
+	}, 5*time.Second, 20*time.Millisecond)
+
+	// When the turn ends, the steering message runs first, then the queued one.
+	env.setPhase(record.OrkaSession+"-t1", corev1alpha1.TaskPhaseSucceeded)
+	second := env.waitForTask(record.OrkaSession + "-t2")
+	require.Equal(t, "steer", second.Spec.Prompt)
+	waitForActionType(t, chatSub, "chat/pendingMessageRemoved")
+	env.setPhase(second.Name, corev1alpha1.TaskPhaseSucceeded)
+	third := env.waitForTask(record.OrkaSession + "-t3")
+	require.Equal(t, "queued", third.Spec.Prompt)
+	env.setPhase(third.Name, corev1alpha1.TaskPhaseSucceeded)
+	require.Eventually(t, func() bool { return env.backend.activeTurn(alice, ahpTestSession) == nil }, 5*time.Second, 20*time.Millisecond)
+
+	snapshot, _, err := c.Subscribe(ctx, chat)
+	require.NoError(t, err)
+	state := snapshot.Snapshot.State.Chat
+	require.Len(t, state.Turns, 3)
+	require.Nil(t, state.SteeringMessage)
+	require.Empty(t, state.QueuedMessages)
+}
+
+func TestAHPReorderPending(t *testing.T) {
+	pending := []ahpPending{{ID: "s", Kind: "steering"}, {ID: "a", Kind: "queued"}, {ID: "b", Kind: "queued"}, {ID: "c", Kind: "queued"}}
+	ids := make([]string, 0, len(pending))
+	for _, p := range ahpReorderPending(pending, []string{"c", "a"}) {
+		ids = append(ids, p.ID)
+	}
+	require.Equal(t, []string{"s", "c", "a", "b"}, ids)
+}

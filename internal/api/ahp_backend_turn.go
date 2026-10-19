@@ -117,9 +117,17 @@ func ahpTitle(text string) string {
 func (b *ahpBackend) startTurn(ctx context.Context, principal ahphost.Principal, record ahpSession, action *ahptypes.ChatTurnStartedAction, emit ahphost.Emitter) {
 	started := b.now().UTC()
 	// The slot reserved when the message was admitted passes to the running
-	// turn, or is freed if the turn never starts.
-	defer b.releaseTurn(principal.UserKey, record.Session)
+	// turn, or is freed if the turn never starts; then a waiting message may
+	// start instead.
+	failed := false
+	defer func() {
+		b.releaseTurn(principal.UserKey, record.Session)
+		if failed {
+			b.runPending(context.WithoutCancel(ctx), principal, record.Session, emit)
+		}
+	}()
 	fail := func(message string) {
+		failed = true
 		b.emitTurnError(ctx, emit, record, action.TurnId, started, "TurnNotStarted", message)
 	}
 	choice, switching, err := b.resolveModel(ctx, principal, record, action.Message.Model)
@@ -996,6 +1004,11 @@ func (t *ahpTurn) finishSession() {
 			s.ActiveTurn, s.ActiveTask, s.ActiveStartedAt = "", "", ""
 		}
 	})
+	go func() {
+		// The turn's slot frees when its run loop returns.
+		<-t.ctx.Done()
+		t.b.runPending(context.WithoutCancel(t.ctx), t.principal, t.session.Session, t.emit)
+	}()
 }
 
 // ahpDeliveryNote tells the person where a write turn's changes went.
@@ -1137,4 +1150,67 @@ func ahpKeepHistory(history []ahpExchange) []ahpExchange {
 		history = append([]ahpExchange(nil), history[len(history)-ahpHistoryMax:]...)
 	}
 	return history
+}
+
+// runPending starts the next waiting message as a turn when none is running.
+func (b *ahpBackend) runPending(ctx context.Context, principal ahphost.Principal, session string, emit ahphost.Emitter) {
+	var record ahpSession
+	if err := b.getRecord(ctx, principal.UserKey, ahpRecordSession, session, &record); err != nil ||
+		record.ActiveTurn != "" || len(record.Pending) == 0 || b.activeTurn(principal.UserKey, session) != nil {
+		return
+	}
+	if !b.reserveTurn(principal.UserKey, session) {
+		return
+	}
+	next := record.Pending[0]
+	record.Pending = record.Pending[1:]
+	b.updateSession(ctx, principal.UserKey, session, func(s *ahpSession) {
+		s.Pending = slices.DeleteFunc(s.Pending, func(p ahpPending) bool { return p.ID == next.ID })
+	})
+	action := &ahptypes.ChatTurnStartedAction{
+		Type: ahptypes.ActionTypeChatTurnStarted, TurnId: "turn-" + ahpRandomHex(16),
+		StartedAt: b.now().UTC().Format(time.RFC3339Nano), Message: next.Message,
+	}
+	if err := emit.Emit(ctx, record.Chat,
+		ahptypes.StateAction{Value: &ahptypes.ChatPendingMessageRemovedAction{
+			Type: ahptypes.ActionTypeChatPendingMessageRemoved, Kind: ahptypes.PendingMessageKind(next.Kind), Id: next.ID,
+		}},
+		ahptypes.StateAction{Value: action},
+	); err != nil {
+		b.releaseTurn(principal.UserKey, session)
+		return
+	}
+	b.startTurn(ctx, principal, record, action, emit)
+}
+
+// ahpReorderPending puts queued messages in the client's order; steering
+// messages stay first and messages the order omits keep their place after it.
+func ahpReorderPending(pending []ahpPending, order []string) []ahpPending {
+	position := map[string]int{}
+	for i, id := range order {
+		position[id] = i
+	}
+	reordered := slices.Clone(pending)
+	slices.SortStableFunc(reordered, func(a, b ahpPending) int {
+		aSteer, bSteer := a.Kind == string(ahptypes.PendingMessageKindSteering), b.Kind == string(ahptypes.PendingMessageKindSteering)
+		if aSteer != bSteer {
+			if aSteer {
+				return -1
+			}
+			return 1
+		}
+		ai, aok := position[a.ID]
+		bi, bok := position[b.ID]
+		switch {
+		case aok && bok:
+			return ai - bi
+		case aok:
+			return -1
+		case bok:
+			return 1
+		default:
+			return 0
+		}
+	})
+	return reordered
 }
