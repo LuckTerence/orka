@@ -916,3 +916,47 @@ func TestAHPReorderPending(t *testing.T) {
 	}
 	require.Equal(t, []string{"s", "c", "a", "b"}, ids)
 }
+
+func TestAHPChangesFollowTheBranch(t *testing.T) {
+	env := newAHPTestEnv(t)
+	c := env.connect("alice")
+	ctx := ahpCtx(t)
+	env.setUpSession(c, "allow-all")
+	principal := ahphost.Principal{UserKey: ahphost.UserKey("https://issuer.example", "alice"), Namespace: ahpTestNamespace}
+	record := ahpSession{}
+	require.NoError(t, env.backend.getRecord(ctx, principal.UserKey, ahpRecordSession, ahpTestSession, &record))
+	changes := &ahpChanges{b: env.backend, ctx: ctx, principal: principal, session: record, emit: env.backend.emitterFor(principal)}
+
+	// A turn reported one edit; the branch holds another edit and a deletion.
+	before, reported := "package a\n", "package a\n// reported\n"
+	changes.setFile(ahpTestDir[len("file://"):]+"/a.go", &before, &reported, true)
+	gone, edited := "x\n", "package b\n// shell edit\n"
+	changes.sync(map[string]ahpGitChange{
+		ahpTestDir[len("file://"):] + "/b.go":   {After: &edited},
+		ahpTestDir[len("file://"):] + "/old.md": {Before: &gone},
+	})
+
+	snapshot, _, err := c.Subscribe(ctx, record.Changeset)
+	require.NoError(t, err)
+	files := snapshot.Snapshot.State.Changeset.Files
+	require.Len(t, files, 2, "the reported edit the branch does not hold is gone")
+	byURI := map[string]ahptypes.FileEdit{}
+	for _, file := range files {
+		uri := ""
+		if file.Edit.After != nil {
+			uri = file.Edit.After.Uri
+		} else {
+			uri = file.Edit.Before.Uri
+		}
+		byURI[uri] = file.Edit
+	}
+	added := byURI[ahpTestDir+"/b.go"]
+	require.Nil(t, added.Before, "a new file has no before side")
+	require.Equal(t, int64(2), *added.Diff.Added)
+	deleted := byURI[ahpTestDir+"/old.md"]
+	require.Nil(t, deleted.After, "a deleted file has no after side")
+	require.Equal(t, int64(1), *deleted.Diff.Removed)
+	var read ahptypes.ResourceReadResult
+	require.NoError(t, c.Request(ctx, "resourceRead", ahptypes.ResourceReadParams{Channel: record.Changeset, Uri: deleted.Before.Content.Uri}, &read))
+	require.Equal(t, gone, read.Data)
+}

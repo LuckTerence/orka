@@ -29,7 +29,6 @@ import (
 	"github.com/orka-agents/orka/internal/ahphost"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/liveevents"
-	"github.com/orka-agents/orka/internal/store"
 )
 
 const (
@@ -780,42 +779,22 @@ func (t *ahpTurn) confirm(ctx context.Context, principal ahphost.Principal, tool
 }
 
 // recordDiffs keeps the reported file edits and lists them in the session's
-// changeset. The first reported content of a file is its "before".
+// changeset as they happen. Git replaces them once the turn's changes land.
 func (t *ahpTurn) recordDiffs(diffs []harnessv2.ToolCallDiff) {
-	ctx, b := t.ctx, t.b
-	hash := ahpHash(t.principal.UserKey, t.session.Session)
+	changes := t.changes()
 	project := t.session.WorkDir
 	if project == "" {
 		project = strings.TrimPrefix(t.sessionProjectDir(), "file://")
 	}
 	for _, diff := range diffs {
-		rel := path.Clean("/" + diff.Path)
-		full := project + rel
-		after := "sha256:" + ahpHash(diff.NewText)
-		if b.store.PutAHPRecord(ctx, store.AHPRecord{
-			UserKey: t.principal.UserKey, Kind: ahpRecordContent, Key: hash + "/" + after, Value: []byte(diff.NewText), UpdatedAt: b.now().UTC(),
-		}) != nil {
-			continue
-		}
-		var file ahpFileContent
-		err := b.getRecord(ctx, t.principal.UserKey, ahpRecordFile, hash+"/"+full, &file)
-		if errors.Is(err, store.ErrNotFound) && diff.OldText != nil {
-			before := "sha256:" + ahpHash(*diff.OldText)
-			if b.store.PutAHPRecord(ctx, store.AHPRecord{
-				UserKey: t.principal.UserKey, Kind: ahpRecordContent, Key: hash + "/" + before, Value: []byte(*diff.OldText), UpdatedAt: b.now().UTC(),
-			}) == nil {
-				file.Before = before
-			}
-		} else if err != nil && !errors.Is(err, store.ErrNotFound) {
-			continue
-		}
-		file.Path, file.After = full, after
-		if b.putRecord(ctx, t.principal.UserKey, ahpRecordFile, hash+"/"+full, file) != nil {
-			continue
-		}
-		t.emitChangesetFile(hash, file)
+		after := diff.NewText
+		changes.setFile(project+path.Clean("/"+diff.Path), diff.OldText, &after, true)
 	}
-	t.emitChangeCounts(hash)
+	changes.emitCounts()
+}
+
+func (t *ahpTurn) changes() *ahpChanges {
+	return &ahpChanges{b: t.b, ctx: t.ctx, principal: t.principal, session: t.session, emit: t.emit}
 }
 
 func (t *ahpTurn) sessionProjectDir() string {
@@ -824,66 +803,6 @@ func (t *ahpTurn) sessionProjectDir() string {
 		return "file://" + ahpProjectRoot
 	}
 	return ahpDirectoryURI(project.Path)
-}
-
-func (t *ahpTurn) content(hash, nonce string) string {
-	return ahpContentScheme + hash[:24] + "/" + nonce
-}
-
-func (t *ahpTurn) emitChangesetFile(hash string, file ahpFileContent) {
-	uri := "file://" + file.Path
-	after := file.After
-	edit := ahptypes.FileEdit{After: &ahptypes.FileEditSide{Uri: uri, Content: ahptypes.ContentRef{Uri: t.content(hash, after), Nonce: &after}}}
-	beforeText := ""
-	if file.Before != "" {
-		before := file.Before
-		edit.Before = &ahptypes.FileEditSide{Uri: uri, Content: ahptypes.ContentRef{Uri: t.content(hash, before), Nonce: &before}}
-		if record, err := t.b.store.GetAHPRecord(t.ctx, t.principal.UserKey, ahpRecordContent, hash+"/"+before); err == nil {
-			beforeText = string(record.Value)
-		}
-	}
-	afterText := ""
-	if record, err := t.b.store.GetAHPRecord(t.ctx, t.principal.UserKey, ahpRecordContent, hash+"/"+after); err == nil {
-		afterText = string(record.Value)
-	}
-	added, removed := ahpLineChanges(beforeText, afterText)
-	edit.Diff = &ahptypes.FileEditDiffStats{Added: &added, Removed: &removed}
-	_ = t.emit.Emit(t.ctx, t.session.Changeset, ahptypes.StateAction{Value: &ahptypes.ChangesetFileSetAction{
-		Type: ahptypes.ActionTypeChangesetFileSet, File: ahptypes.ChangesetFile{Id: ahpHash(file.Path)[:16], Edit: edit},
-	}})
-}
-
-// emitChangeCounts updates the chat's change counts from every edited file.
-func (t *ahpTurn) emitChangeCounts(hash string) {
-	records, err := t.b.store.ListAHPRecords(t.ctx, t.principal.UserKey, ahpRecordFile)
-	if err != nil {
-		return
-	}
-	var additions, deletions, files int64
-	for _, record := range records {
-		if !strings.HasPrefix(record.Key, hash+"/") {
-			continue
-		}
-		var file ahpFileContent
-		if json.Unmarshal(record.Value, &file) != nil {
-			continue
-		}
-		before, after := "", ""
-		if file.Before != "" {
-			if content, err := t.b.store.GetAHPRecord(t.ctx, t.principal.UserKey, ahpRecordContent, hash+"/"+file.Before); err == nil {
-				before = string(content.Value)
-			}
-		}
-		if content, err := t.b.store.GetAHPRecord(t.ctx, t.principal.UserKey, ahpRecordContent, hash+"/"+file.After); err == nil {
-			after = string(content.Value)
-		}
-		added, removed := ahpLineChanges(before, after)
-		additions, deletions, files = additions+added, deletions+removed, files+1
-	}
-	_ = t.emit.Emit(t.ctx, t.session.Session, ahptypes.StateAction{Value: &ahptypes.SessionChatUpdatedAction{
-		Type: ahptypes.ActionTypeSessionChatUpdated, Chat: t.session.Chat,
-		Changes: ahptypes.PartialChatSummary{Changes: &ahptypes.ChangesSummary{Additions: &additions, Deletions: &deletions, Files: &files}},
-	}})
 }
 
 // ahpLineChanges estimates added and removed lines by matching lines as a

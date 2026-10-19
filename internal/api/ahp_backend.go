@@ -1075,8 +1075,10 @@ func (b *ahpBackend) updateSession(ctx context.Context, userKey, session string,
 // ahpFileContent is what a changeset serves for one file of a session.
 type ahpFileContent struct {
 	Path   string `json:"path"`
-	After  string `json:"after"`
+	After  string `json:"after,omitempty"`
 	Before string `json:"before,omitempty"`
+	// Deleted marks a file the session removed: it has no after side.
+	Deleted bool `json:"deleted,omitempty"`
 }
 
 const ahpContentScheme = "ahp-content:/"

@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"path"
 	"strconv"
 	"strings"
@@ -22,6 +23,7 @@ import (
 
 	"github.com/microsoft/agent-host-protocol/clients/go/ahptypes"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/client-go/tools/remotecommand"
 
 	"github.com/orka-agents/orka/internal/ahphost"
 )
@@ -300,4 +302,149 @@ func ahpMatchAny(patterns []string, rel string) bool {
 		}
 	}
 	return false
+}
+
+const (
+	// ahpChangesMax bounds the files a branch's changeset lists, and
+	// ahpChangeContentMax the content shown for one side of a file.
+	ahpChangesMax       = 300
+	ahpChangeContentMax = 1 << 20
+	ahpChangeTooLarge   = "This file is too large to show.\n"
+	ahpChangeBinary     = "This file is binary.\n"
+	ahpGitProgram       = "git"
+)
+
+// branchChanges reads every file a worktree's branch changed since it forked
+// from base, with both sides' contents, keyed by full path.
+func (w *ahpWorkspaces) branchChanges(ctx context.Context, pod *corev1.Pod, worktree, base string) (map[string]ahpGitChange, error) {
+	raw, err := w.output(ctx, pod, 1<<20, "/bin/sh", "-c", `set -e
+cd "$1"
+fork=$(git merge-base HEAD "origin/$2")
+printf '%s\0' "$fork"
+git diff --no-renames --name-status -z "$fork" HEAD`, "sh", worktree, base)
+	if err != nil {
+		return nil, err
+	}
+	fields := strings.Split(strings.TrimSuffix(string(raw), "\x00"), "\x00")
+	if len(fields) == 0 || fields[0] == "" {
+		return nil, errors.New("no fork point")
+	}
+	fork := fields[0]
+	type entry struct{ status, file string }
+	var entries []entry
+	for i := 1; i+1 < len(fields) && len(entries) < ahpChangesMax; i += 2 {
+		entries = append(entries, entry{status: fields[i], file: fields[i+1]})
+	}
+	var objects []string
+	for _, e := range entries {
+		if e.status != "A" {
+			objects = append(objects, fork+":"+e.file)
+		}
+		if e.status != "D" {
+			objects = append(objects, "HEAD:"+e.file)
+		}
+	}
+	contents, err := w.blobs(ctx, pod, worktree, objects)
+	if err != nil {
+		return nil, err
+	}
+	changed := map[string]ahpGitChange{}
+	for _, e := range entries {
+		var change ahpGitChange
+		if e.status != "A" {
+			change.Before = contents[fork+":"+e.file]
+		}
+		if e.status != "D" {
+			change.After = contents["HEAD:"+e.file]
+		}
+		changed[path.Join(worktree, e.file)] = change
+	}
+	return changed, nil
+}
+
+// blobs reads objects with git cat-file. Large or binary contents are
+// replaced by a note; a missing object has no entry.
+func (w *ahpWorkspaces) blobs(ctx context.Context, pod *corev1.Pod, worktree string, objects []string) (map[string]*string, error) {
+	contents := map[string]*string{}
+	if len(objects) == 0 {
+		return contents, nil
+	}
+	sizes, err := w.blobSizes(ctx, pod, worktree, objects)
+	if err != nil {
+		return nil, err
+	}
+	var small []string
+	for _, object := range objects {
+		size, ok := sizes[object]
+		switch {
+		case !ok:
+		case size > ahpChangeContentMax:
+			note := ahpChangeTooLarge
+			contents[object] = &note
+		default:
+			small = append(small, object)
+		}
+	}
+	if len(small) == 0 {
+		return contents, nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, ahpWorkspaceExecTimeout)
+	defer cancel()
+	out := &ahpLimitedBuffer{limit: 64 << 20}
+	stdin := strings.NewReader(strings.Join(small, "\n") + "\n")
+	if err := w.exec(ctx, pod, []string{ahpGitProgram, "-C", worktree, "cat-file", "--batch"},
+		remotecommand.StreamOptions{Stdin: stdin, Stdout: out, Stderr: io.Discard}); err != nil {
+		return nil, err
+	}
+	reader := bufio.NewReader(&out.buf)
+	for _, object := range small {
+		header, err := reader.ReadString('\n')
+		if err != nil {
+			return nil, err
+		}
+		parts := strings.Fields(header)
+		if len(parts) != 3 {
+			continue
+		}
+		size, err := strconv.Atoi(parts[2])
+		if err != nil {
+			return nil, err
+		}
+		data := make([]byte, size+1)
+		if _, err := io.ReadFull(reader, data); err != nil {
+			return nil, err
+		}
+		text := string(data[:size])
+		if !utf8.ValidString(text) || strings.ContainsRune(text, 0) {
+			text = ahpChangeBinary
+		}
+		contents[object] = &text
+	}
+	return contents, nil
+}
+
+// blobSizes returns the size of each object that is a blob.
+func (w *ahpWorkspaces) blobSizes(ctx context.Context, pod *corev1.Pod, worktree string, objects []string) (map[string]int, error) {
+	ctx, cancel := context.WithTimeout(ctx, ahpWorkspaceExecTimeout)
+	defer cancel()
+	out := &ahpLimitedBuffer{limit: 1 << 20}
+	stdin := strings.NewReader(strings.Join(objects, "\n") + "\n")
+	if err := w.exec(ctx, pod, []string{ahpGitProgram, "-C", worktree, "cat-file", "--batch-check"},
+		remotecommand.StreamOptions{Stdin: stdin, Stdout: out, Stderr: io.Discard}); err != nil {
+		return nil, err
+	}
+	sizes := map[string]int{}
+	lines := strings.Split(strings.TrimSuffix(out.buf.String(), "\n"), "\n")
+	for i, object := range objects {
+		if i >= len(lines) {
+			break
+		}
+		parts := strings.Fields(lines[i])
+		if len(parts) == 3 && parts[1] == "blob" {
+			if size, err := strconv.Atoi(parts[2]); err == nil {
+				sizes[object] = size
+			}
+		}
+	}
+	return sizes, nil
 }

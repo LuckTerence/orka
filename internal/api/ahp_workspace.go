@@ -490,16 +490,32 @@ func (w *ahpWorkspaces) follow(ctx context.Context, principal ahphost.Principal,
 	if err != nil {
 		return
 	}
-	_ = w.withGit(ctx, principal, func(ctx context.Context) error {
+	var changed map[string]ahpGitChange
+	err = w.withGit(ctx, principal, func(ctx context.Context) error {
 		if err := w.worktree(ctx, pod, project, record); err != nil {
 			return err
 		}
-		return w.run(ctx, pod, "/bin/sh", "-c", `set -e
+		if err := w.run(ctx, pod, "/bin/sh", "-c", `set -e
 cd "$1"
 git fetch --quiet origin "+refs/heads/$2:refs/remotes/origin/$2"
 git branch --quiet --set-upstream-to="origin/$2" "$2"
-git merge --quiet --ff-only "origin/$2"`, "sh", ahpWorktreePath(project, record.Branch), record.Branch)
+git merge --quiet --ff-only "origin/$2"`, "sh", ahpWorktreePath(project, record.Branch), record.Branch); err != nil {
+			return err
+		}
+		base := record.BaseBranch
+		if base == "" {
+			base = project.DefaultBranch
+		}
+		var err error
+		changed, err = w.branchChanges(ctx, pod, ahpWorktreePath(project, record.Branch), base)
+		return err
 	})
+	if err != nil || changed == nil || w.b.emitterFor == nil {
+		return
+	}
+	// What the branch now holds replaces what the turns reported.
+	changes := &ahpChanges{b: w.b, ctx: ctx, principal: principal, session: record, emit: w.b.emitterFor(principal)}
+	changes.sync(changed)
 }
 
 // dropWorktree removes a disposed session's worktree from a running workspace.
