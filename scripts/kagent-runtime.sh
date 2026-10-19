@@ -328,13 +328,26 @@ deploy() {
     # The relay is this Agent's now, so its policy is too. A rollback
     # restores the policy it replaced, which the render options, such as
     # SUBSTRATE_NAMESPACE, may have changed.
-    # The fence is the rendered spec, which the API server stores as is, so
-    # it is known before the policy changes.
-    if [ -n "${relay_rollback}" ]; then
-      relay_applied_policy=$(jq -ce '.items[] | select(.kind == "NetworkPolicy") | .spec' "${work}/relay.json")
-      relay_rollback_policy=$(kc get networkpolicy "${relay_service}" --ignore-not-found -o json | jq -c '.spec // empty')
+    # Like the Service, an existing policy changes only in one tested patch,
+    # which replaces its whole spec, so the rollback's fence is exactly the
+    # spec it wrote; an apply would keep fields the render does not set.
+    local policy rendered_policy previous_policy
+    rendered_policy=$(jq -ceS '.items[] | select(.kind == "NetworkPolicy") | .spec' "${work}/relay.json")
+    policy=$(kc get networkpolicy "${relay_service}" --ignore-not-found -o json)
+    if [ -z "${policy}" ]; then
+      jq '.items |= map(select(.kind == "NetworkPolicy"))' "${work}/relay.json" |
+        kubectl --context "${KUBECTL_CONTEXT}" create -f - >/dev/null
+    else
+      previous_policy=$(jq -cS '.spec' <<<"${policy}")
+      if [ "${previous_policy}" != "${rendered_policy}" ]; then
+        if [ -n "${relay_rollback}" ]; then
+          relay_rollback_policy=${previous_policy}
+          relay_applied_policy=${rendered_policy}
+        fi
+        kc patch networkpolicy "${relay_service}" --type=json -p "[{\"op\":\"test\",\"path\":\"/spec\",\"value\":${previous_policy}},{\"op\":\"replace\",\"path\":\"/spec\",\"value\":${rendered_policy}}]" >/dev/null ||
+          die "relay policy ${relay_service} changed while this deploy ran, or the patch failed; deploy again"
+      fi
     fi
-    jq '.items |= map(select(.kind == "NetworkPolicy"))' "${work}/relay.json" | apply
   fi
   # The API server's service proxy reaches the runtime's public endpoint.
   kubectl --context "${KUBECTL_CONTEXT}" get --raw \
