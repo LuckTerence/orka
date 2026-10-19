@@ -249,6 +249,8 @@ func TestAHPBackendOffersBuiltInRuntimesAndProjects(t *testing.T) {
 	for _, agent := range root.Agents {
 		for _, model := range agent.Models {
 			providers[agent.Provider] = append(providers[agent.Provider], model.Id)
+			require.NotNil(t, model.PolicyState)
+			require.Equal(t, ahptypes.PolicyStateEnabled, *model.PolicyState, "listed models are enabled for the user")
 		}
 		require.Empty(t, agent.ProtectedResources, "Orka never asks for the person's own credentials")
 	}

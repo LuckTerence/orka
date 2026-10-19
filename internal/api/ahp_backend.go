@@ -368,6 +368,9 @@ func (b *ahpBackend) Agents(ctx context.Context, principal ahphost.Principal) ([
 		return nil, err
 	}
 	var agents []ahptypes.AgentInfo
+	// Every listed model passed the user's Agent authorization; clients may
+	// refuse to send to a model the host does not mark enabled.
+	enabled := ahptypes.PolicyStateEnabled
 	for _, runtime := range ahpBuiltInRuntimes {
 		var models []ahptypes.SessionModelInfo
 		for _, choice := range choices {
@@ -376,6 +379,7 @@ func (b *ahpBackend) Agents(ctx context.Context, principal ahphost.Principal) ([
 			}
 			models = append(models, ahptypes.SessionModelInfo{
 				Id: choice.Model, Provider: string(runtime.runtime), Name: choice.Model, ConfigSchema: ahpModelConfigSchema(),
+				PolicyState: &enabled,
 			})
 		}
 		if len(models) == 0 {
