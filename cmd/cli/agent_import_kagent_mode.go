@@ -65,6 +65,9 @@ type kagentMode struct {
 	ImageProblem string
 	// Tools are the Orka tools a governed Agent calls through the relay.
 	Tools []string
+	// AnyTool reports a binding that names no tools, so kagent calls
+	// whatever the relay lists.
+	AnyTool bool
 }
 
 // kagentRevisionEvidence binds a verdict to the pinned revision. The compiled
@@ -183,22 +186,25 @@ func classifyKagentAgent(agent map[string]any, related kagentObjects, relay stri
 		return mode
 	}
 	mode.Mode, mode.RelayOrigin = kagentModeGoverned, relay
-	mode.Tools = kagentV1ToolNames(agent, related, namespace)
+	mode.Tools, mode.AnyTool = kagentV1ToolNames(agent, related, namespace)
 	return mode
 }
 
 // kagentV1ToolNames lists the tools a v1 Agent's template binds, which for a
-// governed Agent are the Orka tools it calls through the relay.
-func kagentV1ToolNames(agent map[string]any, related kagentObjects, namespace string) []string {
+// governed Agent are the Orka tools it calls through the relay, and reports a
+// binding that names none.
+func kagentV1ToolNames(agent map[string]any, related kagentObjects, namespace string) ([]string, bool) {
 	template := kagentMap(agent, "spec", "template", "inline")
 	if template == nil {
 		template = kagentMap(related.lookup("AgentTemplate", namespace, kagentString(agent, "spec", "template", "ref", cliNameKey)), "spec")
 	}
 	var names []string
+	anyTool := false
 	bindings, _ := template[kagentFieldTools].([]any)
 	for _, raw := range bindings {
 		binding, _ := raw.(map[string]any)
 		tools, _ := kagentMap(binding, "mcp")[kagentFieldTools].([]any)
+		anyTool = anyTool || len(tools) == 0
 		for _, tool := range tools {
 			if name, ok := tool.(string); ok {
 				names = append(names, name)
@@ -206,7 +212,7 @@ func kagentV1ToolNames(agent map[string]any, related kagentObjects, namespace st
 		}
 	}
 	slices.Sort(names)
-	return slices.Compact(names)
+	return slices.Compact(names), anyTool
 }
 
 func harnessProblems(harness map[string]any, name string) []string {

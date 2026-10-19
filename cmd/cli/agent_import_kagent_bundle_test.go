@@ -459,6 +459,10 @@ func TestKagentBundleAllowedToolsComeFromTheFlagFirst(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	unnamed := strings.Replace(governedKagentV0Fixture, ", toolNames: [probe-orka]", "", 1)
 	dir := t.TempDir()
+	// An empty policy would refuse every call such a binding makes.
+	if _, err := runKagentImport(t, kagentBundleArgs(writeTempFile(t, unnamed), dir, "--dry-run")...); err == nil || !strings.Contains(err.Error(), "--allowed-tool") {
+		t.Fatalf("a binding without tool names and no --allowed-tool = %v", err)
+	}
 	if _, err := runKagentImport(t, kagentBundleArgs(writeTempFile(t, unnamed), dir, "--dry-run", "--approval-required-tool", "probe-orka")...); err == nil {
 		t.Fatal("an approval for a tool no binding names was accepted")
 	}

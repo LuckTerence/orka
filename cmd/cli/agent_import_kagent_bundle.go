@@ -120,6 +120,11 @@ func (o kagentWrapperOptions) validateBundle(wrapped []kagentWrappedAgent) error
 				return fmt.Errorf("kagent Agents %s and %s share relay Service %s; give each Agent its own, such as with {name} in --relay-url", other, agent.Source, key)
 			}
 			relays[key] = agent.Source
+			// The registered tool policy is exact, so an empty one would
+			// refuse every call a binding without tool names makes.
+			if agent.Mode.AnyTool && len(o.AllowedTools) == 0 {
+				return fmt.Errorf("kagent Agent %s: a tool binding names no tools, so kagent calls whatever the relay lists; name the Orka tools it may call with --allowed-tool", agent.Source)
+			}
 		}
 		for _, tool := range agent.Mode.Tools {
 			known[tool] = true

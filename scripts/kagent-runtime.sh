@@ -133,11 +133,14 @@ select_relay() {
 
 # Until a deployed runtime is Ready, any failure, or an interrupt, moves its
 # Agent's relay back to the runtime it selected before.
+#
+# The restore applies only while the relay still selects this runtime: a
+# concurrent deploy of the Agent may have moved it since.
 restore_relay() {
   [ -n "${relay_rollback}" ] || return 0
   echo "Runtime ${runtime} is not Ready; moving relay ${relay_service} back." >&2
-  select_relay "${relay_rollback}" ||
-    echo "kagent-runtime: could not move relay ${relay_service} back to ${relay_rollback}" >&2
+  kc patch service "${relay_service}" --type=json -p "[{\"op\":\"test\",\"path\":\"/spec/selector\",\"value\":{\"orka.ai/kagent-runtime\":\"${runtime}\"}},{\"op\":\"replace\",\"path\":\"/spec/selector\",\"value\":${relay_rollback}}]" >/dev/null ||
+    echo "kagent-runtime: relay ${relay_service} was not moved back to ${relay_rollback}; it no longer selects ${runtime}, or the patch failed" >&2
 }
 
 # require_relay refuses unless a governed bundle's relay selects the bundle's
@@ -166,24 +169,30 @@ controller_epoch() {
 # random and never printed; a governed Agent's upstream credential comes from
 # MODEL_UPSTREAM_TOKEN_FILE.
 ensure_auth_secret() {
-  local secret="${runtime}-auth"
-  if kc get secret "${secret}" >/dev/null 2>&1; then
-    return
+  local secret="${runtime}-auth" found key
+  found=$(kc get secret "${secret}" --ignore-not-found -o name)
+  if [ -z "${found}" ]; then
+    # The values go through files in the private work directory, never
+    # through a command line.
+    local args=()
+    for key in controller-token capability-secret provider-token; do
+      openssl rand -hex 32 | tr -d '\n' >"${work}/${key}"
+      args+=(--from-file="${key}=${work}/${key}")
+    done
+    if [ "${governed}" = true ]; then
+      [ -r "${MODEL_UPSTREAM_TOKEN_FILE:-}" ] || die "a governed Agent needs MODEL_UPSTREAM_TOKEN_FILE"
+      # The broker refuses a credential with control characters, such as the
+      # newline a file usually ends with.
+      tr -d '\r\n' <"${MODEL_UPSTREAM_TOKEN_FILE}" >"${work}/model-upstream-token"
+      args+=(--from-file=model-upstream-token="${work}/model-upstream-token")
+    fi
+    kc create secret generic "${secret}" "${args[@]}" >/dev/null
   fi
-  local args=(--from-literal=controller-token="$(openssl rand -hex 32)"
-    --from-literal=capability-secret="$(openssl rand -hex 32)"
-    --from-literal=provider-token="$(openssl rand -hex 32)")
-  if [ "${governed}" = true ]; then
-    [ -r "${MODEL_UPSTREAM_TOKEN_FILE:-}" ] || die "a governed Agent needs MODEL_UPSTREAM_TOKEN_FILE"
-    # The broker refuses a credential with control characters, such as the
-    # newline a file usually ends with.
-    tr -d '\r\n' <"${MODEL_UPSTREAM_TOKEN_FILE}" >"${work}/model-upstream-token"
-    args+=(--from-file=model-upstream-token="${work}/model-upstream-token")
-  fi
-  kc create secret generic "${secret}" "${args[@]}" >/dev/null
-  kc label secret "${secret}" orka.ai/agent-runtime-auth=true orka.ai/agent-runtime-name="${runtime}" \
+  # Orka uses the Secret only with this metadata, which a deploy that stopped
+  # after creating it did not set.
+  kc label --overwrite secret "${secret}" orka.ai/agent-runtime-auth=true orka.ai/agent-runtime-name="${runtime}" \
     orka.ai/kagent-runtime="${runtime}" orka.ai/kagent-agent="${agent}" >/dev/null
-  kc annotate secret "${secret}" \
+  kc annotate --overwrite secret "${secret}" \
     orka.ai/agent-runtime-endpoint="http://${runtime}.${NAMESPACE}.svc.cluster.local:8080" >/dev/null
 }
 

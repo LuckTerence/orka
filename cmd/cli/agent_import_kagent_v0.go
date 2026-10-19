@@ -179,6 +179,7 @@ func classifyKagentV0Agent(agent map[string]any, related kagentObjects, relay, c
 	mode.Mode, mode.RelayOrigin = kagentModeGoverned, relay
 	for _, tool := range kagentV0Tools(agent) {
 		names, _ := kagentMap(tool, kagentFieldMCPServer)[kagentFieldToolNames].([]any)
+		mode.AnyTool = mode.AnyTool || len(names) == 0
 		for _, raw := range names {
 			if name, ok := raw.(string); ok {
 				mode.Tools = append(mode.Tools, name)
