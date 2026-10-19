@@ -869,11 +869,16 @@ type AgentRuntimeSpec struct {
 
 	// PermissionDecisions selects who answers the permission requests an ACP
 	// runtime sends before running a tool. Policy, the default, answers each
-	// request from the frozen tool policy. Requester still refuses what that
-	// policy refuses, but holds every request it would allow for the Task's
-	// verified requester to approve or decline through the Task approvals API;
-	// a request nobody answers before it expires is refused. It never enters
-	// the runtime profile, so turns of one Session may use different values.
+	// request from the frozen tool policy, and built-in runtimes run the native
+	// tools that policy allows without asking. Requester launches the built-in
+	// runtime so it asks before every shell command and file change the policy
+	// allows; it still refuses what that policy refuses, but holds every request
+	// it would allow for the Task's verified requester to approve or decline
+	// through the Task approvals API. A request nobody answers before it expires
+	// is refused. Requester requires a built-in runtime on the harness v2 path;
+	// other Tasks are rejected. It never enters the runtime profile, but a
+	// Session's runtime session is launched in one mode: a turn with the other
+	// value starts a new runtime session from the Session transcript.
 	// +optional
 	PermissionDecisions PermissionDecisionMode `json:"permissionDecisions,omitempty"`
 }

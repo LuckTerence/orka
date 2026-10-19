@@ -90,7 +90,10 @@ func (d *ACPDispatcher) resolvePromptPermission(
 	return nil
 }
 
-// planPermissionDecision returns the decision to send now, or a hold.
+// planPermissionDecision returns the decision to send now, or a hold. A
+// Requester Task's frozen MCP configuration carries NativePermissionsAsk, so
+// its RuntimeSession was launched to ask before every policy-allowed acting
+// tool; the decision still rests only on the request's structured tool name.
 func (d *ACPDispatcher) planPermissionDecision(
 	holdCtx context.Context,
 	task *corev1alpha1.Task,
@@ -368,8 +371,36 @@ func (d *ACPDispatcher) sendPermissionDecision(
 }
 
 func taskPermissionDecisionsByRequester(task *corev1alpha1.Task) bool {
-	return task != nil && task.Spec.AgentRuntime != nil &&
-		task.Spec.AgentRuntime.PermissionDecisions == corev1alpha1.PermissionDecisionsRequester
+	return task != nil && taskNativePermissions(task.Spec.AgentRuntime) == harnessv2.NativePermissionsAsk
+}
+
+// taskNativePermissions is the RuntimeSession launch mode a Task's permission
+// decisions require. A requester can decide only the requests a runtime
+// sends, so a Requester Task's runtime must be launched to ask before each
+// policy-allowed native tool that acts.
+func taskNativePermissions(runtime *corev1alpha1.AgentRuntimeSpec) harnessv2.NativePermissionMode {
+	if runtime != nil && runtime.PermissionDecisions == corev1alpha1.PermissionDecisionsRequester {
+		return harnessv2.NativePermissionsAsk
+	}
+	return harnessv2.NativePermissionsPreapproved
+}
+
+// errPermissionDecisionsRuntimeUnsupported rejects a Requester Task whose
+// runtime does not advertise that it can launch a session that asks.
+var errPermissionDecisionsRuntimeUnsupported = errors.New(
+	"the runtime cannot launch a session that asks before each tool, so the requester could not decide its permission requests")
+
+// rejectPermissionDecisionsRuntime fails a Requester Task before any
+// RuntimeSession exists, instead of running its tools without asking.
+func (d *ACPDispatcher) rejectPermissionDecisionsRuntime(
+	ctx context.Context, task *corev1alpha1.Task, attemptID string, fence store.ControllerEpochFence,
+) error {
+	reason := corev1alpha1.TaskExecutionReason("PermissionDecisionsUnsupported")
+	message := errPermissionDecisionsRuntimeUnsupported.Error()
+	if err := d.transitionAttemptToFailed(ctx, attemptID, fence, "permission-decisions-unsupported", reason, message); err != nil {
+		return err
+	}
+	return d.failTaskBeforeSessionBinding(ctx, task, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed, reason, message)
 }
 
 // taskHasVerifiedRequester reports whether the API server stamped the Task's

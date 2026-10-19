@@ -146,6 +146,11 @@ an AHP backend for agent hosts is a later decision.
   every permission request policy would allow for its requester, shown as an AHP
   confirmation; policy answers what it rejects. In `allow-all`, policy decides. Only the
   session owner may answer. Orka never chooses an "always" option on the user's behalf.
+  A `manual` turn's built-in runtime is launched to ask before every shell command and
+  file change; an `allow-all` turn's runtime runs them unasked. An Orka Session's runtime
+  session is bound to that launch mode, so the first turn after the mode changes starts a
+  new runtime session from the Session transcript instead of reusing one launched the
+  other way.
 - Cancellation answers pending permissions as cancelled, cancels the Task, and kills the
   agent process if the cancel does not settle in time, so late updates cannot reach the
   next turn.

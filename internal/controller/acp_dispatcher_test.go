@@ -3995,6 +3995,7 @@ type dispatcherRuntimeServerOptions struct {
 	terminalEvents                   map[harnessv2.PromptID]harnessv2.EventType
 	disableAgentSessionConfiguration bool
 	disablePermissions               bool
+	nativePermissionAsk              bool
 	// rejectCreate answers a create request with the returned error response
 	// and status instead of creating the session when the response is non-nil.
 	// resident makes the runtime keep reporting the exact requested session as
@@ -4054,7 +4055,10 @@ func newDispatcherRuntimeServerForPoolWithOptions(
 			Protocol: harnessv2.ProtocolVersion, Transport: "http+ndjson", ACPVersion: harnessv2.ACPProfileV1,
 			RuntimeProfileDigest: digest, ProfileDigestSchemaVersion: harnessv2.ProfileDigestSchemaVersion,
 			AdapterDigests: profile.AdapterDigests, Limits: limits,
-			Provider:                          harnessv2.ProviderCapabilities{ProviderKinds: []string{profile.ProviderKind}, Models: []string{profile.Model}, SupportsCancel: true, SupportsPermissions: !options.disablePermissions, SupportsTools: true},
+			Provider: harnessv2.ProviderCapabilities{
+				ProviderKinds: []string{profile.ProviderKind}, Models: []string{profile.Model}, SupportsCancel: true,
+				SupportsPermissions: !options.disablePermissions, SupportsTools: true, SupportsNativePermissionAsk: options.nativePermissionAsk,
+			},
 			WorkspaceGovernance:               harnessv2.StrictWorkspaceGovernanceCapabilities(),
 			SupportsDrain:                     true,
 			SupportsNativeSessions:            options.nativeSnapshot != nil,

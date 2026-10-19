@@ -796,6 +796,10 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, harnessv2.ErrorCodeInvalidRequest, "provider does not support controller-owned brokered tool approvals", nil, false)
 		return
 	}
+	if request.MCPConfiguration.NativePermissions == harnessv2.NativePermissionsAsk && !s.cfg.Capabilities.Provider.SupportsNativePermissionAsk {
+		writeError(w, http.StatusBadRequest, harnessv2.ErrorCodeInvalidRequest, "provider cannot launch a session that asks before each native tool", nil, false)
+		return
+	}
 	expected := s.expectedFence(request.Metadata.Fence.RuntimeSessionUID, request.Metadata.Fence.RuntimeSessionGeneration)
 	// Fresh creates have no operation record or tombstone to classify, but
 	// must still match the current supervisor before allocating an identity.
@@ -1319,6 +1323,7 @@ func (s *Server) createSession(
 		},
 		MCPServers:            []acp.MCPServer{mcpServer},
 		NewSessionMeta:        projection.NewSessionMeta,
+		RequiredModeID:        projection.RequiredModeID,
 		ResumeSessionID:       resumeSessionID,
 		AuthMethodID:          s.cfg.Provider.AuthMethodID,
 		InitializeTimeout:     defaultDuration(s.cfg.InitializeTimeout, acp.DefaultInitializeTimeout),

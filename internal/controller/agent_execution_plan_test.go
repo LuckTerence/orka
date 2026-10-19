@@ -240,6 +240,45 @@ func TestPlanAgentExecutionMatrix(t *testing.T) {
 			wantReason:                  "harness v1 execution path",
 			wantWorkspaceStatusErr:      "harness v1 execution path",
 		},
+		{
+			name:              "requester permission decisions run on a built-in runtime",
+			mutateTask:        plannerRequesterDecisions,
+			acpRuntimeEnabled: true,
+			wantPath:          agentExecutionPathACP,
+		},
+		{
+			name:       "requester permission decisions run on built-in Copilot",
+			mutateTask: plannerRequesterDecisions,
+			mutateAgent: func(agent *corev1alpha1.Agent) {
+				agent.Spec.Runtime.Type = corev1alpha1.AgentRuntimeCopilot
+			},
+			acpRuntimeEnabled: true,
+			wantPath:          agentExecutionPathACP,
+		},
+		{
+			name:       "requester permission decisions reject an external runtimeRef",
+			mutateTask: plannerRequesterDecisions,
+			mutateAgent: func(agent *corev1alpha1.Agent) {
+				agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{
+					RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "external-v2"},
+				}
+			},
+			objects:           []client.Object{plannerExternalRuntime()},
+			acpRuntimeEnabled: true,
+			wantPath:          agentExecutionPathRejected,
+			wantReason:        "an external AgentRuntime cannot be launched to ask before each tool",
+		},
+		{
+			name:       "requester permission decisions reject harness v1",
+			mutateTask: plannerRequesterDecisions,
+			mutateAgent: func(agent *corev1alpha1.Agent) {
+				agent.Spec.Runtime.ContractVersion = new(corev1alpha1.AgentRuntimeContractHarnessV1)
+			},
+			acpRuntimeEnabled: true,
+			harnessV1Enabled:  true,
+			wantPath:          agentExecutionPathRejected,
+			wantReason:        "harness v1 runtimes do not ask before each tool",
+		},
 	}
 
 	for _, tt := range tests {
@@ -352,6 +391,11 @@ func plannerWorkspaceTask(mutate func(*corev1alpha1.ExecutionWorkspaceSpec)) fun
 		}
 		task.Spec.Execution = &corev1alpha1.ExecutionSpec{Workspace: workspace}
 	}
+}
+
+// plannerRequesterDecisions asks for the requester's permission decisions.
+func plannerRequesterDecisions(task *corev1alpha1.Task) {
+	task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{PermissionDecisions: corev1alpha1.PermissionDecisionsRequester}
 }
 
 func validPlannerTask() *corev1alpha1.Task {

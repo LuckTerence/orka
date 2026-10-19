@@ -2198,6 +2198,9 @@ func (s *Server) mapRuntimeEvents(state *sessionState, prompt *promptState, even
 		}
 		if state.mcpProxy != nil {
 			policy := state.mcpProxy.configuration.ToolPolicy
+			if permission.ToolName == "" && !known {
+				permission.ToolName = askPermissionToolName(state.profile.ProviderKind, state.mcpProxy.configuration, event.Permission.Request.ToolCall)
+			}
 			permission.ToolName = canonicalPermissionToolName(state.profile.ProviderKind, policy, permission.ToolName)
 			if state.profile.ProviderKind == providerKindCodex && !known {
 				if descriptor, allowed := policy.Descriptor(permission.ToolName); allowed && descriptor.Source.Brokered() {
