@@ -141,6 +141,10 @@ restore_relay() {
   echo "Runtime ${runtime} is not Ready; moving relay ${relay_service} back." >&2
   kc patch service "${relay_service}" --type=json -p "[{\"op\":\"test\",\"path\":\"/spec/selector\",\"value\":{\"orka.ai/kagent-runtime\":\"${runtime}\"}},{\"op\":\"replace\",\"path\":\"/spec/selector\",\"value\":${relay_rollback}},{\"op\":\"replace\",\"path\":\"/spec/ports\",\"value\":${relay_rollback_ports}}]" >/dev/null ||
     echo "kagent-runtime: relay ${relay_service} was not moved back to ${relay_rollback}; it no longer selects ${runtime}, or the patch failed" >&2
+  # The policy goes back too, while it is still the one this deploy applied.
+  [ -n "${relay_rollback_policy}" ] && [ -n "${relay_applied_policy}" ] || return 0
+  kc patch networkpolicy "${relay_service}" --type=json -p "[{\"op\":\"test\",\"path\":\"/spec\",\"value\":${relay_applied_policy}},{\"op\":\"replace\",\"path\":\"/spec\",\"value\":${relay_rollback_policy}}]" >/dev/null ||
+    echo "kagent-runtime: relay policy ${relay_service} was not restored; it changed since this deploy applied it, or the patch failed" >&2
 }
 
 # lock_agents holds a lock for each Agent, so one deploy, activate, or retire
@@ -308,9 +312,16 @@ deploy() {
           }
       fi
     fi
-    # The relay is this Agent's now, so its policy is too. The policy is the
-    # same for every runtime of the Agent.
+    # The relay is this Agent's now, so its policy is too. A rollback
+    # restores the policy it replaced, which the render options, such as
+    # SUBSTRATE_NAMESPACE, may have changed.
+    if [ -n "${relay_rollback}" ]; then
+      relay_rollback_policy=$(kc get networkpolicy "${relay_service}" --ignore-not-found -o json | jq -c '.spec // empty')
+    fi
     jq '.items |= map(select(.kind == "NetworkPolicy"))' "${work}/relay.json" | apply
+    if [ -n "${relay_rollback_policy}" ]; then
+      relay_applied_policy=$(kc get networkpolicy "${relay_service}" -o json | jq -c '.spec')
+    fi
   fi
   # The API server's service proxy reaches the runtime's public endpoint.
   kubectl --context "${KUBECTL_CONTEXT}" get --raw \
@@ -374,6 +385,13 @@ activate() {
       require_relay "${b%/}"
     fi
   done
+  # The import must include this bundle's Agent, or it would switch the
+  # others and leave this one: a dry run into a scratch directory shows which
+  # Agents these arguments import, without touching the bundles.
+  work=$(mktemp -d)
+  "${ORKA}" agent import kagent "${args[@]}" --dry-run --bundle-dir "${work}/preview" -n "${NAMESPACE}" >/dev/null
+  [ -f "${work}/preview/${agent}/runtime.json" ] ||
+    die "the import arguments do not import Agent ${agent}; check -f"
   "${ORKA}" agent import kagent "${args[@]}" --bundle-dir "${bundle_dir}" -n "${NAMESPACE}"
   [ "$(kc get agents.core.orka.ai "${agent}" -o jsonpath='{.spec.runtime.runtimeRef.name}')" = "${runtime}" ] ||
     die "Agent ${agent} does not use ${runtime}; were the import arguments the ones that wrote this bundle?"
@@ -388,12 +406,13 @@ retire() {
   require_relay "${bundle}"
   # A runtime's objects may outlive its registration when an earlier retire
   # timed out or was interrupted, so they name runtimes to retire too.
-  local old olds present
-  olds=$({
-    kc get agentruntimes.core.orka.ai -l "orka.ai/kagent-agent=${agent}" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'
-    kc get deployment,service,persistentvolumeclaim,serviceaccount,secret -l "orka.ai/kagent-agent=${agent}" \
-      -o jsonpath='{range .items[*]}{.metadata.labels.orka\.ai/kagent-runtime}{"\n"}{end}'
-  } | sort -u)
+  local old olds present registered workloads
+  # Each listing must succeed on its own: a partial inventory would leave
+  # runtimes behind.
+  registered=$(kc get agentruntimes.core.orka.ai -l "orka.ai/kagent-agent=${agent}" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')
+  workloads=$(kc get deployment,service,persistentvolumeclaim,serviceaccount,secret -l "orka.ai/kagent-agent=${agent}" \
+    -o jsonpath='{range .items[*]}{.metadata.labels.orka\.ai/kagent-runtime}{"\n"}{end}')
+  olds=$(printf '%s\n%s\n' "${registered}" "${workloads}" | sort -u)
   for old in ${olds}; do
     [ "${old}" = "${runtime}" ] && continue
     present=$(registration_of "${old}")
@@ -434,6 +453,8 @@ governed=$(bundle_field governed)
 relay_service=""
 relay_rollback=""
 relay_rollback_ports=""
+relay_rollback_policy=""
+relay_applied_policy=""
 work=""
 locks=()
 trap cleanup EXIT
