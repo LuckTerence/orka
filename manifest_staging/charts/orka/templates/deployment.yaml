@@ -6,6 +6,7 @@
 {{- include "orka.validateWebhooks" . }}
 {{- include "orka.validatePublisherAuth" . }}
 {{- include "orka.validateSubstrateCredentials" . }}
+{{- include "orka.validateAHP" . }}
 {{- $substrateCredentials := .Values.controller.substrate.apiCredentials | default dict -}}
 {{- $startupProbe := .Values.controller.startupProbe | default dict -}}
 {{- if $harnessV2 }}
@@ -197,6 +198,27 @@ spec:
             {{- if dig "dashboard" "enabled" false .Values.controller }}
             - --dashboard-enabled=true
             {{- end }}
+            {{- if include "orka.ahpEnabled" . }}
+            {{- with .Values.controller.ahp }}
+            - --enable-ahp-api=true
+            {{- if .tokenMaxTTL }}
+            - {{ printf "--ahp-token-max-ttl=%s" (toString .tokenMaxTTL) | quote }}
+            {{- end }}
+            {{- if .turnTimeout }}
+            - {{ printf "--ahp-turn-timeout=%s" (toString .turnTimeout) | quote }}
+            {{- end }}
+            {{- if .gitCredentialSecret }}
+            - {{ printf "--ahp-git-credential-secret=%s" .gitCredentialSecret | quote }}
+            {{- end }}
+            {{- if .workspaceClass }}
+            - {{ printf "--ahp-workspace-class=%s" .workspaceClass | quote }}
+            {{- end }}
+            {{- end }}
+            {{- if include "orka.ahpWorkspacesEnabled" . }}
+            - {{ printf "--ahp-workspace-namespace=%s" (include "orka.ahpWorkspaceNamespace" .) | quote }}
+            - {{ printf "--ahp-workspace-image=%s" (include "orka.ahpWorkspaceImage" .) | quote }}
+            {{- end }}
+            {{- end }}
             {{- with .Values.controller.oidc }}
             {{- if .issuer }}
             - {{ printf "--oidc-issuer=%s" .issuer | quote }}
@@ -302,6 +324,9 @@ spec:
             {{- end }}
             {{- if .connectorManage }}
             - {{ printf "--context-token-connector-manage-scopes=%s" .connectorManage | quote }}
+            {{- end }}
+            {{- if .ahpTokens }}
+            - {{ printf "--context-token-ahp-token-scopes=%s" .ahpTokens | quote }}
             {{- end }}
             {{- if .skillRead }}
             - {{ printf "--context-token-skill-read-scopes=%s" .skillRead | quote }}

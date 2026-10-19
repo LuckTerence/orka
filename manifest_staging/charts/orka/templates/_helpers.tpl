@@ -1037,3 +1037,47 @@ Create release-scoped static worker RoleBinding names.
 {{ printf "%s:%s" $repository $tag }}
 {{- end -}}
 {{- end }}
+
+{{/*
+The Agent Host Protocol endpoint is an opt-in harness-v2 feature. AHP
+workspaces are on only with a digest-pinned image; their Pods live in a
+namespace the controller never shares with its watch or ACP runtime namespaces.
+*/}}
+{{- define "orka.ahpEnabled" -}}
+{{- if dig "ahp" "enabled" false .Values.controller -}}true{{- end -}}
+{{- end }}
+
+{{- define "orka.ahpWorkspaceImage" -}}
+{{- trim (toString (dig "ahp" "workspaceImage" "" .Values.controller)) -}}
+{{- end }}
+
+{{- define "orka.ahpWorkspacesEnabled" -}}
+{{- if and (include "orka.ahpEnabled" .) (include "orka.ahpWorkspaceImage" .) -}}true{{- end -}}
+{{- end }}
+
+{{- define "orka.ahpWorkspaceNamespace" -}}
+{{- trim (toString (dig "ahp" "workspaceNamespace" "" .Values.controller)) -}}
+{{- end }}
+
+{{- define "orka.validateAHP" -}}
+{{- if include "orka.ahpEnabled" . -}}
+{{- if ne .Values.controller.mode "harness-v2" -}}
+{{- fail "controller.ahp.enabled requires controller.mode=harness-v2" -}}
+{{- end -}}
+{{- if not (or (dig "oidc" "issuer" "" .Values.controller) (dig "contextToken" "issuer" "" .Values.controller)) -}}
+{{- fail "controller.ahp.enabled requires controller.oidc.issuer or controller.contextToken.issuer: only those identities can mint AHP connection tokens" -}}
+{{- end -}}
+{{- if include "orka.ahpWorkspacesEnabled" . -}}
+{{- if not (regexMatch `^[^@\s]+@sha256:[a-f0-9]{64}$` (include "orka.ahpWorkspaceImage" .)) -}}
+{{- fail "controller.ahp.workspaceImage must be pinned by digest: <repository>@sha256:<digest>" -}}
+{{- end -}}
+{{- $namespace := include "orka.ahpWorkspaceNamespace" . -}}
+{{- if not $namespace -}}
+{{- fail "controller.ahp.workspaceNamespace is required when controller.ahp.workspaceImage is set" -}}
+{{- end -}}
+{{- if or (eq $namespace .Release.Namespace) (eq $namespace (include "orka.watchNamespace" .)) (eq $namespace .Values.controller.acpRuntime.namespace) -}}
+{{- fail (printf "controller.ahp.workspaceNamespace %q must differ from the Helm release namespace, controller.watchNamespace and controller.acpRuntime.namespace" $namespace) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end }}

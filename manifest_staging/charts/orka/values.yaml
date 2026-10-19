@@ -195,6 +195,34 @@ controller:
   dashboard:
     enabled: false
 
+  # Agent Host Protocol at /ahp on the API port, for desktop AHP clients. Off by
+  # default; requires controller.mode harness-v2 and controller.oidc (or
+  # controller.contextToken), the identities that mint AHP connection tokens.
+  # Clients connect with wss://<API host>/ahp?tkn=<token>; expose the API
+  # Service through a TLS-terminating Ingress or Gateway that passes WebSocket
+  # upgrades.
+  ahp:
+    enabled: false
+    # Longest lifetime of an AHP connection token. Tokens default to 720h.
+    tokenMaxTTL: 2160h
+    # Timeout of each AHP turn's Task.
+    turnTimeout: 2h
+    # Secret in each AHP user's namespace whose token key clones and publishes
+    # their repositories. Empty clones public repositories read-only.
+    gitCredentialSecret: ""
+    # ExecutionWorkspaceClass for session-scoped workspaces. Needs an installed
+    # workspace provider.
+    workspaceClass: ""
+    # Digest-pinned image with sh and git for per-user AHP workspace Pods, where
+    # clients run git and terminals. Empty disables workspaces and terminals.
+    # When set, the chart creates workspaceNamespace with the restricted Pod
+    # Security profile, the controller's Role in it, and a NetworkPolicy that
+    # admits no ingress and allows egress only to DNS and TCP 443.
+    workspaceImage: ""
+    # Must differ from the Helm release namespace, controller.watchNamespace
+    # and controller.acpRuntime.namespace.
+    workspaceNamespace: orka-ahp-workspaces
+
   # OIDC/JWT authentication for external API requests
   oidc:
     # Issuer URL expected in bearer tokens. Requires audience when set.
@@ -247,6 +275,7 @@ controller:
       monitorOperate: ""
       connectorRead: ""
       connectorManage: ""
+      ahpTokens: ""
       skillRead: ""
       skillWrite: ""
       gatewayRead: ""

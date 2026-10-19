@@ -8,3 +8,5 @@ metadata:
     # Workspace Pods run non-root with no capabilities and the RuntimeDefault
     # seccomp profile, so the restricted Pod Security profile applies.
     pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
