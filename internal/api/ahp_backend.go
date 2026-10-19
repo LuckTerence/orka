@@ -52,6 +52,8 @@ const (
 	ahpConfigApprovalMode     = "approvalMode"
 	ahpConfigAvailableModes   = "availableApprovalModes"
 	ahpConfigEffectiveMode    = "effectiveApprovalMode"
+	ahpConfigBaseBranch       = "baseBranch"
+	ahpConfigBranch           = "branch"
 	ahpSchemaString           = "string"
 	ahpChangesetKindSession   = "session"
 	ahpGitCredentialSecretKey = defaultWorkspaceCredentialKey
@@ -682,7 +684,7 @@ func (b *ahpBackend) CreateSession(ctx context.Context, principal ahphost.Princi
 		return nil, &ahphost.Rejection{Reason: err.Error()}
 	}
 	baseBranch := ""
-	if raw, ok := req.Config["baseBranch"]; ok {
+	if raw, ok := req.Config[ahpConfigBaseBranch]; ok {
 		_ = json.Unmarshal(raw, &baseBranch)
 	}
 	if baseBranch == "" || !ahpValidBranch(baseBranch) {
@@ -691,7 +693,7 @@ func (b *ahpBackend) CreateSession(ctx context.Context, principal ahphost.Princi
 	// Turns publish to the branch the client named for the session, or to an
 	// Orka branch when it named none.
 	branch := ""
-	if raw, ok := req.Config["branch"]; ok {
+	if raw, ok := req.Config[ahpConfigBranch]; ok {
 		_ = json.Unmarshal(raw, &branch)
 	}
 	if !ahpValidBranch(branch) || branch == baseBranch {
@@ -1075,9 +1077,51 @@ func (b *ahpBackend) ReadResource(ctx context.Context, principal ahphost.Princip
 		}
 	}
 	if !ok {
+		if session == "" {
+			// Anything else on the root channel is a file in the user's workspace.
+			return b.readWorkspaceFile(ctx, principal, uri)
+		}
 		return ahptypes.ResourceReadResult{}, ahphost.ErrResourceNotFound
 	}
 	return ahptypes.ResourceReadResult{Data: string(found.Value), Encoding: ahptypes.ContentEncodingUtf8}, nil
+}
+
+// ResolveSessionConfig resolves a new session's configuration for the form a
+// client shows before creating it: the approval mode and the branches.
+func (b *ahpBackend) ResolveSessionConfig(ctx context.Context, principal ahphost.Principal, params ahptypes.ResolveSessionConfigParams) (ahptypes.ResolveSessionConfigResult, error) {
+	mode, err := ahpApprovalModeFrom(params.Config)
+	if err != nil {
+		return ahptypes.ResolveSessionConfigResult{}, &ahphost.Rejection{Reason: err.Error()}
+	}
+	config := ahpSessionConfig(mode)
+	baseBranch, branch := "", ""
+	if raw, ok := params.Config[ahpConfigBaseBranch]; ok {
+		_ = json.Unmarshal(raw, &baseBranch)
+	}
+	if raw, ok := params.Config[ahpConfigBranch]; ok {
+		_ = json.Unmarshal(raw, &branch)
+	}
+	if params.WorkingDirectory != nil && (baseBranch == "" || !ahpValidBranch(baseBranch)) {
+		if project, err := b.projectForDirectory(ctx, principal.UserKey, []string{*params.WorkingDirectory}); err == nil {
+			baseBranch = project.DefaultBranch
+		}
+	}
+	notMutable := false
+	baseDescription := "The branch the session starts from."
+	branchDescription := "The branch the session's turns publish to. Orka names one when it is empty."
+	config.Schema.Properties[ahpConfigBaseBranch] = ahptypes.SessionConfigPropertySchema{
+		Type: ahpSchemaString, Title: "Base branch", Description: &baseDescription, SessionMutable: &notMutable,
+	}
+	config.Schema.Properties[ahpConfigBranch] = ahptypes.SessionConfigPropertySchema{
+		Type: ahpSchemaString, Title: "Branch", Description: &branchDescription, SessionMutable: &notMutable,
+	}
+	if ahpValidBranch(baseBranch) {
+		config.Values[ahpConfigBaseBranch], _ = json.Marshal(baseBranch)
+	}
+	if ahpValidBranch(branch) {
+		config.Values[ahpConfigBranch], _ = json.Marshal(branch)
+	}
+	return ahptypes.ResolveSessionConfigResult{Schema: config.Schema, Values: config.Values}, nil
 }
 
 // gitCredential returns the user's repository credential, if configured.

@@ -99,6 +99,8 @@ func (s storedChannel) stateKind() (string, any) {
 		return "terminal", state.Terminal
 	case state.Annotations != nil:
 		return "annotations", state.Annotations
+	case state.ResourceWatch != nil:
+		return "resourceWatch", state.ResourceWatch
 	default:
 		return "", state
 	}
@@ -136,6 +138,9 @@ func (s *storedChannel) UnmarshalJSON(data []byte) error {
 	case "annotations":
 		s.State.Annotations = &ahptypes.AnnotationsState{}
 		target = s.State.Annotations
+	case "resourceWatch":
+		s.State.ResourceWatch = &ahptypes.ResourceWatchState{}
+		target = s.State.ResourceWatch
 	default:
 		target = &s.State
 	}

@@ -33,6 +33,7 @@ const (
 	maxFrameBytes               = 4 << 20
 	maxClientIDLength           = 256
 	maxURILength                = 2048
+	maxWatchesPerConnection     = 64
 	defaultListLimit            = 100
 	maxListLimit                = 1000
 	writeTimeout                = 10 * time.Second
@@ -108,6 +109,8 @@ type conn struct {
 	version     string
 	dialect     string
 	subs        map[string]bool
+	// watches are the connection's resource watches, by channel.
+	watches map[string]context.CancelFunc
 }
 
 func newConn(host *Host, principal Principal, ws *websocket.Conn) *conn {
@@ -119,6 +122,7 @@ func newConn(host *Host, principal Principal, ws *websocket.Conn) *conn {
 		handled:   make(chan func(), defaultHandledQueue),
 		done:      make(chan struct{}),
 		subs:      map[string]bool{},
+		watches:   map[string]context.CancelFunc{},
 	}
 }
 
@@ -132,6 +136,7 @@ func (c *conn) run(ctx context.Context) {
 		return
 	}
 	defer c.host.unregister(c)
+	defer c.releaseWatches()
 	// A revocation that landed between the door's check and registration
 	// found no connection to close; check again now that this one is findable.
 	if err := c.host.cfg.Tokens.Recheck(ctx, c.principal); err != nil {
@@ -357,6 +362,12 @@ func (c *conn) dispatch(ctx context.Context, msg inbound) (any, error) {
 		return ahptypes.CompletionsResult{Items: []ahptypes.CompletionItem{}}, nil
 	case "resourceRead":
 		return c.resourceRead(ctx, msg.Params)
+	case "resourceList":
+		return c.resourceList(ctx, msg.Params)
+	case "createResourceWatch":
+		return c.createResourceWatch(ctx, msg.Params)
+	case "resolveSessionConfig":
+		return c.resolveSessionConfig(ctx, msg.Params)
 	default:
 		if strings.HasPrefix(msg.Method, extensionMethodPrefix) {
 			return c.extension(ctx, msg.Method, msg.Params)
@@ -449,6 +460,9 @@ func (c *conn) handleNotification(ctx context.Context, msg inbound) {
 			c.mu.Lock()
 			delete(c.subs, params.Channel)
 			c.mu.Unlock()
+			if isResourceWatchChannel(params.Channel) {
+				c.releaseWatch(params.Channel)
+			}
 		}
 	case "dispatchAction":
 		c.dispatchAction(ctx, msg.Params)

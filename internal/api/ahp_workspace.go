@@ -393,19 +393,30 @@ func (w *ahpWorkspaces) runWithin(ctx context.Context, timeout time.Duration, po
 	return nil
 }
 
-// stream executes argv in the workspace container.
+// stream executes argv in the workspace container. Without a terminal its
+// standard error joins its standard output.
 func (w *ahpWorkspaces) stream(ctx context.Context, pod *corev1.Pod, argv []string, stdin io.Reader, stdout io.Writer, tty bool, sizes remotecommand.TerminalSizeQueue) error {
+	stderr := stdout
+	if tty {
+		stderr = nil
+	}
+	return w.exec(ctx, pod, argv, remotecommand.StreamOptions{Stdin: stdin, Stdout: stdout, Stderr: stderr, Tty: tty, TerminalSizeQueue: sizes})
+}
+
+// streamOutput executes argv in the workspace container, keeping only its
+// standard output.
+func (w *ahpWorkspaces) streamOutput(ctx context.Context, pod *corev1.Pod, argv []string, stdout io.Writer) error {
+	return w.exec(ctx, pod, argv, remotecommand.StreamOptions{Stdout: stdout, Stderr: io.Discard})
+}
+
+func (w *ahpWorkspaces) exec(ctx context.Context, pod *corev1.Pod, argv []string, options remotecommand.StreamOptions) error {
 	req := w.clientset.CoreV1().RESTClient().Post().Resource("pods").Namespace(pod.Namespace).Name(pod.Name).SubResource("exec").
 		VersionedParams(&corev1.PodExecOptions{
-			Container: ahpWorkspaceContainer, Command: argv, Stdin: stdin != nil, Stdout: true, Stderr: !tty, TTY: tty,
+			Container: ahpWorkspaceContainer, Command: argv, Stdin: options.Stdin != nil, Stdout: true, Stderr: options.Stderr != nil, TTY: options.Tty,
 		}, scheme.ParameterCodec)
 	executor, err := remotecommand.NewWebSocketExecutor(w.rest, "GET", req.URL().String())
 	if err != nil {
 		return err
-	}
-	options := remotecommand.StreamOptions{Stdin: stdin, Stdout: stdout, Tty: tty, TerminalSizeQueue: sizes}
-	if !tty {
-		options.Stderr = stdout
 	}
 	return executor.StreamWithContext(ctx, options)
 }
