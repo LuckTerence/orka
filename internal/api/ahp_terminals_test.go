@@ -71,7 +71,7 @@ func TestAHPTerminalOutputFlushesQuietOutput(t *testing.T) {
 }
 
 func TestAHPValidBranch(t *testing.T) {
-	for _, good := range []string{"main", "sozercan-expert-succotash", "orka/session-1a2b", "feature/x.y_z"} {
+	for _, good := range []string{"main", "octocat-quiet-meadow", "orka/session-1a2b", "feature/x.y_z"} {
 		require.True(t, ahpValidBranch(good), good)
 	}
 	for _, bad := range []string{"", "-x", "a..b", "a/../b", ".hidden", "a/.b", "x.lock", "a b", "a;b", "a$(b)", "/abs", "a//b"} {
