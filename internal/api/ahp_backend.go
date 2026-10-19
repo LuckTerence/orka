@@ -72,9 +72,10 @@ const (
 	ahpPendingMax   = 10
 	ahpPendingIDMax = 128
 
-	// ahpDefaultProvider is the agent clients start sessions on when they
-	// name none, and the one that offers every model.
-	ahpDefaultProvider = corev1alpha1.AgentRuntimeCopilot
+	// ahpAgentProvider is the one agent this backend offers. It offers every
+	// model the user may run and runs each on the runtime that serves it. Its
+	// id is copilot because some clients send only to an agent with that id.
+	ahpAgentProvider = corev1alpha1.AgentRuntimeCopilot
 )
 
 // The Copilot dialect: the extension keys and commands the GitHub Copilot app
@@ -87,15 +88,16 @@ const (
 	ahpExtensionGetPlan             = "extensions/getPlan"
 )
 
+// ahpBuiltInRuntimes are the runtimes AHP sessions run on, in the order a
+// model several of them serve is offered and run.
 var ahpBuiltInRuntimes = []struct {
-	runtime     corev1alpha1.AgentRuntimeType
-	displayName string
-	name        string
+	runtime corev1alpha1.AgentRuntimeType
+	name    string
 }{
-	{corev1alpha1.AgentRuntimeCopilot, "Copilot CLI on Orka", "Copilot CLI"},
-	{corev1alpha1.AgentRuntimeClaude, "Claude Code on Orka", "Claude Code"},
-	{corev1alpha1.AgentRuntimeCodex, "Codex on Orka", "Codex"},
-	{corev1alpha1.AgentRuntimeOpencode, "OpenCode on Orka", "OpenCode"},
+	{corev1alpha1.AgentRuntimeCopilot, "Copilot CLI"},
+	{corev1alpha1.AgentRuntimeClaude, "Claude Code"},
+	{corev1alpha1.AgentRuntimeCodex, "Codex"},
+	{corev1alpha1.AgentRuntimeOpencode, "OpenCode"},
 }
 
 // ahpRuntimeName is a built-in runtime's short display name.
@@ -429,7 +431,8 @@ func ahpModelConfigSchema() *ahptypes.ConfigSchema {
 	}}
 }
 
-// Agents lists one AHP agent per built-in runtime the user has Agents for.
+// Agents lists one AHP agent offering every model the user has an Agent for,
+// each labelled with the runtime that runs it.
 func (b *ahpBackend) Agents(ctx context.Context, principal ahphost.Principal) ([]ahptypes.AgentInfo, error) {
 	b.recoverTurns(ctx, principal)
 	if b.mayUseWorkspace(principal) == nil {
@@ -439,47 +442,32 @@ func (b *ahpBackend) Agents(ctx context.Context, principal ahphost.Principal) ([
 	if err != nil {
 		return nil, err
 	}
-	var agents []ahptypes.AgentInfo
 	// Every listed model passed the user's Agent authorization; clients may
 	// refuse to send to a model the host does not mark enabled.
 	enabled := ahptypes.PolicyStateEnabled
+	var models []ahptypes.SessionModelInfo
+	listed := map[string]bool{}
 	for _, runtime := range ahpBuiltInRuntimes {
-		var models []ahptypes.SessionModelInfo
-		listed := map[string]bool{}
 		for _, choice := range choices {
-			if choice.Runtime != runtime.runtime {
+			// A model several runtimes serve is offered once, on the first
+			// of them, which is where ahpChooseModel runs it.
+			if choice.Runtime != runtime.runtime || listed[choice.Model] {
 				continue
 			}
 			listed[choice.Model] = true
 			models = append(models, ahptypes.SessionModelInfo{
-				Id: choice.Model, Provider: string(runtime.runtime), Name: choice.Model, ConfigSchema: ahpModelConfigSchema(),
-				PolicyState: &enabled,
+				Id: choice.Model, Provider: string(ahpAgentProvider), Name: choice.Model + " (" + runtime.name + ")",
+				ConfigSchema: ahpModelConfigSchema(), PolicyState: &enabled,
 			})
 		}
-		if runtime.runtime == ahpDefaultProvider {
-			// Clients that start every session on the default agent still
-			// reach every model: one its runtime does not serve runs on the
-			// runtime that does.
-			for _, choice := range choices {
-				if listed[choice.Model] {
-					continue
-				}
-				listed[choice.Model] = true
-				models = append(models, ahptypes.SessionModelInfo{
-					Id: choice.Model, Provider: string(runtime.runtime), ConfigSchema: ahpModelConfigSchema(), PolicyState: &enabled,
-					Name: choice.Model + " (" + ahpRuntimeName(choice.Runtime) + ")",
-				})
-			}
-		}
-		if len(models) == 0 {
-			continue
-		}
-		agents = append(agents, ahptypes.AgentInfo{
-			Provider: string(runtime.runtime), DisplayName: runtime.displayName, Models: models,
-			Description: "Runs " + string(runtime.runtime) + " as an Orka Task in your namespace, with Orka's policy and credentials.",
-		})
 	}
-	return agents, nil
+	if len(models) == 0 {
+		return nil, nil
+	}
+	return []ahptypes.AgentInfo{{
+		Provider: string(ahpAgentProvider), DisplayName: "Orka", Models: models,
+		Description: "Runs each message as an Orka Task in your namespace, with Orka's policy and credentials, on the runtime that serves the chosen model.",
+	}}, nil
 }
 
 func (b *ahpBackend) projects(ctx context.Context, userKey string) ([]ahpProject, error) {
@@ -903,23 +891,18 @@ func (b *ahpBackend) resolveModel(ctx context.Context, principal ahphost.Princip
 }
 
 // ahpChooseModel picks the Agent for a model on a session's provider. The
-// default provider also reaches models only other runtimes serve.
+// offered agent runs a model on the first built-in runtime that serves it, as
+// Agents lists it; a session on another provider stays on that runtime.
 func ahpChooseModel(choices []ahpAgentChoice, provider, model string) (ahpAgentChoice, bool) {
-	var other *ahpAgentChoice
-	for i := range choices {
-		choice := choices[i]
-		if model != "" && choice.Model != model {
+	for _, runtime := range ahpBuiltInRuntimes {
+		if provider != string(ahpAgentProvider) && string(runtime.runtime) != provider {
 			continue
 		}
-		if string(choice.Runtime) == provider {
-			return choice, true
+		for _, choice := range choices {
+			if choice.Runtime == runtime.runtime && (model == "" || choice.Model == model) {
+				return choice, true
+			}
 		}
-		if provider == string(ahpDefaultProvider) && other == nil {
-			other = &choices[i]
-		}
-	}
-	if other != nil {
-		return *other, true
 	}
 	return ahpAgentChoice{}, false
 }

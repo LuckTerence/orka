@@ -247,16 +247,20 @@ func TestAHPBackendOffersBuiltInRuntimesAndProjects(t *testing.T) {
 	root := result.Snapshot.State.Root
 	require.JSONEq(t, `{"available":true}`, string(root.Meta[ahpCopilotProjectManagementMeta]))
 	providers := map[string][]string{}
+	var names []string
 	for _, agent := range root.Agents {
 		for _, model := range agent.Models {
 			providers[agent.Provider] = append(providers[agent.Provider], model.Id)
+			names = append(names, model.Name)
 			require.NotNil(t, model.PolicyState)
 			require.Equal(t, ahptypes.PolicyStateEnabled, *model.PolicyState, "listed models are enabled for the user")
 		}
 		require.Empty(t, agent.ProtectedResources, "Orka never asks for the person's own credentials")
 	}
-	require.Equal(t, map[string][]string{"copilot": {"gpt-5.4-nano", "claude-haiku-5.5", "claude-sonnet-5"}, "claude": {"claude-sonnet-5"}}, providers,
-		"Agents are offered in name order, and the default agent also offers what only other runtimes serve")
+	require.Equal(t, map[string][]string{"copilot": {"gpt-5.4-nano", "claude-haiku-5.5", "claude-sonnet-5"}}, providers,
+		"one agent offers every model, in runtime order and then Agent name order")
+	require.Equal(t, []string{"gpt-5.4-nano (Copilot CLI)", "claude-haiku-5.5 (Copilot CLI)", "claude-sonnet-5 (Claude Code)"}, names,
+		"each model names the runtime that runs it")
 
 	for _, bad := range []string{"http://github.com/a/b", "https://user:pw@github.com/a/b", "https://github.com/a", "https://github.com/a/b?x=1"} {
 		err := c.Request(ctx, ahpExtensionCloneProject, map[string]string{"url": bad}, nil)
@@ -810,6 +814,27 @@ func TestAHPRelativeTitle(t *testing.T) {
 	}
 }
 
+func TestAHPChooseModel(t *testing.T) {
+	choices := []ahpAgentChoice{
+		{Agent: "a-opencode", Runtime: corev1alpha1.AgentRuntimeOpencode, Model: "shared"},
+		{Agent: "b-claude", Runtime: corev1alpha1.AgentRuntimeClaude, Model: "shared"},
+		{Agent: "c-codex", Runtime: corev1alpha1.AgentRuntimeCodex, Model: "codex-only"},
+	}
+	choice, ok := ahpChooseModel(choices, string(ahpAgentProvider), "shared")
+	require.True(t, ok)
+	require.Equal(t, "b-claude", choice.Agent, "the offered agent runs a model on the first runtime in listing order, not the first Agent by name")
+	choice, ok = ahpChooseModel(choices, string(ahpAgentProvider), "")
+	require.True(t, ok)
+	require.Equal(t, "b-claude", choice.Agent)
+	choice, ok = ahpChooseModel(choices, string(corev1alpha1.AgentRuntimeOpencode), "shared")
+	require.True(t, ok)
+	require.Equal(t, "a-opencode", choice.Agent, "a session on a runtime's own provider stays on that runtime")
+	_, ok = ahpChooseModel(choices, string(corev1alpha1.AgentRuntimeOpencode), "codex-only")
+	require.False(t, ok)
+	_, ok = ahpChooseModel(choices, string(ahpAgentProvider), "missing")
+	require.False(t, ok)
+}
+
 func TestAHPBackendSwitchesModelsAcrossRuntimesAndBranches(t *testing.T) {
 	gitSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "git-token", Namespace: ahpTestNamespace}, Data: map[string][]byte{"token": []byte("not-a-real-token")}}
 	env := newAHPTestEnv(t, gitSecret)
@@ -820,7 +845,7 @@ func TestAHPBackendSwitchesModelsAcrossRuntimesAndBranches(t *testing.T) {
 	require.NoError(t, err)
 	alice := ahphost.UserKey("https://issuer.example", "alice")
 
-	// A model only another runtime serves runs there, from the default agent.
+	// A model only another runtime serves runs there.
 	_, err = c.Dispatch(ctx, chat, ahptypes.StateAction{Value: &ahptypes.ChatTurnStartedAction{
 		Type: ahptypes.ActionTypeChatTurnStarted, TurnId: "turn-1", StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
 		Message: ahptypes.Message{Text: "start", Origin: ahptypes.MessageOrigin{Kind: ahptypes.MessageKindUser}, Model: &ahptypes.ModelSelection{Id: "claude-sonnet-5"}},

@@ -5,7 +5,7 @@ description: "Install, expose and connect desktop Agent Host Protocol clients so
 
 Orka serves the [Agent Host Protocol](https://microsoft.github.io/agent-host-protocol/specification/overview.html)
 (AHP) at `/ahp`. A desktop AHP client connects to Orka as a remote agent host. It sees
-Orka's built-in runtimes as agents, picks a repository, and chats. Each message runs as an
+the models of Orka's built-in runtimes, picks a repository, and chats. Each message runs as an
 agent Task in an Orka Session, governed like any other Task: Orka's policy, credentials,
 provider proxy and audit trail apply. The design is
 [ADR 0034](https://github.com/orka-agents/orka/blob/main/docs/adr/0034-agent-host-protocol-api.md).
@@ -201,14 +201,18 @@ token. The same operations are available over the API; see the
 
 ## What a person sees
 
-- **Agents and models.** Each Agent in the person's namespace that uses a built-in
-  runtime and names a model becomes one model of that runtime's agent: for example an
-  Agent with `runtime.type: copilot` and `model.name: gpt-5-mini`. Models the person's
-  token could not run are not offered. The `copilot` agent, which clients use when they
-  name none, also offers the models only other runtimes serve, labelled with their
-  runtime, and runs them there.
+- **Agents and models.** Orka offers one agent, shown as Orka, with the id `copilot`
+  because some clients send only to an agent with that id. Each Agent in the person's
+  namespace that uses a built-in runtime and names a model becomes one of its models,
+  labelled with that runtime, and turns on that model run there: for example an Agent with
+  `runtime.type: claude` and `model.name: claude-sonnet-5` is offered as
+  `claude-sonnet-5 (Claude Code)`. Models the person's token could not run are not
+  offered. A model several runtimes serve is offered once, on the first of Copilot CLI,
+  Claude Code, Codex and OpenCode that serves it.
 - **Projects.** The person adds a repository by its https URL. Each turn's Task clones
   it in its own workspace; with workspaces on, the person's workspace has a checkout too.
+  Orka looks up a repository's default branch on github.com only, so a project on another
+  host needs the session's `baseBranch` set by the client.
 - **Sessions.** A session runs in an Orka Session, which is bound to one runtime profile.
   When the person picks another model, the session moves to a new Orka Session that
   starts with the conversation so far as context. A branch a turn already published

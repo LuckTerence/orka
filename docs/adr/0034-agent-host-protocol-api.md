@@ -112,12 +112,14 @@ an AHP backend for agent hosts is a later decision.
 
 ### The ACP backend
 
-- Agents: Orka's built-in runtimes (copilot, claude, codex, opencode). Each Agent in the
-  user's namespace on a built-in runtime with a model is one model of that runtime's AHP
-  agent, offered only when the user's token would let them run it. The default agent
-  (copilot), which clients use when they name none, also offers the models only other
-  runtimes serve and runs them there. No agent advertises a protected resource: Orka never
-  asks for the user's own credentials.
+- Agents: one AHP agent runs Orka's built-in runtimes (copilot, claude, codex, opencode).
+  Each Agent in the user's namespace on a built-in runtime with a model is one of its
+  models, labelled with that runtime and run there, offered only when the user's token
+  would let them run it. A model several runtimes serve is offered once, on the first in
+  that order. The agent's id is `copilot`, because some clients send only to an agent with
+  that id; one agent instead of one per runtime keeps clients that show every agent from
+  listing each model twice. It advertises no protected resource: Orka never asks for the
+  user's own credentials.
 - An AHP session runs in an Orka Session. An AHP turn is a Task with `sessionRef`, the
   chosen Agent and the project's repository in `spec.workspace`, created and authorized as
   the person. An Orka Session is bound to one runtime profile, so when the person picks

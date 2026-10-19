@@ -34,7 +34,10 @@ import (
 )
 
 const (
-	ahpE2EAgent        = "e2e-ahp-codex"
+	ahpE2EAgent = "e2e-ahp-codex"
+	// ahpE2EProvider is the one AHP agent Orka offers; it runs the codex
+	// Agent's model on Codex.
+	ahpE2EProvider     = "copilot"
 	ahpE2ESubject      = "e2e-ahp-person"
 	ahpE2ERepository   = "https://github.com/octocat/Hello-World"
 	ahpE2EBaseBranch   = "master"
@@ -172,7 +175,7 @@ var _ = Describe("Agent Host Protocol host", Ordered, Serial, Label("agent-runti
 		Expect(root.Snapshot.State.Root).NotTo(BeNil())
 		var models []string
 		for _, agent := range root.Snapshot.State.Root.Agents {
-			if agent.Provider != "codex" {
+			if agent.Provider != ahpE2EProvider {
 				continue
 			}
 			for _, model := range agent.Models {
@@ -201,7 +204,7 @@ var _ = Describe("Agent Host Protocol host", Ordered, Serial, Label("agent-runti
 
 		By("creating a session in the project")
 		sessionURI = fmt.Sprintf("ahp-session:/e2e-%d", time.Now().UnixNano())
-		provider := "codex"
+		provider := ahpE2EProvider
 		Expect(client.Request(ctx, "createSession", ahptypes.CreateSessionParams{
 			Channel: sessionURI, Provider: &provider, WorkingDirectories: []string{"file://" + cloned.Project.Path},
 			Config: map[string]json.RawMessage{
