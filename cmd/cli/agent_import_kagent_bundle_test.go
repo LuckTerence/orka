@@ -127,8 +127,24 @@ func TestKagentV0ImageDigestComesFromTheAgentsPod(t *testing.T) {
 	}
 }
 
+// kagentRuntimeState is an AgentRuntime as Orka's API returns it, which has
+// observed generation 1.
+func kagentRuntimeState(ready bool, generation int, deleting bool) map[string]any {
+	status := "False"
+	if ready {
+		status = "True"
+	}
+	metadata := map[string]any{"generation": float64(generation)}
+	if deleting {
+		metadata["deletionTimestamp"] = "2026-10-19T00:00:00Z"
+	}
+	return map[string]any{"metadata": metadata, "status": map[string]any{"ready": ready, "observedGeneration": float64(1),
+		"conditions": []any{map[string]any{"type": "Ready", "status": status}}}}
+}
+
 // Activating a bundle points the Orka Agent at its runtime only once Orka
-// reports that runtime Ready.
+// would admit Tasks to that runtime: Ready for its current spec, and not being
+// deleted.
 func TestAgentImportKagentCmdActivatesABundleOnlyOnAReadyRuntime(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	dir := t.TempDir()
@@ -143,9 +159,8 @@ func TestAgentImportKagentCmdActivatesABundleOnlyOnAReadyRuntime(t *testing.T) {
 	if _, err := runKagentImport(t, args...); err == nil || !strings.Contains(err.Error(), "is not registered") || api.creates != 0 {
 		t.Fatalf("activation before registration = %v (%d creates)", err, api.creates)
 	}
-	notReady := map[string]any{"status": map[string]any{"conditions": []any{map[string]any{"type": "Ready", "status": "False"}}}}
 	api.mu.Lock()
-	api.runtimes[bundle.Runtime] = notReady
+	api.runtimes[bundle.Runtime] = kagentRuntimeState(false, 1, false)
 	api.mu.Unlock()
 	// With two Agents, one unready runtime keeps both where they are.
 	two := writeTempFile(t, governedKagentV0Fixture+"---\n"+strings.ReplaceAll(governedKagentV0Fixture, "probe-gov", "probe-two"))
@@ -153,10 +168,9 @@ func TestAgentImportKagentCmdActivatesABundleOnlyOnAReadyRuntime(t *testing.T) {
 	if _, err := runKagentImport(t, kagentBundleArgs(two, twoDir, "--dry-run")...); err != nil {
 		t.Fatal(err)
 	}
-	ready := map[string]any{"status": map[string]any{"conditions": []any{map[string]any{"type": "Ready", "status": "True"}}}}
 	other, _ := readBundle(t, filepath.Join(twoDir, "probe-two"))
 	api.mu.Lock()
-	api.runtimes[other.Runtime] = ready
+	api.runtimes[other.Runtime] = kagentRuntimeState(true, 1, false)
 	api.mu.Unlock()
 	if _, err := runKagentImport(t, kagentBundleArgs(two, twoDir, "--server", srv.URL, "-n", "orka-system")...); err == nil || api.creates != 0 {
 		t.Fatalf("a partial activation = %v (%d creates)", err, api.creates)
@@ -164,9 +178,29 @@ func TestAgentImportKagentCmdActivatesABundleOnlyOnAReadyRuntime(t *testing.T) {
 	if _, err := runKagentImport(t, args...); err == nil || !strings.Contains(err.Error(), "is not Ready") || api.creates != 0 {
 		t.Fatalf("activation on an unready runtime = %v (%d creates)", err, api.creates)
 	}
+	for state, want := range map[string]map[string]any{
+		"has not observed its current spec": kagentRuntimeState(true, 2, false),
+		"is being deleted":                  kagentRuntimeState(true, 1, true),
+	} {
+		api.mu.Lock()
+		api.runtimes[bundle.Runtime] = want
+		api.mu.Unlock()
+		if _, err := runKagentImport(t, args...); err == nil || !strings.Contains(err.Error(), state) || api.creates != 0 {
+			t.Fatalf("activation on a runtime that %s = %v (%d creates)", state, err, api.creates)
+		}
+	}
 	api.mu.Lock()
-	api.runtimes[bundle.Runtime] = map[string]any{"status": map[string]any{"conditions": []any{map[string]any{"type": "Ready", "status": "True"}}}}
+	api.runtimes[bundle.Runtime] = kagentRuntimeState(true, 1, false)
 	api.mu.Unlock()
+	// Activation switches the Agents to the bundles that were deployed, not
+	// to what other arguments would pin.
+	if _, err := runKagentImport(t, append(args, "--runtime-revision", "4")...); err == nil ||
+		!strings.Contains(err.Error(), "is not the one these arguments pin") || api.creates != 0 {
+		t.Fatalf("activation with other arguments = %v (%d creates)", err, api.creates)
+	}
+	if _, err := runKagentImport(t, kagentBundleArgs(path, t.TempDir(), "--server", srv.URL, "-n", "orka-system")...); err == nil || api.creates != 0 {
+		t.Fatalf("activation without bundles = %v (%d creates)", err, api.creates)
+	}
 	if _, err := runKagentImport(t, args...); err != nil || api.creates != 1 {
 		t.Fatalf("activation on a ready runtime = %v (%d creates)", err, api.creates)
 	}
@@ -227,8 +261,15 @@ func TestRenderKagentRuntime(t *testing.T) {
 	if labels[kagentBrokerLabel] != "true" || labels[kagentRuntimeLabel] != bundle.Runtime || labels[kagentRelayLabel] != "probe-gov" {
 		t.Fatalf("pod labels = %v", labels)
 	}
-	if role := findKind(workload, "Role"); role == nil || kagentString(role, "metadata", "namespace") != "kagent" {
-		t.Fatalf("a v0 runtime needs read access to the Agent's pods: %v", role)
+	// The same bundle may run in several Orka namespaces, which share the
+	// Agent's namespace.
+	for _, kind := range []string{"Role", "RoleBinding"} {
+		reader := findKind(workload, kind)
+		if reader == nil || kagentString(reader, "metadata", "namespace") != "kagent" ||
+			kagentString(reader, "metadata", "name") != bundle.Runtime+".orka-system.agent-pods" ||
+			kagentMap(reader, "metadata", "labels")[kagentRuntimeNamespaceLabel] != "orka-system" {
+			t.Fatalf("a v0 runtime needs its own read access to the Agent's pods: %v", reader)
+		}
 	}
 	if !bytes.Contains(mustJSON(t, workload), []byte(`"value":"3"`)) || !bytes.Contains(mustJSON(t, workload), []byte(bundle.ConfigDigest)) {
 		t.Fatal("the supervisor is missing the controller epoch or configuration digest")
@@ -240,7 +281,7 @@ func TestRenderKagentRuntime(t *testing.T) {
 
 	checkRenderedRelay(t, bundleDir, bundle, options)
 	checkRenderedRegistration(t, bundleDir, bundle, config, options)
-	options.Part = kagentPartRegistration
+	options.Part, options.DeploymentUID = kagentPartRegistration, "6f1c2b9e-0000-4000-8000-000000000001"
 	options.Capabilities = writeCapabilities(t, "sha256:"+strings.Repeat("9", 64))
 
 	// A bundle edited after the import no longer matches its pin.
@@ -336,7 +377,16 @@ func checkRenderedRegistration(t *testing.T, bundleDir string, bundle kagentBund
 		t.Fatal(err)
 	}
 	options.Part, options.Capabilities = kagentPartRegistration, writeCapabilities(t, profile.Profile.Digest)
+	if _, err := renderKagentRuntime(bundleDir, options); err == nil || !strings.Contains(err.Error(), "--deployment-uid") {
+		t.Fatalf("a registration without the Deployment = %v", err)
+	}
+	options.DeploymentUID = "6f1c2b9e-0000-4000-8000-000000000001"
 	registration := findKind(renderBundle(t, bundleDir, options), "AgentRuntime")
+	// Orka restarts the supervisor with its new epoch after it restarts.
+	recovery := kagentMap(registration, "spec", "deployment", "kubernetesRecovery")
+	if recovery["deploymentName"] != bundle.Runtime || recovery["deploymentUID"] != options.DeploymentUID || recovery["containerName"] != "supervisor" {
+		t.Fatalf("registration recovery = %v", recovery)
+	}
 	if kagentString(registration, "spec", "capabilities", "profile", "digest") != profile.Profile.Digest ||
 		kagentString(registration, "spec", "clientAuth", "controllerBearerTokenSecretRef", "name") != bundle.Runtime+"-auth" ||
 		kagentMap(registration, "spec", "capabilities", "workspaceGovernance")["trusted"] != false ||
@@ -346,6 +396,33 @@ func checkRenderedRegistration(t *testing.T, bundleDir string, bundle kagentBund
 	options.Capabilities = writeCapabilities(t, "sha256:"+strings.Repeat("9", 64))
 	if _, err := renderKagentRuntime(bundleDir, options); err == nil || !strings.Contains(err.Error(), "not the rendered") {
 		t.Fatalf("a runtime serving another profile = %v", err)
+	}
+}
+
+// A relay Service selects one runtime, so governed Agents cannot share one.
+func TestKagentBundleRefusesASharedRelay(t *testing.T) {
+	agent := func(name, relay string) kagentWrappedAgent {
+		return kagentWrappedAgent{Source: "kagent/" + name, Manifest: map[string]any{"metadata": map[string]any{"name": name}},
+			Mode: kagentMode{Mode: kagentModeGoverned, RelayOrigin: relay}}
+	}
+	options := kagentWrapperOptions{BundleDir: t.TempDir()}
+	if err := options.validateBundle([]kagentWrappedAgent{agent("a", "http://a-relay.orka-system.svc:8092"),
+		agent("b", "http://b-relay.orka-system.svc:8092")}); err != nil {
+		t.Fatal(err)
+	}
+	err := options.validateBundle([]kagentWrappedAgent{agent("a", "http://shared.orka-system.svc:8092"),
+		agent("b", "http://shared.orka-system.svc.cluster.local:9000")})
+	if err == nil || !strings.Contains(err.Error(), "share relay Service orka-system/shared") {
+		t.Fatalf("a shared relay = %v", err)
+	}
+}
+
+// A governed Agent with no tools registers explicit empty lists: Orka refuses
+// a null tool policy.
+func TestKagentBundlePolicyListsAreNeverNull(t *testing.T) {
+	allowed, approvalRequired := kagentWrapperOptions{}.kagentBundlePolicy(kagentWrappedAgent{Mode: kagentMode{Mode: kagentModeGoverned}})
+	if allowed == nil || approvalRequired == nil || len(allowed) != 0 || len(approvalRequired) != 0 {
+		t.Fatalf("policy = %#v, %#v", allowed, approvalRequired)
 	}
 }
 

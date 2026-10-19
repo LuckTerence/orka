@@ -47,11 +47,17 @@ const (
 	kagentRuntimeLabel = "orka.ai/kagent-runtime"
 	kagentAgentLabel   = "orka.ai/kagent-agent"
 	// kagentRelayLabel selects the runtime that serves an Agent's relay.
-	kagentRelayLabel      = "orka.ai/kagent-relay"
-	kagentRelayPort       = 8092
-	kagentControlPort     = 8080
-	kagentControlPortName = "control"
-	kagentBrokerContainer = "broker"
+	kagentRelayLabel = "orka.ai/kagent-relay"
+	// kagentRuntimeNamespaceLabel marks a v0 runtime's pod reader in the
+	// Agent's namespace, which runtimes of other Orka namespaces share.
+	kagentRuntimeNamespaceLabel = "orka.ai/kagent-runtime-namespace"
+	kagentRelayPort             = 8092
+	kagentControlPort           = 8080
+	kagentControlPortName       = "control"
+	kagentBrokerContainer       = "broker"
+	// kagentSupervisorContainer is the container Orka's Kubernetes recovery
+	// restarts, the one whose boot it drains.
+	kagentSupervisorContainer = "supervisor"
 	// kagentBrokerUID is the wrapper image's non-root user.
 	kagentBrokerUID        = 65532
 	kagentPartWorkload     = "workload"
@@ -71,6 +77,7 @@ type kagentRenderOptions struct {
 	StorageClass    string
 	Part            string
 	Capabilities    string
+	DeploymentUID   string
 	// SubstrateNamespace is where kagent v1's Substrate egress runs.
 	SubstrateNamespace string
 }
@@ -93,8 +100,12 @@ output is a JSON List for kubectl apply.
                 this runtime. Apply it before the registration: Orka's
                 conformance prompt reaches kagent, which calls the relay.
   registration  The AgentRuntime. It needs --capabilities, the runtime's
-                GET /v2/capabilities answer, and is created once the
-                Deployment is ready.
+                GET /v2/capabilities answer, and --deployment-uid, the UID of
+                the runtime's Deployment, and is created once the Deployment
+                is ready. It opts into Orka's Kubernetes recovery, which
+                drains and restarts the runtime after an Orka controller
+                restart: annotate the Deployment with
+                orka.ai/agent-runtime-recovery-uid=<the AgentRuntime's UID>.
 
 The Secret <runtime>-auth must exist with the keys controller-token,
 capability-secret, and provider-token, and, for a governed Agent,
@@ -119,6 +130,7 @@ model-upstream-token. It is never rendered.`,
 	cmd.Flags().StringVar(&options.StorageClass, "storage-class", "", "StorageClass of the broker ledger volume (default: the cluster default)")
 	cmd.Flags().StringVar(&options.Part, "part", kagentPartWorkload, "Part to render: workload, relay, or registration")
 	cmd.Flags().StringVar(&options.Capabilities, "capabilities", "", "With --part registration, the runtime's GET /v2/capabilities answer (file)")
+	cmd.Flags().StringVar(&options.DeploymentUID, "deployment-uid", "", "With --part registration, the UID of the runtime's Deployment, which Orka recovers")
 	cmd.Flags().StringVar(&options.SubstrateNamespace, "substrate-namespace", "ate-system", "With --part relay, the namespace of kagent v1's Substrate egress, which carries the Agent's calls to the relay")
 	return cmd
 }
@@ -381,7 +393,7 @@ func kagentWorkload(bundle kagentBundle, profile kagentRuntimeProfile, options k
 		"ORKA_ACP_SESSION_BASE_DIR":             "/sessions",
 	})
 	supervisor := corev1.Container{
-		Name: "supervisor", Image: options.RuntimeImage, ImagePullPolicy: corev1.PullIfNotPresent, Env: kagentEnv(values),
+		Name: kagentSupervisorContainer, Image: options.RuntimeImage, ImagePullPolicy: corev1.PullIfNotPresent, Env: kagentEnv(values),
 		Ports:           []corev1.ContainerPort{{Name: kagentControlPortName, ContainerPort: kagentControlPort}},
 		SecurityContext: kagentSecurityContext(0, "CHOWN", "KILL", "SETGID", "SETUID"),
 		Resources:       kagentResources("100m", "256Mi", "2", "2Gi"),
@@ -437,13 +449,18 @@ func kagentWorkload(bundle kagentBundle, profile kagentRuntimeProfile, options k
 			}}}})
 		broker.VolumeMounts = append(broker.VolumeMounts, corev1.VolumeMount{Name: "broker-kube-api",
 			MountPath: "/var/run/secrets/kubernetes.io/serviceaccount", ReadOnly: true})
-		role := name + "-agent-pods"
+		// The same bundle may run in several Orka namespaces, so the pod
+		// reader's name and labels name the runtime's namespace too. Neither
+		// name contains a dot.
+		role := name + "." + namespace + ".agent-pods"
+		readerLabels := maps.Clone(labels)
+		readerLabels[kagentRuntimeNamespaceLabel] = namespace
 		items = append(items,
 			&rbacv1.Role{TypeMeta: metav1.TypeMeta{APIVersion: "rbac.authorization.k8s.io/v1", Kind: "Role"},
-				ObjectMeta: kagentMeta(role, bundle.KagentNamespace, labels),
+				ObjectMeta: kagentMeta(role, bundle.KagentNamespace, readerLabels),
 				Rules:      []rbacv1.PolicyRule{{APIGroups: []string{""}, Resources: []string{"pods"}, Verbs: []string{"get", "list"}}}},
 			&rbacv1.RoleBinding{TypeMeta: metav1.TypeMeta{APIVersion: "rbac.authorization.k8s.io/v1", Kind: "RoleBinding"},
-				ObjectMeta: kagentMeta(role, bundle.KagentNamespace, labels),
+				ObjectMeta: kagentMeta(role, bundle.KagentNamespace, readerLabels),
 				RoleRef:    rbacv1.RoleRef{APIGroup: "rbac.authorization.k8s.io", Kind: "Role", Name: role},
 				Subjects:   []rbacv1.Subject{{Kind: "ServiceAccount", Name: account, Namespace: namespace}}},
 		)
@@ -558,6 +575,9 @@ func kagentRegistration(bundle kagentBundle, profile kagentRuntimeProfile, optio
 	if capabilities.Limits == nil || capabilities.WorkspaceGovernance == nil {
 		return nil, fmt.Errorf("the runtime reports no limits or workspaceGovernance")
 	}
+	if options.DeploymentUID == "" {
+		return nil, fmt.Errorf("--part registration needs --deployment-uid, the UID of the runtime's Deployment")
+	}
 	name, namespace := bundle.Runtime, options.Namespace
 	contract := corev1alpha1.AgentRuntimeContractHarnessV2
 	return &corev1alpha1.AgentRuntime{
@@ -566,7 +586,14 @@ func kagentRegistration(bundle kagentBundle, profile kagentRuntimeProfile, optio
 		Spec: corev1alpha1.AgentRuntimeRegistrySpec{
 			ContractVersion: &contract,
 			Deployment: corev1alpha1.AgentRuntimeDeploymentSpec{Mode: corev1alpha1.AgentRuntimeDeploymentModeExternalEndpoint,
-				Endpoint: "http://" + name + "." + namespace + ".svc.cluster.local:" + strconv.Itoa(kagentControlPort)},
+				Endpoint: "http://" + name + "." + namespace + ".svc.cluster.local:" + strconv.Itoa(kagentControlPort),
+				// The supervisor reads Orka's controller epoch once, at start.
+				// Recovery lets Orka drain it and restart it with the new
+				// epoch after the controller restarts, which a runtime
+				// outside it would wait for by hand.
+				KubernetesRecovery: &corev1alpha1.AgentRuntimeKubernetesRecoverySpec{
+					DeploymentName: name, DeploymentUID: options.DeploymentUID, ContainerName: kagentSupervisorContainer,
+				}},
 			ClientAuth: corev1alpha1.AgentRuntimeClientAuth{
 				ControllerBearerTokenSecretRef: &corev1alpha1.AgentRuntimeSecretKeyReference{Name: name + "-auth", Key: "controller-token"},
 				OperationCapabilitySecretRef:   &corev1alpha1.AgentRuntimeSecretKeyReference{Name: name + "-auth", Key: "capability-secret"},

@@ -104,29 +104,38 @@ each pin gets its own runtime, named `<agent>-kagent-<digest>`:
    activate the new runtime, governed turns on the old runtime fail their
    tool and model calls.
 
-3. Point the Orka Agent at the new runtime, with the same import arguments
-   minus `--dry-run`:
+3. Point the Orka Agent at the new runtime, with the import arguments that
+   wrote the bundle, minus `--dry-run`:
 
    ```bash
    KUBECTL_CONTEXT=<context> scripts/kagent-runtime.sh activate bundle/<agent> -- \
-     -f export.yaml --bundle-dir bundle <the other import flags>
+     -f export.yaml <the other import flags>
    ```
 
+   The script passes `--bundle-dir`, the bundle's directory, itself.
+
    The import switches every Agent in the export, and refuses unless all of
-   their runtimes are Ready. The script also refuses while the relay of a
-   governed Agent in the bundle directory selects another runtime, for
-   example after you deployed a newer one; deploying the bundle again moves
-   the relay back.
+   their runtimes are Ready, and unless these arguments pin exactly the
+   bundles in the directory, which are the ones you deployed. The script also
+   refuses while the relay of a governed Agent in the bundle directory selects
+   another runtime, for example after you deployed a newer one; deploying the
+   bundle again moves the relay back.
 
 4. Retire the Agent's older runtimes. Orka drains each one first, so this
    waits until their sessions are done. It refuses while a governed Agent's
-   relay selects another runtime:
+   relay selects another runtime. If it stops before it is done, run it
+   again: it also finds runtimes whose registration is gone but whose
+   objects are left:
 
    ```bash
    KUBECTL_CONTEXT=<context> scripts/kagent-runtime.sh retire bundle/<agent>
    ```
 
-Re-pinning is the same four steps. The rendered registration does not opt into
-`deployment.kubernetesRecovery`; see
-[Bring your own AgentRuntime](bring-your-own-agent-runtime.md) for what that
-opt-in adds.
+Re-pinning is the same four steps.
+
+The supervisor reads Orka's controller epoch once, when it starts, and Orka
+marks a runtime with an older epoch not Ready. The rendered registration
+therefore opts into `deployment.kubernetesRecovery`: after an Orka controller
+restart, Orka drains each runtime and restarts its supervisor with the new
+epoch, with no step on your part. See
+[Bring your own AgentRuntime](bring-your-own-agent-runtime.md#kubernetes-recovery).

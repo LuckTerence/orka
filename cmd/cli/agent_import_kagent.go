@@ -214,6 +214,13 @@ and refuses everything else, listing every problem:
 			for _, path := range written {
 				fmt.Fprintf(cmd.ErrOrStderr(), "Wrapper configuration written: %s\n", path) //nolint:errcheck
 			}
+			// A dry run writes the bundles; activation requires the deployed ones.
+			if !dryRun {
+				if err := verifyKagentBundles(wrapper, wrapped); err != nil {
+					return err
+				}
+				return reconcileKagentWrappedAgents(cmd, wrapped)
+			}
 			bundles, err := writeKagentBundles(wrapper, wrapped)
 			if err != nil {
 				return fmt.Errorf("writing deployment bundle: %w", err)
@@ -221,14 +228,11 @@ and refuses everything else, listing every problem:
 			for _, path := range bundles {
 				fmt.Fprintf(cmd.ErrOrStderr(), "Deployment bundle written: %s\n", path) //nolint:errcheck
 			}
-			if dryRun {
-				for _, agent := range wrapped {
-					fmt.Fprintf(cmd.ErrOrStderr(), "kagent Agent %s: %s\n", agent.Source, describeKagentMode(agent.Mode)) //nolint:errcheck
-				}
-				namespace, _ := cmd.Flags().GetString(cliNamespaceQuery)
-				return printKagentWrappedAgents(cmd.OutOrStdout(), wrapped, strings.TrimSpace(namespace))
+			for _, agent := range wrapped {
+				fmt.Fprintf(cmd.ErrOrStderr(), "kagent Agent %s: %s\n", agent.Source, describeKagentMode(agent.Mode)) //nolint:errcheck
 			}
-			return reconcileKagentWrappedAgents(cmd, wrapped)
+			namespace, _ := cmd.Flags().GetString(cliNamespaceQuery)
+			return printKagentWrappedAgents(cmd.OutOrStdout(), wrapped, strings.TrimSpace(namespace))
 		},
 	}
 	cmd.Flags().StringVarP(&file, "file", "f", "", "Path to kagent Agent YAML/JSON (use - for stdin)")

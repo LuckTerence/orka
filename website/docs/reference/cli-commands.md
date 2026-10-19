@@ -492,8 +492,12 @@ output is a JSON List for kubectl apply.
                 this runtime. Apply it before the registration: Orka's
                 conformance prompt reaches kagent, which calls the relay.
   registration  The AgentRuntime. It needs --capabilities, the runtime's
-                GET /v2/capabilities answer, and is created once the
-                Deployment is ready.
+                GET /v2/capabilities answer, and --deployment-uid, the UID of
+                the runtime's Deployment, and is created once the Deployment
+                is ready. It opts into Orka's Kubernetes recovery, which
+                drains and restarts the runtime after an Orka controller
+                restart: annotate the Deployment with
+                orka.ai/agent-runtime-recovery-uid=<the AgentRuntime's UID>.
 
 The Secret <runtime>-auth must exist with the keys controller-token,
 capability-secret, and provider-token, and, for a governed Agent,
@@ -506,6 +510,7 @@ Flags:
       --capabilities string          With --part registration, the runtime's GET /v2/capabilities answer (file)
       --configured-image string      Configured kagent source image, by digest (<repo>@sha256:<digest>); its digest is the profile's adapter digest
       --controller-epoch int         Current Orka controller epoch (the orka-controller cepoch record)
+      --deployment-uid string        With --part registration, the UID of the runtime's Deployment, which Orka recovers
   -h, --help                         help for render-kagent
       --orka-api-url string          Orka API base URL the supervisor calls (default http://orka-api.<namespace>.svc:8080)
       --part string                  Part to render: workload, relay, or registration (default "workload")

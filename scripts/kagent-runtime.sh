@@ -17,21 +17,25 @@ usage() {
 Usage:
   scripts/kagent-runtime.sh deploy <bundle>
       Build and push the runtime's images, deploy it, and register it with
-      Orka. Waits until Orka reports the AgentRuntime Ready. A governed
+      Orka under Kubernetes recovery, so Orka restarts it after an Orka
+      controller restart. Waits until Orka reports the AgentRuntime Ready. A governed
       Agent's relay moves to the new runtime before registration, because
       Orka's conformance prompt calls it; until activation, governed turns on
       the old runtime fail their tool and model calls. If deploy fails or is
       interrupted before the runtime is Ready, the relay moves back.
   scripts/kagent-runtime.sh activate <bundle> -- <import arguments>
       Point the Orka Agents at their runtimes by re-running the import without
-      --dry-run, with the same arguments that wrote the bundles. The import
-      switches every Agent in its input, and only if all of their runtimes
-      are Ready, so deploy them all first. Refuses while the relay of a
-      governed Agent bundled beside <bundle> selects another runtime.
+      --dry-run, with the same arguments that wrote the bundles; the import
+      refuses arguments that pin other bundles. The script passes
+      --bundle-dir, the directory of <bundle>, itself. It switches every Agent in
+      its input, and only if all of their runtimes are Ready, so deploy them
+      all first. Refuses while the relay of a governed Agent bundled beside
+      <bundle> selects another runtime.
   scripts/kagent-runtime.sh retire <bundle>
       Delete the Agent's other runtimes. Orka drains each one first, so this
       waits until their sessions are done. Refuses while a governed Agent's
-      relay selects another runtime.
+      relay selects another runtime. Running it again finishes an earlier
+      retire that stopped.
 
 <bundle> is a directory the import wrote, <bundle-dir>/<agent>.
 
@@ -106,8 +110,20 @@ relay_service_of() {
   jq -er '.relay' "$1/runtime.json" | sed -E 's#^http://([^.]+)\..*#\1#'
 }
 
+# relay_selector prints a relay Service's selector, or nothing if there is no
+# such Service. Any other lookup failure fails.
 relay_selector() {
-  kc get service "$1" -o json 2>/dev/null | jq -c '.spec.selector // {}'
+  kc get service "$1" --ignore-not-found -o json | jq -c '.spec.selector // {}'
+}
+
+# registration_of prints the AgentRuntime's name if it is registered. Any
+# lookup failure but NotFound fails.
+registration_of() {
+  kc get agentruntime "$1" --ignore-not-found -o name
+}
+
+same_bundle_dir() {
+  [ -d "$1" ] && [ "$(cd "$1" && pwd -P)" = "$2" ]
 }
 
 select_relay() {
@@ -126,11 +142,12 @@ restore_relay() {
 # require_relay refuses unless a governed bundle's relay selects the bundle's
 # runtime, which otherwise cannot make its tool and model calls.
 require_relay() {
-  local b=$1 service want got
-  [ "$(jq -r '.governed' "$b/runtime.json")" = true ] || return 0
+  local b=$1 governed_bundle service want got
+  governed_bundle=$(jq -er '.governed | tostring' "$b/runtime.json")
+  [ "${governed_bundle}" = true ] || return 0
   service=$(relay_service_of "$b")
   want=$(jq -cn --arg runtime "$(jq -r '.runtime' "$b/runtime.json")" '{"orka.ai/kagent-runtime": $runtime}')
-  got=$(relay_selector "${service}") || got=""
+  got=$(relay_selector "${service}")
   [ "${got}" = "${want}" ] ||
     die "relay ${service} selects ${got:-nothing}, not ${want}; move it with: $0 deploy ${b}"
 }
@@ -169,7 +186,11 @@ ensure_auth_secret() {
 
 deploy() {
   need openssl
-  if ! kc get deployment "${runtime}" >/dev/null 2>&1; then
+  # Only NotFound means the runtime is not deployed yet: rebuilding a deployed
+  # runtime would roll new images into it under its registered profile.
+  local deployed
+  deployed=$(kc get deployment "${runtime}" --ignore-not-found -o name)
+  if [ -z "${deployed}" ]; then
     [ -d "${WRAPPER_SRC:-}" ] || die "WRAPPER_SRC must name an orka-runtime-kagent checkout"
     grep -qE '^FROM .* AS config$' "${WRAPPER_SRC}/Dockerfile" ||
       die "${WRAPPER_SRC} predates baking a bundle (its Dockerfile has no config stage); update the checkout"
@@ -179,7 +200,7 @@ deploy() {
   local work digest
   work=$(mktemp -d)
   trap 'rm -rf "${work}"' RETURN
-  if kc get deployment "${runtime}" >/dev/null 2>&1; then
+  if [ -n "${deployed}" ]; then
     # The images are part of the runtime's immutable profile. A deployed
     # runtime keeps its images; roll new ones under a new name with the
     # import's --runtime-revision.
@@ -205,7 +226,7 @@ deploy() {
     # Orka's conformance prompt reaches kagent, which calls the relay, so the
     # relay must reach this runtime before registration.
     relay_service=$(relay_service_of "${bundle}")
-    relay_rollback=$(relay_selector "${relay_service}") || relay_rollback=""
+    relay_rollback=$(relay_selector "${relay_service}")
     [ "${relay_rollback}" != "{}" ] || relay_rollback=""
     trap restore_relay EXIT
     trap 'exit 1' INT TERM HUP
@@ -217,7 +238,18 @@ deploy() {
   # The API server's service proxy reaches the runtime's public endpoint.
   kubectl --context "${KUBECTL_CONTEXT}" get --raw \
     "/api/v1/namespaces/${NAMESPACE}/services/http:${runtime}:control/proxy/v2/capabilities" >"${work}/capabilities.json"
-  render registration --capabilities "${work}/capabilities.json" | apply
+  local deployment_uid registered owner
+  deployment_uid=$(kc get deployment "${runtime}" -o jsonpath='{.metadata.uid}')
+  render registration --capabilities "${work}/capabilities.json" --deployment-uid "${deployment_uid}" | apply
+  # Orka recovers the Deployment, restarting it after an Orka controller
+  # restart, once the Deployment names the AgentRuntime.
+  registered=$(kc get agentruntime "${runtime}" -o jsonpath='{.metadata.uid}')
+  owner=$(kc get deployment "${runtime}" -o jsonpath='{.metadata.annotations.orka\.ai/agent-runtime-recovery-uid}')
+  if [ -z "${owner}" ]; then
+    kc annotate deployment "${runtime}" "orka.ai/agent-runtime-recovery-uid=${registered}" >/dev/null
+  elif [ "${owner}" != "${registered}" ]; then
+    die "deployment ${runtime} is recovered by another AgentRuntime (${owner})"
+  fi
   kc wait --for=condition=Ready "agentruntime/${runtime}" --timeout="${READY_TIMEOUT}" ||
     die "runtime ${runtime} did not become Ready"
   relay_rollback=""
@@ -226,9 +258,27 @@ deploy() {
 
 activate() {
   [ "$#" -gt 0 ] || die "activate needs the import arguments after --"
+  # The import activates the bundles in this bundle's directory, the ones the
+  # relay checks below cover, so the script names that directory itself.
+  local bundle_dir arg pending=false args=()
+  bundle_dir=$(cd "$(dirname "${bundle}")" && pwd -P)
   for arg in "$@"; do
-    [ "${arg}" != --dry-run ] || die "activate runs the import without --dry-run"
+    if [ "${pending}" = true ]; then
+      pending=false
+      same_bundle_dir "${arg}" "${bundle_dir}" || die "--bundle-dir ${arg} is not ${bundle_dir}, the directory of ${bundle}"
+      continue
+    fi
+    case "${arg}" in
+    --dry-run | --dry-run=*) die "activate runs the import without --dry-run" ;;
+    --bundle-dir) pending=true ;;
+    --bundle-dir=*)
+      same_bundle_dir "${arg#--bundle-dir=}" "${bundle_dir}" ||
+        die "${arg} is not ${bundle_dir}, the directory of ${bundle}"
+      ;;
+    *) args+=("${arg}") ;;
+    esac
   done
+  [ "${pending}" = false ] || die "--bundle-dir needs a directory"
   # The import switches every Agent in its input, which wrote the bundles
   # beside this one, and refuses unless Orka reports all of their runtimes
   # Ready. A governed Agent's relay may have moved since, to a newer runtime.
@@ -238,7 +288,7 @@ activate() {
       require_relay "${b%/}"
     fi
   done
-  "${ORKA}" agent import kagent "$@" -n "${NAMESPACE}"
+  "${ORKA}" agent import kagent "${args[@]}" --bundle-dir "${bundle_dir}" -n "${NAMESPACE}"
   [ "$(kc get agents.core.orka.ai "${agent}" -o jsonpath='{.spec.runtime.runtimeRef.name}')" = "${runtime}" ] ||
     die "Agent ${agent} does not use ${runtime}; were the import arguments the ones that wrote this bundle?"
   echo "Agent ${agent} uses ${runtime}. Retire its other runtimes with: $0 retire ${bundle}"
@@ -249,14 +299,28 @@ retire() {
     die "Agent ${agent} does not use ${runtime} yet; activate it first"
   # The relay may select a runtime this would delete.
   require_relay "${bundle}"
-  local old
-  for old in $(kc get agentruntimes.core.orka.ai -l "orka.ai/kagent-agent=${agent}" -o jsonpath='{.items[*].metadata.name}'); do
+  # A runtime's objects may outlive its registration when an earlier retire
+  # timed out or was interrupted, so they name runtimes to retire too.
+  local old olds present
+  olds=$({
+    kc get agentruntimes.core.orka.ai -l "orka.ai/kagent-agent=${agent}" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'
+    kc get deployment,service,persistentvolumeclaim,serviceaccount,secret -l "orka.ai/kagent-agent=${agent}" \
+      -o jsonpath='{range .items[*]}{.metadata.labels.orka\.ai/kagent-runtime}{"\n"}{end}'
+  } | sort -u)
+  for old in ${olds}; do
     [ "${old}" = "${runtime}" ] && continue
-    echo "Retiring ${old}; Orka drains it first." >&2
-    kc delete agentruntime "${old}" --wait=false
-    kc wait --for=delete "agentruntime/${old}" --timeout="${RETIRE_TIMEOUT}"
+    present=$(registration_of "${old}")
+    if [ -n "${present}" ]; then
+      echo "Retiring ${old}; Orka drains it first." >&2
+      kc delete agentruntime "${old}" --wait=false
+      kc wait --for=delete "agentruntime/${old}" --timeout="${RETIRE_TIMEOUT}"
+    fi
+    # The objects serve the registration until it is gone.
+    present=$(registration_of "${old}")
+    [ -z "${present}" ] || die "AgentRuntime ${old} is still registered"
     kc delete deployment,service,persistentvolumeclaim,serviceaccount,secret -l "orka.ai/kagent-runtime=${old}"
-    kubectl --context "${KUBECTL_CONTEXT}" delete role,rolebinding -A -l "orka.ai/kagent-runtime=${old}"
+    kubectl --context "${KUBECTL_CONTEXT}" delete role,rolebinding -A \
+      -l "orka.ai/kagent-runtime=${old},orka.ai/kagent-runtime-namespace=${NAMESPACE}"
   done
 }
 

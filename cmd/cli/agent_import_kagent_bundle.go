@@ -7,11 +7,13 @@ MIT License - see LICENSE file for details.
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/url"
 	"os"
@@ -95,6 +97,9 @@ func (o kagentWrapperOptions) validateBundle(wrapped []kagentWrappedAgent) error
 	for _, tool := range o.AllowedTools {
 		known[tool] = true
 	}
+	// A relay Service selects one runtime, so two governed Agents cannot
+	// share one.
+	relays := map[string]string{}
 	for _, agent := range wrapped {
 		name := metadataName(agent.Manifest)
 		// The relay Service is the longest DNS label a runtime needs.
@@ -102,9 +107,15 @@ func (o kagentWrapperOptions) validateBundle(wrapped []kagentWrappedAgent) error
 			return fmt.Errorf("kagent Agent %s: Orka Agent name %q is too long for its runtime's Service names (at most 40 characters, starting with a letter)", agent.Source, name)
 		}
 		if agent.Mode.Mode == kagentModeGoverned {
-			if _, _, _, err := kagentRelayService(agent.Mode.RelayOrigin); err != nil {
+			service, namespace, _, err := kagentRelayService(agent.Mode.RelayOrigin)
+			if err != nil {
 				return fmt.Errorf("kagent Agent %s: %w", agent.Source, err)
 			}
+			key := namespace + "/" + service
+			if other, taken := relays[key]; taken {
+				return fmt.Errorf("kagent Agents %s and %s share relay Service %s; give each Agent its own, such as with {name} in --relay-url", other, agent.Source, key)
+			}
+			relays[key] = agent.Source
 		}
 		for _, tool := range agent.Mode.Tools {
 			known[tool] = true
@@ -127,7 +138,9 @@ func (o kagentWrapperOptions) kagentBundlePolicy(agent kagentWrappedAgent) (allo
 	if agent.Mode.Mode != kagentModeGoverned {
 		return allowed, approvalRequired
 	}
-	allowed = slices.Clone(agent.Mode.Tools)
+	// The registered policy lists are explicit: an Agent with no tools
+	// allows none, never null.
+	allowed = append(allowed, agent.Mode.Tools...)
 	if len(o.AllowedTools) > 0 {
 		allowed = slices.Clone(o.AllowedTools)
 	}
@@ -173,6 +186,34 @@ func cloneManifest(manifest map[string]any) map[string]any {
 }
 
 // writeKagentBundles writes <dir>/<agent>/kagent.json and runtime.json.
+// kagentBundleFiles returns the files of an Agent's deployment bundle.
+func (o kagentWrapperOptions) kagentBundleFiles(agent kagentWrappedAgent) (map[string][]byte, error) {
+	config, err := o.wrapperConfig(agent)
+	if err != nil {
+		return nil, err
+	}
+	version := agent.Version
+	if version == "" {
+		version = "v1"
+	}
+	sum := sha256.Sum256(config)
+	bundle := kagentBundle{
+		Agent: metadataName(agent.Manifest), Runtime: agent.RuntimeName,
+		KagentNamespace: agent.SourceNamespace, KagentName: agent.SourceName, KagentVersion: version,
+		Governed: agent.Mode.Mode == kagentModeGoverned, Model: kagentWrapperModel(agent),
+		ConfigDigest: "sha256:" + hex.EncodeToString(sum[:]), Revision: o.RuntimeRevision,
+	}
+	if bundle.Governed {
+		bundle.Relay = agent.Mode.RelayOrigin
+	}
+	bundle.AllowedTools, bundle.ApprovalRequiredTools = o.kagentBundlePolicy(agent)
+	metadata, err := json.MarshalIndent(bundle, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return map[string][]byte{kagentBundleConfigFile: config, kagentBundleRuntimeFile: append(metadata, '\n')}, nil
+}
+
 func writeKagentBundles(o kagentWrapperOptions, wrapped []kagentWrappedAgent) ([]string, error) {
 	if o.BundleDir == "" {
 		return nil, nil
@@ -187,35 +228,15 @@ func writeKagentBundles(o kagentWrapperOptions, wrapped []kagentWrappedAgent) ([
 	defer root.Close() //nolint:errcheck
 	var written []string
 	for _, agent := range wrapped {
-		config, err := o.wrapperConfig(agent)
+		files, err := o.kagentBundleFiles(agent)
 		if err != nil {
 			return nil, err
 		}
 		name := metadataName(agent.Manifest)
-		version := agent.Version
-		if version == "" {
-			version = "v1"
-		}
-		sum := sha256.Sum256(config)
-		bundle := kagentBundle{
-			Agent: name, Runtime: agent.RuntimeName,
-			KagentNamespace: agent.SourceNamespace, KagentName: agent.SourceName, KagentVersion: version,
-			Governed: agent.Mode.Mode == kagentModeGoverned, Model: kagentWrapperModel(agent),
-			ConfigDigest: "sha256:" + hex.EncodeToString(sum[:]), Revision: o.RuntimeRevision,
-			AllowedTools: []string{}, ApprovalRequiredTools: []string{},
-		}
-		if bundle.Governed {
-			bundle.Relay = agent.Mode.RelayOrigin
-		}
-		bundle.AllowedTools, bundle.ApprovalRequiredTools = o.kagentBundlePolicy(agent)
-		metadata, err := json.MarshalIndent(bundle, "", "  ")
-		if err != nil {
-			return nil, err
-		}
 		if err := root.MkdirAll(name, 0o750); err != nil {
 			return nil, err
 		}
-		for file, data := range map[string][]byte{kagentBundleConfigFile: config, kagentBundleRuntimeFile: append(metadata, '\n')} {
+		for file, data := range files {
 			if err := root.WriteFile(filepath.Join(name, file), data, 0o600); err != nil {
 				return nil, err
 			}
@@ -224,6 +245,34 @@ func writeKagentBundles(o kagentWrapperOptions, wrapped []kagentWrappedAgent) ([
 	}
 	slices.Sort(written)
 	return written, nil
+}
+
+// verifyKagentBundles refuses an activation whose arguments pin anything but
+// the bundles in the directory: those are the ones deployed, whose relays
+// were checked before it.
+func verifyKagentBundles(o kagentWrapperOptions, wrapped []kagentWrappedAgent) error {
+	if o.BundleDir == "" {
+		return nil
+	}
+	root, err := os.OpenRoot(o.BundleDir)
+	if err != nil {
+		return fmt.Errorf("reading the deployment bundles: %w", err)
+	}
+	defer root.Close() //nolint:errcheck
+	for _, agent := range wrapped {
+		files, err := o.kagentBundleFiles(agent)
+		if err != nil {
+			return err
+		}
+		name := metadataName(agent.Manifest)
+		for _, file := range slices.Sorted(maps.Keys(files)) {
+			if have, err := root.ReadFile(filepath.Join(name, file)); err != nil || !bytes.Equal(have, files[file]) {
+				return fmt.Errorf("kagent Agent %s: the bundle in %s is not the one these arguments pin (runtime %s); write it with --dry-run and deploy it before activating",
+					agent.Source, filepath.Join(o.BundleDir, name), agent.RuntimeName)
+			}
+		}
+	}
+	return nil
 }
 
 // kagentRelayService names the in-cluster Service a relay origin addresses,
@@ -257,11 +306,22 @@ func requireReadyKagentRuntime(ctx context.Context, c *client.Client, namespace,
 		return fmt.Errorf("reading AgentRuntime %q: %w", runtime, err)
 	}
 	runtimeObj, _ := value.(map[string]any)
-	conditions, _ := kagentMap(runtimeObj, "status")["conditions"].([]any)
-	for _, raw := range conditions {
-		condition, _ := raw.(map[string]any)
-		if condition["type"] == kagentConditionReady && condition["status"] == "True" {
-			return nil
+	// Orka admits Tasks only to a Ready runtime that has observed its
+	// current spec and is not being deleted.
+	if kagentMap(runtimeObj, "metadata")["deletionTimestamp"] != nil {
+		return fmt.Errorf("AgentRuntime %q is being deleted; deploy the bundle again under a new --runtime-revision", runtime)
+	}
+	if generation := kagentInt(runtimeObj, "metadata", "generation"); generation == 0 ||
+		kagentInt(runtimeObj, "status", "observedGeneration") != generation {
+		return fmt.Errorf("AgentRuntime %q has not observed its current spec; wait for it before activating the bundle", runtime)
+	}
+	if ready, _ := kagentMap(runtimeObj, "status")["ready"].(bool); ready {
+		conditions, _ := kagentMap(runtimeObj, "status")["conditions"].([]any)
+		for _, raw := range conditions {
+			condition, _ := raw.(map[string]any)
+			if condition["type"] == kagentConditionReady && condition["status"] == "True" {
+				return nil
+			}
 		}
 	}
 	return fmt.Errorf("AgentRuntime %q is not Ready; wait for it before activating the bundle", runtime)
