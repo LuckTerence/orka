@@ -121,6 +121,8 @@ type ServerConfig struct {
 
 // Server is the REST API server
 type Server struct {
+	// ahpBackend is the AHP session backend, when AHP serves sessions.
+	ahpBackend          *ahpBackend
 	app                 *fiber.App
 	client              client.Client
 	config              ServerConfig
@@ -206,6 +208,8 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		}
 		if err := config.AHP.RegisterBackend(backend); err != nil {
 			log.Error(err, "register the AHP session backend")
+		} else {
+			server.ahpBackend = backend
 		}
 	}
 	resolver := NewProviderResolver(c, config.Chat)
@@ -652,6 +656,9 @@ func (s *Server) Start(ctx context.Context) error {
 	addr := fmt.Sprintf(":%d", s.config.Port)
 	log.Info("starting API server", "address", addr)
 
+	if s.ahpBackend != nil {
+		go s.ahpBackend.workspaces.collectIdle(ctx)
+	}
 	// Start server in a goroutine
 	errCh := make(chan error, 1)
 	go func() {

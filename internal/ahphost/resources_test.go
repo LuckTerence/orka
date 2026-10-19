@@ -119,3 +119,25 @@ func TestResourceListsWatchesAndSessionConfig(t *testing.T) {
 	err = client.Request(ctx, "createResourceWatch", ahptypes.CreateResourceWatchParams{Channel: rootChannel, Uri: "file:///etc"}, &watch)
 	require.Equal(t, ahptypes.ErrorCodeNotFound, rpcCode(t, err))
 }
+
+func TestLeftoverChannelsAreSweptOnce(t *testing.T) {
+	env, _ := newExtendedEnv(t)
+	minted := env.mint("alice")
+	userKey := ahpUserKey(t, env, minted.Token)
+	ctx := ctx5(t)
+	state := ahptypes.TerminalState{Content: []ahptypes.TerminalContentPart{}}
+	watch := ahptypes.ResourceWatchState{Root: "file:///work"}
+	require.NoError(t, env.host.storeChannels(ctx, userKey, map[string]storedChannel{
+		"ahp-terminal:/gone":             {Backend: "fake", State: ahptypes.SnapshotState{Terminal: &state}},
+		resourceWatchScheme + "leftover": {Backend: "fake", State: ahptypes.SnapshotState{ResourceWatch: &watch}},
+	}))
+	_, err := env.store.GetAHPChannelState(ctx, userKey, "ahp-terminal:/gone")
+	require.NoError(t, err)
+	client := env.connect(minted.Token)
+	_, err = client.Initialize(ctx, "client-a", ahptypes.SupportedProtocolVersions(), nil)
+	require.NoError(t, err)
+	for _, channel := range []string{"ahp-terminal:/gone", resourceWatchScheme + "leftover"} {
+		_, err := env.store.GetAHPChannelState(ctx, userKey, channel)
+		require.ErrorIs(t, err, store.ErrNotFound, channel)
+	}
+}

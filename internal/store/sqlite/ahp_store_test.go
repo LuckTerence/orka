@@ -206,3 +206,21 @@ func TestAHPRecordsAreScopedAndDeletedByLiteralPrefix(t *testing.T) {
 	require.Equal(t, "ahp-session:/one-more", sessions[0].Key)
 	require.NoError(t, s.DeleteAHPRecord(ctx, "alice", "session", "missing"))
 }
+
+func TestAHPChannelsListByPrefix(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := t.Context()
+	limits := store.AHPJournalLimits{MaxEntries: 100, MaxBytes: 1 << 20}
+	channelURIs := []string{"ahp-terminal:/a", "ahp-terminal:/b", "ahp-terminalx:/c", "ahp-session:/d"}
+	states := make([]store.AHPChannelState, 0, len(channelURIs))
+	for _, channel := range channelURIs {
+		states = append(states, store.AHPChannelState{Channel: channel, State: []byte(`{}`), FromSeq: 1})
+	}
+	require.NoError(t, s.AppendAHPJournal(ctx, "alice", 0, ahpEntries(1, 1), states, limits))
+	channels, err := s.ListAHPChannels(ctx, "alice", "ahp-terminal:")
+	require.NoError(t, err)
+	require.Equal(t, []string{"ahp-terminal:/a", "ahp-terminal:/b"}, channels)
+	other, err := s.ListAHPChannels(ctx, "bob", "ahp-terminal:")
+	require.NoError(t, err)
+	require.Empty(t, other)
+}

@@ -88,6 +88,8 @@ type ahpWorkspaces struct {
 	mu        sync.Mutex
 	starting  map[string]chan struct{}
 	restoring map[string]chan struct{}
+	// active is each user's last use of their workspace, by user label.
+	active map[string]time.Time
 	// git serializes each user's clones and worktree changes, which share
 	// the projects' checkouts.
 	git map[string]chan struct{}
@@ -188,6 +190,7 @@ func (w *ahpWorkspaces) ensure(ctx context.Context, principal ahphost.Principal,
 			if created || pod.Annotations[ahpWorkspaceRestoredAnnotation] == "" {
 				w.restoreInBackground(principal, pod.DeepCopy())
 			}
+			w.touch(principal, pod.DeepCopy())
 			return pod, nil
 		}
 		if time.Now().After(deadline) {

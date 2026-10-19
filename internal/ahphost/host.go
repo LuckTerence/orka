@@ -59,6 +59,8 @@ type Host struct {
 	hubs    map[string]*userHub
 	byToken map[string]map[*conn]struct{}
 	stopped bool
+	// swept records the users whose leftover channels this process dropped.
+	swept map[string]bool
 }
 
 type userHub struct {

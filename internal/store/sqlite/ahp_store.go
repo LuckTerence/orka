@@ -371,6 +371,26 @@ func (s *Store) DeleteAHPChannelStates(ctx context.Context, userKey string, chan
 	return nil
 }
 
+// ListAHPChannels returns the user's channels with state whose URI starts with prefix.
+func (s *Store) ListAHPChannels(ctx context.Context, userKey, prefix string) ([]string, error) {
+	escaped := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(prefix)
+	rows, err := s.db.QueryContext(ctx, `SELECT channel FROM ahp_channel_states WHERE user_key = ? AND channel LIKE ? ESCAPE '\' ORDER BY channel`,
+		userKey, escaped+"%")
+	if err != nil {
+		return nil, fmt.Errorf("list AHP channels: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var channels []string
+	for rows.Next() {
+		var channel string
+		if err := rows.Scan(&channel); err != nil {
+			return nil, fmt.Errorf("scan AHP channel: %w", err)
+		}
+		channels = append(channels, channel)
+	}
+	return channels, rows.Err()
+}
+
 // PutAHPSession records or updates one entry in a user's session catalog.
 func (s *Store) PutAHPSession(ctx context.Context, session store.AHPSession) error {
 	if strings.TrimSpace(session.UserKey) == "" || strings.TrimSpace(session.Session) == "" {

@@ -112,6 +112,8 @@ type AHPStore interface {
 	// GetAHPChannelState returns ErrNotFound for a channel the user has no state for.
 	GetAHPChannelState(ctx context.Context, userKey, channel string) (AHPChannelState, error)
 	DeleteAHPChannelStates(ctx context.Context, userKey string, channels []string) error
+	// ListAHPChannels returns the user's channels with state whose URI starts with prefix.
+	ListAHPChannels(ctx context.Context, userKey, prefix string) ([]string, error)
 
 	PutAHPSession(ctx context.Context, session AHPSession) error
 	// GetAHPSession returns ErrNotFound for a session the user does not have.

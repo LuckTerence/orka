@@ -125,6 +125,10 @@ type AHPBackendConfig struct {
 	// image must be digest-pinned and provide sh and git.
 	WorkspaceNamespace string
 	WorkspaceImage     string
+	// WorkspaceIdleTimeout is how long a workspace with no shells, no running
+	// turn and nothing unpushed stays after its last use. Zero keeps
+	// workspaces until their user's last session ends.
+	WorkspaceIdleTimeout time.Duration
 }
 
 // ahpApprovalDecider answers a held permission request as its requester.

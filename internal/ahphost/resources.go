@@ -18,8 +18,12 @@ import (
 	"github.com/microsoft/agent-host-protocol/clients/go/ahptypes"
 )
 
-// resourceWatchScheme names the channels of resource watches.
-const resourceWatchScheme = "ahp-resource-watch:/"
+// resourceWatchScheme names the channels of resource watches, and
+// terminalScheme those of terminals.
+const (
+	resourceWatchScheme = "ahp-resource-watch:/"
+	terminalScheme      = "ahp-terminal:"
+)
 
 // ResourceLister lists the directories a backend serves to its users.
 type ResourceLister interface {
@@ -202,4 +206,46 @@ func randomID() string {
 	id := make([]byte, 16)
 	_, _ = rand.Read(id)
 	return hex.EncodeToString(id)
+}
+
+// sweepOnce drops, once per user in this process, the channels an earlier
+// process left behind: resource watches, which never outlive their
+// connection, and terminals whose shells are gone.
+func (h *Host) sweepOnce(ctx context.Context, principal Principal) {
+	h.mu.Lock()
+	if h.swept == nil {
+		h.swept = map[string]bool{}
+	}
+	if h.swept[principal.UserKey] {
+		h.mu.Unlock()
+		return
+	}
+	h.swept[principal.UserKey] = true
+	h.mu.Unlock()
+	stale, err := h.cfg.Store.ListAHPChannels(ctx, principal.UserKey, resourceWatchScheme)
+	if err != nil {
+		return
+	}
+	// List the stored terminals before the live ones: a terminal's shell
+	// starts before its channel is stored, so a newer channel is never swept.
+	terminals, err := h.cfg.Store.ListAHPChannels(ctx, principal.UserKey, terminalScheme)
+	if err != nil {
+		return
+	}
+	live, err := h.cfg.Backends.terminals(ctx, principal)
+	if err != nil {
+		return
+	}
+	running := map[string]bool{}
+	for _, terminal := range live {
+		running[terminal.Resource] = true
+	}
+	for _, channel := range terminals {
+		if !running[channel] {
+			stale = append(stale, channel)
+		}
+	}
+	if len(stale) > 0 {
+		_ = h.cfg.Store.DeleteAHPChannelStates(ctx, principal.UserKey, stale)
+	}
 }
