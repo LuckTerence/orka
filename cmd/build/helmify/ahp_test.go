@@ -117,7 +117,8 @@ func TestStaticChartAHPWorkspaceFlags(t *testing.T) {
 			t.Errorf("controller args are missing %s:\n%s", want, strings.Join(args, "\n"))
 		}
 	}
-	if output, err := helmTemplateStaticChart(t, ahpWorkspacesEnabled("--set-string", "controller.ahp.workspaceConnectorProvider=github")...); err == nil ||
+	withoutConnectors := ahpWorkspacesEnabled("--set-string", "controller.ahp.workspaceConnectorProvider=github")
+	if output, err := helmTemplateStaticChart(t, withoutConnectors...); err == nil ||
 		!strings.Contains(output, "requires controller.connectors.enabled") {
 		t.Fatalf("a connector provider without connectors rendered: %v\n%s", err, output)
 	}
