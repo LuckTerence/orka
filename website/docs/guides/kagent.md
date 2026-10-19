@@ -89,6 +89,11 @@ each pin gets its own runtime, named `<agent>-kagent-<digest>`:
      --unreachable kagent-postgresql.kagent.svc:5432
    ```
 
+   A governed Agent's tool policy lists the tools its bindings name. If a
+   binding names none, kagent calls whatever the relay lists, so name the
+   Orka tools it may call with `--allowed-tool`. Mark the ones that need an
+   Orka approval with `--approval-required-tool`.
+
 2. Build, deploy, and register the runtime of every Agent in the export:
 
    ```bash
