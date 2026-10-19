@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/orka-agents/orka/internal/store"
 )
@@ -87,15 +88,18 @@ type MintRequest struct {
 	// TTL is the requested lifetime; zero means DefaultTokenTTL.
 	TTL time.Duration
 	// NotAfter bounds the expiry, for example by a delegated token's own expiry.
-	NotAfter    *time.Time
+	NotAfter *time.Time
+	// Description names the token for its owner, for example the device it
+	// was pasted into.
 	Description string
 }
 
 // MintedToken is a new token. The secret is returned only once.
 type MintedToken struct {
-	ID        string
-	Token     string
-	ExpiresAt time.Time
+	ID          string
+	Token       string
+	Description string
+	ExpiresAt   time.Time
 }
 
 // TokenInfo describes a token without its secret.
@@ -116,6 +120,10 @@ type TokenService struct {
 	Now    func() time.Time
 	// OnRevoke is called after a token is revoked, to close its connections.
 	OnRevoke func(tokenID string)
+	// Admit, when set, decides whether a token's owner may still connect, for
+	// example whether the OIDC subject allowlist still admits them. Tokens of
+	// an owner it refuses are invalid, at the door and on every recheck.
+	Admit func(Principal) error
 }
 
 func (s *TokenService) now() time.Time {
@@ -137,8 +145,12 @@ func (s *TokenService) Mint(ctx context.Context, req MintRequest) (MintedToken, 
 	if strings.TrimSpace(req.Issuer) == "" || strings.TrimSpace(req.Subject) == "" {
 		return MintedToken{}, fmt.Errorf("%w: an issuer and subject are required", ErrInvalidMintRequest)
 	}
-	if len(req.Description) > maxDescriptionLength {
+	description := strings.TrimSpace(req.Description)
+	if len(description) > maxDescriptionLength {
 		return MintedToken{}, fmt.Errorf("%w: description must be at most %d characters", ErrInvalidMintRequest, maxDescriptionLength)
+	}
+	if strings.IndexFunc(description, unicode.IsControl) >= 0 {
+		return MintedToken{}, fmt.Errorf("%w: description must not contain control characters", ErrInvalidMintRequest)
 	}
 	ttl := req.TTL
 	if ttl == 0 {
@@ -178,13 +190,13 @@ func (s *TokenService) Mint(ctx context.Context, req MintRequest) (MintedToken, 
 		Username:    req.Username,
 		Namespace:   req.Namespace,
 		Constraints: constraints,
-		Description: req.Description,
+		Description: description,
 		CreatedAt:   now,
 		ExpiresAt:   expires,
 	}); err != nil {
 		return MintedToken{}, err
 	}
-	return MintedToken{ID: id, Token: token, ExpiresAt: expires}, nil
+	return MintedToken{ID: id, Token: token, Description: description, ExpiresAt: expires}, nil
 }
 
 // Verify resolves a presented token to its principal.
@@ -227,7 +239,7 @@ func (s *TokenService) verifyHash(ctx context.Context, hash string) (Principal, 
 			return Principal{}, ErrInvalidToken
 		}
 	}
-	return Principal{
+	principal := Principal{
 		UserKey:     record.UserKey,
 		Issuer:      record.Issuer,
 		Subject:     record.Subject,
@@ -237,7 +249,11 @@ func (s *TokenService) verifyHash(ctx context.Context, hash string) (Principal, 
 		ExpiresAt:   record.ExpiresAt,
 		Constraints: constraints,
 		tokenHash:   hash,
-	}, nil
+	}
+	if s.Admit != nil && s.Admit(principal) != nil {
+		return Principal{}, ErrInvalidToken
+	}
+	return principal, nil
 }
 
 // List returns a person's tokens without their secrets.

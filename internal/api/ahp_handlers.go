@@ -118,9 +118,36 @@ func (h *Handlers) CreateAHPToken(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusInternalServerError, "failed to mint AHP token")
 	}
 	return c.Status(fiber.StatusCreated).JSON(AHPTokenResponse{
-		ID: minted.ID, Token: minted.Token, Description: req.Description, Namespace: namespace,
+		ID: minted.ID, Token: minted.Token, Description: minted.Description, Namespace: namespace,
 		ExpiresAt: minted.ExpiresAt, Delegated: mint.Constraints.Delegated,
 	})
+}
+
+var errAHPTokenOwnerNotAdmitted = errors.New("the AHP token's owner can no longer sign in")
+
+// AHPTokenOwnerCheck refuses the AHP tokens of owners the API would no longer
+// sign in: a token minted with OIDC needs the configured issuer and a subject
+// the allowlist still admits, and a token minted from a context token needs a
+// configured context-token issuer. The configuration is the controller's
+// current one, so narrowing the allowlist cuts off tokens minted before.
+func AHPTokenOwnerCheck(oidc OIDCConfig, contextTokens ContextTokenConfig) func(ahphost.Principal) error {
+	return func(p ahphost.Principal) error {
+		if p.Constraints.Delegated {
+			for _, profile := range contextTokens.Profiles {
+				if profile.Issuer != "" && profile.Issuer == p.Issuer {
+					return nil
+				}
+			}
+			return errAHPTokenOwnerNotAdmitted
+		}
+		if !oidc.Enabled() || p.Issuer != oidc.Issuer {
+			return errAHPTokenOwnerNotAdmitted
+		}
+		if err := authorizeOIDCClaims(oidcClaims{Issuer: p.Issuer, Subject: p.Subject}, oidc); err != nil {
+			return errAHPTokenOwnerNotAdmitted
+		}
+		return nil
+	}
 }
 
 // ListAHPTokens lists the caller's AHP tokens without their secrets.

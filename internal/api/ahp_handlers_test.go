@@ -199,6 +199,30 @@ func TestAHPTokenFromAContextTokenKeepsItsConstraints(t *testing.T) {
 	require.Equal(t, "team", principal.Constraints.TransactionContext["namespace"])
 }
 
+func TestAHPTokenOwnerCheckFollowsTheCurrentSignInPolicy(t *testing.T) {
+	oidc := OIDCConfig{Issuer: ahpTestIssuer, Audience: "orka", AllowedSubjects: []string{"alice", "team-*"}}
+	contextTokens := ContextTokenConfig{Profiles: []ContextTokenProfileConfig{{Name: "txn", Issuer: "https://txn.example"}}}
+	check := AHPTokenOwnerCheck(oidc, contextTokens)
+	oidcOwner := func(issuer, subject string) ahphost.Principal {
+		return ahphost.Principal{Issuer: issuer, Subject: subject}
+	}
+	delegated := func(issuer string) ahphost.Principal {
+		return ahphost.Principal{Issuer: issuer, Subject: "carol", Constraints: ahphost.Constraints{Delegated: true}}
+	}
+
+	require.NoError(t, check(oidcOwner(ahpTestIssuer, "alice")))
+	require.NoError(t, check(oidcOwner(ahpTestIssuer, "team-bob")), "allowlist patterns apply")
+	require.Error(t, check(oidcOwner(ahpTestIssuer, "mallory")), "a subject the allowlist no longer admits")
+	require.Error(t, check(oidcOwner("https://old-issuer.example", "alice")), "an issuer that is no longer configured")
+	require.NoError(t, check(delegated("https://txn.example")))
+	require.Error(t, check(delegated(ahpTestIssuer)), "a delegated token needs a configured context-token issuer")
+
+	require.Error(t, AHPTokenOwnerCheck(OIDCConfig{}, ContextTokenConfig{})(oidcOwner(ahpTestIssuer, "alice")),
+		"with OIDC turned off, no OIDC-minted token connects")
+	require.Error(t, AHPTokenOwnerCheck(OIDCConfig{Issuer: ahpTestIssuer, Audience: "orka"}, ContextTokenConfig{})(oidcOwner(ahpTestIssuer, "alice")),
+		"an empty allowlist admits no one, as at sign-in")
+}
+
 // TestAHPEndpointServesThroughFiber drives /ahp with the official client
 // through the Fiber adaptor the API server uses, from minting to revocation.
 func TestAHPEndpointServesThroughFiber(t *testing.T) {

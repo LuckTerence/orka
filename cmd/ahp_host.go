@@ -22,13 +22,14 @@ import (
 )
 
 // newAHPHost builds the AHP host behind --enable-ahp-api. The API server
-// registers the session backend once its handlers exist.
-func newAHPHost(s store.AHPStore, maxTTL time.Duration) (*ahphost.Host, error) {
+// registers the session backend once its handlers exist. admit refuses the
+// tokens of owners the API would no longer sign in.
+func newAHPHost(s store.AHPStore, maxTTL time.Duration, admit func(ahphost.Principal) error) (*ahphost.Host, error) {
 	backends, err := ahphost.NewRegistry()
 	if err != nil {
 		return nil, err
 	}
-	tokens := &ahphost.TokenService{Store: s, MaxTTL: maxTTL}
+	tokens := &ahphost.TokenService{Store: s, MaxTTL: maxTTL, Admit: admit}
 	host, err := ahphost.New(ahphost.Config{
 		Store:    s,
 		Tokens:   tokens,

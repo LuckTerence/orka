@@ -2223,13 +2223,20 @@ func main() {
 		publisherControllerEpochs = api.NewControllerEpochStoreFenceSource(kubeControlStore)
 		connectorToolEffects = kubeControlStore
 	}
+	oidcConfig := api.OIDCConfig{
+		Issuer:          oidcIssuer,
+		Audience:        oidcAudience,
+		JWKSURL:         oidcJWKSURL,
+		AllowedSubjects: splitCommaList(oidcAllowedSubjects),
+		Namespace:       oidcNamespace,
+	}
 	var ahpHost *ahphost.Host
 	if ahpAPIEnabled {
 		if err := validateAHPWorkspace(ahpBackendConfig, watchNamespace, controlNamespace); err != nil {
 			setupLog.Error(err, "invalid AHP workspace configuration")
 			os.Exit(1)
 		}
-		ahpHost, err = newAHPHost(sqliteStore, ahpTokenMaxTTL)
+		ahpHost, err = newAHPHost(sqliteStore, ahpTokenMaxTTL, api.AHPTokenOwnerCheck(oidcConfig, contextTokenConfig))
 		if err != nil {
 			setupLog.Error(err, "unable to set up the AHP host")
 			os.Exit(1)
@@ -2245,13 +2252,7 @@ func main() {
 		WatchNamespace:            watchNamespace,
 		ExecutionMode:             mode,
 		EnforceNamespaceIsolation: enforceNamespaceIsolation,
-		OIDC: api.OIDCConfig{
-			Issuer:          oidcIssuer,
-			Audience:        oidcAudience,
-			JWKSURL:         oidcJWKSURL,
-			AllowedSubjects: splitCommaList(oidcAllowedSubjects),
-			Namespace:       oidcNamespace,
-		},
+		OIDC:                      oidcConfig,
 		ContextTokens:             contextTokenConfig,
 		ContextTokenAuthorization: contextTokenAuthzConfig,
 		ResultStore:               sqliteStore,

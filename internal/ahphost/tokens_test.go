@@ -8,6 +8,7 @@ package ahphost
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -61,10 +62,49 @@ func TestMintRejectsBadRequests(t *testing.T) {
 		"ttl too short":     {Issuer: "i", Subject: "s", TTL: time.Second},
 		"expired parent":    {Issuer: "i", Subject: "s", NotAfter: &past},
 		"description limit": {Issuer: "i", Subject: "s", Description: strings.Repeat("x", maxDescriptionLength+1)},
+		"control character": {Issuer: "i", Subject: "s", Description: "laptop\x1b[2J"},
 	} {
 		_, err := tokens.Mint(ctx, req)
-		require.Error(t, err, name)
+		require.ErrorIs(t, err, ErrInvalidMintRequest, name)
 	}
+}
+
+func TestMintTrimsTheDescription(t *testing.T) {
+	tokens := newTokenService(t)
+	ctx := context.Background()
+	minted, err := tokens.Mint(ctx, MintRequest{Issuer: "i", Subject: "alice", Description: "  work laptop \n"})
+	require.NoError(t, err)
+	require.Equal(t, "work laptop", minted.Description)
+	list, err := tokens.List(ctx, "i", "alice")
+	require.NoError(t, err)
+	require.Len(t, list, 1)
+	require.Equal(t, "work laptop", list[0].Description)
+	require.WithinDuration(t, time.Now().Add(DefaultTokenTTL), list[0].ExpiresAt, time.Minute)
+}
+
+func TestVerifyRefusesOwnersAdmitRefuses(t *testing.T) {
+	tokens := newTokenService(t)
+	ctx := context.Background()
+	minted, err := tokens.Mint(ctx, MintRequest{Issuer: "i", Subject: "alice", TTL: time.Hour})
+	require.NoError(t, err)
+	principal, err := tokens.Verify(ctx, minted.Token)
+	require.NoError(t, err)
+
+	admitted := map[string]bool{"alice": true}
+	tokens.Admit = func(p Principal) error {
+		if !admitted[p.Subject] {
+			return errors.New("no longer admitted")
+		}
+		return nil
+	}
+	_, err = tokens.Verify(ctx, minted.Token)
+	require.NoError(t, err)
+	require.NoError(t, tokens.Recheck(ctx, principal))
+
+	delete(admitted, "alice")
+	_, err = tokens.Verify(ctx, minted.Token)
+	require.ErrorIs(t, err, ErrInvalidToken, "an owner the sign-in policy no longer admits cannot connect")
+	require.ErrorIs(t, tokens.Recheck(ctx, principal), ErrInvalidToken, "and open connections close on the next recheck")
 }
 
 func TestVerifyRefusesExpiredRevokedAndForeignTokens(t *testing.T) {
