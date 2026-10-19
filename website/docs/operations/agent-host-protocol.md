@@ -277,8 +277,9 @@ Each AHP user then gets one workspace Pod in that namespace (`--ahp-workspace-na
 
 ### Private repositories
 
-A workspace reads public repositories anonymously. To let each person's workspace read
-their private repositories, link GitHub through [Connectors](../guides/connectors.md) and start the
+A workspace reads public repositories anonymously, on any host. Private repositories work
+on github.com only. To let each person's workspace read their private repositories, link
+GitHub through [Connectors](../guides/connectors.md) and start the
 controller with `--ahp-workspace-connector-provider=<ConnectorProvider name>`
 (`--connectors-enabled` is required). The named provider, in each person's namespace, must
 issue github.com tokens. Orka then gives the person's workspace their own token from their
