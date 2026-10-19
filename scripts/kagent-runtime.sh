@@ -255,16 +255,18 @@ deploy() {
     render relay >"${work}/relay.json"
     jq '.items |= map(select(.kind == "NetworkPolicy"))' "${work}/relay.json" | apply
     if [ -z "${previous}" ]; then
-      jq '.items |= map(select(.kind == "Service"))' "${work}/relay.json" | apply
+      # Create, not apply: a deploy that created it meanwhile makes this fail.
+      jq '.items |= map(select(.kind == "Service"))' "${work}/relay.json" |
+        kubectl --context "${KUBECTL_CONTEXT}" create -f - >/dev/null
     elif [ "${previous}" != "${want}" ]; then
-      # Apply the Service with what it selects now, so applying moves
-      # nothing; then hand it over in one patch that holds only while it
-      # still selects that, and replaces the selector outright, since a merge
+      # The handoff is one patch that holds only while the Service still
+      # selects what it did, so it never writes back a selector another
+      # deploy replaced. It replaces the selector outright, since a merge
       # with an older one would select nothing.
-      jq --argjson selector "${previous}" '.items |= map(select(.kind == "Service") | .spec.selector = $selector)' \
-        "${work}/relay.json" | apply
+      local ports
+      ports=$(jq -ce '.items[] | select(.kind == "Service") | .spec.ports' "${work}/relay.json")
       relay_rollback=${previous}
-      kc patch service "${relay_service}" --type=json -p "[{\"op\":\"test\",\"path\":\"/spec/selector\",\"value\":${previous}},{\"op\":\"replace\",\"path\":\"/spec/selector\",\"value\":${want}}]" >/dev/null ||
+      kc patch service "${relay_service}" --type=json -p "[{\"op\":\"test\",\"path\":\"/spec/selector\",\"value\":${previous}},{\"op\":\"replace\",\"path\":\"/spec/selector\",\"value\":${want}},{\"op\":\"replace\",\"path\":\"/spec/ports\",\"value\":${ports}}]" >/dev/null ||
         {
           relay_rollback=""
           die "relay ${relay_service} changed while this deploy ran; deploy again"
