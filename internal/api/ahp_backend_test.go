@@ -276,6 +276,8 @@ func TestAHPBackendRunsATurnAsATask(t *testing.T) {
 	chat := env.setUpSession(c, "manual")
 	_, chatSub, err := c.Subscribe(ctx, chat)
 	require.NoError(t, err)
+	_, sessionSub, err := c.Subscribe(ctx, ahpTestSession)
+	require.NoError(t, err)
 
 	_, err = c.Dispatch(ctx, chat, ahptypes.StateAction{Value: &ahptypes.ChatTurnStartedAction{
 		Type: ahptypes.ActionTypeChatTurnStarted, TurnId: "turn-1", StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
@@ -341,6 +343,7 @@ func TestAHPBackendRunsATurnAsATask(t *testing.T) {
 	waitForActionType(t, chatSub, "chat/delta")
 	env.setPhase(taskName, corev1alpha1.TaskPhaseSucceeded)
 	waitForActionType(t, chatSub, "chat/turnComplete")
+	waitForActionType(t, sessionSub, "session/activityChanged")
 
 	snapshot, _, err := c.Subscribe(ctx, chat)
 	require.NoError(t, err)
@@ -418,6 +421,8 @@ func TestAHPBackendCancelsATurn(t *testing.T) {
 	chat := env.setUpSession(c, "allow-all")
 	_, chatSub, err := c.Subscribe(ctx, chat)
 	require.NoError(t, err)
+	_, sessionSub, err := c.Subscribe(ctx, ahpTestSession)
+	require.NoError(t, err)
 	_, err = c.Dispatch(ctx, chat, ahptypes.StateAction{Value: &ahptypes.ChatTurnStartedAction{
 		Type: ahptypes.ActionTypeChatTurnStarted, TurnId: "turn-1", StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
 		Message: ahptypes.Message{Text: "sleep", Origin: ahptypes.MessageOrigin{Kind: ahptypes.MessageKindUser}},
@@ -445,6 +450,7 @@ func TestAHPBackendCancelsATurn(t *testing.T) {
 		return ok
 	}, 5*time.Second, 20*time.Millisecond, "cancelling the turn cancels its Task")
 	env.setPhase(taskName, corev1alpha1.TaskPhaseCancelled)
+	waitForActionType(t, sessionSub, "session/activityChanged")
 	require.Eventually(t, func() bool {
 		return env.backend.activeTurn(ahphost.UserKey("https://issuer.example", "alice"), ahpTestSession) == nil
 	}, 5*time.Second, 20*time.Millisecond)

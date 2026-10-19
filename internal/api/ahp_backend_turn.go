@@ -203,10 +203,19 @@ func (b *ahpBackend) emitTurnError(ctx context.Context, emit ahphost.Emitter, re
 		Part: ahptypes.ErrorResponsePart{Kind: ahptypes.ResponsePartKindError, Error: ahptypes.ErrorInfo{ErrorType: kind, Message: message}},
 	}})
 	now := ahpNow(b)
-	_ = emit.Emit(ctx, record.Session, ahptypes.StateAction{Value: &ahptypes.SessionChatUpdatedAction{
-		Type: ahptypes.ActionTypeSessionChatUpdated, Chat: record.Chat,
-		Changes: ahptypes.PartialChatSummary{Status: ahpStatus(ahptypes.SessionStatusIdle), ModifiedAt: &now},
-	}})
+	_ = emit.Emit(ctx, record.Session, ahpSessionIdle(record.Chat, now)...)
+}
+
+// ahpSessionIdle marks a session's chat idle after a turn and clears the
+// session's activity, which clients read as the end of its work.
+func ahpSessionIdle(chat, now string) []ahptypes.StateAction {
+	return []ahptypes.StateAction{
+		{Value: &ahptypes.SessionChatUpdatedAction{
+			Type: ahptypes.ActionTypeSessionChatUpdated, Chat: chat,
+			Changes: ahptypes.PartialChatSummary{Status: ahpStatus(ahptypes.SessionStatusIdle), ModifiedAt: &now},
+		}},
+		{Value: &ahptypes.SessionActivityChangedAction{Type: ahptypes.ActionTypeSessionActivityChanged}},
+	}
 }
 
 func (t *ahpTurn) stop() { t.cancel() }
@@ -754,10 +763,7 @@ func (t *ahpTurn) settleWithError(kind, message string) {
 // finishSession marks the chat idle and the session free for the next turn.
 func (t *ahpTurn) finishSession() {
 	now := ahpNow(t.b)
-	_ = t.emit.Emit(t.ctx, t.session.Session, ahptypes.StateAction{Value: &ahptypes.SessionChatUpdatedAction{
-		Type: ahptypes.ActionTypeSessionChatUpdated, Chat: t.session.Chat,
-		Changes: ahptypes.PartialChatSummary{Status: ahpStatus(ahptypes.SessionStatusIdle), ModifiedAt: &now},
-	}})
+	_ = t.emit.Emit(t.ctx, t.session.Session, ahpSessionIdle(t.session.Chat, now)...)
 	t.b.updateSession(t.ctx, t.principal.UserKey, t.session.Session, func(s *ahpSession) {
 		if s.ActiveTurn == t.id {
 			s.ActiveTurn, s.ActiveTask, s.ActiveStartedAt = "", "", ""
