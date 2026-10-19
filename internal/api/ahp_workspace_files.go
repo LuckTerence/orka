@@ -335,6 +335,11 @@ git diff --no-renames --name-status -z "$fork" HEAD`, "sh", worktree, base)
 	type entry struct{ status, file string }
 	var entries []entry
 	for i := 1; i+1 < len(fields) && len(entries) < ahpChangesMax; i += 2 {
+		// git cat-file reads one object name per line, so a file whose name
+		// holds a line break cannot be read safely; leave it out.
+		if strings.ContainsAny(fields[i+1], "\n\r") {
+			continue
+		}
 		entries = append(entries, entry{status: fields[i], file: fields[i+1]})
 	}
 	var objects []string
@@ -398,6 +403,9 @@ func (w *ahpWorkspaces) blobs(ctx context.Context, pod *corev1.Pod, worktree str
 		remotecommand.StreamOptions{Stdin: stdin, Stdout: out, Stderr: io.Discard}); err != nil {
 		return nil, err
 	}
+	if out.over {
+		return nil, errAHPOutputTooLarge
+	}
 	reader := bufio.NewReader(&out.buf)
 	for _, object := range small {
 		header, err := reader.ReadString('\n')
@@ -411,6 +419,11 @@ func (w *ahpWorkspaces) blobs(ctx context.Context, pod *corev1.Pod, worktree str
 		size, err := strconv.Atoi(parts[2])
 		if err != nil {
 			return nil, err
+		}
+		if size < 0 || size > ahpChangeContentMax {
+			// Each object was checked to be small; anything else means the
+			// answers do not match the questions.
+			return nil, errors.New("git returned an object larger than it reported")
 		}
 		data := make([]byte, size+1)
 		if _, err := io.ReadFull(reader, data); err != nil {
@@ -437,10 +450,10 @@ func (w *ahpWorkspaces) blobSizes(ctx context.Context, pod *corev1.Pod, worktree
 	}
 	sizes := map[string]int{}
 	lines := strings.Split(strings.TrimSuffix(out.buf.String(), "\n"), "\n")
+	if out.over || len(lines) != len(objects) {
+		return nil, errors.New("git answered a different number of objects than it was asked")
+	}
 	for i, object := range objects {
-		if i >= len(lines) {
-			break
-		}
 		parts := strings.Fields(lines[i])
 		if len(parts) == 3 && parts[1] == "blob" {
 			if size, err := strconv.Atoi(parts[2]); err == nil {

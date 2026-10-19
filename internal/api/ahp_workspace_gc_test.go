@@ -8,6 +8,10 @@ package api
 
 import (
 	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -59,4 +63,81 @@ func TestAHPWorkspaceCollectorKeepsWorkspacesInUse(t *testing.T) {
 	require.True(t, apierrors.IsNotFound(err), "an idle workspace with nothing running is removed")
 	require.NoError(t, env.kube.Get(context.Background(), types.NamespacedName{Namespace: w.namespace, Name: ahpWorkspacePodName(bob.UserKey)}, &corev1.Pod{}),
 		"a workspace with a shell stays")
+}
+
+// The script runs in the workspace; run it here against real repositories.
+func TestAHPHoldsWorkScript(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	// Git reports real paths; the temporary directory may be a symlink.
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	git := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", dir, "-c", "user.email=t@example.com", "-c", "user.name=t", "-c", "init.defaultBranch=main"}, args...)...)
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, string(out))
+	}
+	holds := func() string {
+		out, err := exec.Command("/bin/sh", "-c", ahpHoldsWorkScript, "sh", root).Output()
+		require.NoError(t, err)
+		return strings.TrimSpace(string(out))
+	}
+	remote := filepath.Join(t.TempDir(), "remote.git")
+	require.NoError(t, os.MkdirAll(remote, 0o755))
+	git(remote, "init", "--bare")
+	project := filepath.Join(root, "src", "o", "r")
+	require.NoError(t, os.MkdirAll(project, 0o755))
+	git(project, "init")
+	require.NoError(t, os.WriteFile(filepath.Join(project, "a"), []byte("a\n"), 0o600))
+	git(project, "add", "a")
+	git(project, "commit", "-m", "a")
+	git(project, "remote", "add", "origin", remote)
+	git(project, "push", "-u", "origin", "main")
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "worktrees"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(root, ".home"), 0o755))
+	require.Equal(t, "done", holds(), "everything is pushed")
+
+	// A local branch with no upstream holds a commit, even when it is not
+	// checked out.
+	git(project, "switch", "--no-track", "-c", "scratch")
+	require.NoError(t, os.WriteFile(filepath.Join(project, "b"), []byte("b\n"), 0o600))
+	git(project, "add", "b")
+	git(project, "commit", "-m", "b")
+	git(project, "switch", "main")
+	require.Contains(t, holds(), "unpushed "+project)
+	git(project, "push", "origin", "scratch")
+	require.Equal(t, "done", holds())
+
+	// An uncommitted file in a worktree, and a file outside the checkouts.
+	worktree := filepath.Join(root, "worktrees", "o", "r", "s")
+	git(project, "worktree", "add", "-b", "s", worktree, "main")
+	require.NoError(t, os.WriteFile(filepath.Join(worktree, "c"), []byte("c\n"), 0o600))
+	require.Contains(t, holds(), "changed "+worktree)
+	require.NoError(t, os.Remove(filepath.Join(worktree, "c")))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "notes.txt"), []byte("n\n"), 0o600))
+	require.Contains(t, holds(), "other "+filepath.Join(root, "notes.txt"))
+}
+
+func TestAHPWorkspaceUseWaitsOutACollection(t *testing.T) {
+	env := newAHPTestEnv(t)
+	w := &ahpWorkspaces{b: env.backend}
+	alice := ahphost.Principal{UserKey: ahphost.UserKey("https://issuer.example", "alice")}
+	done, ok := w.beginCollect(alice.UserKey[:40])
+	require.True(t, ok)
+	_, again := w.beginCollect(alice.UserKey[:40])
+	require.False(t, again, "one collection at a time")
+	claimed := make(chan error, 1)
+	go func() { claimed <- w.claimForUse(context.Background(), alice) }()
+	select {
+	case err := <-claimed:
+		t.Fatalf("a use went ahead while the workspace was being collected: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	done()
+	require.NoError(t, <-claimed)
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{CreationTimestamp: metav1.NewTime(time.Now().Add(-48 * time.Hour))}}
+	env.backend.cfg.WorkspaceIdleTimeout = time.Hour
+	require.False(t, w.idle(alice.UserKey[:40], pod), "the use counts as recent")
 }

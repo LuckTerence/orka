@@ -77,20 +77,98 @@ func (w *ahpWorkspaces) collectOnce(ctx context.Context) {
 	for i := range pods.Items {
 		pod := &pods.Items[i]
 		label := pod.Labels[ahpWorkspaceUserLabel]
-		if label == "" || !pod.DeletionTimestamp.IsZero() || w.inUse(label) {
+		if label == "" || !pod.DeletionTimestamp.IsZero() || !w.idle(label, pod) {
 			continue
 		}
-		w.mu.Lock()
-		last := w.active[label]
-		w.mu.Unlock()
-		if !ahpWorkspaceIdle(w.b.now(), last, pod, w.b.cfg.WorkspaceIdleTimeout) {
-			continue
-		}
-		if pod.Status.Phase == corev1.PodRunning && w.holdsWork(ctx, pod) {
-			continue
-		}
-		_ = w.b.h.client.Delete(ctx, pod, client.Preconditions{UID: &pod.UID})
+		w.collect(ctx, label, pod)
 	}
+}
+
+// collect removes one idle workspace. While it decides, the workspace is
+// handed to no one: ensure waits for it, so nothing starts in the workspace
+// after the final checks.
+func (w *ahpWorkspaces) collect(ctx context.Context, label string, listed *corev1.Pod) {
+	done, ok := w.beginCollect(label)
+	if !ok {
+		return
+	}
+	defer done()
+	// Use that began before the guard shows now; none can begin after it.
+	pod := &corev1.Pod{}
+	if err := w.reader().Get(ctx, client.ObjectKeyFromObject(listed), pod); err != nil || pod.UID != listed.UID ||
+		!pod.DeletionTimestamp.IsZero() || !w.idle(label, pod) || w.gitBusy(label) {
+		return
+	}
+	if pod.Status.Phase == corev1.PodRunning && w.holdsWork(ctx, pod) {
+		return
+	}
+	_ = w.b.h.client.Delete(ctx, pod, client.Preconditions{UID: &pod.UID})
+}
+
+// idle reports a workspace with nothing running and no recent use.
+func (w *ahpWorkspaces) idle(label string, pod *corev1.Pod) bool {
+	if w.inUse(label) {
+		return false
+	}
+	w.mu.Lock()
+	last := w.active[label]
+	w.mu.Unlock()
+	return ahpWorkspaceIdle(w.b.now(), last, pod, w.b.cfg.WorkspaceIdleTimeout)
+}
+
+// beginCollect marks a user's workspace as being collected.
+func (w *ahpWorkspaces) beginCollect(label string) (func(), bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.collecting == nil {
+		w.collecting = map[string]chan struct{}{}
+	}
+	if _, busy := w.collecting[label]; busy {
+		return nil, false
+	}
+	finished := make(chan struct{})
+	w.collecting[label] = finished
+	return func() {
+		w.mu.Lock()
+		delete(w.collecting, label)
+		w.mu.Unlock()
+		close(finished)
+	}, true
+}
+
+// claimForUse notes a use of the user's workspace, then waits out a
+// collection already deciding about it; the collection sees the use when it
+// has not decided yet.
+func (w *ahpWorkspaces) claimForUse(ctx context.Context, principal ahphost.Principal) error {
+	label := principal.UserKey[:40]
+	w.mu.Lock()
+	if w.active == nil {
+		w.active = map[string]time.Time{}
+	}
+	w.active[label] = w.b.now().UTC()
+	finished := w.collecting[label]
+	w.mu.Unlock()
+	if finished == nil {
+		return nil
+	}
+	select {
+	case <-finished:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// gitBusy reports a git change running in the user's workspace.
+func (w *ahpWorkspaces) gitBusy(label string) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for key, lock := range w.git {
+		if strings.HasPrefix(key, label) && len(lock) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // inUse reports whether a user has a shell or a turn running.
@@ -128,23 +206,31 @@ func ahpWorkspaceIdle(now, last time.Time, pod *corev1.Pod, idle time.Duration) 
 	return now.Sub(last) >= idle
 }
 
-// holdsWork reports whether any checkout in a workspace has changes that
-// exist nowhere else: uncommitted files or commits its upstream lacks. When
-// it cannot tell, it keeps the workspace.
-func (w *ahpWorkspaces) holdsWork(ctx context.Context, pod *corev1.Pod) bool {
-	out, err := w.output(ctx, pod, 64<<10, ahpShell, "-c", `for p in "$1"/*/*; do
+// ahpHoldsWorkScript prints a line for each place under the workspace root
+// ($1) that holds work found nowhere else, then "done".
+const ahpHoldsWorkScript = `for p in "$1"/src/*/*; do
   [ -d "$p/.git" ] || continue
-  git -C "$p" worktree list --porcelain | sed -n 's/^worktree //p' | while IFS= read -r wt; do
-    if [ -n "$(git -C "$wt" status --porcelain 2>/dev/null | head -n 1)" ]; then echo "changed $wt"; continue; fi
-    if git -C "$wt" rev-parse --abbrev-ref '@{u}' >/dev/null 2>&1; then
-      [ "$(git -C "$wt" rev-list --count '@{u}..HEAD')" = 0 ] || echo "ahead $wt"
-    fi
+  n=$(git -C "$p" rev-list --count --branches --not --remotes 2>/dev/null) || { echo "error $p"; continue; }
+  [ "$n" = 0 ] || echo "unpushed $p"
+  s=$(git -C "$p" stash list 2>/dev/null) || { echo "error $p"; continue; }
+  [ -z "$s" ] || echo "stashed $p"
+  wts=$(git -C "$p" worktree list --porcelain 2>/dev/null) || { echo "error $p"; continue; }
+  printf '%s\n' "$wts" | sed -n 's/^worktree //p' | while IFS= read -r wt; do
+    c=$(git -C "$wt" status --porcelain 2>/dev/null) || { echo "error $wt"; continue; }
+    [ -z "$c" ] || echo "changed $wt"
   done
 done
-echo done`, "sh", ahpWorkspaceRoot+"/src")
+find "$1" -mindepth 1 -maxdepth 1 ! -name src ! -name worktrees ! -name .home ! -name .clones | head -n 1 | sed 's/^/other /'
+echo done`
+
+// holdsWork reports whether a workspace holds work that exists nowhere
+// else: uncommitted files in a checkout, commits on any local branch that no
+// remote-tracking branch has, stashes, or files outside the checkouts. When a
+// check fails, it keeps the workspace.
+func (w *ahpWorkspaces) holdsWork(ctx context.Context, pod *corev1.Pod) bool {
+	out, err := w.output(ctx, pod, 64<<10, ahpShell, "-c", ahpHoldsWorkScript, "sh", ahpWorkspaceRoot)
 	if err != nil {
 		return true
 	}
-	text := strings.TrimSpace(string(out))
-	return text != "done"
+	return strings.TrimSpace(string(out)) != "done"
 }

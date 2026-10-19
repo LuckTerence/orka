@@ -92,6 +92,8 @@ type ahpWorkspaces struct {
 	active map[string]time.Time
 	// provided is when each user's workspace last got their git token.
 	provided map[string]ahpProvidedCredential
+	// collecting are the workspaces an idle collection is deciding about.
+	collecting map[string]chan struct{}
 	// git serializes each user's clones and worktree changes, which share
 	// the projects' checkouts.
 	git map[string]chan struct{}
@@ -173,6 +175,9 @@ func (w *ahpWorkspaces) ensure(ctx context.Context, principal ahphost.Principal,
 	}
 	if !w.enabled() {
 		return nil, errors.New("workspaces are not enabled on this host")
+	}
+	if err := w.claimForUse(ctx, principal); err != nil {
+		return nil, err
 	}
 	name := ahpWorkspacePodName(principal.UserKey)
 	deadline := time.Now().Add(wait)
