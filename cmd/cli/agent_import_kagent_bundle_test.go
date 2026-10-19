@@ -127,6 +127,17 @@ func TestKagentV0ImageDigestComesFromTheAgentsPod(t *testing.T) {
 	}
 }
 
+// testRuntimeUID is the UID of the AgentRuntime a test bundle was deployed as.
+const testRuntimeUID = "6f1c2b9e-0000-4000-8000-000000000002"
+
+// recordRegistration does what deploy does once the bundle is registered.
+func recordRegistration(t *testing.T, bundleDir, uid string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(bundleDir, kagentBundleRegistrationFile), []byte(uid+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // kagentRuntimeState is an AgentRuntime as Orka's API returns it, which has
 // observed generation 1.
 func kagentRuntimeState(ready bool, generation int, deleting bool) map[string]any {
@@ -134,7 +145,7 @@ func kagentRuntimeState(ready bool, generation int, deleting bool) map[string]an
 	if ready {
 		status = "True"
 	}
-	metadata := map[string]any{"generation": float64(generation)}
+	metadata := map[string]any{"uid": testRuntimeUID, "generation": float64(generation)}
 	if deleting {
 		metadata["deletionTimestamp"] = "2026-10-19T00:00:00Z"
 	}
@@ -156,6 +167,10 @@ func TestAgentImportKagentCmdActivatesABundleOnlyOnAReadyRuntime(t *testing.T) {
 	api := &kagentImportAPI{agents: map[string]map[string]any{}, runtimes: map[string]map[string]any{}}
 	srv := kagentImportAPIServer(t, api)
 	args := kagentBundleArgs(path, dir, "--server", srv.URL, "-n", "orka-system")
+	if _, err := runKagentImport(t, args...); err == nil || !strings.Contains(err.Error(), "records no registration") || api.creates != 0 {
+		t.Fatalf("activation of an undeployed bundle = %v (%d creates)", err, api.creates)
+	}
+	recordRegistration(t, filepath.Join(dir, "probe-gov"), testRuntimeUID)
 	if _, err := runKagentImport(t, args...); err == nil || !strings.Contains(err.Error(), "is not registered") || api.creates != 0 {
 		t.Fatalf("activation before registration = %v (%d creates)", err, api.creates)
 	}
@@ -169,6 +184,8 @@ func TestAgentImportKagentCmdActivatesABundleOnlyOnAReadyRuntime(t *testing.T) {
 		t.Fatal(err)
 	}
 	other, _ := readBundle(t, filepath.Join(twoDir, "probe-two"))
+	recordRegistration(t, filepath.Join(twoDir, "probe-gov"), testRuntimeUID)
+	recordRegistration(t, filepath.Join(twoDir, "probe-two"), testRuntimeUID)
 	api.mu.Lock()
 	api.runtimes[other.Runtime] = kagentRuntimeState(true, 1, false)
 	api.mu.Unlock()
@@ -188,6 +205,16 @@ func TestAgentImportKagentCmdActivatesABundleOnlyOnAReadyRuntime(t *testing.T) {
 		if _, err := runKagentImport(t, args...); err == nil || !strings.Contains(err.Error(), state) || api.creates != 0 {
 			t.Fatalf("activation on a runtime that %s = %v (%d creates)", state, err, api.creates)
 		}
+	}
+	// A registration of the same name that the deploy did not create, such
+	// as one in another cluster than the deploy targeted, is refused.
+	elsewhere := kagentRuntimeState(true, 1, false)
+	elsewhere["metadata"].(map[string]any)["uid"] = "6f1c2b9e-0000-4000-8000-0000000000ff"
+	api.mu.Lock()
+	api.runtimes[bundle.Runtime] = elsewhere
+	api.mu.Unlock()
+	if _, err := runKagentImport(t, args...); err == nil || !strings.Contains(err.Error(), "the registration the bundle was deployed as") || api.creates != 0 {
+		t.Fatalf("activation on another registration = %v (%d creates)", err, api.creates)
 	}
 	api.mu.Lock()
 	api.runtimes[bundle.Runtime] = kagentRuntimeState(true, 1, false)

@@ -250,6 +250,9 @@ deploy() {
   elif [ "${owner}" != "${registered}" ]; then
     die "deployment ${runtime} is recovered by another AgentRuntime (${owner})"
   fi
+  # Activation requires this registration, so it cannot switch Agents through
+  # an Orka API in another cluster.
+  printf '%s\n' "${registered}" >"${bundle}/registration.uid"
   kc wait --for=condition=Ready "agentruntime/${runtime}" --timeout="${READY_TIMEOUT}" ||
     die "runtime ${runtime} did not become Ready"
   relay_rollback=""

@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -35,6 +36,9 @@ import (
 const (
 	kagentBundleConfigFile  = "kagent.json"
 	kagentBundleRuntimeFile = "runtime.json"
+	// kagentBundleRegistrationFile records the UID of the AgentRuntime the
+	// bundle was deployed and registered as.
+	kagentBundleRegistrationFile = "registration.uid"
 	// kagentBundleDigestChars of the configuration digest name each runtime.
 	kagentBundleDigestChars = 10
 	kagentRelayScheme       = "http"
@@ -247,9 +251,13 @@ func writeKagentBundles(o kagentWrapperOptions, wrapped []kagentWrappedAgent) ([
 	return written, nil
 }
 
+// kagentUID matches a Kubernetes object UID.
+var kagentUID = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
 // verifyKagentBundles refuses an activation whose arguments pin anything but
 // the bundles in the directory: those are the ones deployed, whose relays
-// were checked before it.
+// were checked before it. It reads the registration each deploy recorded,
+// which activation then requires.
 func verifyKagentBundles(o kagentWrapperOptions, wrapped []kagentWrappedAgent) error {
 	if o.BundleDir == "" {
 		return nil
@@ -259,7 +267,7 @@ func verifyKagentBundles(o kagentWrapperOptions, wrapped []kagentWrappedAgent) e
 		return fmt.Errorf("reading the deployment bundles: %w", err)
 	}
 	defer root.Close() //nolint:errcheck
-	for _, agent := range wrapped {
+	for i, agent := range wrapped {
 		files, err := o.kagentBundleFiles(agent)
 		if err != nil {
 			return err
@@ -270,6 +278,11 @@ func verifyKagentBundles(o kagentWrapperOptions, wrapped []kagentWrappedAgent) e
 				return fmt.Errorf("kagent Agent %s: the bundle in %s is not the one these arguments pin (runtime %s); write it with --dry-run and deploy it before activating",
 					agent.Source, filepath.Join(o.BundleDir, name), agent.RuntimeName)
 			}
+		}
+		uid, err := root.ReadFile(filepath.Join(name, kagentBundleRegistrationFile))
+		if wrapped[i].RuntimeUID = strings.TrimSpace(string(uid)); err != nil || !kagentUID.MatchString(wrapped[i].RuntimeUID) {
+			return fmt.Errorf("kagent Agent %s: the bundle in %s records no registration (%s); deploy it before activating",
+				agent.Source, filepath.Join(o.BundleDir, name), kagentBundleRegistrationFile)
 		}
 	}
 	return nil
@@ -297,7 +310,7 @@ func kagentRelayService(origin string) (service, namespace string, port int, err
 // requireReadyKagentRuntime refuses to point an Agent at a runtime Orka has
 // not registered as ready, so a re-pin never sends new Tasks to a runtime
 // that cannot serve them.
-func requireReadyKagentRuntime(ctx context.Context, c *client.Client, namespace, runtime string) error {
+func requireReadyKagentRuntime(ctx context.Context, c *client.Client, namespace, runtime, uid string) error {
 	value, err := c.DoJSON(ctx, http.MethodGet, "/api/v1/agent-runtimes/"+url.PathEscape(runtime), map[string]string{cliNamespaceQuery: namespace}, nil)
 	if err != nil {
 		if strings.Contains(err.Error(), "HTTP 404") {
@@ -306,6 +319,11 @@ func requireReadyKagentRuntime(ctx context.Context, c *client.Client, namespace,
 		return fmt.Errorf("reading AgentRuntime %q: %w", runtime, err)
 	}
 	runtimeObj, _ := value.(map[string]any)
+	// The Orka API this import reaches must serve the registration the
+	// bundle's deploy created, not one of the same name in another cluster.
+	if got := kagentString(runtimeObj, "metadata", "uid"); got != uid {
+		return fmt.Errorf("AgentRuntime %q has UID %q, not %q, the registration the bundle was deployed as; does the Orka CLI target the cluster the deploy did?", runtime, got, uid)
+	}
 	// Orka admits Tasks only to a Ready runtime that has observed its
 	// current spec and is not being deleted.
 	if kagentMap(runtimeObj, "metadata")["deletionTimestamp"] != nil {

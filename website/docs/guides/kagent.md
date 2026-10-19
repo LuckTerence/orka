@@ -116,7 +116,10 @@ each pin gets its own runtime, named `<agent>-kagent-<digest>`:
 
    The import switches every Agent in the export, and refuses unless all of
    their runtimes are Ready, and unless these arguments pin exactly the
-   bundles in the directory, which are the ones you deployed. The script also
+   bundles in the directory, which are the ones you deployed. `deploy`
+   records each runtime's AgentRuntime UID in its bundle
+   (`registration.uid`), and the import refuses a runtime with another UID,
+   such as one in another cluster than the deploy targeted. The script also
    refuses while the relay of a governed Agent in the bundle directory selects
    another runtime, for example after you deployed a newer one; deploying the
    bundle again moves the relay back.
