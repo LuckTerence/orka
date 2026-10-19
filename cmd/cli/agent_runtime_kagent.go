@@ -508,17 +508,21 @@ func kagentRelay(bundle kagentBundle, options kagentRenderOptions) ([]any, error
 		return nil, fmt.Errorf("the Agent's relay %s is in namespace %q; render the runtime there", bundle.Relay, namespace)
 	}
 	labels := map[string]string{kagentAgentLabel: bundle.Agent}
+	// The relay also names the kagent Agent it serves: kagent Agents of one
+	// name in different namespaces map to one Orka Agent name.
+	meta := kagentMeta(name, options.Namespace, labels)
+	meta.Annotations = map[string]string{kagentSourceAnnotation: bundle.KagentNamespace + "/" + bundle.KagentName}
 	tcp := corev1.ProtocolTCP
 	port := func(n int) []networkingv1.NetworkPolicyPort {
 		return []networkingv1.NetworkPolicyPort{{Port: new(intstr.FromInt(n)), Protocol: &tcp}}
 	}
 	return []any{
 		&corev1.Service{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Service"},
-			ObjectMeta: kagentMeta(name, options.Namespace, labels),
+			ObjectMeta: meta,
 			Spec: corev1.ServiceSpec{Type: corev1.ServiceTypeClusterIP, Selector: map[string]string{kagentRuntimeLabel: bundle.Runtime},
 				Ports: []corev1.ServicePort{{Name: kagentPartRelay, Port: int32(servicePort), TargetPort: intstr.FromString(kagentPartRelay)}}}},
 		&networkingv1.NetworkPolicy{TypeMeta: metav1.TypeMeta{APIVersion: "networking.k8s.io/v1", Kind: "NetworkPolicy"},
-			ObjectMeta: kagentMeta(name, options.Namespace, labels),
+			ObjectMeta: meta,
 			Spec: networkingv1.NetworkPolicySpec{
 				PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{kagentRelayLabel: bundle.Agent}},
 				PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress},

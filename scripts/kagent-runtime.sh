@@ -127,6 +127,13 @@ registration_of() {
   kc get agentruntime "$1" --ignore-not-found -o name
 }
 
+# relay_owner prints the Agent and kagent Agent a relay object is labeled and
+# annotated for, as "<agent> <namespace>/<name>", or nothing if it is absent.
+relay_owner() {
+  kc get "$1" "$2" --ignore-not-found -o json |
+    jq -r '"\(.metadata.labels["orka.ai/kagent-agent"] // "-") \(.metadata.annotations["orka.ai/kagent-source"] // "-")"'
+}
+
 same_bundle_dir() {
   [ -d "$1" ] && [ "$(cd "$1" && pwd -P)" = "$2" ]
 }
@@ -137,10 +144,11 @@ same_bundle_dir() {
 # The restore applies only while the relay still selects this runtime: a
 # concurrent deploy of the Agent may have moved it since.
 restore_relay() {
-  [ -n "${relay_rollback}" ] || return 0
-  echo "Runtime ${runtime} is not Ready; moving relay ${relay_service} back." >&2
-  kc patch service "${relay_service}" --type=json -p "[{\"op\":\"test\",\"path\":\"/spec/selector\",\"value\":{\"orka.ai/kagent-runtime\":\"${runtime}\"}},{\"op\":\"replace\",\"path\":\"/spec/selector\",\"value\":${relay_rollback}},{\"op\":\"replace\",\"path\":\"/spec/ports\",\"value\":${relay_rollback_ports}}]" >/dev/null ||
-    echo "kagent-runtime: relay ${relay_service} was not moved back to ${relay_rollback}; it does not select ${runtime}, or the patch failed" >&2
+  if [ -n "${relay_rollback}" ]; then
+    echo "Runtime ${runtime} is not Ready; moving relay ${relay_service} back." >&2
+    kc patch service "${relay_service}" --type=json -p "[{\"op\":\"test\",\"path\":\"/spec/selector\",\"value\":{\"orka.ai/kagent-runtime\":\"${runtime}\"}},{\"op\":\"replace\",\"path\":\"/spec/selector\",\"value\":${relay_rollback}},{\"op\":\"replace\",\"path\":\"/spec/ports\",\"value\":${relay_rollback_ports}}]" >/dev/null ||
+      echo "kagent-runtime: relay ${relay_service} was not moved back to ${relay_rollback}; it does not select ${runtime}, or the patch failed" >&2
+  fi
   # The policy goes back too, while it is still the one this deploy wrote:
   # one it created is deleted, under the Agent's lock, if it is that object.
   if [ -n "${relay_created_policy}" ]; then
@@ -254,21 +262,16 @@ deploy() {
   if [ "${governed}" = true ]; then
     # The relay Service's name comes from the Agent's relay URL, which an
     # Agent imported separately may share.
-    local relay_agent
+    # Both relay objects must be absent, or this Agent's for this kagent
+    # Agent: before activation, no Orka Agent records which kagent Agent a
+    # deployed relay serves.
+    local kind owner
     relay_service=$(relay_service_of "${bundle}")
-    local relay_found
-    relay_found=$(kc get service "${relay_service}" --ignore-not-found -o name)
-    relay_agent=$(kc get service "${relay_service}" --ignore-not-found -o jsonpath='{.metadata.labels.orka\.ai/kagent-agent}')
-    if [ -n "${relay_found}" ] && [ "${relay_agent}" != "${agent}" ]; then
-      [ -n "${relay_agent}" ] && die "relay ${relay_service} serves Agent ${relay_agent}; give ${agent} its own relay URL"
-      die "Service ${relay_service} exists but is not a relay of this script; to let ${agent} use it, label it orka.ai/kagent-agent=${agent}"
-    fi
-    # The relay's NetworkPolicy has the Service's name, and the same rule.
-    local policy_found policy_agent
-    policy_found=$(kc get networkpolicy "${relay_service}" --ignore-not-found -o name)
-    policy_agent=$(kc get networkpolicy "${relay_service}" --ignore-not-found -o jsonpath='{.metadata.labels.orka\.ai/kagent-agent}')
-    [ -z "${policy_found}" ] || [ "${policy_agent}" = "${agent}" ] ||
-      die "NetworkPolicy ${relay_service} exists but is not ${agent}'s relay policy; to let ${agent} use it, label it orka.ai/kagent-agent=${agent}"
+    for kind in service networkpolicy; do
+      owner=$(relay_owner "${kind}" "${relay_service}")
+      [ -z "${owner}" ] || [ "${owner}" = "${agent} ${kagent_source}" ] ||
+        die "${kind} ${relay_service} is not ${agent}'s relay for kagent Agent ${kagent_source} (it is for ${owner% *}, ${owner#* }); give ${agent} its own relay URL, or adopt it by labeling it orka.ai/kagent-agent=${agent} and annotating it orka.ai/kagent-source=${kagent_source}"
+    done
   fi
   # Only NotFound means the runtime is not deployed yet: rebuilding a deployed
   # runtime would roll new images into it under its registered profile.
@@ -331,7 +334,7 @@ deploy() {
         # the rollback restores only while the relay selects this runtime.
         relay_rollback=${previous}
         relay_rollback_ports=$(jq -c '.spec.ports' <<<"${current}")
-        kc patch service "${relay_service}" --type=json -p "[{\"op\":\"test\",\"path\":\"/spec/selector\",\"value\":${previous}},{\"op\":\"test\",\"path\":\"/metadata/labels/orka.ai~1kagent-agent\",\"value\":\"${agent}\"},{\"op\":\"replace\",\"path\":\"/spec/selector\",\"value\":${want}},{\"op\":\"replace\",\"path\":\"/spec/ports\",\"value\":${ports}}]" >/dev/null ||
+        kc patch service "${relay_service}" --type=json -p "[{\"op\":\"test\",\"path\":\"/spec/selector\",\"value\":${previous}},{\"op\":\"test\",\"path\":\"/metadata/labels/orka.ai~1kagent-agent\",\"value\":\"${agent}\"},{\"op\":\"test\",\"path\":\"/metadata/annotations/orka.ai~1kagent-source\",\"value\":\"${kagent_source}\"},{\"op\":\"replace\",\"path\":\"/spec/selector\",\"value\":${want}},{\"op\":\"replace\",\"path\":\"/spec/ports\",\"value\":${ports}}]" >/dev/null ||
           die "relay ${relay_service} did not take the handoff: it changed while this deploy ran, or the patch failed; deploy again"
       fi
     fi
@@ -349,15 +352,15 @@ deploy() {
       created=$(jq '.items[] | select(.kind == "NetworkPolicy")' "${work}/relay.json" |
         kubectl --context "${KUBECTL_CONTEXT}" create -f - -o jsonpath='{.metadata.uid}')
       # A rollback deletes a policy this deploy created, by its UID.
-      [ -z "${relay_rollback}" ] || relay_created_policy=${created}
+      relay_created_policy=${created}
     else
       previous_policy=$(jq -cS '.spec' <<<"${policy}")
       if [ "${previous_policy}" != "${rendered_policy}" ]; then
-        if [ -n "${relay_rollback}" ]; then
-          relay_rollback_policy=${previous_policy}
-          relay_applied_policy=${rendered_policy}
-        fi
-        kc patch networkpolicy "${relay_service}" --type=json -p "[{\"op\":\"test\",\"path\":\"/spec\",\"value\":${previous_policy}},{\"op\":\"replace\",\"path\":\"/spec\",\"value\":${rendered_policy}}]" >/dev/null ||
+        # Armed even when the selector stays, since the policy alone can
+        # shut out the serving runtime's callers.
+        relay_rollback_policy=${previous_policy}
+        relay_applied_policy=${rendered_policy}
+        kc patch networkpolicy "${relay_service}" --type=json -p "[{\"op\":\"test\",\"path\":\"/spec\",\"value\":${previous_policy}},{\"op\":\"test\",\"path\":\"/metadata/labels/orka.ai~1kagent-agent\",\"value\":\"${agent}\"},{\"op\":\"test\",\"path\":\"/metadata/annotations/orka.ai~1kagent-source\",\"value\":\"${kagent_source}\"},{\"op\":\"replace\",\"path\":\"/spec\",\"value\":${rendered_policy}}]" >/dev/null ||
           die "relay policy ${relay_service} changed while this deploy ran, or the patch failed; deploy again"
       fi
     fi
@@ -387,7 +390,7 @@ deploy() {
   kc get agentruntime "${runtime}" -o json | jq -e --arg uid "${registered}" \
     '.metadata.uid == $uid and .metadata.deletionTimestamp == null and .status.ready == true and .status.observedGeneration == .metadata.generation' >/dev/null ||
     die "runtime ${runtime} is Ready but being deleted, not yet current, or not the registration this deploy made; deploy under a new --runtime-revision"
-  relay_rollback=""
+  relay_rollback="" relay_rollback_policy="" relay_applied_policy="" relay_created_policy=""
   echo "Runtime ${runtime} is Ready. Activate it with: $0 activate ${bundle} -- <the import arguments>"
 }
 

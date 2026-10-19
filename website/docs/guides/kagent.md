@@ -107,9 +107,11 @@ each pin gets its own runtime, named `<agent>-kagent-<digest>`:
    with: to rotate it, re-pin under a new `--runtime-revision`, and the
    script refuses to redeploy a runtime with a different one. Set `CONTROLLER_NAMESPACE` when the Orka
    controller runs in another namespace than the runtimes. A governed Agent's
-   relay Service may serve only that Agent, so the script refuses one that
-   another Agent's deploy created, and one it did not create: label such a
-   Service `orka.ai/kagent-agent=<agent>` to let the Agent use it. The script waits until Orka reports the
+   relay Service and NetworkPolicy may serve only that Agent and its kagent
+   Agent, so the script refuses ones another Agent's deploy created, and ones
+   it did not create. To let the Agent use such objects, label them
+   `orka.ai/kagent-agent=<agent>` and annotate them
+   `orka.ai/kagent-source=<kagent namespace>/<kagent name>`. The script waits until Orka reports the
    AgentRuntime Ready. Orka's conformance check sends a prompt that calls the
    relay, so the script moves a governed Agent's relay to the new runtime
    first, and back if deploying fails before the runtime is Ready. Until you

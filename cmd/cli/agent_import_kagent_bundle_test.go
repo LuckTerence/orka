@@ -380,6 +380,12 @@ func checkRenderedRelay(t *testing.T, bundleDir string, bundle kagentBundle, opt
 		len(ports) != 1 || ports[0].(map[string]any)["port"] != float64(8092) {
 		t.Fatalf("relay service = %v", service)
 	}
+	// Both relay objects name the kagent Agent they serve.
+	for _, kind := range []string{"Service", "NetworkPolicy"} {
+		if source := kagentString(findKind(renderBundle(t, bundleDir, options), kind), "metadata", "annotations", kagentSourceAnnotation); source != bundle.KagentNamespace+"/"+bundle.KagentName {
+			t.Fatalf("relay %s source = %q", kind, source)
+		}
+	}
 	options.Namespace = "team"
 	if _, err := renderKagentRuntime(bundleDir, options); err == nil || !strings.Contains(err.Error(), `in namespace "orka-system"`) {
 		t.Fatalf("a relay rendered outside its namespace = %v", err)
