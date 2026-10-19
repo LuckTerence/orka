@@ -141,7 +141,17 @@ restore_relay() {
   echo "Runtime ${runtime} is not Ready; moving relay ${relay_service} back." >&2
   kc patch service "${relay_service}" --type=json -p "[{\"op\":\"test\",\"path\":\"/spec/selector\",\"value\":{\"orka.ai/kagent-runtime\":\"${runtime}\"}},{\"op\":\"replace\",\"path\":\"/spec/selector\",\"value\":${relay_rollback}},{\"op\":\"replace\",\"path\":\"/spec/ports\",\"value\":${relay_rollback_ports}}]" >/dev/null ||
     echo "kagent-runtime: relay ${relay_service} was not moved back to ${relay_rollback}; it does not select ${runtime}, or the patch failed" >&2
-  # The policy goes back too, while it is still the one this deploy applied.
+  # The policy goes back too, while it is still the one this deploy wrote:
+  # one it created is deleted, under the Agent's lock, if it is that object.
+  if [ -n "${relay_created_policy}" ]; then
+    local uid
+    uid=$(kc get networkpolicy "${relay_service}" --ignore-not-found -o jsonpath='{.metadata.uid}') || uid=""
+    if [ "${uid}" = "${relay_created_policy}" ]; then
+      kc delete networkpolicy "${relay_service}" >/dev/null ||
+        echo "kagent-runtime: could not delete relay policy ${relay_service}, which this deploy created" >&2
+    fi
+    return 0
+  fi
   [ -n "${relay_rollback_policy}" ] && [ -n "${relay_applied_policy}" ] || return 0
   kc patch networkpolicy "${relay_service}" --type=json -p "[{\"op\":\"test\",\"path\":\"/spec\",\"value\":${relay_applied_policy}},{\"op\":\"replace\",\"path\":\"/spec\",\"value\":${relay_rollback_policy}}]" >/dev/null ||
     echo "kagent-runtime: relay policy ${relay_service} was not restored; it changed since this deploy applied it, or the patch failed" >&2
@@ -335,8 +345,11 @@ deploy() {
     rendered_policy=$(jq -ceS '.items[] | select(.kind == "NetworkPolicy") | .spec' "${work}/relay.json")
     policy=$(kc get networkpolicy "${relay_service}" --ignore-not-found -o json)
     if [ -z "${policy}" ]; then
-      jq '.items |= map(select(.kind == "NetworkPolicy"))' "${work}/relay.json" |
-        kubectl --context "${KUBECTL_CONTEXT}" create -f - >/dev/null
+      local created
+      created=$(jq '.items[] | select(.kind == "NetworkPolicy")' "${work}/relay.json" |
+        kubectl --context "${KUBECTL_CONTEXT}" create -f - -o jsonpath='{.metadata.uid}')
+      # A rollback deletes a policy this deploy created, by its UID.
+      [ -z "${relay_rollback}" ] || relay_created_policy=${created}
     else
       previous_policy=$(jq -cS '.spec' <<<"${policy}")
       if [ "${previous_policy}" != "${rendered_policy}" ]; then
@@ -504,6 +517,7 @@ relay_service=""
 relay_rollback=""
 relay_rollback_ports=""
 relay_rollback_policy=""
+relay_created_policy=""
 relay_applied_policy=""
 work=""
 locks=()
