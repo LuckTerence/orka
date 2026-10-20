@@ -46,7 +46,9 @@ const (
 	// runtime's objects and the runtimes of one Agent.
 	kagentRuntimeLabel = "orka.ai/kagent-runtime"
 	kagentAgentLabel   = "orka.ai/kagent-agent"
-	// kagentRelayLabel selects the runtime that serves an Agent's relay.
+	// kagentRelayLabel names the relay Service a governed runtime serves, which
+	// its relay NetworkPolicy selects: one relay's policy never covers the
+	// runtimes of another kagent Agent, even one of the same name.
 	kagentRelayLabel = "orka.ai/kagent-relay"
 	// kagentRuntimeNamespaceLabel marks a v0 runtime's pod reader in the
 	// Agent's namespace, which runtimes of other Orka namespaces share.
@@ -182,6 +184,9 @@ func readKagentBundle(dir string) (kagentBundle, []byte, error) {
 	if bundle.KagentVersion != kagentVersionV0 && bundle.KagentVersion != "v1" {
 		return bundle, nil, fmt.Errorf("the bundle names kagent version %q", bundle.KagentVersion)
 	}
+	if bundle.Source == "" {
+		return bundle, nil, fmt.Errorf("%s names no kagent source; re-run the import", kagentBundleRuntimeFile)
+	}
 	return bundle, config, nil
 }
 
@@ -223,7 +228,9 @@ func renderKagentPart(bundle kagentBundle, config []byte, options kagentRenderOp
 		if options.ControllerEpoch <= 0 {
 			return nil, fmt.Errorf("--controller-epoch must be the current Orka controller epoch")
 		}
-		items = kagentWorkload(bundle, config, profile, options)
+		if items, err = kagentWorkload(bundle, config, profile, options); err != nil {
+			return nil, err
+		}
 	case kagentPartRelay:
 		if !bundle.Governed {
 			return nil, fmt.Errorf("kagent Agent %s/%s is observed; only a governed Agent has a relay", bundle.KagentNamespace, bundle.KagentName)
@@ -384,10 +391,11 @@ func kagentResources(cpuRequest, memoryRequest, cpuLimit, memoryLimit string) co
 
 // kagentMeta names an object of a runtime. Its annotation names the kagent
 // Agent the runtime wraps: kagent Agents of one name in different namespaces
-// map to one Orka Agent, so a retirement must tell their runtimes apart.
+// or API versions map to one Orka Agent, so a retirement must tell their
+// runtimes apart.
 func kagentMeta(bundle kagentBundle, name, namespace string, labels map[string]string) metav1.ObjectMeta {
 	return metav1.ObjectMeta{Name: name, Namespace: namespace, Labels: labels,
-		Annotations: map[string]string{kagentSourceAnnotation: bundle.KagentNamespace + "/" + bundle.KagentName}}
+		Annotations: map[string]string{kagentSourceAnnotation: bundle.Source}}
 }
 
 func kagentSecretVolume(name, secret string, keys ...string) corev1.Volume {
@@ -412,7 +420,7 @@ func kagentSecretEnv(name, secret, key string) corev1.EnvVar {
 // kagentWorkload renders the runtime's own objects. The pod runs exactly the
 // supervisor and broker containers, mounts no service account token except
 // v0's into the broker, and keeps the ledger on a broker-only volume.
-func kagentWorkload(bundle kagentBundle, config []byte, profile kagentRuntimeProfile, options kagentRenderOptions) []any {
+func kagentWorkload(bundle kagentBundle, config []byte, profile kagentRuntimeProfile, options kagentRenderOptions) ([]any, error) {
 	name, namespace := bundle.Runtime, options.Namespace
 	secret, account, claim, configMap := name+"-auth", name+"-broker", name+"-ledger", name+"-config"
 	configMount := corev1.VolumeMount{Name: "agent-config", MountPath: kagentConfigDir, ReadOnly: true}
@@ -421,7 +429,14 @@ func kagentWorkload(bundle kagentBundle, config []byte, profile kagentRuntimePro
 		orkaAPI = "http://orka-api." + namespace + ".svc:8080"
 	}
 	labels := map[string]string{kagentRuntimeLabel: name, kagentAgentLabel: bundle.Agent}
-	podLabels := map[string]string{kagentRuntimeLabel: name, kagentAgentLabel: bundle.Agent, kagentBrokerLabel: "true", kagentRelayLabel: bundle.Agent}
+	podLabels := map[string]string{kagentRuntimeLabel: name, kagentAgentLabel: bundle.Agent, kagentBrokerLabel: "true"}
+	if bundle.Governed {
+		relay, _, _, err := kagentRelayService(bundle.Relay)
+		if err != nil {
+			return nil, err
+		}
+		podLabels[kagentRelayLabel] = relay
+	}
 	values := maps.Clone(profile.SupervisorEnv)
 	maps.Copy(values, map[string]string{
 		"ORKA_ACP_LISTEN_ADDRESS":               ":" + strconv.Itoa(kagentControlPort),
@@ -549,7 +564,7 @@ func kagentWorkload(bundle kagentBundle, config []byte, profile kagentRuntimePro
 			Ports: []corev1.ServicePort{{Name: kagentControlPortName, Port: kagentControlPort, TargetPort: intstr.FromString(kagentControlPortName)}}}}
 	// The broker ledger must survive pod restarts, or a restart drops every
 	// session it owns. Each runtime has its own ledger.
-	return append(items, pvc, deployment, service)
+	return append(items, pvc, deployment, service), nil
 }
 
 // kagentRelay renders a governed Agent's relay Service, the one its pinned
@@ -577,7 +592,7 @@ func kagentRelay(bundle kagentBundle, options kagentRenderOptions) ([]any, error
 		&networkingv1.NetworkPolicy{TypeMeta: metav1.TypeMeta{APIVersion: "networking.k8s.io/v1", Kind: "NetworkPolicy"},
 			ObjectMeta: meta,
 			Spec: networkingv1.NetworkPolicySpec{
-				PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{kagentRelayLabel: bundle.Agent}},
+				PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{kagentRelayLabel: name}},
 				PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress},
 				Ingress: []networkingv1.NetworkPolicyIngressRule{
 					// Orka's controller reaches every runtime's control port.

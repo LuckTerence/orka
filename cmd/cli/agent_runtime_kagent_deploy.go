@@ -375,8 +375,10 @@ func (k *kagentRuntimes) getOptional(ctx context.Context, name string, obj clien
 	}
 }
 
+// kagentSource is the bundle's kagent Agent as every object of its runtimes,
+// and the Orka Agent, names it: "<apiVersion> <namespace>/<name>".
 func kagentSource(bundle kagentBundle) string {
-	return bundle.KagentNamespace + "/" + bundle.KagentName
+	return bundle.Source
 }
 
 // relayOwned reports whether a relay object serves the Agent and kagent
@@ -416,11 +418,8 @@ func (k *kagentRuntimes) deploy(ctx context.Context, dir string) (err error) {
 	if err != nil {
 		return err
 	}
-	// The annotation is "<apiVersion> <namespace>/<name>".
-	if wraps := agent.Annotations[kagentSourceAnnotation]; found && wraps != "" {
-		if wrapped := wraps[strings.LastIndex(wraps, " ")+1:]; wrapped != source {
-			return fmt.Errorf("the Orka Agent %s wraps kagent Agent %s, not %s; import %s into another Orka namespace", bundle.Agent, wrapped, source, source)
-		}
+	if wraps := agent.Annotations[kagentSourceAnnotation]; found && wraps != "" && wraps != source {
+		return fmt.Errorf("the Orka Agent %s wraps kagent Agent %s, not %s; import %s into another Orka namespace", bundle.Agent, wraps, source, source)
 	}
 	relay := ""
 	if bundle.Governed {
@@ -436,7 +435,7 @@ func (k *kagentRuntimes) deploy(ctx context.Context, dir string) (err error) {
 				return err
 			}
 			if found && !relayOwned(obj, bundle) {
-				return fmt.Errorf("%s %s is not %s's relay for kagent Agent %s; give %s its own relay URL, or adopt it by labeling it %s=%s and annotating it %s=%s",
+				return fmt.Errorf("%s %s is not %s's relay for kagent Agent %s; give %s its own relay URL, or adopt it by labeling it %s=%s and annotating it %s='%s'",
 					kind, relay, bundle.Agent, source, bundle.Agent, kagentAgentLabel, bundle.Agent, kagentSourceAnnotation, source)
 			}
 		}

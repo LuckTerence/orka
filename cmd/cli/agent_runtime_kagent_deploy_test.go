@@ -308,13 +308,17 @@ func TestKagentDeployDeletesAPolicyWhoseCreateAnswerWasLost(t *testing.T) {
 	}
 }
 
+// A relay of the same Orka Agent name serving another kagent source, of
+// another namespace or API version, is not this Agent's.
 func TestKagentDeployRefusesAnotherAgentsRelay(t *testing.T) {
 	dir, bundle := writeTestKagentBundle(t)
-	service, _ := relayObjectsFor(bundle, "other")
-	service.Annotations[kagentSourceAnnotation] = "elsewhere/probe-gov"
-	k, _ := newTestKagentRuntimes(t, kagentTestCluster(t, service))
-	if err := k.deploy(context.Background(), dir); err == nil || !strings.Contains(err.Error(), "is not probe-gov's relay") {
-		t.Fatalf("deploy onto another kagent Agent's relay = %v", err)
+	for _, other := range []string{"kagent.dev/v1alpha2 elsewhere/probe-gov", "api.kagent.dev/v1alpha3 kagent/probe-gov"} {
+		service, _ := relayObjectsFor(bundle, "other")
+		service.Annotations[kagentSourceAnnotation] = other
+		k, _ := newTestKagentRuntimes(t, kagentTestCluster(t, service))
+		if err := k.deploy(context.Background(), dir); err == nil || !strings.Contains(err.Error(), "is not probe-gov's relay") {
+			t.Fatalf("deploy onto the relay of %s = %v", other, err)
+		}
 	}
 }
 

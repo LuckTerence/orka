@@ -123,7 +123,9 @@ each pin gets its own runtime, named `<agent>-kagent-<digest>`:
    kagent Agent, so deploy refuses ones another Agent's deploy created, and
    ones it did not create. To let the Agent use such objects, label them
    `orka.ai/kagent-agent=<agent>` and annotate them
-   `orka.ai/kagent-source=<kagent namespace>/<kagent name>`.
+   `orka.ai/kagent-source='<kagent apiVersion> <kagent namespace>/<kagent name>'`,
+   such as `'kagent.dev/v1alpha2 kagent/probe'`, the value the Orka Agent
+   carries.
 
 3. Point the Orka Agent at the new runtime, with the import flags that wrote
    the bundle, minus `--dry-run`, after `--`:
