@@ -653,14 +653,15 @@ func (k *kagentRuntimes) handOffRelay(ctx context.Context, bundle kagentBundle, 
 		return nil
 	}
 	// Armed even when the selector stays, since the policy alone can shut out
-	// the serving runtime's callers.
-	rollback.policy = existing.Spec.DeepCopy()
+	// the serving runtime's callers, and before the patch, since an error may
+	// follow a committed one. The fence is the rendered spec, which sets every
+	// field the API server would default.
+	rollback.policy, rollback.applied = existing.Spec.DeepCopy(), policy.Spec.DeepCopy()
 	ops := append(kagentOwnerTests(bundle), kagentPatchOp{kagentPatchTest, kagentSpecPath, rollback.policy}, kagentPatchOp{kagentPatchReplace, kagentSpecPath, policy.Spec})
 	if err := k.jsonPatch(ctx, existing, ops); err != nil {
-		rollback.policy = nil
 		return fmt.Errorf("relay policy %s changed while this deploy ran, or the patch failed; deploy again: %w", rollback.service, err)
 	}
-	// The fence is the spec the API server stored, defaults included.
+	// Once the answer arrives, the fence is the spec the API server stored.
 	rollback.applied = existing.Spec.DeepCopy()
 	return nil
 }
@@ -731,7 +732,11 @@ func (k *kagentRuntimes) restoreRelay(bundle kagentBundle, rollback *kagentRelay
 			k.logf("kagent-runtime: could not delete relay policy %s, which this deploy created: %v", rollback.service, err)
 		}
 	case rollback.policy != nil && rollback.applied != nil:
-		policy.Name, policy.Namespace = rollback.service, k.namespace
+		// A patch that failed before it committed left the policy as it was.
+		if found, err := k.getOptional(ctx, rollback.service, policy); err == nil && found && equalJSON(policy.Spec, *rollback.policy) {
+			break
+		}
+		policy = &networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{Name: rollback.service, Namespace: k.namespace}}
 		ops := []kagentPatchOp{{kagentPatchTest, kagentSpecPath, rollback.applied}, {kagentPatchReplace, kagentSpecPath, rollback.policy}}
 		if err := k.jsonPatch(ctx, policy, ops); err != nil {
 			k.logf("kagent-runtime: relay policy %s was not restored; it changed since this deploy applied it, or the patch failed: %v", rollback.service, err)
