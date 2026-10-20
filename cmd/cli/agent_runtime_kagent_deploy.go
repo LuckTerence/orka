@@ -47,14 +47,17 @@ import (
 const (
 	kagentLockSuffix         = "-kagent-lock"
 	kagentRecoveryAnnotation = "orka.ai/agent-runtime-recovery-uid"
-	kagentFieldOwner         = "orka-agent-runtime-kagent"
-	kagentControllerEpoch    = "orka-controller"
-	kagentAdapterDigestEnv   = "ORKA_ACP_KAGENT_ADAPTER_DIGEST"
-	kagentRollbackTimeout    = time.Minute
-	kagentPatchTest          = "test"
-	kagentPatchReplace       = "replace"
-	kagentSpecPath           = "/spec"
-	kagentSelectorPath       = "/spec/selector"
+	// kagentDeployAnnotation carries the nonce of the deploy that created a
+	// relay policy.
+	kagentDeployAnnotation = "orka.ai/kagent-deploy"
+	kagentFieldOwner       = "orka-agent-runtime-kagent"
+	kagentControllerEpoch  = "orka-controller"
+	kagentAdapterDigestEnv = "ORKA_ACP_KAGENT_ADAPTER_DIGEST"
+	kagentRollbackTimeout  = time.Minute
+	kagentPatchTest        = "test"
+	kagentPatchReplace     = "replace"
+	kagentSpecPath         = "/spec"
+	kagentSelectorPath     = "/spec/selector"
 )
 
 // kagentRuntimeOptions are the settings of deploy, activate, and retire.
@@ -339,10 +342,13 @@ func relayOwned(obj client.Object, bundle kagentBundle) bool {
 // kagentRelayRollback is what a deploy changed on its Agent's relay before
 // the runtime was Ready, so that a failure can change it back.
 type kagentRelayRollback struct {
-	service       string
-	selector      map[string]string
-	ports         []corev1.ServicePort
+	service  string
+	selector map[string]string
+	ports    []corev1.ServicePort
+	// createdPolicy marks the policy this deploy creates, by its UID once
+	// the answer arrives and by the nonce annotation it carries before.
 	createdPolicy types.UID
+	policyNonce   string
 	policy        *networkingv1.NetworkPolicySpec
 	applied       *networkingv1.NetworkPolicySpec
 }
@@ -642,10 +648,19 @@ func (k *kagentRuntimes) handOffRelay(ctx context.Context, bundle kagentBundle, 
 		return err
 	}
 	if !found {
+		// A rollback deletes a policy this deploy created. Armed before the
+		// create, since an error may follow a committed one: until the answer
+		// names its UID, the policy is the one carrying this deploy's nonce.
+		nonce := make([]byte, 16)
+		if _, err := rand.Read(nonce); err != nil {
+			return err
+		}
+		rollback.policyNonce = hex.EncodeToString(nonce)
+		policy.Annotations = maps.Clone(policy.Annotations)
+		policy.Annotations[kagentDeployAnnotation] = rollback.policyNonce
 		if err := k.c.Create(ctx, policy); err != nil {
 			return fmt.Errorf("creating relay policy %s: %w", rollback.service, err)
 		}
-		// A rollback deletes a policy this deploy created, by its UID.
 		rollback.createdPolicy = policy.UID
 		return nil
 	}
@@ -723,10 +738,12 @@ func (k *kagentRuntimes) restoreRelay(bundle kagentBundle, rollback *kagentRelay
 	}
 	policy := &networkingv1.NetworkPolicy{}
 	switch {
-	case rollback.createdPolicy != "":
+	case rollback.policyNonce != "":
 		found, err := k.getOptional(ctx, rollback.service, policy)
-		if err == nil && found && policy.UID == rollback.createdPolicy {
-			err = k.c.Delete(ctx, policy, client.Preconditions{UID: &rollback.createdPolicy})
+		if err == nil && found && (policy.UID == rollback.createdPolicy ||
+			(rollback.createdPolicy == "" && policy.Annotations[kagentDeployAnnotation] == rollback.policyNonce)) {
+			uid := policy.UID
+			err = k.c.Delete(ctx, policy, client.Preconditions{UID: &uid})
 		}
 		if err != nil && !apierrors.IsNotFound(err) {
 			k.logf("kagent-runtime: could not delete relay policy %s, which this deploy created: %v", rollback.service, err)

@@ -276,6 +276,36 @@ func TestKagentDeployRestoresAPolicyWhosePatchAnswerWasLost(t *testing.T) {
 	}
 }
 
+// A policy created by a request whose answer was lost is the deploy's own
+// too: the rollback finds it by the deploy's nonce and deletes it.
+func TestKagentDeployDeletesAPolicyWhoseCreateAnswerWasLost(t *testing.T) {
+	dir, bundle := writeTestKagentBundle(t)
+	service, _ := relayObjectsFor(bundle, "probe-gov-kagent-old")
+	base := kagentTestCluster(t, service)
+	c := interceptor.NewClient(base.(client.WithWatch), interceptor.Funcs{
+		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			if err := c.Create(ctx, obj, opts...); err != nil {
+				return err
+			}
+			if _, ok := obj.(*networkingv1.NetworkPolicy); ok {
+				return errors.New("the connection was reset")
+			}
+			return nil
+		},
+	})
+	k, _ := newTestKagentRuntimes(t, c)
+	if err := k.deploy(context.Background(), dir); err == nil || !strings.Contains(err.Error(), "connection was reset") {
+		t.Fatalf("deploy = %v", err)
+	}
+	if err := c.Get(context.Background(), k.key("probe-gov-relay"), &networkingv1.NetworkPolicy{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("the policy whose create answer was lost stayed: %v", err)
+	}
+	relay := &corev1.Service{}
+	if err := c.Get(context.Background(), k.key("probe-gov-relay"), relay); err != nil || relay.Spec.Selector[kagentRuntimeLabel] != "probe-gov-kagent-old" {
+		t.Fatalf("relay after a lost answer = %v, %v", relay.Spec.Selector, err)
+	}
+}
+
 func TestKagentDeployRefusesAnotherAgentsRelay(t *testing.T) {
 	dir, bundle := writeTestKagentBundle(t)
 	service, _ := relayObjectsFor(bundle, "other")
