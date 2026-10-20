@@ -486,3 +486,70 @@ func TestKagentCommandsSurviveAClosedOutput(t *testing.T) {
 		t.Fatal("SIGPIPE would end the run before its rollback")
 	}
 }
+
+// An empty credential file is not an omitted flag: on a deployed runtime it
+// would skip the comparison and keep the old credential silently.
+func TestKagentDeployRefusesAnEmptyCredentialFile(t *testing.T) {
+	dir, bundle := writeTestKagentBundle(t)
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: bundle.Runtime + "-auth", Namespace: kagentTestNamespace},
+		Data: map[string][]byte{"model-upstream-token": []byte("the deployed token")}}
+	k, _ := newTestKagentRuntimes(t, kagentTestCluster(t, secret))
+	k.options.ModelUpstreamTokenFile = writeTempFile(t, "\n")
+	if err := k.deploy(context.Background(), dir); err == nil || !strings.Contains(err.Error(), "is empty") {
+		t.Fatalf("deploy with an empty credential file = %v", err)
+	}
+}
+
+// The flags that wrote a bundle name its directory as given, often relative.
+func TestKagentActivateAcceptsTheBundleDirectoryAsWritten(t *testing.T) {
+	parent := t.TempDir()
+	if err := os.Mkdir(filepath.Join(parent, "bundle"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(parent)
+	bundleDir, err := filepath.Abs("bundle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	args, err := kagentActivateArgs([]string{"-f", "x.yaml", "--bundle-dir", "bundle", "--bundle-dir=./bundle"}, bundleDir, t.TempDir(), nil)
+	if err != nil || strings.Join(args, " ") != "-f x.yaml" {
+		t.Fatalf("activate args = %v, %v", args, err)
+	}
+	if _, err := kagentActivateArgs([]string{"--bundle-dir", "elsewhere"}, bundleDir, t.TempDir(), nil); err == nil {
+		t.Fatal("another bundle directory was accepted")
+	}
+}
+
+// A stalled read cannot outlast the wait's deadline.
+func TestKagentWaitBoundsEachCheck(t *testing.T) {
+	k := &kagentRuntimes{poll: time.Millisecond}
+	start := time.Now()
+	err := k.waitFor(context.Background(), 20*time.Millisecond, "a stalled read", func(ctx context.Context) (bool, error) {
+		<-ctx.Done()
+		return false, ctx.Err()
+	})
+	if err == nil || time.Since(start) > 5*time.Second {
+		t.Fatalf("wait = %v after %s", err, time.Since(start))
+	}
+}
+
+// An unreadable transaction token file fails before any lock is taken,
+// instead of exiting the process from inside the import.
+func TestKagentActivateReadsTheTransactionTokenFirst(t *testing.T) {
+	root := newRootCmd()
+	if err := root.PersistentFlags().Set("txn-token-file", filepath.Join(t.TempDir(), "missing")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := kagentTxnToken(root); err == nil || !strings.Contains(err.Error(), "--txn-token-file") {
+		t.Fatalf("unreadable token file = %v", err)
+	}
+	if err := root.PersistentFlags().Set("txn-token-file", writeTempFile(t, "txn-value\n")); err != nil {
+		t.Fatal(err)
+	}
+	if token, err := kagentTxnToken(root); err != nil || token != "txn-value" {
+		t.Fatalf("token = %q, %v", token, err)
+	}
+	if !kagentReadsStdin([]string{"-f", "-"}) || !kagentReadsStdin([]string{"--file=-"}) || kagentReadsStdin([]string{"-f", "x.yaml"}) {
+		t.Fatal("standard input use was misread")
+	}
+}

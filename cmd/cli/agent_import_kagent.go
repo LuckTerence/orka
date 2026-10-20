@@ -676,7 +676,11 @@ func kagentPromptNamespaceProblem(translated []kagentWrappedAgent, destination s
 func reconcileKagentWrappedAgents(cmd *cobra.Command, wrapped []kagentWrappedAgent) error {
 	c := newClientFromCmd(cmd)
 	out := cmd.OutOrStdout()
-	ctx := context.Background()
+	// An interrupted activation stops here rather than switching on.
+	ctx := cmd.Context()
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	query := map[string]string{cliNamespaceQuery: c.Namespace}
 	// Activating bundles is all or nothing: no Agent moves to its runtime
 	// unless every runtime is Ready.

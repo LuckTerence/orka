@@ -169,6 +169,9 @@ them all first. It refuses while the relay of a governed Agent bundled beside
 			if dash := cmd.ArgsLenAtDash(); dash != 1 {
 				return fmt.Errorf("activate takes <bundle>, then -- and the import flags")
 			}
+			if kagentFlag(cmd, "txn-token-file") == "-" && kagentReadsStdin(args[1:]) {
+				return fmt.Errorf("--txn-token-file and the import's -f cannot both read standard input")
+			}
 			k, ctx, stop, err := newKagentRuntimes(cmd, *options, "activate")
 			if err != nil {
 				return err
@@ -233,6 +236,14 @@ func newKagentRuntimes(cmd *cobra.Command, options kagentRuntimeOptions, command
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	// Resolved before any lock is taken, so a token file that cannot be read
+	// fails the run cleanly.
+	txnToken := ""
+	if command == "activate" {
+		if txnToken, err = kagentTxnToken(cmd); err != nil {
+			return nil, nil, nil, err
+		}
+	}
 	host, _ := os.Hostname()
 	k := &kagentRuntimes{
 		c: c, namespace: namespace, options: options, out: cmd.ErrOrStderr(), poll: 2 * time.Second,
@@ -251,7 +262,7 @@ func newKagentRuntimes(cmd *cobra.Command, options kagentRuntimeOptions, command
 			return resolveKagentRuntimeImage(ctx, image, nil)
 		},
 		importer: func(ctx context.Context, args []string, quiet bool) error {
-			return runKagentImportCmd(ctx, cmd, append(args, "-n", namespace), quiet)
+			return runKagentImportCmd(ctx, cmd, append(args, "-n", namespace), txnToken, quiet)
 		},
 	}
 	ctx, stop := kagentSignals(cmd.Context())
@@ -267,14 +278,40 @@ func kagentSignals(parent context.Context) (context.Context, context.CancelFunc)
 	return signal.NotifyContext(parent, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 }
 
+// kagentTxnToken resolves the transaction token the import sends, reading
+// --txn-token-file here: the import's client exits the process when it cannot
+// read the file, which would skip releasing the locks.
+func kagentTxnToken(cmd *cobra.Command) (string, error) {
+	token, file := kagentFlag(cmd, "txn-token"), kagentFlag(cmd, "txn-token-file")
+	if token != "" || file == "" {
+		return token, nil
+	}
+	data, err := readFileOrStdin(file)
+	if err != nil {
+		return "", fmt.Errorf("reading --txn-token-file: %w", err)
+	}
+	return strings.TrimSpace(string(data)), nil
+}
+
+// kagentFlag reads a flag of cmd or of a parent, parsed or not.
+func kagentFlag(cmd *cobra.Command, name string) string {
+	if flag := cmd.Flag(name); flag != nil {
+		return flag.Value.String()
+	}
+	return ""
+}
+
 // runKagentImportCmd runs "orka agent import kagent" with args, and with the
-// Orka API flags this command was given.
-func runKagentImportCmd(ctx context.Context, cmd *cobra.Command, args []string, quiet bool) error {
+// Orka API flags this command was given and the transaction token it resolved.
+func runKagentImportCmd(ctx context.Context, cmd *cobra.Command, args []string, txnToken string, quiet bool) error {
 	forwarded := strings.Fields("agent import kagent")
-	for _, name := range []string{"server", "token", "txn-token", "txn-token-file", "kubeconfig"} {
+	for _, name := range []string{"server", "token", "kubeconfig"} {
 		if flag := cmd.Flags().Lookup(name); flag != nil && flag.Changed {
 			forwarded = append(forwarded, "--"+name, flag.Value.String())
 		}
+	}
+	if txnToken != "" {
+		forwarded = append(forwarded, "--txn-token", txnToken)
 	}
 	root := newRootCmd()
 	root.SetArgs(append(forwarded, args...))
@@ -485,6 +522,11 @@ func (k *kagentRuntimes) ensureAuthSecret(ctx context.Context, bundle kagentBund
 			}
 			return r
 		}, raw)
+		// An empty file is not an omitted flag: a deployed runtime would keep
+		// its credential without a comparison.
+		if len(upstream) == 0 {
+			return fmt.Errorf("--model-upstream-token-file %s is empty", k.options.ModelUpstreamTokenFile)
+		}
 	}
 	secret := &corev1.Secret{}
 	found, err := k.getOptional(ctx, name, secret)
@@ -566,11 +608,13 @@ func (k *kagentRuntimes) applyPart(ctx context.Context, bundle kagentBundle, con
 }
 
 // waitFor polls check until it reports done, fails, or timeout passes.
-func (k *kagentRuntimes) waitFor(ctx context.Context, timeout time.Duration, what string, check func() (bool, error)) error {
+// The deadline bounds every read check makes too, so a stalled read cannot
+// outlast it.
+func (k *kagentRuntimes) waitFor(ctx context.Context, timeout time.Duration, what string, check func(context.Context) (bool, error)) error {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	for {
-		done, err := check()
+		done, err := check(ctx)
 		if err != nil || done {
 			return err
 		}
@@ -586,7 +630,7 @@ func (k *kagentRuntimes) waitFor(ctx context.Context, timeout time.Duration, wha
 }
 
 func (k *kagentRuntimes) waitRollout(ctx context.Context, name string) error {
-	return k.waitFor(ctx, k.options.ReadyTimeout, "deployment "+name+" to roll out", func() (bool, error) {
+	return k.waitFor(ctx, k.options.ReadyTimeout, "deployment "+name+" to roll out", func(ctx context.Context) (bool, error) {
 		deployment := &appsv1.Deployment{}
 		if err := k.c.Get(ctx, k.key(name), deployment); err != nil {
 			return false, err
@@ -806,7 +850,7 @@ func (k *kagentRuntimes) register(ctx context.Context, dir string, bundle kagent
 	if err := os.WriteFile(filepath.Join(dir, kagentBundleRegistrationFile), []byte(string(registration.UID)+"\n"), 0o644); err != nil { //nolint:gosec // a UID, not a secret
 		return err
 	}
-	err = k.waitFor(ctx, k.options.ReadyTimeout, "runtime "+bundle.Runtime+" to be Ready", func() (bool, error) {
+	err = k.waitFor(ctx, k.options.ReadyTimeout, "runtime "+bundle.Runtime+" to be Ready", func(ctx context.Context) (bool, error) {
 		current := &corev1alpha1.AgentRuntime{}
 		if err := k.c.Get(ctx, k.key(bundle.Runtime), current); err != nil {
 			return false, err
@@ -934,7 +978,11 @@ func (k *kagentRuntimes) activate(ctx context.Context, dir string, flags []strin
 // same input.
 func kagentActivateArgs(flags []string, bundleDir, work string, stdin io.Reader) ([]string, error) {
 	sameDir := func(path string) error {
-		resolved, err := filepath.EvalSymlinks(path)
+		absolute, err := filepath.Abs(path)
+		if err != nil {
+			return err
+		}
+		resolved, err := filepath.EvalSymlinks(absolute)
 		want, werr := filepath.EvalSymlinks(bundleDir)
 		if err != nil || werr != nil || resolved != want {
 			return fmt.Errorf("--bundle-dir %s is not %s, the directory of the bundle", path, bundleDir)
@@ -991,6 +1039,17 @@ func kagentActivateArgs(flags []string, bundleDir, work string, stdin io.Reader)
 		}
 	}
 	return args, nil
+}
+
+// kagentReadsStdin reports whether the import flags read their input from
+// standard input.
+func kagentReadsStdin(flags []string) bool {
+	for i, flag := range flags {
+		if flag == "-f=-" || flag == "--file=-" || ((flag == "-f" || flag == "--file") && i+1 < len(flags) && flags[i+1] == "-") {
+			return true
+		}
+	}
+	return false
 }
 
 // kagentRuntimeKinds are the kinds a runtime's objects in its own namespace
@@ -1082,7 +1141,7 @@ func (k *kagentRuntimes) retireRuntime(ctx context.Context, old string) error {
 		if err := k.c.Delete(ctx, registration); err != nil && !apierrors.IsNotFound(err) {
 			return err
 		}
-		err := k.waitFor(ctx, k.options.RetireTimeout, "AgentRuntime "+old+" to drain", func() (bool, error) {
+		err := k.waitFor(ctx, k.options.RetireTimeout, "AgentRuntime "+old+" to drain", func(ctx context.Context) (bool, error) {
 			found, err := k.getOptional(ctx, old, &corev1alpha1.AgentRuntime{})
 			return !found, err
 		})
