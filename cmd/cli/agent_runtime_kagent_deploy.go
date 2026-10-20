@@ -973,7 +973,7 @@ func (k *kagentRuntimes) activate(ctx context.Context, dir string, flags []strin
 }
 
 // kagentActivateArgs checks the import flags activate forwards: it refuses
-// --dry-run, drops a --bundle-dir that names the bundle's own directory, and
+// --dry-run and --txn-token-file, drops a --bundle-dir that names the bundle's own directory, and
 // reads standard input (-f -) once, so the preview and the import see the
 // same input.
 func kagentActivateArgs(flags []string, bundleDir, work string, stdin io.Reader) ([]string, error) {
@@ -1003,6 +1003,10 @@ func kagentActivateArgs(flags []string, bundleDir, work string, stdin io.Reader)
 		switch {
 		case flag == "--dry-run" || strings.HasPrefix(flag, "--dry-run="):
 			return nil, fmt.Errorf("activate runs the import without --dry-run")
+		case flag == "--txn-token-file" || strings.HasPrefix(flag, "--txn-token-file="):
+			// The import's client exits the process when it cannot read the
+			// file, which would leave the locks held; activate reads it first.
+			return nil, fmt.Errorf("pass --txn-token-file before --, where activate reads it before taking its locks")
 		case flag == "--bundle-dir":
 			if i+1 == len(flags) {
 				return nil, fmt.Errorf("--bundle-dir needs a directory")

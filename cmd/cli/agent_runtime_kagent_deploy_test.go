@@ -552,4 +552,10 @@ func TestKagentActivateReadsTheTransactionTokenFirst(t *testing.T) {
 	if !kagentReadsStdin([]string{"-f", "-"}) || !kagentReadsStdin([]string{"--file=-"}) || kagentReadsStdin([]string{"-f", "x.yaml"}) {
 		t.Fatal("standard input use was misread")
 	}
+	// Given after --, the file would be read inside the import, with the locks held.
+	for _, flags := range [][]string{{"-f", "x.yaml", "--txn-token-file", "missing"}, {"--txn-token-file=missing"}} {
+		if _, err := kagentActivateArgs(flags, t.TempDir(), t.TempDir(), nil); err == nil || !strings.Contains(err.Error(), "before --") {
+			t.Errorf("%v: err = %v", flags, err)
+		}
+	}
 }
