@@ -125,11 +125,11 @@ func newTestKagentRuntimes(t *testing.T, c client.Client) (*kagentRuntimes, *byt
 }
 
 // writeTestKagentBundle writes the governed v0 fixture's bundle.
-func writeTestKagentBundle(t *testing.T, extra ...string) (string, kagentBundle) {
+func writeTestKagentBundle(t *testing.T) (string, kagentBundle) {
 	t.Helper()
 	t.Setenv("HOME", t.TempDir())
 	dir := t.TempDir()
-	if _, err := runKagentImport(t, kagentBundleArgs(writeTempFile(t, governedKagentV0Fixture), dir, append([]string{"--dry-run"}, extra...)...)...); err != nil {
+	if _, err := runKagentImport(t, kagentBundleArgs(writeTempFile(t, governedKagentV0Fixture), dir, "--dry-run")...); err != nil {
 		t.Fatal(err)
 	}
 	bundleDir := filepath.Join(dir, "probe-gov")
@@ -137,10 +137,10 @@ func writeTestKagentBundle(t *testing.T, extra ...string) (string, kagentBundle)
 	return bundleDir, bundle
 }
 
-func relayObjectsFor(bundle kagentBundle, runtime string) (*corev1.Service, *networkingv1.NetworkPolicy) {
+func relayObjectsFor(bundle kagentBundle, serving string) (*corev1.Service, *networkingv1.NetworkPolicy) {
 	meta := metav1.ObjectMeta{Name: "probe-gov-relay", Namespace: kagentTestNamespace,
 		Labels: map[string]string{kagentAgentLabel: bundle.Agent}, Annotations: map[string]string{kagentSourceAnnotation: kagentSource(bundle)}}
-	return &corev1.Service{ObjectMeta: meta, Spec: corev1.ServiceSpec{Selector: map[string]string{kagentRuntimeLabel: runtime},
+	return &corev1.Service{ObjectMeta: meta, Spec: corev1.ServiceSpec{Selector: map[string]string{kagentRuntimeLabel: serving},
 			Ports: []corev1.ServicePort{{Name: "relay", Port: 8092}}}},
 		&networkingv1.NetworkPolicy{ObjectMeta: *meta.DeepCopy(), Spec: networkingv1.NetworkPolicySpec{
 			PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{"old": "policy"}}}}
@@ -275,23 +275,23 @@ func TestKagentCommandsHoldAPerAgentLock(t *testing.T) {
 	}
 }
 
-func agentUsing(bundle kagentBundle, runtime string) *corev1alpha1.Agent {
+func agentUsing(bundle kagentBundle, name string) *corev1alpha1.Agent {
 	return &corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Name: bundle.Agent, Namespace: kagentTestNamespace},
-		Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: runtime}}}}
+		Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: name}}}}
 }
 
-func runtimeObjects(bundle kagentBundle, runtime, source string) []client.Object {
+func runtimeObjects(bundle kagentBundle, name, source string) []client.Object {
 	meta := func(name string) metav1.ObjectMeta {
 		return metav1.ObjectMeta{Name: name, Namespace: kagentTestNamespace,
-			Labels:      map[string]string{kagentRuntimeLabel: runtime, kagentAgentLabel: bundle.Agent},
+			Labels:      map[string]string{kagentRuntimeLabel: name, kagentAgentLabel: bundle.Agent},
 			Annotations: map[string]string{kagentSourceAnnotation: source}}
 	}
 	return []client.Object{
-		&corev1alpha1.AgentRuntime{ObjectMeta: meta(runtime)},
-		&appsv1.Deployment{ObjectMeta: meta(runtime)},
-		&corev1.Service{ObjectMeta: meta(runtime)},
-		&corev1.ConfigMap{ObjectMeta: meta(runtime + "-config")},
-		&corev1.Secret{ObjectMeta: meta(runtime + "-auth")},
+		&corev1alpha1.AgentRuntime{ObjectMeta: meta(name)},
+		&appsv1.Deployment{ObjectMeta: meta(name)},
+		&corev1.Service{ObjectMeta: meta(name)},
+		&corev1.ConfigMap{ObjectMeta: meta(name + "-config")},
+		&corev1.Secret{ObjectMeta: meta(name + "-auth")},
 	}
 }
 
@@ -380,13 +380,13 @@ func TestKagentActivateSwitchesTheAgent(t *testing.T) {
 	}
 }
 
-func withRuntime(t *testing.T, c client.Client, bundle kagentBundle, runtime string) *corev1alpha1.Agent {
+func withRuntime(t *testing.T, c client.Client, bundle kagentBundle, name string) *corev1alpha1.Agent {
 	t.Helper()
 	agent := &corev1alpha1.Agent{}
 	if err := c.Get(context.Background(), types.NamespacedName{Namespace: kagentTestNamespace, Name: bundle.Agent}, agent); err != nil {
 		t.Fatal(err)
 	}
-	agent.Spec.Runtime.RuntimeRef.Name = runtime
+	agent.Spec.Runtime.RuntimeRef.Name = name
 	return agent
 }
 
