@@ -238,3 +238,21 @@ func TestNoticeCoversPublisherGitSource(t *testing.T) {
 		t.Errorf("NOTICE.md does not mention %q shipped by the Publisher image", want)
 	}
 }
+
+func TestRetryAfterDelay(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
+	for header, want := range map[string]time.Duration{
+		"":                              0,
+		"7":                             7 * time.Second,
+		"-3":                            0,
+		"3600":                          5 * time.Minute,
+		"Mon, 19 Oct 2026 12:00:30 GMT": 30 * time.Second,
+		"Mon, 19 Oct 2026 11:59:00 GMT": 0,
+		"soon":                          0,
+	} {
+		if got := retryAfterDelay(header, now); got != want {
+			t.Errorf("retryAfterDelay(%q) = %v, want %v", header, got, want)
+		}
+	}
+}

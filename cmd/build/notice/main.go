@@ -437,10 +437,7 @@ func postNotices(client *http.Client, api string, coordinates []string) (noticeR
 		}
 		if response.StatusCode >= 500 || response.StatusCode == http.StatusTooManyRequests {
 			lastErr = fmt.Errorf("ClearlyDefined returned %s", response.Status)
-			retryAfter = 0
-			if seconds, err := strconv.Atoi(response.Header.Get("Retry-After")); err == nil && seconds > 0 {
-				retryAfter = min(time.Duration(seconds)*time.Second, 5*time.Minute)
-			}
+			retryAfter = retryAfterDelay(response.Header.Get("Retry-After"), time.Now())
 			continue
 		}
 		if response.StatusCode != http.StatusOK {
@@ -454,6 +451,18 @@ func postNotices(client *http.Client, api string, coordinates []string) (noticeR
 	}
 	return noticeResponse{}, fmt.Errorf("notices request for %d coordinates failed after %d attempts: %w",
 		len(coordinates), attempts, lastErr)
+}
+
+// retryAfterDelay reads a Retry-After header in either of its RFC 9110 forms,
+// delay-seconds or an HTTP-date, and caps the wait at five minutes.
+func retryAfterDelay(header string, now time.Time) time.Duration {
+	var delay time.Duration
+	if seconds, err := strconv.Atoi(header); err == nil {
+		delay = time.Duration(seconds) * time.Second
+	} else if date, err := http.ParseTime(header); err == nil {
+		delay = date.Sub(now)
+	}
+	return min(max(delay, 0), 5*time.Minute)
 }
 
 const separator = "-------------------------------------------------------------------------------"
