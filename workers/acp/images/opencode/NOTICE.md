@@ -26,6 +26,13 @@ The derived source is licensed under the Apache License, Version 2.0. See
 `cmd/build/helmify/README.md` for the license,
 upstream revision, and Orka modification notes.
 
+## Git
+
+The Publisher image builds Git 2.55.0 from the unmodified upstream source archive
+at https://www.kernel.org/pub/software/scm/git/git-2.55.0.tar.xz and redistributes
+the compiled programs. Git is licensed under the GNU General Public License,
+version 2. The image includes Git's license at `/usr/share/licenses/git/COPYING`.
+
 ## GitHub Copilot CLI
 
 The digest-pinned Copilot ACP runtime image redistributes the unmodified official GitHub Copilot CLI executable as one component of Orka's fenced RuntimePool service. The image includes this license at `/usr/share/licenses/github-copilot-cli/LICENSE.md`; the controller and Publisher images do not include Copilot CLI.

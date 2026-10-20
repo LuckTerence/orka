@@ -18,6 +18,7 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -28,6 +29,13 @@ const outputName = "THIRD-PARTY-NOTICES.txt"
 // Shipped images whose direct downloads need notices. Demo and test fixture
 // images are not published, so they are not scanned.
 var dockerfileGlobs = []string{"Dockerfile", "workers/*/Dockerfile", "workers/acp/images/*/Dockerfile"}
+
+// Published images are built for these targets with CGO disabled.
+var goPlatforms = []string{"linux/amd64", "linux/arm64"}
+
+// Dev dependencies whose code is bundled into the shipped UI. Tailwind's base
+// styles are compiled into the UI stylesheet from ui/src/index.css.
+var bundledDevDependencies = []string{"tailwindcss"}
 
 // Components with hand-written NOTICE.md sections because their terms are not
 // open source licenses that ClearlyDefined can describe.
@@ -41,8 +49,11 @@ var (
 	trailingComma = regexp.MustCompile(`,(\s*[}\]])`)
 )
 
-// retryDelay is a variable so tests can avoid real backoff.
-var retryDelay = func(attempt int) time.Duration { return time.Duration(attempt) * 15 * time.Second }
+// retryDelay and sleep are variables so tests can avoid real backoff.
+var (
+	retryDelay = func(attempt int) time.Duration { return time.Duration(attempt) * 15 * time.Second }
+	sleep      = time.Sleep
+)
 
 func main() {
 	api := flag.String("api", "https://api.clearlydefined.io", "ClearlyDefined API base URL")
@@ -87,17 +98,24 @@ func run(root, api string, batch int) error {
 }
 
 // goModules lists the modules compiled into every main package under cmd and
-// workers. Test-only dependencies are excluded because -test is not set.
+// workers for each published platform. Test-only dependencies are excluded
+// because -test is not set.
 func goModules(root string) ([]string, error) {
 	const format = `{{with .Module}}{{if not .Main}}` +
 		`{{with .Replace}}{{.Path}} {{.Version}}{{else}}{{.Path}} {{.Version}}{{end}}` +
 		`{{end}}{{end}}`
-	cmd := exec.Command("go", "list", "-deps", "-f", format, "./cmd/...", "./workers/...")
-	cmd.Dir = root
-	cmd.Stderr = os.Stderr
-	out, err := cmd.Output()
-	if err != nil {
-		return nil, fmt.Errorf("list Go modules: %w", err)
+	var out []byte
+	for _, platform := range goPlatforms {
+		goos, goarch, _ := strings.Cut(platform, "/")
+		cmd := exec.Command("go", "list", "-deps", "-f", format, "./cmd/...", "./workers/...")
+		cmd.Dir = root
+		cmd.Env = append(os.Environ(), "GOOS="+goos, "GOARCH="+goarch, "CGO_ENABLED=0")
+		cmd.Stderr = os.Stderr
+		listed, err := cmd.Output()
+		if err != nil {
+			return nil, fmt.Errorf("list Go modules for %s: %w", platform, err)
+		}
+		out = append(out, listed...)
 	}
 	var coordinates []string
 	for line := range strings.Lines(string(out)) {
@@ -143,7 +161,8 @@ func uiPackages(lockfile string) ([]string, error) {
 	}
 	var lock struct {
 		Workspaces map[string]struct {
-			Dependencies map[string]string `json:"dependencies"`
+			Dependencies    map[string]string `json:"dependencies"`
+			DevDependencies map[string]string `json:"devDependencies"`
 		} `json:"workspaces"`
 		Packages map[string][]json.RawMessage `json:"packages"`
 	}
@@ -176,7 +195,16 @@ func uiPackages(lockfile string) ([]string, error) {
 		}
 		return nil
 	}
-	for dependency := range lock.Workspaces[""].Dependencies {
+	workspace := lock.Workspaces[""]
+	for dependency := range workspace.Dependencies {
+		if err := visit("", dependency); err != nil {
+			return nil, err
+		}
+	}
+	for _, dependency := range bundledDevDependencies {
+		if _, declared := workspace.DevDependencies[dependency]; !declared {
+			return nil, fmt.Errorf("%s: bundled dev dependency %q is not declared", lockfile, dependency)
+		}
 		if err := visit("", dependency); err != nil {
 			return nil, err
 		}
@@ -391,9 +419,10 @@ func postNotices(client *http.Client, api string, coordinates []string) (noticeR
 	}
 	const attempts = 6
 	var lastErr error
+	var retryAfter time.Duration
 	for attempt := 1; attempt <= attempts; attempt++ {
 		if attempt > 1 {
-			time.Sleep(retryDelay(attempt - 1))
+			sleep(max(retryDelay(attempt-1), retryAfter))
 		}
 		response, err := client.Post(strings.TrimRight(api, "/")+"/notices", "application/json", bytes.NewReader(body))
 		if err != nil {
@@ -406,8 +435,12 @@ func postNotices(client *http.Client, api string, coordinates []string) (noticeR
 			lastErr = err
 			continue
 		}
-		if response.StatusCode >= 500 {
+		if response.StatusCode >= 500 || response.StatusCode == http.StatusTooManyRequests {
 			lastErr = fmt.Errorf("ClearlyDefined returned %s", response.Status)
+			retryAfter = 0
+			if seconds, err := strconv.Atoi(response.Header.Get("Retry-After")); err == nil && seconds > 0 {
+				retryAfter = min(time.Duration(seconds)*time.Second, 5*time.Minute)
+			}
 			continue
 		}
 		if response.StatusCode != http.StatusOK {

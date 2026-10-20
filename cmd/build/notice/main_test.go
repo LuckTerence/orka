@@ -6,8 +6,10 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -34,7 +36,7 @@ func TestUIPackagesFollowsProductionDependencies(t *testing.T) {
   "workspaces": {
     "": {
       "dependencies": { "@scope/app": "1", "react": "19", },
-      "devDependencies": { "vite": "6", },
+      "devDependencies": { "tailwindcss": "4", "vite": "6", },
     },
   },
   "packages": {
@@ -49,6 +51,7 @@ func TestUIPackagesFollowsProductionDependencies(t *testing.T) {
     "react": ["react@19.0.0", "", {}, "sha512-d"],
     "@types/react": ["@types/react@19.0.0", "", {}, "sha512-e"],
     "native": ["native@1.0.0", "", {}, "sha512-f"],
+    "tailwindcss": ["tailwindcss@4.1.18", "", {}, "sha512-h"],
     "vite": ["vite@6.0.0", "", { "dependencies": { "shared": "1" } }, "sha512-g"],
   },
 }`
@@ -59,7 +62,12 @@ func TestUIPackagesFollowsProductionDependencies(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"npm/npmjs/-/react/19.0.0", "npm/npmjs/-/shared/2.0.0", "npm/npmjs/@scope/app/1.0.0"}
+	want := []string{
+		"npm/npmjs/-/react/19.0.0",
+		"npm/npmjs/-/shared/2.0.0",
+		"npm/npmjs/-/tailwindcss/4.1.18",
+		"npm/npmjs/@scope/app/1.0.0",
+	}
 	if got = dedupe(got); !slices.Equal(got, want) {
 		t.Fatalf("uiPackages() = %q, want %q", got, want)
 	}
@@ -120,14 +128,29 @@ func TestImageDownloadsSkipHandWrittenComponents(t *testing.T) {
 
 func TestFetchNoticesRetriesServerErrorsAndRendersStableOutput(t *testing.T) {
 	retryDelay = func(int) time.Duration { return 0 }
+	var (
+		mu    sync.Mutex
+		slept []time.Duration
+	)
+	sleep = func(d time.Duration) {
+		mu.Lock()
+		defer mu.Unlock()
+		slept = append(slept, d)
+	}
+	t.Cleanup(func() { sleep = time.Sleep })
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/notices" || r.Method != http.MethodPost {
 			http.NotFound(w, r)
 			return
 		}
-		if calls.Add(1) == 1 {
+		switch calls.Add(1) {
+		case 1:
 			http.Error(w, "warming", http.StatusBadGateway)
+			return
+		case 2:
+			w.Header().Set("Retry-After", "7")
+			http.Error(w, "slow down", http.StatusTooManyRequests)
 			return
 		}
 		var request struct {
@@ -162,6 +185,11 @@ func TestFetchNoticesRetriesServerErrorsAndRendersStableOutput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Batches run concurrently, so the retry order is not fixed.
+	slices.Sort(slept)
+	if want := []time.Duration{0, 7 * time.Second}; !slices.Equal(slept, want) {
+		t.Errorf("retry sleeps = %v, want %v", slept, want)
+	}
 	got := string(render(result))
 	for _, want := range []string{
 		"  npm/npmjs/-/unknown/1.0.0\n",
@@ -186,5 +214,27 @@ func TestFetchNoticesFailsOnClientError(t *testing.T) {
 	_, err := fetchNotices(server.Client(), server.URL, []string{"bad"}, 25)
 	if err == nil || !strings.Contains(err.Error(), "invalid coordinates") {
 		t.Fatalf("fetchNotices() error = %v, want client error", err)
+	}
+}
+
+// The Publisher's Git source archive has no ClearlyDefined coordinate, so
+// NOTICE.md must carry a hand-written section for the version it ships.
+func TestNoticeCoversPublisherGitSource(t *testing.T) {
+	t.Parallel()
+	dockerfile, err := os.ReadFile(filepath.Join("..", "..", "..", "workers", "publisher", "Dockerfile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	match := regexp.MustCompile(`https://www\.kernel\.org/pub/software/scm/git/git-([0-9.]+)\.tar\.xz`).
+		FindSubmatch(dockerfile)
+	if match == nil {
+		t.Fatal("publisher Dockerfile no longer downloads a Git source archive; update this test")
+	}
+	notice, err := os.ReadFile(filepath.Join("..", "..", "..", "NOTICE.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "Git " + string(match[1]); !strings.Contains(string(notice), want) {
+		t.Errorf("NOTICE.md does not mention %q shipped by the Publisher image", want)
 	}
 }
