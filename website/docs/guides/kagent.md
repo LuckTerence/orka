@@ -112,7 +112,8 @@ each pin gets its own runtime, named `<agent>-kagent-<digest>`:
    Agent, so the script refuses ones another Agent's deploy created, and ones
    it did not create. To let the Agent use such objects, label them
    `orka.ai/kagent-agent=<agent>` and annotate them
-   `orka.ai/kagent-source=<kagent namespace>/<kagent name>`. The script waits until Orka reports the
+   `orka.ai/kagent-source='<kagent apiVersion> <kagent namespace>/<kagent name>'`, such as
+   `'kagent.dev/v1alpha2 kagent/probe'`, the value the Orka Agent carries. The script waits until Orka reports the
    AgentRuntime Ready. Orka's conformance check sends a prompt that calls the
    relay, so the script moves a governed Agent's relay to the new runtime
    first, and back if deploying fails before the runtime is Ready. Until you

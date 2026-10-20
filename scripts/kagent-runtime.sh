@@ -128,10 +128,11 @@ registration_of() {
 }
 
 # relay_owner prints the Agent and kagent Agent a relay object is labeled and
-# annotated for, as "<agent> <namespace>/<name>", or nothing if it is absent.
+# annotated for, as "<agent>|<apiVersion> <namespace>/<name>", or nothing if
+# it is absent.
 relay_owner() {
   kc get "$1" "$2" --ignore-not-found -o json |
-    jq -r '"\(.metadata.labels["orka.ai/kagent-agent"] // "-") \(.metadata.annotations["orka.ai/kagent-source"] // "-")"'
+    jq -r '"\(.metadata.labels["orka.ai/kagent-agent"] // "-")|\(.metadata.annotations["orka.ai/kagent-source"] // "-")"'
 }
 
 same_bundle_dir() {
@@ -257,8 +258,8 @@ deploy() {
   # one the Orka Agent wraps.
   local wraps
   wraps=$(kc get agents.core.orka.ai "${agent}" --ignore-not-found -o json | jq -r '.metadata.annotations["orka.ai/kagent-source"] // empty')
-  [ -z "${wraps}" ] || [ "${wraps##* }" = "${kagent_source}" ] ||
-    die "Orka Agent ${agent} wraps kagent Agent ${wraps##* }, not ${kagent_source}; import ${kagent_source} into another Orka namespace"
+  [ -z "${wraps}" ] || [ "${wraps}" = "${kagent_source}" ] ||
+    die "Orka Agent ${agent} wraps kagent Agent ${wraps}, not ${kagent_source}; import ${kagent_source} into another Orka namespace"
   if [ "${governed}" = true ]; then
     # The relay Service's name comes from the Agent's relay URL, which an
     # Agent imported separately may share.
@@ -269,8 +270,8 @@ deploy() {
     relay_service=$(relay_service_of "${bundle}")
     for kind in service networkpolicy; do
       owner=$(relay_owner "${kind}" "${relay_service}")
-      [ -z "${owner}" ] || [ "${owner}" = "${agent} ${kagent_source}" ] ||
-        die "${kind} ${relay_service} is not ${agent}'s relay for kagent Agent ${kagent_source} (it is for ${owner% *}, ${owner#* }); give ${agent} its own relay URL, or adopt it by labeling it orka.ai/kagent-agent=${agent} and annotating it orka.ai/kagent-source=${kagent_source}"
+      [ -z "${owner}" ] || [ "${owner}" = "${agent}|${kagent_source}" ] ||
+        die "${kind} ${relay_service} is not ${agent}'s relay for kagent Agent ${kagent_source} (it is for ${owner%%|*}, ${owner#*|}); give ${agent} its own relay URL, or adopt it by labeling it orka.ai/kagent-agent=${agent} and annotating it orka.ai/kagent-source='${kagent_source}'"
     done
   fi
   # Only NotFound means the runtime is not deployed yet: rebuilding a deployed
@@ -518,8 +519,9 @@ need kubectl
 runtime=$(bundle_field runtime)
 agent=$(bundle_field agent)
 governed=$(bundle_field governed)
-# The kagent Agent this bundle wraps; every runtime object names it.
-kagent_source="$(bundle_field kagentNamespace)/$(bundle_field kagentName)"
+# The kagent Agent this bundle wraps, "<apiVersion> <namespace>/<name>" as the
+# Orka Agent's annotation names it; every runtime object names it too.
+kagent_source=$(bundle_field source)
 relay_service=""
 relay_rollback=""
 relay_rollback_ports=""

@@ -54,7 +54,13 @@ type kagentBundle struct {
 	KagentName      string `json:"kagentName"`
 	// KagentVersion is "v0" or "v1".
 	KagentVersion string `json:"kagentVersion"`
-	Governed      bool   `json:"governed"`
+	// Source identifies the wrapped kagent Agent as the Orka Agent's
+	// orka.ai/kagent-source annotation does: "<apiVersion> <namespace>/<name>".
+	// Every object of the runtime carries it, and only objects that do serve
+	// this kagent Agent, so kagent Agents of one name in different namespaces
+	// or API versions never share a runtime or relay.
+	Source   string `json:"source"`
+	Governed bool   `json:"governed"`
 	// Relay is the origin a governed Agent's model and tools point at. Its
 	// Service name is part of the kagent Agent's pinned config, so it stays
 	// the same for every runtime of the Agent.
@@ -106,9 +112,9 @@ func (o kagentWrapperOptions) validateBundle(wrapped []kagentWrappedAgent) error
 	relays := map[string]string{}
 	for _, agent := range wrapped {
 		name := metadataName(agent.Manifest)
-		// The relay Service is the longest DNS label a runtime needs.
-		if problems := utilvalidation.IsDNS1035Label(kagentBundleRuntimeName(name, nil, nil, nil, 0) + "-relay"); len(problems) > 0 {
-			return fmt.Errorf("kagent Agent %s: Orka Agent name %q is too long for its runtime's Service names (at most 40 characters, starting with a letter)", agent.Source, name)
+		// The runtime's name is its Service's, a DNS label, and a label value.
+		if problems := utilvalidation.IsDNS1035Label(kagentBundleRuntimeName(name, nil, nil, nil, 0)); len(problems) > 0 {
+			return fmt.Errorf("kagent Agent %s: Orka Agent name %q is too long for its runtime's Service name (at most 45 characters, starting with a letter)", agent.Source, name)
 		}
 		if agent.Mode.Mode == kagentModeGoverned {
 			service, namespace, _, err := kagentRelayService(agent.Mode.RelayOrigin)
@@ -209,6 +215,7 @@ func (o kagentWrapperOptions) kagentBundleFiles(agent kagentWrappedAgent) (map[s
 	bundle := kagentBundle{
 		Agent: metadataName(agent.Manifest), Runtime: agent.RuntimeName,
 		KagentNamespace: agent.SourceNamespace, KagentName: agent.SourceName, KagentVersion: version,
+		Source:   kagentString(agent.Manifest, kagentFieldMetadata, kagentFieldAnnotations, kagentSourceAnnotation),
 		Governed: agent.Mode.Mode == kagentModeGoverned, Model: kagentWrapperModel(agent),
 		ConfigDigest: "sha256:" + hex.EncodeToString(sum[:]), Revision: o.RuntimeRevision,
 	}

@@ -285,13 +285,13 @@ func TestRenderKagentRuntime(t *testing.T) {
 		t.Fatalf("deployment = %v", deployment)
 	}
 	labels := kagentMap(deployment, "spec", "template", "metadata", "labels")
-	if labels[kagentBrokerLabel] != "true" || labels[kagentRuntimeLabel] != bundle.Runtime || labels[kagentRelayLabel] != "probe-gov" {
+	if labels[kagentBrokerLabel] != "true" || labels[kagentRuntimeLabel] != bundle.Runtime || labels[kagentRelayLabel] != "probe-gov-relay" {
 		t.Fatalf("pod labels = %v", labels)
 	}
 	// Every object names the kagent Agent the runtime wraps, which retirement
 	// scopes its inventory to.
 	for _, item := range workload {
-		if kagentString(item, "metadata", "annotations", kagentSourceAnnotation) != bundle.KagentNamespace+"/"+bundle.KagentName {
+		if kagentString(item, "metadata", "annotations", kagentSourceAnnotation) != bundle.Source || bundle.Source != "kagent.dev/v1alpha2 kagent/probe-gov" {
 			t.Fatalf("%v has no kagent source", item["kind"])
 		}
 	}
@@ -387,9 +387,16 @@ func checkRenderedRelay(t *testing.T, bundleDir string, bundle kagentBundle, opt
 		len(ports) != 1 || ports[0].(map[string]any)["port"] != float64(8092) {
 		t.Fatalf("relay service = %v", service)
 	}
+	// The policy selects only the runtimes of this relay: another kagent
+	// Agent's runtimes of the same Orka Agent name carry their own relay's
+	// name.
+	policy := findKind(renderBundle(t, bundleDir, options), "NetworkPolicy")
+	if selector := kagentMap(policy, "spec", "podSelector", "matchLabels"); len(selector) != 1 || selector[kagentRelayLabel] != "probe-gov-relay" {
+		t.Fatalf("relay policy selects %v", selector)
+	}
 	// Both relay objects name the kagent Agent they serve.
 	for _, kind := range []string{"Service", "NetworkPolicy"} {
-		if source := kagentString(findKind(renderBundle(t, bundleDir, options), kind), "metadata", "annotations", kagentSourceAnnotation); source != bundle.KagentNamespace+"/"+bundle.KagentName {
+		if source := kagentString(findKind(renderBundle(t, bundleDir, options), kind), "metadata", "annotations", kagentSourceAnnotation); source != bundle.Source {
 			t.Fatalf("relay %s source = %q", kind, source)
 		}
 	}
@@ -422,7 +429,7 @@ func checkRenderedRegistration(t *testing.T, bundleDir string, bundle kagentBund
 	}
 	options.DeploymentUID = "6f1c2b9e-0000-4000-8000-000000000001"
 	registration := findKind(renderBundle(t, bundleDir, options), "AgentRuntime")
-	if kagentString(registration, "metadata", "annotations", kagentSourceAnnotation) != bundle.KagentNamespace+"/"+bundle.KagentName {
+	if kagentString(registration, "metadata", "annotations", kagentSourceAnnotation) != bundle.Source {
 		t.Fatalf("registration has no kagent source: %v", registration["metadata"])
 	}
 	// Orka restarts the supervisor with its new epoch after it restarts.
@@ -522,5 +529,33 @@ func TestKagentBundleRuntimeNameCoversTheToolPolicy(t *testing.T) {
 	}
 	if len(names) != 4 {
 		t.Fatalf("runtime names = %v, want one per tool policy and revision", names)
+	}
+}
+
+// An Orka Agent name fits a bundle when its runtime's name, which is the
+// runtime Service's name and a label value, fits a DNS label.
+func TestKagentBundleNamesFitTheRuntimeService(t *testing.T) {
+	o := kagentWrapperOptions{BundleDir: t.TempDir()}
+	for length, fits := range map[int]bool{45: true, 46: false} {
+		name := "a" + strings.Repeat("b", length-1)
+		agent := kagentWrappedAgent{Source: "kagent/" + name, Manifest: map[string]any{"metadata": map[string]any{"name": name}}}
+		err := o.validateBundle([]kagentWrappedAgent{agent})
+		if fits != (err == nil) || (err != nil && !strings.Contains(err.Error(), "at most 45 characters")) {
+			t.Errorf("%d characters: err = %v", length, err)
+		}
+	}
+}
+
+// kagent Agents of one namespace and name but different API versions are
+// different sources, so neither takes the other's runtimes or relay.
+func TestKagentBundleSourceNamesTheAPIVersion(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := t.TempDir()
+	if _, err := runKagentImport(t, kagentBundleArgs(writeTempFile(t, governedKagentV0Fixture), dir, "--dry-run")...); err != nil {
+		t.Fatal(err)
+	}
+	bundle, _ := readBundle(t, filepath.Join(dir, "probe-gov"))
+	if bundle.Source != "kagent.dev/v1alpha2 kagent/probe-gov" {
+		t.Fatalf("bundle source = %q", bundle.Source)
 	}
 }
