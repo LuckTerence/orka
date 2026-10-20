@@ -105,8 +105,12 @@ one, which keeps serving its sessions until it is retired:
   2. activate  it, pointing the Orka Agent at it;
   3. retire    the Agent's older runtimes.
 
-These commands need Kubernetes access to the Orka namespace (--kubeconfig and
---context) and, for activate, the Orka API, like "orka agent import kagent".
+These commands work in --namespace, by default orka-system, where the
+runtimes, their relays, and by default the Orka controller run; unlike other
+orka commands, they never fall back to the namespace orka config or kubeconfig
+names. They need Kubernetes access to it (--kubeconfig and --context) and, for
+activate, the Orka API, which activate finds like "orka agent import kagent":
+through kubeconfig's current context, unless --server and --token name it.
 Each command holds a lock per Agent it changes, the ConfigMap
 <agent>-kagent-lock; a run that was killed leaves its lock, which you delete
 once no run is left.`,
@@ -163,7 +167,8 @@ without --dry-run, with the flags that wrote the bundles, after --. The command
 passes --bundle-dir, the directory of <bundle>, itself. It switches every Agent
 in the import's input, and only if all of their runtimes are Ready, so deploy
 them all first. It refuses while the relay of a governed Agent bundled beside
-<bundle> selects another runtime.`,
+<bundle> selects another runtime. The import creates the Agents in the runtimes'
+namespace, so pass -n before --.`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if dash := cmd.ArgsLenAtDash(); dash != 1 {
@@ -221,6 +226,11 @@ func newKagentRuntimes(cmd *cobra.Command, options kagentRuntimeOptions, command
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("loading kubeconfig: %w", err)
 	}
+	if command == "activate" {
+		if err := kagentAPIContextProblem(cmd, rules, options.Context); err != nil {
+			return nil, nil, nil, err
+		}
+	}
 	scheme := runtime.NewScheme()
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
 		return nil, nil, nil, err
@@ -267,6 +277,24 @@ func newKagentRuntimes(cmd *cobra.Command, options kagentRuntimeOptions, command
 	}
 	ctx, stop := kagentSignals(cmd.Context())
 	return k, ctx, func() { k.unlock(); stop() }, nil
+}
+
+// kagentAPIContextProblem refuses an activate whose --context is not
+// kubeconfig's current context unless --server and --token name the Orka
+// API: the import finds the API, and its fallback token, through the current
+// context, so it would reach another cluster than the locks and relays.
+func kagentAPIContextProblem(cmd *cobra.Command, rules *clientcmd.ClientConfigLoadingRules, selected string) error {
+	if selected == "" || (kagentFlag(cmd, "server") != "" && kagentFlag(cmd, "token") != "") {
+		return nil
+	}
+	raw, err := rules.Load()
+	if err != nil {
+		return fmt.Errorf("loading kubeconfig: %w", err)
+	}
+	if raw.CurrentContext == selected {
+		return nil
+	}
+	return fmt.Errorf("activate reaches the Orka API through kubeconfig's current context %q, not --context %q; switch to that context, or pass its Orka API with --server and --token", raw.CurrentContext, selected)
 }
 
 // kagentSignals cancels the returned context on an interrupt, so a deploy
@@ -1006,6 +1034,9 @@ func kagentActivateArgs(flags []string, bundleDir, work string, stdin io.Reader)
 			// The import's client exits the process when it cannot read the
 			// file, which would leave the locks held; activate reads it first.
 			return nil, fmt.Errorf("pass --txn-token-file before --, where activate reads it before taking its locks")
+		case flag == "--namespace" || strings.HasPrefix(flag, "--namespace=") || (strings.HasPrefix(flag, "-n") && !strings.HasPrefix(flag, "--")):
+			// The runtimes' namespace would silently replace it.
+			return nil, fmt.Errorf("pass -n before --, where it names the namespace of the runtimes and the Agents")
 		case flag == "--bundle-dir":
 			if i+1 == len(flags) {
 				return nil, fmt.Errorf("--bundle-dir needs a directory")

@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -521,6 +522,57 @@ func TestKagentActivateAcceptsTheBundleDirectoryAsWritten(t *testing.T) {
 	}
 	if _, err := kagentActivateArgs([]string{"--bundle-dir", "elsewhere"}, bundleDir, t.TempDir(), nil); err == nil {
 		t.Fatal("another bundle directory was accepted")
+	}
+}
+
+// Activate imports into the runtimes' namespace; one named after -- would be
+// silently replaced.
+func TestKagentActivateRefusesANamespaceAmongTheImportFlags(t *testing.T) {
+	for _, flags := range [][]string{{"-f", "x.yaml", "-n", "team-a"}, {"-nteam-a"}, {"--namespace", "team-a"}, {"--namespace=team-a"}} {
+		if _, err := kagentActivateArgs(flags, t.TempDir(), t.TempDir(), nil); err == nil || !strings.Contains(err.Error(), "before --") {
+			t.Errorf("%v: err = %v", flags, err)
+		}
+	}
+}
+
+// The import finds the Orka API through kubeconfig's current context, so an
+// activate in another context needs the API named explicitly.
+func TestKagentActivateRefusesAnotherContextWithoutTheAPI(t *testing.T) {
+	kubeconfig := writeTempFile(t, `apiVersion: v1
+kind: Config
+current-context: a
+contexts:
+- name: a
+  context: {cluster: a}
+- name: b
+  context: {cluster: b}
+clusters:
+- name: a
+  cluster: {server: https://a.example}
+- name: b
+  cluster: {server: https://b.example}
+`)
+	rules := &clientcmd.ClientConfigLoadingRules{ExplicitPath: kubeconfig}
+	for _, selected := range []string{"", "a"} {
+		if err := kagentAPIContextProblem(newRootCmd(), rules, selected); err != nil {
+			t.Errorf("--context %q: %v", selected, err)
+		}
+	}
+	root := newRootCmd()
+	if err := kagentAPIContextProblem(root, rules, "b"); err == nil || !strings.Contains(err.Error(), "--server and --token") {
+		t.Fatalf("--context b without the API = %v", err)
+	}
+	if err := root.PersistentFlags().Set("server", "https://orka.b.example"); err != nil {
+		t.Fatal(err)
+	}
+	if err := kagentAPIContextProblem(root, rules, "b"); err == nil {
+		t.Fatal("--context b with --server alone was accepted")
+	}
+	if err := root.PersistentFlags().Set("token", "b-token"); err != nil {
+		t.Fatal(err)
+	}
+	if err := kagentAPIContextProblem(root, rules, "b"); err != nil {
+		t.Fatalf("--context b with --server and --token = %v", err)
 	}
 }
 

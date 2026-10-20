@@ -467,8 +467,12 @@ one, which keeps serving its sessions until it is retired:
   2. activate  it, pointing the Orka Agent at it;
   3. retire    the Agent's older runtimes.
 
-These commands need Kubernetes access to the Orka namespace (--kubeconfig and
---context) and, for activate, the Orka API, like "orka agent import kagent".
+These commands work in --namespace, by default orka-system, where the
+runtimes, their relays, and by default the Orka controller run; unlike other
+orka commands, they never fall back to the namespace orka config or kubeconfig
+names. They need Kubernetes access to it (--kubeconfig and --context) and, for
+activate, the Orka API, which activate finds like "orka agent import kagent":
+through kubeconfig's current context, unless --server and --token name it.
 Each command holds a lock per Agent it changes, the ConfigMap
 <agent>-kagent-lock; a run that was killed leaves its lock, which you delete
 once no run is left.
@@ -504,7 +508,8 @@ without --dry-run, with the flags that wrote the bundles, after --. The command
 passes --bundle-dir, the directory of <bundle>, itself. It switches every Agent
 in the import's input, and only if all of their runtimes are Ready, so deploy
 them all first. It refuses while the relay of a governed Agent bundled beside
-<bundle> selects another runtime.
+<bundle> selects another runtime. The import creates the Agents in the runtimes'
+namespace, so pass -n before --.
 
 Usage:
   orka agent-runtime kagent activate <bundle> -- <import flags> [flags]
