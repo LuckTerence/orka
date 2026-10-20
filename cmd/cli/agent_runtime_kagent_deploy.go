@@ -254,8 +254,17 @@ func newKagentRuntimes(cmd *cobra.Command, options kagentRuntimeOptions, command
 			return runKagentImportCmd(ctx, cmd, append(args, "-n", namespace), quiet)
 		},
 	}
-	ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	ctx, stop := kagentSignals(cmd.Context())
 	return k, ctx, func() { k.unlock(); stop() }, nil
+}
+
+// kagentSignals cancels the returned context on an interrupt, so a deploy
+// moves its relay back before it exits. A write to a closed output, such as
+// a pipe whose reader the same interrupt stopped, must not end the run
+// before that, so SIGPIPE is ignored and the write fails instead.
+func kagentSignals(parent context.Context) (context.Context, context.CancelFunc) {
+	signal.Ignore(syscall.SIGPIPE)
+	return signal.NotifyContext(parent, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 }
 
 // runKagentImportCmd runs "orka agent import kagent" with args, and with the

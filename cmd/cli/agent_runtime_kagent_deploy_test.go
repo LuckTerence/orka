@@ -12,8 +12,10 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -471,5 +473,16 @@ func TestKagentDefaultImageFollowsTheRelease(t *testing.T) {
 		if _, err := kagentDefaultImage(build); err == nil || !strings.Contains(err.Error(), "pass --image") {
 			t.Errorf("%s: err = %v", build, err)
 		}
+	}
+}
+
+// A deploy interrupted together with the reader of its output still moves its
+// relay back: a write to the closed pipe fails instead of ending the run.
+func TestKagentCommandsSurviveAClosedOutput(t *testing.T) {
+	t.Cleanup(func() { signal.Reset(syscall.SIGPIPE) })
+	_, stop := kagentSignals(context.Background())
+	defer stop()
+	if !signal.Ignored(syscall.SIGPIPE) {
+		t.Fatal("SIGPIPE would end the run before its rollback")
 	}
 }
