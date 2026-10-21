@@ -41,7 +41,7 @@ Optional values:
 | --- | --- | --- |
 | `controller.ahp.tokenMaxTTL` | `2160h` | Longest lifetime a connection token may be minted with. Tokens default to `720h`. |
 | `controller.ahp.turnTimeout` | `2h` | Timeout of each turn's Task. |
-| `controller.ahp.gitCredentialSecret` | `""` | Secret in the user's namespace whose `token` key clones and publishes their repositories. See [Repositories and credentials](#repositories-and-credentials). |
+| `controller.ahp.gitCredentialSecret` | `""` | Secret in the user's namespace whose `token` key clones and publishes their github.com repositories. See [Repositories and credentials](#repositories-and-credentials). |
 | `controller.ahp.workspaceClass` | `""` | ExecutionWorkspaceClass for session-scoped workspaces. Needs an installed workspace provider. |
 | `controller.ahp.workspaceImage` | `""` | Digest-pinned image with `sh` and `git` that turns on [workspaces and terminals](#workspaces-and-terminals). |
 | `controller.ahp.workspaceNamespace` | `orka-ahp-workspaces` | Namespace the chart creates for workspace Pods when `workspaceImage` is set. |
@@ -242,7 +242,9 @@ token. The same operations are available over the API; see the
 
 The agent never holds Git credentials. With `controller.ahp.gitCredentialSecret`
 (`--ahp-git-credential-secret`), Orka looks up that Secret in each person's namespace and
-uses its `token` key to clone the repository and publish the agent's changes. Each turn
+uses its `token` key to clone github.com repositories and publish the agent's changes.
+Orka never sends it to another host: a project on another host is cloned anonymously and
+its turns cannot publish. Each turn
 that changes files publishes them to the session's branch, `orka/session-<uid>` unless the
 client named one, and the next turn starts from it. Without the Secret, sessions clone
 public repositories read-only, and a turn that changes files fails with

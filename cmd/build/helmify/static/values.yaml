@@ -206,7 +206,8 @@ controller:
     # Timeout of each AHP turn's Task.
     turnTimeout: 2h
     # Secret in each AHP user's namespace whose token key clones and publishes
-    # their repositories. Empty clones public repositories read-only.
+    # their github.com repositories; it is never sent to another host. Empty
+    # clones public repositories read-only.
     gitCredentialSecret: ""
     # ExecutionWorkspaceClass for session-scoped workspaces. Needs an installed
     # workspace provider.

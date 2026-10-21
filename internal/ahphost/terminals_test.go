@@ -94,6 +94,12 @@ func TestTerminalsRouteToTheirBackendInOrder(t *testing.T) {
 	require.NoError(t, client.Request(ctx, "createTerminal", ahptypes.CreateTerminalParams{Channel: "ahp-terminal:/one", Claim: claim}, nil))
 	err = client.Request(ctx, "createTerminal", ahptypes.CreateTerminalParams{Channel: "ahp-terminal:/one", Claim: claim}, nil)
 	require.Equal(t, ahptypes.ErrorCodeAlreadyExists, rpcCode(t, err))
+	// A session cannot take over the terminal's channel.
+	err = client.Request(ctx, "createSession", ahptypes.CreateSessionParams{Channel: "ahp-terminal:/one"}, nil)
+	require.Equal(t, ahptypes.ErrorCodeAlreadyExists, rpcCode(t, err))
+	stored, _, err := host.readChannel(ctx, UserKey("https://issuer.example", "alice"), "ahp-terminal:/one")
+	require.NoError(t, err)
+	require.NotNil(t, stored.State.Terminal, "the terminal's channel state is intact")
 
 	result, _, err := client.Subscribe(ctx, rootChannel)
 	require.NoError(t, err)

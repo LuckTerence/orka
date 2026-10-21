@@ -246,12 +246,16 @@ func (b *ahpBackend) turnTask(ctx context.Context, principal ahphost.Principal, 
 		source = record.SourceBranch
 	}
 	workspace := &corev1alpha1.WorkspaceConfig{GitRepo: record.RepoURL, Branch: source, Intent: corev1alpha1.WorkspaceIntentRead}
-	if credential := b.gitCredential(ctx, principal.Namespace); credential != nil {
-		workspace.Intent = corev1alpha1.WorkspaceIntentWrite
-		workspace.ReadCredentialRef = credential
-		publication := *credential
-		workspace.PublicationCredentialRef = &publication
-		workspace.PushBranch = record.Branch
+	// The namespace's credential goes to github.com only: a project on another
+	// host, which the user may name freely, is cloned anonymously.
+	if ahpOnGitHub(record.RepoURL) {
+		if credential := b.gitCredential(ctx, principal.Namespace); credential != nil {
+			workspace.Intent = corev1alpha1.WorkspaceIntentWrite
+			workspace.ReadCredentialRef = credential
+			publication := *credential
+			workspace.PublicationCredentialRef = &publication
+			workspace.PushBranch = record.Branch
+		}
 	}
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: principal.Namespace},

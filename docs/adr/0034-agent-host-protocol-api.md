@@ -131,8 +131,9 @@ an AHP backend for agent hosts is a later decision.
   queued, so clients do not also show it as input to the running turn.
 - Projects are repositories the user adds; Orka never clones them on the host, because
   each turn's Task clones its own workspace. The agent never holds Git credentials. The
-  operator names one credential Secret that is looked up in each user's namespace; without
-  it, sessions clone public repositories read-only. Write turns publish to an Orka-owned
+  operator names one credential Secret that is looked up in each user's namespace and sent
+  only to github.com, since users name project hosts freely; without it, and for projects
+  on other hosts, sessions clone public repositories read-only. Write turns publish to an Orka-owned
   session branch through the Publisher.
 - Mapping: text and reasoning chunks stream as deltas; tool calls follow the AHP state
   machine and are named as soon as they start, with their raw input, and a running call's

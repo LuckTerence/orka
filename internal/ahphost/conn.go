@@ -783,7 +783,7 @@ func (c *conn) createSession(ctx context.Context, raw json.RawMessage) (err erro
 	if !validURI(session) {
 		return rpcErr(ahptypes.ErrorCodeInvalidParams, "a valid session URI is required")
 	}
-	release, claimed := c.host.claimSessionURI(c.principal.UserKey, session)
+	release, claimed := c.host.claimChannelURI(c.principal.UserKey, session)
 	if !claimed {
 		return rpcErr(ahptypes.ErrorCodeSessionAlreadyExists, "the session already exists")
 	}
@@ -791,6 +791,12 @@ func (c *conn) createSession(ctx context.Context, raw json.RawMessage) (err erro
 	if _, err := c.host.cfg.Store.GetAHPSession(ctx, c.principal.UserKey, session); err == nil {
 		return rpcErr(ahptypes.ErrorCodeSessionAlreadyExists, "the session already exists")
 	} else if !errors.Is(err, store.ErrNotFound) {
+		return err
+	}
+	// Another channel, such as a terminal, may already use the URI.
+	if _, _, err := c.host.readChannel(ctx, c.principal.UserKey, session); err == nil {
+		return rpcErr(ahptypes.ErrorCodeAlreadyExists, "the URI is already used by another channel")
+	} else if !errors.Is(err, errUnknownChannel) {
 		return err
 	}
 	provider := ""

@@ -78,6 +78,11 @@ func (c *conn) createTerminal(ctx context.Context, raw json.RawMessage) error {
 	if !ok {
 		return rpcErr(ahptypes.ErrorCodeMethodNotFound, "method %q is not supported", "createTerminal")
 	}
+	release, claimed := c.host.claimChannelURI(c.principal.UserKey, params.Channel)
+	if !claimed {
+		return rpcErr(ahptypes.ErrorCodeAlreadyExists, "the terminal already exists")
+	}
+	defer release()
 	if _, _, err := c.host.readChannel(ctx, c.principal.UserKey, params.Channel); err == nil {
 		return rpcErr(ahptypes.ErrorCodeAlreadyExists, "the terminal already exists")
 	} else if !errors.Is(err, errUnknownChannel) {

@@ -38,50 +38,86 @@ const AHPWorkspaceTokenHorizon = 45 * time.Minute
 // provideCredential puts the person's own github.com token in their
 // workspace, from their linked account, at most every ahpGitTokenEvery. A
 // person without a usable link gets none, and a token they no longer hold
-// is removed.
+// is removed. One installation runs per person at a time: a request that
+// finds one under way waits for it, so it never clones private repositories
+// before the token is there, and only a finished installation counts.
 func (w *ahpWorkspaces) provideCredential(ctx context.Context, principal ahphost.Principal, pod *corev1.Pod) {
 	fetch := w.b.cfg.RepositoryCredential
 	if fetch == nil || !w.enabled() {
 		return
 	}
-	now := w.b.now()
-	w.mu.Lock()
-	if w.provided == nil {
-		w.provided = map[string]ahpProvidedCredential{}
-	}
-	last := w.provided[principal.UserKey]
-	if last.pod == string(pod.UID) && now.Sub(last.at) < ahpGitTokenEvery {
+	for {
+		now := w.b.now()
+		w.mu.Lock()
+		last, provided := w.provided[principal.UserKey]
+		if provided && last.pod == string(pod.UID) && now.Sub(last.at) < ahpGitTokenEvery {
+			w.mu.Unlock()
+			return
+		}
+		if installing := w.providing[principal.UserKey]; installing != nil {
+			w.mu.Unlock()
+			select {
+			case <-installing:
+				continue
+			case <-ctx.Done():
+				return
+			}
+		}
+		done := make(chan struct{})
+		if w.providing == nil {
+			w.providing = map[string]chan struct{}{}
+		}
+		w.providing[principal.UserKey] = done
+		w.mu.Unlock()
+
+		at, record := w.installCredential(ctx, principal, pod, fetch, now)
+		w.mu.Lock()
+		if record {
+			if w.provided == nil {
+				w.provided = map[string]ahpProvidedCredential{}
+			}
+			w.provided[principal.UserKey] = ahpProvidedCredential{pod: string(pod.UID), at: at}
+		}
+		delete(w.providing, principal.UserKey)
+		close(done)
 		w.mu.Unlock()
 		return
 	}
-	w.provided[principal.UserKey] = ahpProvidedCredential{pod: string(pod.UID), at: now}
-	w.mu.Unlock()
+}
+
+// installCredential fetches the person's token and writes it to their
+// workspace. It reports when the attempt counts as made, and whether to
+// record it: a token that did not arrive is tried again on the next request.
+func (w *ahpWorkspaces) installCredential(ctx context.Context, principal ahphost.Principal, pod *corev1.Pod,
+	fetch func(ctx context.Context, namespace, issuer, subject string) (string, error), now time.Time) (time.Time, bool) {
 	token, err := fetch(ctx, principal.Namespace, principal.Issuer, principal.Subject)
 	if err != nil || strings.TrimSpace(token) == "" || strings.ContainsAny(token, "\n\r") {
 		_ = w.run(ctx, pod, "rm", "-f", ahpGitTokenFile)
 		if err != nil {
 			// Ask again in half the usual time: the person may link their
 			// account at any moment.
-			w.mu.Lock()
-			w.provided[principal.UserKey] = ahpProvidedCredential{pod: string(pod.UID), at: now.Add(-ahpGitTokenEvery / 2)}
-			w.mu.Unlock()
+			return now.Add(-ahpGitTokenEvery / 2), true
 		}
-		return
+		return now, true
 	}
 	writeCtx, cancel := context.WithTimeout(ctx, ahpWorkspaceExecTimeout)
 	defer cancel()
-	// The token travels on standard input, never in a command line.
-	if err := w.exec(writeCtx, pod, []string{ahpShell, "-c",
-		`umask 077; mkdir -p "$1"; cat > "$2.next" && mv "$2.next" "$2"`, "sh", ahpGitTokenDir, ahpGitTokenFile},
-		remotecommand.StreamOptions{Stdin: strings.NewReader(token), Stdout: &ahpLimitedBuffer{limit: 4 << 10}, Stderr: &ahpLimitedBuffer{limit: 4 << 10}}); err != nil {
-		// The token did not arrive; let the next request try again, unless a
-		// newer attempt has already taken this one's place.
-		w.mu.Lock()
-		if current := w.provided[principal.UserKey]; current.pod == string(pod.UID) && current.at.Equal(now) {
-			delete(w.provided, principal.UserKey)
-		}
-		w.mu.Unlock()
+	write := w.writeToken
+	if write == nil {
+		write = w.execWriteToken
 	}
+	if err := write(writeCtx, pod, token); err != nil {
+		return time.Time{}, false
+	}
+	return now, true
+}
+
+// execWriteToken writes a token to the workspace. It travels on standard
+// input, never in a command line.
+func (w *ahpWorkspaces) execWriteToken(ctx context.Context, pod *corev1.Pod, token string) error {
+	return w.exec(ctx, pod, []string{ahpShell, "-c",
+		`umask 077; mkdir -p "$1"; cat > "$2.next" && mv "$2.next" "$2"`, "sh", ahpGitTokenDir, ahpGitTokenFile},
+		remotecommand.StreamOptions{Stdin: strings.NewReader(token), Stdout: &ahpLimitedBuffer{limit: 4 << 10}, Stderr: &ahpLimitedBuffer{limit: 4 << 10}})
 }
 
 // refreshCredentialForTerminal renews the person's token while they use a

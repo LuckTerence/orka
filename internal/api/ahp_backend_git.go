@@ -43,6 +43,13 @@ var ahpGitHTTPClient = &http.Client{
 	},
 }
 
+// ahpOnGitHub reports whether a repository URL names a github.com repository,
+// the only host Orka sends a namespace's repository credential to.
+func ahpOnGitHub(repo string) bool {
+	parsed, err := url.Parse(repo)
+	return err == nil && parsed.Scheme == connectorSchemeHTTPS && parsed.Host == ahpDefaultBranchHost && parsed.User == nil
+}
+
 // defaultBranch reads a repository's default branch from git's smart HTTP
 // ref advertisement, without cloning. Any failure leaves it unknown.
 func (b *ahpBackend) defaultBranch(ctx context.Context, namespace, repo string) string {

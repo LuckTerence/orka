@@ -1191,3 +1191,33 @@ func TestAHPBackendRunsNoTurnForADisposedSession(t *testing.T) {
 	require.Empty(t, tasks.Items, "no Task runs for a disposed session")
 	require.Nil(t, env.backend.activeTurn(alice.UserKey, ahpTestSession))
 }
+
+// The namespace's repository credential goes to github.com projects only; a
+// project on another host, which the user names freely, is cloned anonymously.
+func TestAHPBackendSendsTheGitCredentialToGitHubOnly(t *testing.T) {
+	env := newAHPTestEnv(t)
+	ctx := ahpCtx(t)
+	require.NoError(t, env.kube.Create(ctx, &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "git-token", Namespace: ahpTestNamespace},
+		Data:       map[string][]byte{ahpGitCredentialSecretKey: []byte("not-a-real-token")},
+	}))
+	principal := ahphost.Principal{Namespace: ahpTestNamespace, UserKey: ahphost.UserKey("https://issuer.example", "alice")}
+	choice := ahpAgentChoice{Agent: "copilot-gpt", Runtime: corev1alpha1.AgentRuntimeCopilot, Model: "gpt-5.4-nano"}
+	for repo, credentialed := range map[string]bool{
+		"https://github.com/octo/widgets":         true,
+		"https://git.example.com/octo/widgets":    false,
+		"https://github.com.example/octo/widgets": false,
+	} {
+		record := ahpSession{RepoURL: repo, BaseBranch: "main", Branch: "orka/session-1", OrkaSession: "ahp-1"}
+		workspace := env.backend.turnTask(ctx, principal, record, choice, "ahp-1-t1", "hi", true).Spec.Workspace
+		if credentialed {
+			require.NotNil(t, workspace.ReadCredentialRef, repo)
+			require.NotNil(t, workspace.PublicationCredentialRef, repo)
+			require.Equal(t, corev1alpha1.WorkspaceIntentWrite, workspace.Intent, repo)
+		} else {
+			require.Nil(t, workspace.ReadCredentialRef, repo)
+			require.Nil(t, workspace.PublicationCredentialRef, repo)
+			require.Equal(t, corev1alpha1.WorkspaceIntentRead, workspace.Intent, repo)
+		}
+	}
+}

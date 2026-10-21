@@ -477,7 +477,7 @@ func main() {
 	flag.DurationVar(&ahpTokenMaxTTL, "ahp-token-max-ttl", ahphost.DefaultMaxTokenTTL,
 		"Longest lifetime an AHP connection token may be minted with.")
 	flag.StringVar(&ahpBackendConfig.GitCredentialSecret, "ahp-git-credential-secret", os.Getenv("ORKA_AHP_GIT_CREDENTIAL_SECRET"),
-		"Secret in each AHP user's namespace whose token key clones and publishes their repositories. Without it, AHP sessions clone public repositories read-only.")
+		"Secret in each AHP user's namespace whose token key clones and publishes their github.com repositories; it is never sent to another host. Without it, AHP sessions clone public repositories read-only.")
 	flag.StringVar(&ahpBackendConfig.WorkspaceClass, "ahp-workspace-class", os.Getenv("ORKA_AHP_WORKSPACE_CLASS"),
 		"ExecutionWorkspaceClass for session-scoped AHP workspaces, so a session's files stay warm between turns. Empty publishes each write turn and starts the next from it.")
 	flag.DurationVar(&ahpBackendConfig.TurnTimeout, "ahp-turn-timeout", 2*time.Hour,

@@ -94,6 +94,11 @@ type ahpWorkspaces struct {
 	provided map[string]ahpProvidedCredential
 	// refreshing are the users whose token a terminal's input is renewing.
 	refreshing map[string]bool
+	// providing are the users whose token is being installed; it closes when
+	// the installation ends.
+	providing map[string]chan struct{}
+	// writeToken installs a token in a workspace; nil writes it with exec.
+	writeToken func(ctx context.Context, pod *corev1.Pod, token string) error
 	// collecting are the workspaces an idle collection is deciding about.
 	collecting map[string]chan struct{}
 	// git serializes each user's clones and worktree changes, which share
