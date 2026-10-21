@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/orka-agents/orka/internal/api"
-	"github.com/orka-agents/orka/internal/executionmode"
 
 	ctrl "sigs.k8s.io/controller-runtime"
 
@@ -46,8 +45,8 @@ func newAHPHost(s store.AHPStore, maxTTL time.Duration, admit func(ahphost.Princ
 
 // ahpBackendFor returns the ACP session backend configuration when the AHP
 // host is on. The backend runs turns through the harness-v2 ACP dispatcher.
-func ahpBackendFor(host *ahphost.Host, mode executionmode.Mode, cfg api.AHPBackendConfig) *api.AHPBackendConfig {
-	if host == nil || mode != executionmode.HarnessV2 {
+func ahpBackendFor(host *ahphost.Host, cfg api.AHPBackendConfig) *api.AHPBackendConfig {
+	if host == nil {
 		return nil
 	}
 	return &cfg

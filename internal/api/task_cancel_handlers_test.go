@@ -150,17 +150,8 @@ func TestCancelTaskReportsFinishedTasks(t *testing.T) {
 	}
 }
 
-func TestCancelTaskRefusesAgentTasksOnHarnessV1(t *testing.T) {
-	_, app := setupCancelHandlers(t, executionmode.HarnessV1,
-		cancelTestTask("v1", corev1alpha1.TaskTypeAgent, corev1alpha1.TaskPhaseRunning))
-
-	if status, _ := postCancel(t, app, "v1", "alice"); status != http.StatusConflict {
-		t.Fatalf("cancel of a harness-v1 agent Task = %d, want 409", status)
-	}
-}
-
-func TestCancelTaskRecordsAContainerTaskOnHarnessV1(t *testing.T) {
-	h, app := setupCancelHandlers(t, executionmode.HarnessV1,
+func TestCancelTaskRecordsAContainerTask(t *testing.T) {
+	h, app := setupCancelHandlers(t, executionmode.HarnessV2,
 		cancelTestTask("job", corev1alpha1.TaskTypeContainer, corev1alpha1.TaskPhaseRunning))
 
 	// The Task reconciler completes a container Task's recorded cancel request.

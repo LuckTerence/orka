@@ -18,7 +18,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
-	"github.com/orka-agents/orka/internal/executionmode"
 	"github.com/orka-agents/orka/internal/labels"
 )
 
@@ -71,11 +70,6 @@ func (h *Handlers) requestTaskCancellation(ctx context.Context, ui *UserInfo, ta
 		return "", fiber.NewError(fiber.StatusForbidden, "only the Task's requester may cancel it")
 	} else if person == nil && ui.AuthType != AuthTypeTokenReview {
 		return "", fiber.NewError(fiber.StatusForbidden, "cancelling a Task requires a verified identity")
-	}
-	agent := task.Spec.Type == corev1alpha1.TaskTypeAgent ||
-		(task.Status.Execution != nil && task.Status.Execution.ControllerEpoch > 0)
-	if agent && h.executionMode == executionmode.HarnessV1 {
-		return "", fiber.NewError(fiber.StatusConflict, "cancelling agent Tasks requires the harness-v2 execution mode")
 	}
 	reader := h.apiReader
 	if reader == nil {

@@ -205,9 +205,9 @@ spec:
 
 - Orka then launches the runtime so that it asks before every shell command and every file
   write or edit the policy allows, including read-only commands. Tools outside the policy
-  stay removed or denied, exactly as in the default. Only the built-in runtimes on the
-  harness v2 path can be launched this way; a Task that sets `Requester` for an external
-  AgentRuntime or a harness v1 runtime is rejected before it runs.
+  stay removed or denied, exactly as in the default. Only the built-in runtimes can be
+  launched this way; a Task that sets `Requester` for an external AgentRuntime is rejected
+  before it runs.
 - Orka names each request from the runtime's structured description of the call, such as
   its kind and arguments, never from its display title. A request it cannot name is refused.
 - Orka still refuses whatever the policy refuses. A request the policy would allow is held

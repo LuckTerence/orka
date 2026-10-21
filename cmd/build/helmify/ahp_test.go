@@ -219,7 +219,6 @@ func TestStaticChartAHPWorkspaceNamespaceRBACAndPolicy(t *testing.T) {
 }
 
 func TestStaticChartRejectsInvalidAHPValues(t *testing.T) {
-	digest := "sha256:" + strings.Repeat("3", 64)
 	for _, tt := range []struct {
 		name string
 		args []string
@@ -249,16 +248,6 @@ func TestStaticChartRejectsInvalidAHPValues(t *testing.T) {
 			name: "empty namespace",
 			args: ahpWorkspacesEnabled("--set-string", "controller.ahp.workspaceNamespace="),
 			want: "controller.ahp.workspaceNamespace is required",
-		},
-		{
-			name: "harness v1",
-			args: ahpEnabled(
-				"--set-string", "controller.mode=harness-v1",
-				"--set-string", "harnessV1.image.digest="+digest,
-				"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
-				"--set-string", "harnessV1.tls.existingSecret=harness-wrapper-tls",
-			),
-			want: "controller.ahp.enabled requires controller.mode=harness-v2",
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
