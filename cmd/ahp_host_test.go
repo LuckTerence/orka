@@ -12,6 +12,21 @@ import (
 	"github.com/orka-agents/orka/internal/api"
 )
 
+func TestValidateAHPSignInRequiresOIDC(t *testing.T) {
+	for name, oidc := range map[string]api.OIDCConfig{
+		"none":        {},
+		"no audience": {Issuer: "https://issuer.example"},
+		"no issuer":   {Audience: "orka"},
+	} {
+		if validateAHPSignIn(oidc) == nil {
+			t.Errorf("%s: an AHP endpoint without OIDC started", name)
+		}
+	}
+	if err := validateAHPSignIn(api.OIDCConfig{Issuer: "https://issuer.example", Audience: "orka"}); err != nil {
+		t.Fatalf("OIDC sign-in refused: %v", err)
+	}
+}
+
 func TestValidateAHPWorkspace(t *testing.T) {
 	digest := "ghcr.io/example/git@sha256:" + "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	for _, test := range []struct {

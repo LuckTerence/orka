@@ -7,6 +7,7 @@ MIT License - see LICENSE file for details.
 package main
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -50,6 +51,15 @@ func ahpBackendFor(host *ahphost.Host, cfg api.AHPBackendConfig) *api.AHPBackend
 		return nil
 	}
 	return &cfg
+}
+
+// validateAHPSignIn refuses an AHP endpoint no one could use: tokens are
+// minted for, and admitted only while, the owner's OIDC sign-in holds.
+func validateAHPSignIn(oidc api.OIDCConfig) error {
+	if !oidc.Enabled() {
+		return errors.New("--enable-ahp-api requires --oidc-issuer and --oidc-audience: AHP tokens belong to OIDC sign-ins")
+	}
+	return nil
 }
 
 var ahpWorkspaceImageDigest = regexp.MustCompile(`^[^@\s]+@sha256:[a-f0-9]{64}$`)

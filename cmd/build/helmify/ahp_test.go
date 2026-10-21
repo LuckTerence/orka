@@ -225,7 +225,7 @@ func TestStaticChartRejectsInvalidAHPValues(t *testing.T) {
 		{
 			name: "no identity that can mint tokens",
 			args: []string{"--set", "controller.ahp.enabled=true"},
-			want: "controller.ahp.enabled requires controller.oidc.issuer",
+			want: "controller.ahp.enabled requires controller.oidc.issuer and controller.oidc.audience",
 		},
 		{
 			name: "release namespace",

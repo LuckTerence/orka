@@ -2026,6 +2026,10 @@ func main() {
 	}
 	var ahpHost *ahphost.Host
 	if ahpAPIEnabled {
+		if err := validateAHPSignIn(oidcConfig); err != nil {
+			setupLog.Error(err, "invalid AHP configuration")
+			os.Exit(1)
+		}
 		if err := validateAHPWorkspace(ahpBackendConfig, watchNamespace, controlNamespace); err != nil {
 			setupLog.Error(err, "invalid AHP workspace configuration")
 			os.Exit(1)

@@ -194,8 +194,8 @@ controller:
     enabled: false
 
   # Agent Host Protocol at /ahp on the API port, for desktop AHP clients. Off by
-  # default; requires controller.oidc (or controller.contextToken), the
-  # identities that mint AHP connection tokens.
+  # default; requires controller.oidc (issuer and audience): AHP connection
+  # tokens are minted for a person's own OIDC sign-in.
   # Clients connect with wss://<API host>/ahp?tkn=<token>; expose the API
   # Service through a TLS-terminating Ingress or Gateway that passes WebSocket
   # upgrades.
