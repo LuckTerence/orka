@@ -92,6 +92,14 @@ func TestValidateTemplate(t *testing.T) {
 		"egress to port zero": func(s *corev1alpha1.AgentHostTemplateSpec) {
 			s.AdditionalEgress = []corev1alpha1.AgentHostEgressRule{{CIDR: "10.0.0.0/8", Ports: []int32{0}}}
 		},
+		"empty runtime class": func(s *corev1alpha1.AgentHostTemplateSpec) {
+			empty := ""
+			s.RuntimeClassName = &empty
+		},
+		"malformed runtime class": func(s *corev1alpha1.AgentHostTemplateSpec) {
+			name := "Not_A_Class"
+			s.RuntimeClassName = &name
+		},
 		"negative request": func(s *corev1alpha1.AgentHostTemplateSpec) {
 			s.Containers[0].Resources.Requests = corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("-1")}
 		},

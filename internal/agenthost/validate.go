@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/validation"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
@@ -67,6 +68,11 @@ func validateSettings(spec *corev1alpha1.AgentHostTemplateSpec) error {
 	}
 	if spec.Storage.Size.Sign() <= 0 {
 		return fmt.Errorf("storage size must be positive")
+	}
+	if spec.RuntimeClassName != nil {
+		if errs := validation.IsDNS1123Subdomain(*spec.RuntimeClassName); len(errs) > 0 {
+			return fmt.Errorf("runtimeClassName %q is not a valid RuntimeClass name", *spec.RuntimeClassName)
+		}
 	}
 	for _, rule := range spec.AdditionalEgress {
 		if _, _, err := net.ParseCIDR(rule.CIDR); err != nil {

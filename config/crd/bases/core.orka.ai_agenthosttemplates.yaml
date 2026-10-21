@@ -493,6 +493,7 @@ spec:
                   RuntimeClassName selects a RuntimeClass, for example a gVisor or Kata
                   sandbox, for host Pods.
                 maxLength: 253
+                minLength: 1
                 type: string
               securityContext:
                 description: SecurityContext selects the non-root identity for every

@@ -274,6 +274,7 @@ type AgentHostTemplateSpec struct {
 
 	// RuntimeClassName selects a RuntimeClass, for example a gVisor or Kata
 	// sandbox, for host Pods.
+	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
 	// +optional
 	RuntimeClassName *string `json:"runtimeClassName,omitempty"`
