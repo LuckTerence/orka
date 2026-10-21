@@ -681,6 +681,70 @@ func TestAgentHostIdleSuspendAndWake(t *testing.T) {
 	}
 }
 
+// A wake request dated in the future does nothing until its time, then wakes
+// the host once; it never keeps defeating later idle suspensions.
+func TestAgentHostFutureWakeRequestWakesOnceAtItsTime(t *testing.T) {
+	template := testTemplate(corev1alpha1.AgentHostAccessRelay, corev1alpha1.AgentHostCredentialRequired)
+	template.Spec.IdleSuspend = &corev1alpha1.AgentHostIdleSuspend{After: metav1.Duration{Duration: 30 * time.Minute}}
+	h := newAgentHostHarness(t, template, testHost(), userToken("ghs_user_token"))
+	h.settle()
+	h.markPodReady()
+	suspendIdle := func() {
+		t.Helper()
+		since := h.now.Add(-2 * time.Hour)
+		h.idle.status = agenthost.IdleStatus{Idle: true, IdleSince: &since}
+		h.settle()
+		if _, ok := h.pod(); ok {
+			t.Fatal("a host idle past the window must be suspended")
+		}
+	}
+	suspendIdle()
+
+	host := h.host()
+	future := metav1.NewTime(h.now.Add(24 * time.Hour))
+	host.Spec.WakeRequestedAt = &future
+	if err := h.client.Update(context.Background(), host); err != nil {
+		t.Fatal(err)
+	}
+	h.settle()
+	if _, ok := h.pod(); ok {
+		t.Fatal("a wake request dated in the future must not start the host yet")
+	}
+
+	h.now = h.now.Add(25 * time.Hour)
+	h.settle()
+	if _, ok := h.pod(); !ok {
+		t.Fatal("a wake request whose time has come must start the host")
+	}
+	h.markPodReady()
+	suspendIdle()
+	h.settle()
+	if _, ok := h.pod(); ok {
+		t.Fatal("the same wake request must not start the host again")
+	}
+}
+
+// The host's NetworkPolicy follows the controller's current namespace and Pod
+// labels, so the controller can keep reading the host's status.
+func TestAgentHostNetworkPolicyFollowsTheController(t *testing.T) {
+	h := newAgentHostHarness(t, testTemplate(corev1alpha1.AgentHostAccessRelay, corev1alpha1.AgentHostCredentialRequired),
+		testHost(), userToken("ghs_user_token"))
+	h.settle()
+	h.reconciler.Controller = agenthost.ControllerPeer{
+		Namespace: "orka-controller", PodLabels: map[string]string{"orka.ai/network-role": "controller"},
+	}
+	h.settle()
+	policy := &networkingv1.NetworkPolicy{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: testHostNamespace, Name: h.names().NetworkPolicy}, policy); err != nil {
+		t.Fatal(err)
+	}
+	from := policy.Spec.Ingress[0].From[0]
+	if from.NamespaceSelector.MatchLabels["kubernetes.io/metadata.name"] != "orka-controller" ||
+		from.PodSelector.MatchLabels["orka.ai/network-role"] != "controller" {
+		t.Fatalf("ingress still admits the old controller: %+v", from)
+	}
+}
+
 func TestAgentHostIdleStatusErrorsNeverSuspend(t *testing.T) {
 	template := testTemplate(corev1alpha1.AgentHostAccessRelay, corev1alpha1.AgentHostCredentialRequired)
 	template.Spec.IdleSuspend = &corev1alpha1.AgentHostIdleSuspend{After: metav1.Duration{Duration: time.Minute}}

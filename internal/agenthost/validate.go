@@ -13,6 +13,8 @@ import (
 	"regexp"
 	"strings"
 
+	corev1 "k8s.io/api/core/v1"
+
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
 
@@ -130,6 +132,18 @@ func validateContainer(container *corev1alpha1.AgentHostContainer, names, scratc
 	// Host Pods declare no resource claims, so a container cannot use one.
 	if len(container.Resources.Claims) > 0 {
 		return fmt.Errorf("container %q may not use resource claims", container.Name)
+	}
+	for _, quantities := range []corev1.ResourceList{container.Resources.Requests, container.Resources.Limits} {
+		for name, quantity := range quantities {
+			if quantity.Sign() < 0 {
+				return fmt.Errorf("container %q %s must not be negative", container.Name, name)
+			}
+		}
+	}
+	for name, request := range container.Resources.Requests {
+		if limit, ok := container.Resources.Limits[name]; ok && request.Cmp(limit) > 0 {
+			return fmt.Errorf("container %q %s request exceeds its limit", container.Name, name)
+		}
 	}
 	paths := map[string]bool{}
 	for _, mount := range container.VolumeMounts {

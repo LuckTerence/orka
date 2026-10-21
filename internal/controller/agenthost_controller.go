@@ -79,6 +79,8 @@ const (
 	agentHostRestartBackoffMax = 5 * time.Minute
 	agentHostTokenBytes        = 32
 	agentHostNonceBytes        = 16
+	// agentHostWakeClockSkew lets a wake request dated slightly ahead count now.
+	agentHostWakeClockSkew = time.Minute
 
 	// Kubelet reasons for a container that is starting normally.
 	agentHostWaitingInitializing = "PodInitializing"
@@ -214,8 +216,12 @@ func (r *AgentHostReconciler) reconcileHost(
 			"the host's objects are in namespace %q but the controller now uses %q; delete and recreate the AgentHost",
 			host.Status.HostNamespace, r.HostNamespace)
 	}
+	// A wake request counts once its time has come, so it wakes the host at
+	// most once: a request dated in the future would otherwise be later than
+	// every idle suspension until that date and defeat them all.
 	if host.Status.IdleSuspendedAt != nil && host.Spec.WakeRequestedAt != nil &&
-		host.Spec.WakeRequestedAt.After(host.Status.IdleSuspendedAt.Time) {
+		host.Spec.WakeRequestedAt.After(host.Status.IdleSuspendedAt.Time) &&
+		!host.Spec.WakeRequestedAt.After(r.now().Add(agentHostWakeClockSkew)) {
 		host.Status.IdleSuspendedAt = nil
 		host.Status.IdleSince = nil
 	}
@@ -265,12 +271,22 @@ func (r *AgentHostReconciler) reconcileHost(
 		}
 		return ctrl.Result{}, err
 	}
-	if err := r.ensureRecreatable(ctx, host, agentHostKindNetworkPolicy, "", names.NetworkPolicy, &networkingv1.NetworkPolicy{},
+	policy := &networkingv1.NetworkPolicy{}
+	if err := r.ensureRecreatable(ctx, host, agentHostKindNetworkPolicy, "", names.NetworkPolicy, policy,
 		func(nonce string) client.Object {
 			return agenthost.HostNetworkPolicy(host, names, nonce, template, r.Controller)
 		},
 	); err != nil {
 		return ctrl.Result{}, err
+	}
+	// The controller's namespace or Pod labels may have changed since the
+	// policy was made; without current rules the controller cannot read the
+	// host's status.
+	if desired := agenthost.HostNetworkPolicy(host, names, "", template, r.Controller); !equality.Semantic.DeepEqual(policy.Spec, desired.Spec) {
+		policy.Spec = desired.Spec
+		if err := r.Update(ctx, policy); err != nil {
+			return ctrl.Result{}, fmt.Errorf("update NetworkPolicy %s: %w", names.NetworkPolicy, err)
+		}
 	}
 	if err := r.reconcileConnectionSecret(ctx, host, names, template, connectionToken); err != nil {
 		return ctrl.Result{}, err

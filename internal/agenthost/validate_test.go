@@ -92,6 +92,13 @@ func TestValidateTemplate(t *testing.T) {
 		"egress to port zero": func(s *corev1alpha1.AgentHostTemplateSpec) {
 			s.AdditionalEgress = []corev1alpha1.AgentHostEgressRule{{CIDR: "10.0.0.0/8", Ports: []int32{0}}}
 		},
+		"negative request": func(s *corev1alpha1.AgentHostTemplateSpec) {
+			s.Containers[0].Resources.Requests = corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("-1")}
+		},
+		"request above its limit": func(s *corev1alpha1.AgentHostTemplateSpec) {
+			s.Containers[0].Resources.Requests = corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("2Gi")}
+			s.Containers[0].Resources.Limits = corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("1Gi")}
+		},
 	}
 	for name, mutate := range cases {
 		template := validTemplate()
