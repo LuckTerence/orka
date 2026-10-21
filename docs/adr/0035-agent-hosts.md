@@ -146,6 +146,10 @@ image and pinned by digest (`--agent-host-agent-image`):
   doubling to 5 min) until a replacement becomes ready.
 - `spec.suspended: true` deletes the Pod and keeps the volume and Secrets; `false` creates
   it again. A suspended or replaced host never replays an in-progress turn.
+- An operator changes a template by recreating it under the same name. Every host on it
+  then gets a new Pod from the new template on its existing volume: the Pod records the
+  template UID it was rendered from, and a Pod from an earlier UID is replaced. The
+  volume keeps the storage settings it was created with.
 - Idle suspension is opt-in per template (`idleSuspend.after`, from 1m to 720h, checked by
   the API server so a malformed duration can never be stored). The controller reads the
   sidecar's idle status and suspends a host idle for that long, recording

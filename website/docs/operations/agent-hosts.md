@@ -160,6 +160,9 @@ connections. It never keeps the host from being idle.
   on the same volume. A turn that was running is lost; sessions resume from the volume.
 - `spec.suspended: true` stops the Pod and keeps the volume and Secrets. Setting it back
   to `false` starts the host again.
+- A template's spec cannot change. To change a template, delete it and create it again
+  under the same name: each host on it gets a new Pod from the new template, on its
+  existing volume. A running turn is lost, and storage changes apply only to new hosts.
 - A template's `idleSuspend.after` suspends hosts that report idle for that long. A
   client cannot wake a suspended relay host; set `spec.wakeRequestedAt` to the current
   time to start it:

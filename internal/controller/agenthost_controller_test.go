@@ -825,6 +825,51 @@ func TestAgentHostRotatesTheGitHubTokenCopy(t *testing.T) {
 	}
 }
 
+// Recreating a template under its name moves its hosts to the new template on
+// the volumes they already have.
+func TestAgentHostMovesToARecreatedTemplate(t *testing.T) {
+	template := testTemplate(corev1alpha1.AgentHostAccessRelay, corev1alpha1.AgentHostCredentialRequired)
+	h := newAgentHostHarness(t, template, testHost(), userToken("ghs_user_token"))
+	h.settle()
+	h.markPodReady()
+	h.settle()
+	first, _ := h.pod()
+	claim := &corev1.PersistentVolumeClaim{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: testHostNamespace, Name: h.names().PVC}, claim); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := h.client.Delete(context.Background(), template); err != nil {
+		t.Fatal(err)
+	}
+	recreated := testTemplate(corev1alpha1.AgentHostAccessRelay, corev1alpha1.AgentHostCredentialRequired)
+	recreated.UID = "template-uid-2"
+	recreated.Spec.Containers[0].Image = "registry.example/host@sha256:" + strings.Repeat("3", 64)
+	if err := h.client.Create(context.Background(), recreated); err != nil {
+		t.Fatal(err)
+	}
+	h.settle()
+	second, ok := h.pod()
+	if !ok || second.UID == first.UID {
+		t.Fatalf("the host kept the Pod from the replaced template (ok=%v)", ok)
+	}
+	if second.Annotations[agenthost.AnnotationTemplateUID] != "template-uid-2" ||
+		second.Spec.Containers[0].Image != recreated.Spec.Containers[0].Image {
+		t.Fatalf("new Pod runs template %q with image %q", second.Annotations[agenthost.AnnotationTemplateUID],
+			second.Spec.Containers[0].Image)
+	}
+	after := &corev1.PersistentVolumeClaim{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: testHostNamespace, Name: h.names().PVC}, after); err != nil {
+		t.Fatal(err)
+	}
+	if after.UID != claim.UID {
+		t.Fatal("moving to a recreated template must keep the host's volume")
+	}
+	if got := h.host().Status.Restarts; got != 0 {
+		t.Fatalf("a template change counted as %d restarts", got)
+	}
+}
+
 func TestAgentHostLostStateVolumeFailsInsteadOfRecreating(t *testing.T) {
 	h := newAgentHostHarness(t, testTemplate(corev1alpha1.AgentHostAccessStandalone, corev1alpha1.AgentHostCredentialNone), testHost())
 	h.settle()
