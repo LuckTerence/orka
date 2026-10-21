@@ -132,32 +132,39 @@ func TestRedactionStreamReleasesProseWordByWord(t *testing.T) {
 	if got := stream.write("ld and more\nnext"); got != "world and more\n" {
 		t.Fatalf("write = %q", got)
 	}
-	// A word longer than the hold bound waits for its end, like any other.
+	// Text with no safe cut past the hold bound waits for the end of the
+	// stream, and then comes out whole.
 	long := strings.Repeat("x", maxPatternHeldBytes+1)
-	if got := stream.write(long); got != "" {
-		t.Fatalf("an unfinished word was released: %d bytes", len(got))
+	for _, chunk := range []string{long, " done"} {
+		if got := stream.write(chunk); got != "" {
+			t.Fatalf("held text came out early: %d bytes", len(got))
+		}
 	}
-	if got := stream.write(" done"); got != "next"+long+" " {
-		t.Fatalf("an oversized word was not released at its end: %d bytes", len(got))
+	if got := stream.flush(); got != "next"+long+" done" {
+		t.Fatalf("flush = %d bytes", len(got))
 	}
 }
 
-// Past the hold bound, text before an unfinished construct is released and
-// the construct is kept whole, never released before its value arrives.
+// An unfinished construct past the hold bound is never released before its
+// value arrives, however much text it holds.
 func TestRedactionStreamKeepsAnUnfinishedConstructPastTheHoldBound(t *testing.T) {
 	long := strings.Repeat("x", maxPatternHeldBytes+1)
-	chunks := []string{long, ` password: "my `, `hidden value" done`}
-	pieces := streamPublished(newCredentialRedactor().stream(), chunks...)
-	if joined, whole := strings.Join(pieces, ""), executionevents.RedactExecutionEventText(strings.Join(chunks, "")); joined != whole {
-		t.Fatalf("published %q, want %q", joined, whole)
-	}
-	for _, piece := range pieces {
-		if strings.Contains(piece, "hidden value") {
-			t.Fatalf("published piece %q carries the credential", piece)
-		}
-	}
-	if pieces[1] != long+" " {
-		t.Fatalf("second piece = %d bytes, want the long word released before the construct", len(pieces[1]))
+	for name, chunks := range map[string][]string{
+		"after a long word": {long, ` password: "my `, `hidden value" done`},
+		"long quoted value": {`password: "my `, strings.Repeat("hidden ", maxPatternHeldBytes/7+1), `value" done`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			pieces := streamPublished(newCredentialRedactor().stream(), chunks...)
+			whole := executionevents.RedactExecutionEventText(strings.Join(chunks, ""))
+			if joined := strings.Join(pieces, ""); joined != whole {
+				t.Fatalf("published %d bytes, want %d", len(joined), len(whole))
+			}
+			for _, piece := range pieces {
+				if strings.Contains(piece, "hidden") {
+					t.Fatalf("published piece of %d bytes carries the credential", len(piece))
+				}
+			}
+		})
 	}
 }
 

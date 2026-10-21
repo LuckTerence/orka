@@ -110,9 +110,11 @@ func (r *credentialRedactor) heldPrefixLength(text string) int {
 type redactionStream struct {
 	redactor *credentialRedactor
 	held     string
-	// refused is how far into the held text every whitespace has already
-	// been tried as a cut and refused, so a long hold is searched only once.
-	refused int
+	// overflow takes everything once the held text passed
+	// maxPatternHeldBytes with no safe cut. The stream then releases nothing
+	// until it ends, so a long unfinished construct costs one pass rather
+	// than one per chunk.
+	overflow *strings.Builder
 }
 
 func (r *credentialRedactor) stream() *redactionStream {
@@ -126,32 +128,39 @@ func (s *redactionStream) write(chunk string) string {
 	if s == nil {
 		return chunk
 	}
+	if s.overflow != nil {
+		s.overflow.WriteString(chunk)
+		return ""
+	}
 	joined := s.held + chunk
 	text, limit := joined, len(joined)
 	if s.redactor != nil && s.redactor.replacer != nil {
 		text = s.redactor.replace(joined)
 		limit = len(text) - s.redactor.heldPrefixLength(text)
 	}
-	refused := s.refused
-	if text != joined {
-		// A replacement moved the held text; search it again.
-		refused = 0
+	cut := 0
+	// Without new whitespace and with the held text unchanged, the only
+	// candidate cuts are the ones the held text was already refused at.
+	if text != joined || strings.ContainsAny(chunk, redactionWhitespace) {
+		cut = patternSafeCut(text, limit)
 	}
-	cut, searched := patternSafeCut(text, limit, refused)
+	if cut == 0 && len(text) > maxPatternHeldBytes {
+		s.overflow = &strings.Builder{}
+		s.overflow.WriteString(text)
+		s.held = ""
+		return ""
+	}
 	for cut > 0 && cut < len(text) && !utf8.RuneStart(text[cut]) {
 		cut--
 	}
-	s.held, s.refused = text[cut:], 0
-	if cut == 0 {
-		s.refused = searched
-	}
+	s.held = text[cut:]
 	return text[:cut]
 }
 
-// maxPatternHeldBytes is how much a stream holds before it also looks for a
-// cut further back. Text with no safe cut is never released early: it waits
-// for more text or the end of the stream.
-const maxPatternHeldBytes = 2 * harnessv2.MaxProtocolStringBytes
+// maxPatternHeldBytes bounds the text a stream re-examines on each chunk.
+// Text with no safe cut in that much is held to the end of the stream, never
+// released early.
+const maxPatternHeldBytes = harnessv2.MaxProtocolStringBytes
 
 // redactionWhitespace is what `\s` matches in the redaction patterns.
 const redactionWhitespace = " \t\n\f\r"
@@ -167,28 +176,17 @@ var redactionProbes = []string{
 // pattern redaction of the part before the cut cannot change with what
 // follows, or 0 when there is no such cut yet. A cut follows whitespace, so
 // no word is split; nothing before it waits for a value; and no match crosses
-// it. The last whitespace and the last line break are tried. Past
-// maxPatternHeldBytes every earlier whitespace after refused is tried too, so
-// a long unfinished construct does not hold back the text before it. It also
-// returns how far the text has now been searched without a cut.
-func patternSafeCut(text string, limit, refused int) (int, int) {
+// it. Only the last whitespace and the last line break are tried, so the work
+// per chunk stays bounded by the held text.
+func patternSafeCut(text string, limit int) int {
 	space := strings.LastIndexAny(text[:limit], redactionWhitespace) + 1
 	line := strings.LastIndexByte(text[:limit], '\n') + 1
 	for _, cut := range []int{space, line} {
-		if cut > refused && patternFinal(text[:cut], text[cut:]) {
-			return cut, 0
+		if cut > 0 && patternFinal(text[:cut], text[cut:]) {
+			return cut
 		}
 	}
-	if len(text) <= maxPatternHeldBytes {
-		return 0, refused
-	}
-	for cut := space; cut > refused+1; {
-		cut = strings.LastIndexAny(text[:cut-1], redactionWhitespace) + 1
-		if cut > refused && patternFinal(text[:cut], text[cut:]) {
-			return cut, 0
-		}
-	}
-	return 0, max(space, refused)
+	return 0
 }
 
 // patternFinal reports whether prefix redacts the same whatever follows it.
@@ -208,14 +206,19 @@ func (s *redactionStream) flush() string {
 		return ""
 	}
 	text := s.held
-	s.held = ""
+	if s.overflow != nil {
+		text = s.overflow.String()
+	}
+	s.held, s.overflow = "", nil
 	if s.redactor != nil {
 		text = s.redactor.replace(text)
 	}
 	return text
 }
 
-func (s *redactionStream) pending() bool { return s != nil && s.held != "" }
+func (s *redactionStream) pending() bool {
+	return s != nil && (s.held != "" || s.overflow != nil && s.overflow.Len() > 0)
+}
 
 // redactPermission redacts the agent-controlled text of a permission request.
 func (r *credentialRedactor) redactPermission(permission *harnessv2.PermissionRequestedEvent) {
