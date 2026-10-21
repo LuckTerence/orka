@@ -242,7 +242,18 @@ func HostNetworkPolicy(
 						{Protocol: &tcp, Port: new(intstr.FromInt32(53))},
 					},
 				},
-				{Ports: []networkingv1.NetworkPolicyPort{{Protocol: &tcp, Port: new(intstr.FromInt32(443))}}},
+				// Public HTTPS only: private, shared, link-local and loopback
+				// addresses, which hold in-cluster and internal endpoints, are
+				// reachable only through additionalEgress.
+				{
+					To: []networkingv1.NetworkPolicyPeer{
+						{IPBlock: &networkingv1.IPBlock{CIDR: "0.0.0.0/0", Except: []string{
+							"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "169.254.0.0/16", "127.0.0.0/8",
+						}}},
+						{IPBlock: &networkingv1.IPBlock{CIDR: "::/0", Except: []string{"fc00::/7", "fe80::/10", "::1/128"}}},
+					},
+					Ports: []networkingv1.NetworkPolicyPort{{Protocol: &tcp, Port: new(intstr.FromInt32(443))}},
+				},
 			},
 		},
 	}

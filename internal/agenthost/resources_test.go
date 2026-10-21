@@ -7,9 +7,11 @@ MIT License - see LICENSE file for details.
 package agenthost
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
+	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation"
@@ -49,5 +51,29 @@ func TestOwnerLabelsStayValidForLongNames(t *testing.T) {
 		if errs := validation.IsValidLabelValue(value); len(errs) != 0 {
 			t.Fatalf("host name label %q is invalid: %v", value, errs)
 		}
+	}
+}
+
+func TestHostNetworkPolicyKeepsHTTPSToPublicAddresses(t *testing.T) {
+	policy := HostNetworkPolicy(namedHost("alice", "uid-1"), ObjectNames(namedHost("alice", "uid-1"), "orka-agent-hosts"), "nonce",
+		validTemplate(), ControllerPeer{Namespace: "orka-system", PodLabels: map[string]string{"app": "orka"}})
+	var https *networkingv1.NetworkPolicyEgressRule
+	for i := range policy.Spec.Egress {
+		for _, port := range policy.Spec.Egress[i].Ports {
+			if port.Port != nil && port.Port.IntValue() == 443 {
+				https = &policy.Spec.Egress[i]
+			}
+		}
+	}
+	if https == nil || len(https.To) == 0 {
+		t.Fatalf("HTTPS egress has no destination limit: %+v", https)
+	}
+	for _, peer := range https.To {
+		if peer.IPBlock == nil || len(peer.IPBlock.Except) == 0 {
+			t.Fatalf("HTTPS egress peer is not a public address block: %+v", peer)
+		}
+	}
+	if !slices.Contains(https.To[0].IPBlock.Except, "10.0.0.0/8") {
+		t.Fatalf("private addresses are reachable over HTTPS: %+v", https.To[0].IPBlock)
 	}
 }

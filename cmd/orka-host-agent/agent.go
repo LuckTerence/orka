@@ -36,7 +36,9 @@ const (
 	maxTokenBytes  = 4096
 	maxStatusBytes = 64 << 10
 	// staleAfter marks an idle status the host has not refreshed recently.
-	staleAfter = 5 * time.Minute
+	// Hosts rewrite it at least every five minutes; twice that absorbs write
+	// and clock jitter, so a host that keeps to the contract never flaps.
+	staleAfter = 10 * time.Minute
 )
 
 // handshaker completes an AHP initialize and ping at a WebSocket URL.

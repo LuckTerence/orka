@@ -18,7 +18,7 @@ host, what it runs, what it may reach and the policy pinned in its template.
 :::warning[One trusted user per host]
 - The sample host, `copilotd`, serves exactly one GitHub user per process.
 - The host's agent holds the user's GitHub token, and every process in the Pod runs as
-  one uid, so code the agent runs can read it. Egress to TCP 443 is open. Run hosts only
+  one uid, so code the agent runs can read it. Egress to public TCP 443 is open. Run hosts only
   for code the user trusts; "public repositories only" is not a sandbox boundary.
 :::
 
@@ -138,7 +138,7 @@ The host must serve AHP on `127.0.0.1:<listenPort>`, gated by the connection tok
 keep everything that must survive a restart under `/workspace`. When the template sets
 `idleStatusFile`, the host writes JSON with at least `idle` and `idleSince` there, and
 rewrites it at least every five minutes. Orka judges freshness by its `updatedAt`, or by the
-file's modification time when it has none. copilotd's `--idle-status-file` format fits.
+file's modification time when it has none, and treats the status as stale after ten minutes. copilotd's `--idle-status-file` format fits.
 
 The `orka-host-agent` sidecar answers the host's probes. The Pod is Ready only after an AHP
 `initialize` and `ping` succeed against the loopback listener; the check never sends

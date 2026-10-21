@@ -107,7 +107,8 @@ container named `host`. Orka adds, and promises nothing else:
 The workload may declare `idleStatusFile`, a path inside the Pod where it writes JSON
 with at least `idle` (boolean) and `idleSince` (RFC 3339 or null), rewritten at least every
 five minutes. Freshness is judged by `updatedAt` (RFC 3339) when the file has one and by the
-file's modification time otherwise; a time more than five minutes ahead is stale too.
+file's modification time otherwise. A status is stale ten minutes after that time, twice the
+rewrite interval, or when that time is more than ten minutes ahead.
 copilotd's `--idle-status-file` format satisfies it.
 
 ### Readiness and status come from an Orka sidecar
@@ -203,8 +204,9 @@ image and pinned by digest (`--agent-host-agent-image`):
   root filesystem where the workload allows; Pod Security `restricted` in the host
   namespace; optional `runtimeClassName` (for example gVisor or Kata).
 - The NetworkPolicy denies all ingress except the controller (its namespace and Pod
-  labels together) to the sidecar's status port, and allows egress to DNS, TCP 443 and
-  the template's extra rules. It confines hosts only on clusters whose network plugin
+  labels together) to the sidecar's status port, and allows egress to DNS, TCP 443 on public
+  addresses (private, shared, link-local and loopback ranges excluded) and the template's
+  extra rules. It confines hosts only on clusters whose network plugin
   enforces NetworkPolicy.
 - Release gate: the copilotd sample must boot, restart and resume under enforced
   restricted Pod Security with its volume, scratch and caches writable.
