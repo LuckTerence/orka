@@ -211,6 +211,9 @@ func StateVolumeClaim(
 
 // HostNetworkPolicy denies ingress except the controller to the status port,
 // and allows egress to DNS, TCP 443 and the template's extra rules.
+//
+// DNS reaches the cluster's DNS Pods and link-local addresses, where node-local
+// DNS caches listen; only port 53 is open there, never a metadata API.
 func HostNetworkPolicy(
 	host *corev1alpha1.AgentHost,
 	n Names,
@@ -238,12 +241,15 @@ func HostNetworkPolicy(
 			}},
 			Egress: []networkingv1.NetworkPolicyEgressRule{
 				{
-					To: []networkingv1.NetworkPolicyPeer{{
-						NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{
-							"kubernetes.io/metadata.name": "kube-system",
-						}},
-						PodSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"k8s-app": "kube-dns"}},
-					}},
+					To: []networkingv1.NetworkPolicyPeer{
+						{
+							NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{
+								"kubernetes.io/metadata.name": "kube-system",
+							}},
+							PodSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"k8s-app": "kube-dns"}},
+						},
+						{IPBlock: &networkingv1.IPBlock{CIDR: "169.254.0.0/16"}},
+					},
 					Ports: []networkingv1.NetworkPolicyPort{
 						{Protocol: &udp, Port: new(intstr.FromInt32(53))},
 						{Protocol: &tcp, Port: new(intstr.FromInt32(53))},
