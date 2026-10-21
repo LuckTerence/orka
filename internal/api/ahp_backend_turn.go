@@ -29,6 +29,7 @@ import (
 	"github.com/orka-agents/orka/internal/ahphost"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/liveevents"
+	"github.com/orka-agents/orka/internal/store"
 )
 
 const (
@@ -132,7 +133,10 @@ func (b *ahpBackend) startTurn(ctx context.Context, principal ahphost.Principal,
 	// Start from the session as stored now: a change accepted since the
 	// message was admitted, such as the approval mode, applies to this turn.
 	var current ahpSession
-	if err := b.getRecord(ctx, principal.UserKey, ahpRecordSession, record.Session, &current); err == nil {
+	if err := b.getRecord(ctx, principal.UserKey, ahpRecordSession, record.Session, &current); errors.Is(err, store.ErrNotFound) {
+		// The session was disposed of while the message waited: run nothing.
+		return
+	} else if err == nil {
 		record = current
 	}
 	choice, switching, err := b.resolveModel(ctx, principal, record, action.Message.Model)
@@ -190,13 +194,27 @@ func (b *ahpBackend) startTurn(ctx context.Context, principal ahphost.Principal,
 		b: b, principal: principal, session: record, id: action.TurnId, task: name, startedAt: started, emit: emit,
 		ctx: turnCtx, cancel: cancel, tools: map[string]*ahpToolCall{},
 	}
+	// Disposal holds the user's lifecycle lock while it cancels the session's
+	// active Task and deletes the session. Recording the Task under the same
+	// lock means disposal either finds and cancels it, or has already deleted
+	// the session, and then the Task is cancelled here.
+	unlock := b.lockUser(principal.UserKey)
+	recorded := false
 	b.updateSession(ctx, principal.UserKey, record.Session, func(s *ahpSession) {
 		s.Agent, s.Model, s.Turns = choice.Agent, choice.Model, number
 		s.SessionTurns++
 		s.ActiveTurn, s.ActiveTask, s.ActiveStartedAt = action.TurnId, name, started.Format(time.RFC3339Nano)
 		s.History = ahpKeepHistory(append(s.History, ahpExchange{User: ahpBounded(action.Message.Text, ahpExchangeMax)}))
 		turn.session = *s
+		recorded = true
 	})
+	unlock()
+	if !recorded {
+		sub.Close()
+		cancel()
+		b.cancelTask(context.WithoutCancel(ctx), principal, task.Namespace, name)
+		return
+	}
 	b.mu.Lock()
 	b.turns[ahpTurnKey(principal.UserKey, record.Session)] = turn
 	b.mu.Unlock()

@@ -783,6 +783,11 @@ func (c *conn) createSession(ctx context.Context, raw json.RawMessage) (err erro
 	if !validURI(session) {
 		return rpcErr(ahptypes.ErrorCodeInvalidParams, "a valid session URI is required")
 	}
+	release, claimed := c.host.claimSessionURI(c.principal.UserKey, session)
+	if !claimed {
+		return rpcErr(ahptypes.ErrorCodeSessionAlreadyExists, "the session already exists")
+	}
+	defer release()
 	if _, err := c.host.cfg.Store.GetAHPSession(ctx, c.principal.UserKey, session); err == nil {
 		return rpcErr(ahptypes.ErrorCodeSessionAlreadyExists, "the session already exists")
 	} else if !errors.Is(err, store.ErrNotFound) {

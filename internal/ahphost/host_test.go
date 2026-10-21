@@ -497,3 +497,18 @@ func TestSubscribeNeverMissesAConcurrentAction(t *testing.T) {
 	envelope := nextAction(t, sub)
 	require.Equal(t, result.Snapshot.FromSeq+1, envelope.ServerSeq, "the action follows the snapshot it is missing from")
 }
+
+func TestSessionURIsAreClaimedOneCreationAtATime(t *testing.T) {
+	h := &Host{}
+	release, ok := h.claimSessionURI("alice", "ahp-session:/one")
+	require.True(t, ok)
+	_, ok = h.claimSessionURI("alice", "ahp-session:/one")
+	require.False(t, ok, "a second creation of the same URI waits for none: it is refused")
+	other, ok := h.claimSessionURI("bob", "ahp-session:/one")
+	require.True(t, ok, "another user's URI is their own")
+	other()
+	release()
+	again, ok := h.claimSessionURI("alice", "ahp-session:/one")
+	require.True(t, ok, "a finished creation frees the URI")
+	again()
+}

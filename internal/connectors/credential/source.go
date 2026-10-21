@@ -764,6 +764,12 @@ func (s *Source) ResolveGitHubPersonCredential(ctx context.Context, namespace, p
 		return outboundaccess.ConnectionCredential{}, err
 	}
 	validate := func(connection *corev1alpha1.Connection, credential store.ConnectorCredential) error {
+		// A Connection deleted and recreated under the same name can reach the
+		// same grant sequence; the credential belongs only to the one it was
+		// read for.
+		if string(connection.UID) != ref.ConnectionUID {
+			return errors.New("connection was replaced; try again")
+		}
 		if credential.GrantSequence <= 0 || credential.GrantSequence != connection.Status.GrantSequence {
 			return errors.New("connection was re-linked; try again")
 		}

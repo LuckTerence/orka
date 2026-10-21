@@ -65,6 +65,29 @@ type Host struct {
 	stopped bool
 	// swept records the users whose leftover channels this process dropped.
 	swept map[string]bool
+	// creating are the session URIs, per user, whose creation is under way.
+	creating map[string]bool
+}
+
+// claimSessionURI reserves a session URI for one creation at a time, so two
+// connections of a user cannot both create it. It reports false while
+// another creation of the URI runs.
+func (h *Host) claimSessionURI(userKey, session string) (func(), bool) {
+	key := userKey + "\x00" + session
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.creating[key] {
+		return nil, false
+	}
+	if h.creating == nil {
+		h.creating = map[string]bool{}
+	}
+	h.creating[key] = true
+	return func() {
+		h.mu.Lock()
+		delete(h.creating, key)
+		h.mu.Unlock()
+	}, true
 }
 
 type userHub struct {

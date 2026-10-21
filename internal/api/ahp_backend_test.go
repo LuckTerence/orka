@@ -1167,3 +1167,27 @@ func TestAHPFileURIsEscapeAndRoundTrip(t *testing.T) {
 		require.False(t, ok, bad)
 	}
 }
+
+// A message admitted before its session was disposed of waits behind other
+// work; when its turn finally starts, it runs nothing for the gone session.
+func TestAHPBackendRunsNoTurnForADisposedSession(t *testing.T) {
+	env := newAHPTestEnv(t)
+	c := env.connect("alice")
+	ctx := ahpCtx(t)
+	env.setUpSession(c, "allow-all")
+	alice := ahphost.Principal{Issuer: "https://issuer.example", Subject: "alice", Namespace: ahpTestNamespace,
+		UserKey: ahphost.UserKey("https://issuer.example", "alice")}
+	var record ahpSession
+	require.NoError(t, env.backend.getRecord(ctx, alice.UserKey, ahpRecordSession, ahpTestSession, &record))
+	require.NoError(t, c.Request(ctx, "disposeSession", ahptypes.DisposeSessionParams{Channel: ahpTestSession}, nil))
+
+	require.True(t, env.backend.reserveTurn(alice.UserKey, ahpTestSession))
+	env.backend.startTurn(ctx, alice, record, &ahptypes.ChatTurnStartedAction{
+		Type: ahptypes.ActionTypeChatTurnStarted, TurnId: "turn-late", StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		Message: ahptypes.Message{Text: "late", Origin: ahptypes.MessageOrigin{Kind: ahptypes.MessageKindUser}},
+	}, env.backend.emitterFor(alice))
+	var tasks corev1alpha1.TaskList
+	require.NoError(t, env.kube.List(ctx, &tasks))
+	require.Empty(t, tasks.Items, "no Task runs for a disposed session")
+	require.Nil(t, env.backend.activeTurn(alice.UserKey, ahpTestSession))
+}

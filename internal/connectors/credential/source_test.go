@@ -1208,3 +1208,32 @@ func TestResolveGitHubPersonCredentialRefusesOtherIssuers(t *testing.T) {
 		t.Fatal("a provider that does not issue github.com tokens must not serve them")
 	}
 }
+
+// A Connection deleted and recreated under the same name while its credential
+// is refreshed is another person's consent, even at the same grant sequence.
+func TestResolveGitHubPersonCredentialRefusesAReplacedConnection(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	h.put(store.ConnectorCredential{AccessToken: "gho_old", RefreshToken: "ghr_old", TokenType: "bearer", ExpiresAt: h.now.Add(5 * time.Minute)})
+	h.refresher.onRefresh = func() {
+		h.refresher.onRefresh = nil
+		live := h.reload()
+		replacement := live.DeepCopy()
+		replacement.ResourceVersion = ""
+		replacement.UID = "uid-2"
+		if err := h.client.Delete(ctx, live); err != nil {
+			t.Fatal(err)
+		}
+		if err := h.client.Create(ctx, replacement); err != nil {
+			t.Fatal(err)
+		}
+		replacement.Status = live.Status
+		if err := h.client.Status().Update(ctx, replacement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, err := h.source.ResolveGitHubPersonCredential(ctx, testNamespace, "github", testIssuer, testSubject, 10*time.Minute)
+	if err == nil || !strings.Contains(err.Error(), "replaced") {
+		t.Fatalf("a replaced Connection served a credential: err = %v", err)
+	}
+}
