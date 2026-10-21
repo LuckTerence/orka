@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="generator" content="Docusaurus v3.10.1">
 <title data-rh="true">Configuration | Orka</title><meta data-rh="true" name="viewport" content="width=device-width,initial-scale=1"><meta data-rh="true" name="twitter:card" content="summary_large_image"><meta data-rh="true" property="og:url" content="https://orka-agents.github.io/orka/docs/configuration"><meta data-rh="true" property="og:locale" content="en"><meta data-rh="true" name="docusaurus_locale" content="en"><meta data-rh="true" name="docsearch:language" content="en"><meta data-rh="true" name="docusaurus_version" content="current"><meta data-rh="true" name="docusaurus_tag" content="docs-default-current"><meta data-rh="true" name="docsearch:version" content="current"><meta data-rh="true" name="docsearch:docusaurus_tag" content="docs-default-current"><meta data-rh="true" property="og:title" content="Configuration | Orka"><meta data-rh="true" name="description" content="Helm values, controller flags, and environment variables for running Orka."><meta data-rh="true" property="og:description" content="Helm values, controller flags, and environment variables for running Orka."><link data-rh="true" rel="canonical" href="https://orka-agents.github.io/orka/docs/configuration"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/configuration" hreflang="en"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/configuration" hreflang="x-default"><script data-rh="true" type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Configuration","item":"https://orka-agents.github.io/orka/docs/configuration"}]}</script><link rel="stylesheet" href="/orka/assets/css/styles.ecda331d.css">
-<script src="/orka/assets/js/runtime~main.c3148fd1.js" defer="defer"></script>
+<script src="/orka/assets/js/runtime~main.691d64e2.js" defer="defer"></script>
 <script src="/orka/assets/js/main.1f4a80eb.js" defer="defer"></script>
 </head>
 <body>
@@ -50,15 +50,21 @@ to disable that provider.</p>
 <p>The controller encrypts agent execution snapshots at rest with an AES-256 key
 mounted from a Secret. By default the chart renders an empty Secret named
 <code>&lt;release&gt;-agent-execution-snapshot</code> and the controller mints 32 random bytes
-into it on its first start, then reuses them on every later start. The chart
-never renders key material, so Helm release history and dry-run output contain
-no secrets, and Helm leaves the controller-written data alone on upgrade. The
-Secret is kept on <code>helm uninstall</code> so a restored data volume can still be
-decrypted. Back it up with the data volume.</p>
-<p>If the controller finds its SQLite store already present but the Secret empty,
-the key was lost. It refuses to start rather than mint a new key that could not
-read the existing records. Restore the Secret from backup, or delete the data
-volume to start over.</p>
+into it when it creates a new SQLite dataset, then reuses them on every later
+start. The chart never renders key material, so Helm release history and
+dry-run output contain no secrets, and Helm leaves the controller-written data
+alone on upgrade. The Secret is kept on <code>helm uninstall</code> so a restored data
+volume can still be decrypted. Back it up with the data volume.</p>
+<p>The controller decides whether it may mint a key from the dataset history recorded
+inside the SQLite database, not from whether the database file exists. It mints a
+key only for a new dataset that has never completed key bootstrap and holds no
+records. A dataset that completed bootstrap, or was adopted from an older layout
+during an upgrade, needs its existing key even if every record has since been
+deleted. If the Secret is empty for such a dataset, the key was lost, and the
+controller refuses to start rather than mint a new key that could not read the
+existing records. Restore the Secret from backup, or delete the data volume to
+start over. See
+<a class="" href="/orka/docs/upgrading#dataset-identity-and-key-bootstrap">Dataset identity and key bootstrap</a>.</p>
 <p>To bring your own key, create the Secret before installing and set
 <code>controller.agentExecutionSnapshot.existingSecret</code>. The item must hold exactly
 32 raw bytes or their base64 encoding:</p>
