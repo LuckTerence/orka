@@ -51,6 +51,9 @@ const (
 	ConnectionTokenFileEnv = "ORKA_CONNECTION_TOKEN_FILE"
 	GitHubTokenFileEnv     = "ORKA_GITHUB_TOKEN_FILE"
 	StatusDirEnv           = "ORKA_STATUS_DIR"
+	// HostAgentEnv names a copy of the Orka host agent the host container
+	// can run as its init process: exec "$ORKA_HOST_AGENT" init -- <command>.
+	HostAgentEnv = "ORKA_HOST_AGENT"
 )
 
 // Secret data keys.
@@ -63,20 +66,22 @@ const (
 )
 
 const (
-	hostAgentContainer  = "orka-host-agent"
-	stageTokenContainer = "orka-stage-connection-token"
-	hostAgentBinary     = "/orka-host-agent"
-	statusPortName      = "orka-status"
+	hostAgentContainer = "orka-host-agent"
+	stageContainerName = "orka-stage"
+	hostAgentBinary    = "/orka-host-agent"
+	statusPortName     = "orka-status"
 
 	connectionTokenVolume       = "orka-connection-token"
 	connectionTokenSecretVolume = "orka-connection-token-secret"
 	githubTokenVolume           = "orka-github-token"
 	statusVolume                = "orka-status"
+	hostAgentBinVolume          = "orka-host-agent-bin"
 
 	connectionTokenDir       = "/run/orka/connection-token"
 	connectionTokenSecretDir = "/var/run/orka/connection-token-secret"
 	githubTokenDir           = "/var/run/orka/github"
 	statusDir                = "/var/run/orka/status"
+	hostAgentBinDir          = "/run/orka/bin"
 
 	secretFileMode int32 = 0o440
 )
@@ -311,6 +316,9 @@ func HostPod(
 		{Name: statusVolume, VolumeSource: corev1.VolumeSource{
 			EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory, SizeLimit: new(resource.MustParse("1Mi"))},
 		}},
+		{Name: hostAgentBinVolume, VolumeSource: corev1.VolumeSource{
+			EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: new(resource.MustParse("64Mi"))},
+		}},
 	}
 	if opts.GitHubToken {
 		volumes = append(volumes, corev1.Volume{Name: githubTokenVolume, VolumeSource: corev1.VolumeSource{
@@ -411,17 +419,19 @@ func templateContainer(source *corev1alpha1.AgentHostContainer, spec *corev1alph
 }
 
 // stageContainer copies the connection token from its Secret into the
-// memory-backed volume only the host container mounts, as the host's uid. It
-// runs the host agent's image, so the host image needs no tools of its own.
+// memory-backed volume only the host container mounts, and the host agent into
+// a volume the host mounts read-only, as the host's uid. It runs the host
+// agent's image, so the host image needs no tools of its own.
 func stageContainer(spec *corev1alpha1.AgentHostTemplateSpec, image string) corev1.Container {
 	return corev1.Container{
-		Name:    stageTokenContainer,
+		Name:    stageContainerName,
 		Image:   image,
 		Command: []string{hostAgentBinary},
 		Args: []string{
-			"stage-token",
-			"--from=" + connectionTokenSecretDir + "/" + TokenKey,
-			"--to=" + connectionTokenDir + "/" + TokenKey,
+			"stage",
+			"--token-from=" + connectionTokenSecretDir + "/" + TokenKey,
+			"--token-to=" + connectionTokenDir + "/" + TokenKey,
+			"--agent-to=" + hostAgentBinDir + hostAgentBinary,
 		},
 		SecurityContext: hardenedSecurity(spec),
 		ImagePullPolicy: corev1.PullIfNotPresent,
@@ -429,6 +439,7 @@ func stageContainer(spec *corev1alpha1.AgentHostTemplateSpec, image string) core
 		VolumeMounts: []corev1.VolumeMount{
 			{Name: connectionTokenSecretVolume, MountPath: connectionTokenSecretDir, ReadOnly: true},
 			{Name: connectionTokenVolume, MountPath: connectionTokenDir},
+			{Name: hostAgentBinVolume, MountPath: hostAgentBinDir},
 		},
 	}
 }
@@ -462,17 +473,20 @@ func hostAgentSidecar(spec *corev1alpha1.AgentHostTemplateSpec, image string) co
 }
 
 // decorateHostContainer adds the host contract: identity, credentials, the
-// status directory, and probes answered by the host agent.
+// status directory, the host agent as an init, and probes answered by the
+// host agent.
 func decorateHostContainer(container *corev1.Container, host *corev1alpha1.AgentHost, opts PodOptions) {
 	container.Env = append(container.Env,
 		corev1.EnvVar{Name: HostIDEnv, Value: string(host.UID)},
 		corev1.EnvVar{Name: HostNameEnv, Value: host.Name},
 		corev1.EnvVar{Name: ConnectionTokenFileEnv, Value: connectionTokenDir + "/" + TokenKey},
 		corev1.EnvVar{Name: StatusDirEnv, Value: statusDir},
+		corev1.EnvVar{Name: HostAgentEnv, Value: hostAgentBinDir + hostAgentBinary},
 	)
 	container.VolumeMounts = append(container.VolumeMounts,
 		corev1.VolumeMount{Name: connectionTokenVolume, MountPath: connectionTokenDir},
 		corev1.VolumeMount{Name: statusVolume, MountPath: statusDir},
+		corev1.VolumeMount{Name: hostAgentBinVolume, MountPath: hostAgentBinDir, ReadOnly: true},
 	)
 	if opts.GitHubToken {
 		container.Env = append(container.Env, corev1.EnvVar{Name: GitHubTokenFileEnv, Value: githubTokenDir + "/" + TokenKey})

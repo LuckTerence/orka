@@ -100,6 +100,10 @@ container named `host`. Orka adds, and promises nothing else:
   volume mounted only into `host`. The launcher reads it once and deletes it.
 - `ORKA_GITHUB_TOKEN_FILE`: only when the template asks for it and the AgentHost names a
   token Secret; a read-only mount in `host` only.
+- `ORKA_HOST_AGENT`: a read-only copy of the Orka host agent. Run as
+  `orka-host-agent init -- <command>`, it is the container's PID 1: it reaps every orphan
+  the container adopts, which agent daemons do not, forwards signals and exits with the
+  command's status.
 - The state volume at `/workspace`. Everything that must survive a restart lives there.
   Executable caches stay on per-Pod scratch.
 - A loopback AHP listener on the template's `listenPort`, gated by the connection token.
@@ -129,8 +133,8 @@ image and pinned by digest (`--agent-host-agent-image`):
 - It serves the parsed idle status (no other fields) on a port that only the Orka
   controller may reach.
 - It reads the connection token from its own Secret mount, which `host` does not share.
-  The same binary, run as the first init container, stages the token for `host`, so host
-  images need no tools of their own.
+  The same binary, run as the first init container, stages the token and a copy of itself
+  for `host`, so host images need no tools of their own.
 
 ### Restarts and suspension are driven by core
 

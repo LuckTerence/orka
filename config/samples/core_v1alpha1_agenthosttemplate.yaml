@@ -47,7 +47,10 @@ spec:
           export COPILOTD_MISSION_CONTROL_TOKEN
           PATH=$agent_path
           export PATH
-          exec /opt/agent-bin/copilotd --relay --no-update-check \
+          # The container's PID 1 adopts orphaned processes, such as git's
+          # detached maintenance, and the daemon never reaps them. Orka's init
+          # does, and forwards signals to the daemon.
+          exec "$ORKA_HOST_AGENT" init -- /opt/agent-bin/copilotd --relay --no-update-check \
             --mission-control-token-file "$ORKA_GITHUB_TOKEN_FILE" \
             --compute-id "$ORKA_HOST_ID" --environment-name "orka-$ORKA_HOST_NAME" \
             --listen 127.0.0.1:7777 --connection-token-stream stdin \

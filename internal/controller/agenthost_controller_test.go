@@ -9,6 +9,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -264,10 +265,11 @@ func assertHardenedHostPod(t *testing.T, pod *corev1.Pod) {
 		sidecar.RestartPolicy == nil || *sidecar.RestartPolicy != corev1.ContainerRestartPolicyAlways {
 		t.Fatalf("host agent sidecar = %+v", sidecar)
 	}
-	// Orka's own image stages the connection token, so host images need no tools.
+	// Orka's own image stages the connection token and the host agent, so host
+	// images need no tools.
 	stage := pod.Spec.InitContainers[0]
-	if stage.Image != testAgentImage || len(stage.Args) == 0 || stage.Args[0] != "stage-token" {
-		t.Fatalf("token staging container = %+v", stage)
+	if stage.Image != testAgentImage || len(stage.Args) == 0 || stage.Args[0] != "stage" {
+		t.Fatalf("staging container = %+v", stage)
 	}
 	hostContainer := pod.Spec.Containers[0]
 	if hostContainer.LivenessProbe == nil || hostContainer.LivenessProbe.HTTPGet.Path != "/readyz" {
@@ -290,10 +292,21 @@ func assertHardenedHostPod(t *testing.T, pod *corev1.Pod) {
 			t.Fatal("the GitHub token must be mounted into the host container only")
 		}
 	}
+	// The host runs the staged host agent as its init, from a mount it cannot write.
+	if !slices.Contains(stage.Args, "--agent-to="+env[agenthost.HostAgentEnv]) {
+		t.Fatalf("host agent staged by %v, host runs %q", stage.Args, env[agenthost.HostAgentEnv])
+	}
+	agentMounted := false
 	for _, mount := range hostContainer.VolumeMounts {
 		if mount.Name == "orka-connection-token-secret" {
 			t.Fatal("the host container must not mount the connection token Secret")
 		}
+		if mount.Name == "orka-host-agent-bin" {
+			agentMounted = mount.ReadOnly && strings.HasPrefix(env[agenthost.HostAgentEnv], mount.MountPath+"/")
+		}
+	}
+	if !agentMounted {
+		t.Fatalf("host mounts = %+v; want the host agent read-only", hostContainer.VolumeMounts)
 	}
 }
 

@@ -133,9 +133,14 @@ Orka adds to the template's container named `host`, and promises nothing else:
 | `ORKA_CONNECTION_TOKEN_FILE` | A per-host random token in a memory-backed volume mounted only into `host`. Read it once and delete it. |
 | `ORKA_GITHUB_TOKEN_FILE` | The user's GitHub token, read-only, when the template's `githubToken` allows it. |
 | `ORKA_STATUS_DIR` | A directory shared with the Orka host agent for the idle status file. |
+| `ORKA_HOST_AGENT` | A read-only copy of the Orka host agent, for use as the container's init process. |
 
 The host must serve AHP on `127.0.0.1:<listenPort>`, gated by the connection token, and
-keep everything that must survive a restart under `/workspace`. When the template sets
+keep everything that must survive a restart under `/workspace`. The container's entrypoint is
+its PID 1, which adopts every orphaned process, such as git's detached maintenance. Agent daemons
+do not reap processes they never started, so start the daemon with
+`exec "$ORKA_HOST_AGENT" init -- <command>`: it reaps them, forwards signals to the daemon, and
+exits with its status. When the template sets
 `idleStatusFile`, the host writes JSON with at least `idle` and `idleSince` there, and
 rewrites it at least every five minutes. Orka judges freshness by its `updatedAt`, or by the
 file's modification time when it has none, and treats the status as stale after ten minutes. copilotd's `--idle-status-file` format fits.
