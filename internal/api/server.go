@@ -431,6 +431,7 @@ func (s *Server) setupRoutes() {
 	api.Post("/agents", s.handlers.CreateAgent)
 	api.Get("/agents", s.handlers.ListAgents)
 	api.Get("/agents/:name", s.handlers.GetAgent)
+	api.Get("/agents/:name/system-prompt", s.handlers.GetAgentSystemPrompt)
 	api.Put("/agents/:name", s.handlers.UpdateAgent)
 	api.Delete("/agents/:name", s.handlers.DeleteAgent)
 
@@ -532,8 +533,7 @@ func (s *Server) setupRoutes() {
 	anthropic.Post("/messages", s.anthropicHandler.HandleMessages)
 	anthropic.Get("/models", s.anthropicHandler.HandleListModels)
 
-	// Internal API for worker communication. Harness v1 retirement is served
-	// only by the dedicated audience-bound TLS listener configured below.
+	// Internal API for worker communication.
 	if s.hasInternalStores() {
 		s.internalHandlers = NewInternalHandlers(
 			s.ResultStore,
