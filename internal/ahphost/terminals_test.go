@@ -30,12 +30,22 @@ type terminalBackend struct {
 	inputs   []string
 	running  map[string]bool
 	disposed []string
+	// exitAtOnce makes a terminal's shell exit with this code before
+	// CreateTerminal returns.
+	exitAtOnce *int64
 }
 
-func (b *terminalBackend) CreateTerminal(_ context.Context, _ Principal, params ahptypes.CreateTerminalParams, _ Emitter) (ahptypes.TerminalState, error) {
+func (b *terminalBackend) CreateTerminal(ctx context.Context, _ Principal, params ahptypes.CreateTerminalParams, emit Emitter) (ahptypes.TerminalState, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.running[params.Channel] = true
+	if b.exitAtOnce != nil {
+		// Like a real backend, it does not wait to learn whether the exit landed.
+		_ = emit.Emit(ctx, params.Channel, ahptypes.StateAction{Value: &ahptypes.TerminalExitedAction{
+			Type: ahptypes.ActionTypeTerminalExited, ExitCode: b.exitAtOnce,
+		}})
+	} else {
+		b.running[params.Channel] = true
+	}
 	return ahptypes.TerminalState{Title: "shell", Claim: params.Claim,
 		Lifecycle: ahptypes.TerminalLifecycleState{Value: &ahptypes.TerminalRunningLifecycleState{Status: ahptypes.TerminalLifecycleStatusRunning}}}, nil
 }
@@ -71,6 +81,38 @@ func (b *terminalBackend) HandleClientAction(_ context.Context, _ Principal, _ s
 		b.inputs = append(b.inputs, input.Data)
 		b.mu.Unlock()
 	}
+}
+
+// A shell that exits before the host has stored its terminal still ends it:
+// the exit waits for the channel and applies once it is stored.
+func TestATerminalWhoseShellExitsAtOnceIsStoredAsExited(t *testing.T) {
+	s, err := sqlite.OpenLockedStore(filepath.Join(t.TempDir(), "orka.db"))
+	require.NoError(t, err)
+	tokens := &TokenService{Store: s}
+	code := int64(3)
+	backend := &terminalBackend{fakeBackend: &fakeBackend{}, running: map[string]bool{}, exitAtOnce: &code}
+	registry, err := NewRegistry(backend)
+	require.NoError(t, err)
+	host, err := New(Config{Store: s, Tokens: tokens, Backends: registry, Logger: logr.Discard()})
+	require.NoError(t, err)
+	server := httptest.NewServer(host)
+	t.Cleanup(server.Close)
+	env := &testEnv{t: t, host: host, tokens: tokens, store: s, backend: backend.fakeBackend, server: server}
+	client := env.connect(env.mint("alice").Token)
+	ctx := ctx5(t)
+	_, err = client.Initialize(ctx, "client-a", ahptypes.SupportedProtocolVersions(), nil)
+	require.NoError(t, err)
+
+	claim := ahptypes.TerminalClaim{Value: &ahptypes.TerminalClientClaim{Kind: ahptypes.TerminalClaimKindClient, ClientId: "client-a"}}
+	require.NoError(t, client.Request(ctx, "createTerminal", ahptypes.CreateTerminalParams{Channel: "ahp-terminal:/one", Claim: claim}, nil))
+	stored, _, err := host.readChannel(ctx, UserKey("https://issuer.example", "alice"), "ahp-terminal:/one")
+	require.NoError(t, err)
+	exited, ok := stored.State.Terminal.Lifecycle.Value.(*ahptypes.TerminalExitedLifecycleState)
+	require.True(t, ok, "the stored terminal = %#v, want exited", stored.State.Terminal.Lifecycle.Value)
+	require.Equal(t, code, *exited.ExitCode)
+	result, _, err := client.Subscribe(ctx, rootChannel)
+	require.NoError(t, err)
+	require.Empty(t, result.Snapshot.State.Root.Terminals, "an exited shell is not listed as running")
 }
 
 func TestTerminalsRouteToTheirBackendInOrder(t *testing.T) {

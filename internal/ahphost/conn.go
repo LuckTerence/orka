@@ -783,7 +783,7 @@ func (c *conn) createSession(ctx context.Context, raw json.RawMessage) (err erro
 	if !validURI(session) {
 		return rpcErr(ahptypes.ErrorCodeInvalidParams, "a valid session URI is required")
 	}
-	release, claimed := c.host.claimChannelURI(c.principal.UserKey, session)
+	release, claimed := c.host.claimChannelURI(c.principal.UserKey, session, false)
 	if !claimed {
 		return rpcErr(ahptypes.ErrorCodeSessionAlreadyExists, "the session already exists")
 	}

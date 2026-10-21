@@ -78,7 +78,7 @@ func (c *conn) createTerminal(ctx context.Context, raw json.RawMessage) error {
 	if !ok {
 		return rpcErr(ahptypes.ErrorCodeMethodNotFound, "method %q is not supported", "createTerminal")
 	}
-	release, claimed := c.host.claimChannelURI(c.principal.UserKey, params.Channel)
+	release, claimed := c.host.claimChannelURI(c.principal.UserKey, params.Channel, true)
 	if !claimed {
 		return rpcErr(ahptypes.ErrorCodeAlreadyExists, "the terminal already exists")
 	}
@@ -104,6 +104,10 @@ func (c *conn) createTerminal(ctx context.Context, raw json.RawMessage) error {
 	}); err != nil {
 		c.unsubscribeFrom(params.Channel)
 		_ = provider.DisposeTerminal(ctx, c.principal, params.Channel)
+		return err
+	}
+	// The shell may already have exited, or written output.
+	if err := c.host.finishCreation(ctx, c.principal, params.Channel); err != nil {
 		return err
 	}
 	return c.host.updateTerminals(ctx, c.principal)

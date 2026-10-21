@@ -500,15 +500,15 @@ func TestSubscribeNeverMissesAConcurrentAction(t *testing.T) {
 
 func TestSessionURIsAreClaimedOneCreationAtATime(t *testing.T) {
 	h := &Host{}
-	release, ok := h.claimChannelURI("alice", "ahp-session:/one")
+	release, ok := h.claimChannelURI("alice", "ahp-session:/one", false)
 	require.True(t, ok)
-	_, ok = h.claimChannelURI("alice", "ahp-session:/one")
+	_, ok = h.claimChannelURI("alice", "ahp-session:/one", false)
 	require.False(t, ok, "a second creation of the same URI waits for none: it is refused")
-	other, ok := h.claimChannelURI("bob", "ahp-session:/one")
+	other, ok := h.claimChannelURI("bob", "ahp-session:/one", false)
 	require.True(t, ok, "another user's URI is their own")
 	other()
 	release()
-	again, ok := h.claimChannelURI("alice", "ahp-session:/one")
+	again, ok := h.claimChannelURI("alice", "ahp-session:/one", false)
 	require.True(t, ok, "a finished creation frees the URI")
 	again()
 }

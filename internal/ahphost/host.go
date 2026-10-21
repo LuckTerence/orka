@@ -67,28 +67,77 @@ type Host struct {
 	swept map[string]bool
 	// creating are the channel URIs, per user, whose creation as a session or
 	// terminal is under way.
-	creating map[string]bool
+	creating map[string]*channelCreation
+}
+
+// channelCreation is one channel URI being created. A terminal's backend can
+// emit to it before the host has stored it, as when its shell exits at once;
+// such actions are held and applied once the channel is stored.
+type channelCreation struct {
+	hold    bool
+	actions []ahptypes.StateAction
 }
 
 // claimChannelURI reserves a channel URI for one creation at a time, so two
 // connections of a user cannot both create it, as a session or a terminal.
 // It reports false while another creation of the URI runs.
-func (h *Host) claimChannelURI(userKey, session string) (func(), bool) {
-	key := userKey + "\x00" + session
+// With hold, actions a backend emits to the URI meanwhile wait for
+// finishCreation instead of failing as for an unknown channel.
+func (h *Host) claimChannelURI(userKey, uri string, hold bool) (func(), bool) {
+	key := userKey + "\x00" + uri
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if h.creating[key] {
+	if h.creating[key] != nil {
 		return nil, false
 	}
 	if h.creating == nil {
-		h.creating = map[string]bool{}
+		h.creating = map[string]*channelCreation{}
 	}
-	h.creating[key] = true
+	creation := &channelCreation{hold: hold}
+	h.creating[key] = creation
 	return func() {
 		h.mu.Lock()
-		delete(h.creating, key)
+		if h.creating[key] == creation {
+			delete(h.creating, key)
+		}
 		h.mu.Unlock()
 	}, true
+}
+
+// holdForCreation keeps a backend's actions for a channel whose creation
+// holds them, and reports whether it did.
+func (h *Host) holdForCreation(userKey, channel string, actions []ahptypes.StateAction) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	creation := h.creating[userKey+"\x00"+channel]
+	if creation == nil || !creation.hold {
+		return false
+	}
+	creation.actions = append(creation.actions, actions...)
+	return true
+}
+
+// finishCreation applies, in order, the actions held while a stored channel
+// was being created, then lets later actions apply directly.
+func (h *Host) finishCreation(ctx context.Context, principal Principal, channel string) error {
+	key := principal.UserKey + "\x00" + channel
+	for {
+		h.mu.Lock()
+		creation := h.creating[key]
+		if creation == nil || len(creation.actions) == 0 {
+			if creation != nil {
+				creation.hold = false
+			}
+			h.mu.Unlock()
+			return nil
+		}
+		actions := creation.actions
+		creation.actions = nil
+		h.mu.Unlock()
+		if err := h.apply(ctx, principal, channel, actions, nil); err != nil {
+			return err
+		}
+	}
 }
 
 type userHub struct {
@@ -664,6 +713,8 @@ func (e emitter) Emit(ctx context.Context, channel string, actions ...ahptypes.S
 				return fmt.Errorf("session backends may change only the root configuration and agents")
 			}
 		}
+	} else if e.host.holdForCreation(e.principal.UserKey, channel, actions) {
+		return nil
 	}
 	return e.host.apply(ctx, e.principal, channel, actions, nil)
 }
