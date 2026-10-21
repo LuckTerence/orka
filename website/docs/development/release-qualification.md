@@ -27,7 +27,7 @@ The flow is:
    pushes to `main`.
 3. Preparation explicitly dispatches `release.yml` at that generated commit.
    Release runs full Go/UI lint and tests, Helm checks, and govulncheck. It
-   builds all nine images for amd64 and arm64, runs Trivy, generates platform
+   builds all ten images for amd64 and arm64, runs Trivy, generates platform
    SBOMs, and signs the images. Trivy findings remain advisory; scanner and
    SARIF-upload failures still fail the run.
 4. Release dispatches **Release Qualification** with the exact candidate

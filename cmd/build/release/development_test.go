@@ -316,8 +316,10 @@ func TestDevelopmentPinnedValuesRenderEveryBuiltImage(t *testing.T) {
 		Images map[string]string `json:"images"`
 	}
 	must(t, readJSON(filepath.Join(directory, "images.json"), &manifest))
+	// The chart renders the harness v1 wrapper only when enabled, and never the
+	// kagent runtime: the orka CLI deploys it.
 	for name, ref := range manifest.Images {
-		if name != harnessWrapperImage && !strings.Contains(string(output), ref) {
+		if name != harnessWrapperImage && name != kagentRuntimeImage && !strings.Contains(string(output), ref) {
 			t.Errorf("pinned chart does not select %s", ref)
 		}
 	}

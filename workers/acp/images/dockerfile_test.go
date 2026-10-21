@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -296,9 +297,19 @@ func TestKagentDockerfileRequiresAFrozenAdapterImage(t *testing.T) {
 			t.Errorf("kagent Dockerfile is missing %q", required)
 		}
 	}
-	forbidden := append([]string{
-		"KAGENT_ADAPTER_IMAGE=", "KAGENT_ADAPTER_DIGEST=sha256:", "/agent/kagent.json",
-	}, universalForbiddenSubstrings...)
+	// The default is the published adapter image, pinned by its commit tag and
+	// its image index digest; the digest argument must name the same image.
+	pinned := regexp.MustCompile(
+		`(?m)^ARG KAGENT_ADAPTER_IMAGE=ghcr\.io/orka-agents/orka-runtime-kagent:sha-[0-9a-f]{40}@(sha256:[0-9a-f]{64})$`,
+	).FindAllStringSubmatch(contents, -1)
+	if len(pinned) != 1 || strings.Count(contents, "ARG KAGENT_ADAPTER_IMAGE=") != 1 ||
+		strings.Count(contents, "ARG KAGENT_ADAPTER_DIGEST=") != 1 {
+		t.Fatal("kagent Dockerfile must default to one published adapter image pinned by commit tag and digest")
+	}
+	if !strings.Contains(contents, "\nARG KAGENT_ADAPTER_DIGEST="+pinned[0][1]+"\n") {
+		t.Error("kagent Dockerfile's default adapter digest is not its default adapter image's digest")
+	}
+	forbidden := append([]string{"/agent/kagent.json"}, universalForbiddenSubstrings...)
 	for _, value := range forbidden {
 		if strings.Contains(contents, value) {
 			t.Errorf("kagent Dockerfile contains forbidden mutable or credential default %q", value)

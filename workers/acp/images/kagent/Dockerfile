@@ -1,10 +1,12 @@
 # syntax=docker/dockerfile:1.7.1@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
 
 # The kagent runtime adapter Orka releases this runtime on, pinned by digest.
-# Each runtime mounts its Agent's kagent.json at /agent; the adapter refuses
-# a file whose SHA-256 is not the profile's agent configuration digest.
-ARG KAGENT_ADAPTER_IMAGE
-ARG KAGENT_ADAPTER_DIGEST
+# The tag names the adapter commit; the image index digest makes every
+# supported platform immutable. Each runtime mounts its Agent's kagent.json at
+# /agent; the adapter refuses a file whose SHA-256 is not the profile's agent
+# configuration digest.
+ARG KAGENT_ADAPTER_IMAGE=ghcr.io/orka-agents/orka-runtime-kagent:sha-864c905b168cec14bfe04f96d177361966882789@sha256:123e7249f7c40ea0aefc531b79a761c2a139b4730b9bb4d0bbbe7ac3e8bd8de8
+ARG KAGENT_ADAPTER_DIGEST=sha256:123e7249f7c40ea0aefc531b79a761c2a139b4730b9bb4d0bbbe7ac3e8bd8de8
 
 FROM --platform=$TARGETPLATFORM ${KAGENT_ADAPTER_IMAGE} AS kagent
 

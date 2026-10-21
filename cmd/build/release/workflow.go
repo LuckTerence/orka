@@ -35,6 +35,7 @@ const (
 	claudeRuntimeImage       = "acp-claude-runtime"
 	copilotRuntimeImage      = "acp-copilot-runtime"
 	opencodeRuntimeImage     = "acp-opencode-runtime"
+	kagentRuntimeImage       = "acp-kagent-runtime"
 	makefilePath             = "Makefile"
 	chartInputPath           = "cmd/build/helmify/static/Chart.yaml"
 	valuesInputPath          = "cmd/build/helmify/static/values.yaml"
@@ -60,7 +61,7 @@ var (
 	imageNames = []string{
 		controllerImage, aiWorkerImage, generalWorkerImage, harnessWrapperImage,
 		codexRuntimeImage, claudeRuntimeImage, copilotRuntimeImage,
-		opencodeRuntimeImage, publisherImage,
+		opencodeRuntimeImage, kagentRuntimeImage, publisherImage,
 	}
 	imageRoles = map[string]string{
 		controllerImage: controllerImage, "publisher": publisherImage,

@@ -76,7 +76,9 @@ You need the `orka` CLI and access to the cluster; nothing is built. Each
 runtime runs Orka's kagent runtime image, by default the one released with
 your CLI (`ghcr.io/orka-agents/orka/acp-kagent-runtime:<version>`), and
 mounts its Agent's `kagent.json` from a ConfigMap. The adapter refuses a
-configuration whose digest the runtime's profile does not pin.
+configuration whose digest the runtime's profile does not pin. A development
+build of the CLI has no released image, so pass `--image`; each `main` commit
+publishes `ghcr.io/orka-agents/orka/acp-kagent-runtime:sha-<full-commit>`.
 
 The adapter pins the exact Agent it wraps: kagent v1's compiled revision, or
 kagent v0's config hash and image digest. Changing kagent's Helm
