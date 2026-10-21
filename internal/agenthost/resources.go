@@ -84,6 +84,12 @@ const (
 // maxBaseLength bounds the AgentHost name part of an object name.
 const maxBaseLength = 40
 
+const (
+	// maxNameLength is the longest object name Kubernetes accepts.
+	maxNameLength    = 253
+	connectionSuffix = "-connection"
+)
+
 // Names derives every object name for one host. They depend only on the
 // AgentHost name and UID, so they are stable for the host's life.
 type Names struct {
@@ -101,8 +107,16 @@ type Names struct {
 // ObjectNames returns the names of a host's objects in hostNamespace.
 func ObjectNames(host *corev1alpha1.AgentHost, hostNamespace string) Names {
 	sum := sha256.Sum256([]byte(host.UID))
+	hash := hex.EncodeToString(sum[:6])
 	prefix := strings.TrimRight(truncate(host.Name, maxBaseLength), "-.")
-	base := prefix + "-" + hex.EncodeToString(sum[:6])
+	base := prefix + "-" + hash
+	// The connection Secret keeps the host's name when it fits. A name too
+	// long for it is shortened, and the UID hash keeps two such hosts apart.
+	connection := host.Name + connectionSuffix
+	if len(connection) > maxNameLength {
+		keep := maxNameLength - len(connectionSuffix) - len(hash) - 1
+		connection = strings.TrimRight(truncate(host.Name, keep), "-.") + "-" + hash + connectionSuffix
+	}
 	return Names{
 		Namespace:             hostNamespace,
 		Base:                  base,
@@ -111,7 +125,7 @@ func ObjectNames(host *corev1alpha1.AgentHost, hostNamespace string) Names {
 		NetworkPolicy:         base,
 		ConnectionTokenSecret: base + "-connection-token",
 		GitHubTokenSecret:     base + "-github-token",
-		Connection:            truncate(host.Name, 242) + "-connection",
+		Connection:            connection,
 	}
 }
 
@@ -121,7 +135,7 @@ func OwnerLabels(host *corev1alpha1.AgentHost) map[string]string {
 	return map[string]string{
 		LabelComponent:     ComponentValue,
 		LabelHostUID:       string(host.UID),
-		LabelHostName:      truncate(host.Name, 63),
+		LabelHostName:      strings.TrimRight(truncate(host.Name, 63), "-."),
 		LabelHostNamespace: host.Namespace,
 	}
 }
@@ -255,15 +269,8 @@ func HostPod(
 	opts PodOptions,
 ) *corev1.Pod {
 	spec := &template.Spec
-	hostImage := ""
-	for i := range spec.Containers {
-		if spec.Containers[i].Name == corev1alpha1.AgentHostContainerName {
-			hostImage = spec.Containers[i].Image
-		}
-	}
-
 	initContainers := make([]corev1.Container, 0, 2+len(spec.InitContainers))
-	initContainers = append(initContainers, stageContainer(spec, hostImage))
+	initContainers = append(initContainers, stageContainer(spec, opts.AgentImage))
 	for i := range spec.InitContainers {
 		initContainers = append(initContainers, templateContainer(&spec.InitContainers[i], spec))
 	}
@@ -393,13 +400,17 @@ func templateContainer(source *corev1alpha1.AgentHostContainer, spec *corev1alph
 }
 
 // stageContainer copies the connection token from its Secret into the
-// memory-backed volume only the host container mounts, as the host's uid.
+// memory-backed volume only the host container mounts, as the host's uid. It
+// runs the host agent's image, so the host image needs no tools of its own.
 func stageContainer(spec *corev1alpha1.AgentHostTemplateSpec, image string) corev1.Container {
 	return corev1.Container{
-		Name:  stageTokenContainer,
-		Image: image,
-		Command: []string{
-			"cp", connectionTokenSecretDir + "/" + TokenKey, connectionTokenDir + "/" + TokenKey,
+		Name:    stageTokenContainer,
+		Image:   image,
+		Command: []string{hostAgentBinary},
+		Args: []string{
+			"stage-token",
+			"--from=" + connectionTokenSecretDir + "/" + TokenKey,
+			"--to=" + connectionTokenDir + "/" + TokenKey,
 		},
 		SecurityContext: hardenedSecurity(spec),
 		ImagePullPolicy: corev1.PullIfNotPresent,

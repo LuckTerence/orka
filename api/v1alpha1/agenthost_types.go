@@ -203,7 +203,9 @@ type AgentHostIdleSuspend struct {
 //     githubToken allows it and the AgentHost names a token Secret.
 //   - ORKA_STATUS_DIR: a directory shared with the Orka host agent. When
 //     idleStatusFile is set, the host writes its idle status there as JSON
-//     with at least idle (boolean) and idleSince (RFC 3339 or null).
+//     with at least idle (boolean) and idleSince (RFC 3339 or null), and
+//     rewrites it at least every five minutes. Freshness is judged by
+//     updatedAt (RFC 3339), or by the file's modification time without it.
 //
 // The daemon must serve the Agent Host Protocol on 127.0.0.1:listenPort, gated
 // by the connection token.

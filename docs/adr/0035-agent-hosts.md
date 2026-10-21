@@ -105,8 +105,10 @@ container named `host`. Orka adds, and promises nothing else:
 - A loopback AHP listener on the template's `listenPort`, gated by the connection token.
 
 The workload may declare `idleStatusFile`, a path inside the Pod where it writes JSON
-with at least `idle` (boolean) and `idleSince` (RFC 3339 or null). copilotd's
-`--idle-status-file` format satisfies it.
+with at least `idle` (boolean) and `idleSince` (RFC 3339 or null), rewritten at least every
+five minutes. Freshness is judged by `updatedAt` (RFC 3339) when the file has one and by the
+file's modification time otherwise; a time more than five minutes ahead is stale too.
+copilotd's `--idle-status-file` format satisfies it.
 
 ### Readiness and status come from an Orka sidecar
 
@@ -121,10 +123,13 @@ image and pinned by digest (`--agent-host-agent-image`):
   attached client would reset the host's idle clock. A host that declares an idle status
   file is alive while it keeps that file fresh, so its listener is not touched at all;
   copilotd logs every connection that never completes a handshake. Other hosts get a TCP
-  check of the listener.
+  check of the listener. A restarted sidecar completes the startup handshake again from
+  these checks, because the host's startup probe never runs again.
 - It serves the parsed idle status (no other fields) on a port that only the Orka
   controller may reach.
 - It reads the connection token from its own Secret mount, which `host` does not share.
+  The same binary, run as the first init container, stages the token for `host`, so host
+  images need no tools of their own.
 
 ### Restarts and suspension are driven by core
 

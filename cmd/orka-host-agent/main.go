@@ -6,7 +6,8 @@ MIT License - see LICENSE file for details.
 
 // Command orka-host-agent runs beside an agent host in its Pod. It answers the
 // host container's probes by checking the host's loopback Agent Host Protocol
-// listener, and serves the host's idle status to the Orka controller.
+// listener, and serves the host's idle status to the Orka controller. Run as
+// "orka-host-agent stage-token", it stages the host's connection token.
 package main
 
 import (
@@ -23,6 +24,12 @@ import (
 
 func main() {
 	logger := log.New(os.Stderr, "orka-host-agent: ", log.LstdFlags|log.LUTC)
+	if len(os.Args) > 1 && os.Args[1] == "stage-token" {
+		if err := stageToken(os.Args[2:]); err != nil {
+			logger.Fatalf("stage token: %v", err)
+		}
+		return
+	}
 	address := flag.String("address", ":7790", "address to serve probes and status on")
 	listenPort := flag.Int("listen-port", 0, "loopback port of the host's Agent Host Protocol listener")
 	tokenFile := flag.String("token-file", "", "file holding the host's connection token")

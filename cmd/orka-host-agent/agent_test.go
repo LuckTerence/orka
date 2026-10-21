@@ -126,9 +126,6 @@ func TestStartupCompletesAHPHandshakeWithoutAuthenticating(t *testing.T) {
 	agent := newAgent(host.port(t), writeFile(t, "token", testToken+"\n"), "", io.Discard)
 	routes := agent.routes()
 
-	if got := get(t, routes, "/readyz"); got.Code != http.StatusServiceUnavailable {
-		t.Fatalf("readyz before startup = %d", got.Code)
-	}
 	if got := get(t, routes, "/startupz"); got.Code != http.StatusOK {
 		t.Fatalf("startupz = %d %q", got.Code, got.Body.String())
 	}
@@ -150,6 +147,66 @@ func TestStartupCompletesAHPHandshakeWithoutAuthenticating(t *testing.T) {
 	case method := <-host.methods:
 		t.Fatalf("second startup probe reached the host with %s", method)
 	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+// A restarted sidecar starts over after the host's startup probe has passed
+// for good, so its readiness probe completes the handshake instead.
+func TestARestartedSidecarStartsFromItsReadinessProbe(t *testing.T) {
+	host := newFakeHost(t, testToken)
+	agent := newAgent(host.port(t), writeFile(t, "token", testToken), "", io.Discard)
+	routes := agent.routes()
+
+	if got := get(t, routes, "/readyz"); got.Code != http.StatusOK {
+		t.Fatalf("readyz of a restarted sidecar = %d %q", got.Code, got.Body.String())
+	}
+	if seen := []string{<-host.methods, <-host.methods}; seen[0] != "initialize" || seen[1] != "ping" {
+		t.Fatalf("host saw %v, want initialize then ping", seen)
+	}
+	if host.authenticated.Load() {
+		t.Fatal("the startup check must never authenticate")
+	}
+	if got := get(t, routes, "/readyz"); got.Code != http.StatusOK {
+		t.Fatalf("second readyz = %d", got.Code)
+	}
+	select {
+	case method := <-host.methods:
+		t.Fatalf("a later readiness probe reached the host with %s", method)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestReadinessFailsWhileTheHostDoesNotAnswer(t *testing.T) {
+	host := newFakeHost(t, testToken)
+	agent := newAgent(host.port(t), writeFile(t, "token", testToken), "", io.Discard)
+	host.server.Close()
+	if got := get(t, agent.routes(), "/readyz"); got.Code != http.StatusServiceUnavailable {
+		t.Fatalf("readyz before the host answers = %d", got.Code)
+	}
+}
+
+func TestStatusStalenessUsesTheFileTimeAndRejectsTheFuture(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	// A host that writes no updatedAt is judged by when it last wrote the file.
+	status := writeFile(t, "idle.json", `{"idle":false,"idleSince":null}`)
+	agent := newAgent(1, "unused", status, io.Discard)
+	agent.now = func() time.Time { return now }
+	var body agenthost.IdleStatus
+	if err := json.Unmarshal(get(t, agent.routes(), "/status").Body.Bytes(), &body); err != nil || body.Stale {
+		t.Fatalf("a freshly written status without updatedAt must be fresh: %+v %v", body, err)
+	}
+	if err := os.Chtimes(status, now.Add(-time.Hour), now.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(get(t, agent.routes(), "/status").Body.Bytes(), &body); err != nil || !body.Stale {
+		t.Fatalf("a status file untouched for an hour must be stale: %+v %v", body, err)
+	}
+
+	future := writeFile(t, "idle.json", `{"idle":true,"updatedAt":"`+now.Add(time.Hour).Format(time.RFC3339)+`"}`)
+	agent = newAgent(1, "unused", future, io.Discard)
+	agent.now = func() time.Time { return now }
+	if err := json.Unmarshal(get(t, agent.routes(), "/status").Body.Bytes(), &body); err != nil || !body.Stale {
+		t.Fatalf("an updatedAt an hour ahead must be stale: %+v %v", body, err)
 	}
 }
 

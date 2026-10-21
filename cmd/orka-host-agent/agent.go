@@ -69,26 +69,34 @@ func (a *agent) routes() http.Handler {
 // handshake without authenticating, so it never claims a single-user host,
 // and then stops talking AHP so it cannot keep the host from being idle.
 func (a *agent) startupz(w http.ResponseWriter, r *http.Request) {
-	if a.started.Load() {
-		writeText(w, http.StatusOK, "started")
+	if !a.ensureStarted(r.Context()) {
+		writeText(w, http.StatusServiceUnavailable, "host is not answering the Agent Host Protocol")
 		return
+	}
+	writeText(w, http.StatusOK, "started")
+}
+
+// ensureStarted completes the startup handshake once. The host's startup
+// probe usually does it, but a restarted sidecar starts over after that probe
+// has passed for good, so the readiness and liveness probes do it then.
+func (a *agent) ensureStarted(ctx context.Context) bool {
+	if a.started.Load() {
+		return true
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.started.Load() {
-		writeText(w, http.StatusOK, "started")
-		return
+		return true
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), a.handshakeTimeout)
+	ctx, cancel := context.WithTimeout(ctx, a.handshakeTimeout)
 	defer cancel()
 	if err := a.probe(ctx); err != nil {
 		a.logger.Printf("startup check failed: %v", err)
-		writeText(w, http.StatusServiceUnavailable, "host is not answering the Agent Host Protocol")
-		return
+		return false
 	}
 	a.started.Store(true)
 	a.logger.Printf("host answered the Agent Host Protocol handshake")
-	writeText(w, http.StatusOK, "started")
+	return true
 }
 
 // readyz answers the readiness and liveness probes after startup. A host
@@ -96,8 +104,8 @@ func (a *agent) startupz(w http.ResponseWriter, r *http.Request) {
 // leaves its listener untouched; hosts may log every connection that never
 // completes a handshake. Otherwise readyz checks that the loopback listener
 // accepts connections. It never opens an AHP session.
-func (a *agent) readyz(w http.ResponseWriter, _ *http.Request) {
-	if !a.started.Load() {
+func (a *agent) readyz(w http.ResponseWriter, r *http.Request) {
+	if !a.ensureStarted(r.Context()) {
 		writeText(w, http.StatusServiceUnavailable, "not started")
 		return
 	}
@@ -136,13 +144,19 @@ func (a *agent) status(w http.ResponseWriter, _ *http.Request) {
 }
 
 // readStatus reads and parses the host's idle status file. The host does not
-// choose staleness; the agent judges it from updatedAt.
+// choose staleness; the agent judges it from updatedAt, or from the file's
+// modification time when the host writes none. A time further in the future
+// than staleAfter is as untrustworthy as an old one.
 func (a *agent) readStatus() (agenthost.IdleStatus, error) {
 	file, err := os.Open(a.statusFile)
 	if err != nil {
 		return agenthost.IdleStatus{}, errors.New("idle status is not available")
 	}
 	defer func() { _ = file.Close() }()
+	info, err := file.Stat()
+	if err != nil {
+		return agenthost.IdleStatus{}, errors.New("idle status is not readable")
+	}
 	raw, err := io.ReadAll(io.LimitReader(file, maxStatusBytes+1))
 	if err != nil {
 		return agenthost.IdleStatus{}, errors.New("idle status is not readable")
@@ -151,7 +165,12 @@ func (a *agent) readStatus() (agenthost.IdleStatus, error) {
 	if err != nil {
 		return agenthost.IdleStatus{}, errors.New("idle status is not valid")
 	}
-	parsed.Stale = parsed.UpdatedAt == nil || a.now().Sub(*parsed.UpdatedAt) > staleAfter
+	updated := info.ModTime()
+	if parsed.UpdatedAt != nil {
+		updated = *parsed.UpdatedAt
+	}
+	age := a.now().Sub(updated)
+	parsed.Stale = age > staleAfter || age < -staleAfter
 	return parsed, nil
 }
 

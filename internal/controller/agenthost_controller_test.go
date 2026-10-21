@@ -258,6 +258,11 @@ func assertHardenedHostPod(t *testing.T, pod *corev1.Pod) {
 		sidecar.RestartPolicy == nil || *sidecar.RestartPolicy != corev1.ContainerRestartPolicyAlways {
 		t.Fatalf("host agent sidecar = %+v", sidecar)
 	}
+	// Orka's own image stages the connection token, so host images need no tools.
+	stage := pod.Spec.InitContainers[0]
+	if stage.Image != testAgentImage || len(stage.Args) == 0 || stage.Args[0] != "stage-token" {
+		t.Fatalf("token staging container = %+v", stage)
+	}
 	hostContainer := pod.Spec.Containers[0]
 	if hostContainer.LivenessProbe == nil || hostContainer.LivenessProbe.HTTPGet.Path != "/readyz" {
 		t.Fatalf("host liveness = %+v", hostContainer.LivenessProbe)

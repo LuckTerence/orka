@@ -136,8 +136,9 @@ Orka adds to the template's container named `host`, and promises nothing else:
 
 The host must serve AHP on `127.0.0.1:<listenPort>`, gated by the connection token, and
 keep everything that must survive a restart under `/workspace`. When the template sets
-`idleStatusFile`, the host writes JSON with at least `idle` and `idleSince` there;
-copilotd's `--idle-status-file` format fits.
+`idleStatusFile`, the host writes JSON with at least `idle` and `idleSince` there, and
+rewrites it at least every five minutes. Orka judges freshness by its `updatedAt`, or by the
+file's modification time when it has none. copilotd's `--idle-status-file` format fits.
 
 The `orka-host-agent` sidecar answers the host's probes. The Pod is Ready only after an AHP
 `initialize` and `ping` succeed against the loopback listener; the check never sends
