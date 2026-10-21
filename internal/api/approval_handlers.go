@@ -310,6 +310,7 @@ func (h *Handlers) decideApproval(
 		}
 		return approvals.Approval{}, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to append approval decision: %v", err))
 	}
+	approvals.RecordDecision(current, appended)
 	listed = append(listed, *appended)
 	updated, _ := findApproval(deriveTaskApprovalState(listed), approvalID)
 	if err := h.patchTaskApprovalDecisionAnnotation(ctx, namespace, taskName, updated); err != nil {
