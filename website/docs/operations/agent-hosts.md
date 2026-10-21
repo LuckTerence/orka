@@ -178,6 +178,7 @@ because a pending or running workflow can be lost to suspension.
 | `InvalidTemplate` | The template breaks a rule in the message. |
 | `GitHubTokenRequired` / `GitHubTokenUnavailable` | The template needs a token and the referenced Secret or key is missing. |
 | `ObjectCollision` | An object with a host's name exists in the host namespace but was not created for it. Orka never adopts or deletes it. |
+| `ObjectRejected` | The API server refused one of the host's objects, for example a Pod naming an unknown RuntimeClass, huge pages whose request and limit differ, or a Pod a quota or admission policy denies. The message carries the server's reason; Orka retries on its next resync. |
 | `StateVolumeLost` | The host's volume was deleted. Delete and recreate the AgentHost. |
 | `HostAgentUnavailable` | The controller has no `--agent-host-agent-image`. |
 | `HostNamespaceChanged` | The controller's `--agent-host-namespace` changed after the host was created. Delete and recreate it. |

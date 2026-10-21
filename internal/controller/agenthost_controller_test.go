@@ -20,6 +20,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/uuid"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -102,6 +103,8 @@ type agentHostHarness struct {
 	reconciler *AgentHostReconciler
 	idle       *fakeIdleStatus
 	now        time.Time
+	// podCreateErr, when set, is how the API server answers a Pod create.
+	podCreateErr error
 }
 
 func newAgentHostHarness(t *testing.T, objects ...client.Object) *agentHostHarness {
@@ -113,6 +116,9 @@ func newAgentHostHarness(t *testing.T, objects ...client.Object) *agentHostHarne
 		WithObjects(objects...).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				if _, isPod := obj.(*corev1.Pod); isPod && h.podCreateErr != nil {
+					return h.podCreateErr
+				}
 				if obj.GetUID() == "" {
 					obj.SetUID(uuid.NewUUID())
 				}
@@ -288,6 +294,28 @@ func assertHardenedHostPod(t *testing.T, pod *corev1.Pod) {
 		if mount.Name == "orka-connection-token-secret" {
 			t.Fatal("the host container must not mount the connection token Secret")
 		}
+	}
+}
+
+// The API server's refusal of a host object, here an unknown RuntimeClass,
+// fails the host with its reason instead of retrying in silence, and the host
+// recovers once the cause is gone.
+func TestAgentHostReportsARefusedPod(t *testing.T) {
+	h := newAgentHostHarness(t, testTemplate(corev1alpha1.AgentHostAccessRelay, corev1alpha1.AgentHostCredentialRequired),
+		testHost(), userToken("ghs_user_token"))
+	h.podCreateErr = apierrors.NewForbidden(schema.GroupResource{Resource: "pods"}, "alice",
+		errors.New(`pod rejected: RuntimeClass "gvisor" not found`))
+	h.settle()
+	host := h.host()
+	ready := agentHostReady(host)
+	if host.Status.Phase != corev1alpha1.AgentHostPhaseFailed || ready.Reason != agentHostReasonObjectRejected ||
+		!strings.Contains(ready.Message, `RuntimeClass "gvisor" not found`) {
+		t.Fatalf("status = %+v, ready = %+v", host.Status, ready)
+	}
+	h.podCreateErr = nil
+	h.settle()
+	if _, ok := h.pod(); !ok {
+		t.Fatal("the host must start once the API server accepts its Pod")
 	}
 }
 

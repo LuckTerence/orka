@@ -62,6 +62,7 @@ const (
 	agentHostReasonGitHubTokenRequired    = "GitHubTokenRequired"
 	agentHostReasonGitHubTokenUnavailable = "GitHubTokenUnavailable"
 	agentHostReasonObjectCollision        = "ObjectCollision"
+	agentHostReasonObjectRejected         = "ObjectRejected"
 	agentHostReasonStateVolumeLost        = "StateVolumeLost"
 	agentHostReasonHostAgentUnavailable   = "HostAgentUnavailable"
 	agentHostReasonHostNamespaceChanged   = "HostNamespaceChanged"
@@ -465,6 +466,12 @@ func (r *AgentHostReconciler) ensureObject(
 		if apierrors.IsAlreadyExists(err) {
 			return fmt.Errorf("%s %s appeared while creating it; retrying", kind, name)
 		}
+		// The API server's own rules (RuntimeClasses, resource rules such as
+		// huge pages, Pod Security, quotas, admission policies) are reported
+		// with its reason rather than mirrored here; the next resync retries.
+		if apierrors.IsInvalid(err) || apierrors.IsForbidden(err) {
+			return agentHostFailed(agentHostReasonObjectRejected, "the API server refused the host's %s: %s", kind, agentHostAPIMessage(err))
+		}
 		return fmt.Errorf("create %s %s: %w", kind, name, err)
 	}
 	receipt = findAgentHostReceipt(host, kind, namespace, name)
@@ -473,6 +480,15 @@ func (r *AgentHostReconciler) ensureObject(
 		return err
 	}
 	return copyAgentHostObject(live, desired)
+}
+
+// agentHostAPIMessage is the API server's message for a refused request.
+func agentHostAPIMessage(err error) string {
+	var status apierrors.APIStatus
+	if errors.As(err, &status) && status.Status().Message != "" {
+		return status.Status().Message
+	}
+	return err.Error()
 }
 
 // copyAgentHostObject copies a created object into the caller's value of the same type.
