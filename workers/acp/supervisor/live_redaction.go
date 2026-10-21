@@ -104,8 +104,9 @@ func (r *credentialRedactor) heldPrefixLength(text string) int {
 }
 
 // redactionStream redacts one stream of text that arrives in chunks, so a
-// credential split across chunks is still replaced. It holds back only a
-// suffix that could begin a credential, cut on a UTF-8 boundary.
+// credential split across chunks is still replaced. It holds back a suffix
+// that could begin an exact credential, and text whose pattern redaction
+// could still change: the last word, and anything still waiting for a value.
 type redactionStream struct {
 	redactor *credentialRedactor
 	held     string
@@ -115,18 +116,67 @@ func (r *credentialRedactor) stream() *redactionStream {
 	return &redactionStream{redactor: r}
 }
 
-// write returns the redacted text that can no longer be part of a credential.
+// write returns the text that can no longer be part of a credential, with
+// exact credentials replaced. Pattern redaction of the returned text cannot
+// change with what follows.
 func (s *redactionStream) write(chunk string) string {
-	if s == nil || s.redactor == nil || s.redactor.replacer == nil {
+	if s == nil {
 		return chunk
 	}
-	text := s.redactor.replace(s.held + chunk)
-	cut := len(text) - s.redactor.heldPrefixLength(text)
+	text := s.held + chunk
+	limit := len(text)
+	if s.redactor != nil && s.redactor.replacer != nil {
+		text = s.redactor.replace(text)
+		limit = len(text) - s.redactor.heldPrefixLength(text)
+	}
+	cut := patternSafeCut(text, limit)
 	for cut > 0 && cut < len(text) && !utf8.RuneStart(text[cut]) {
 		cut--
 	}
 	s.held = text[cut:]
 	return text[:cut]
+}
+
+// maxPatternHeldBytes bounds the text a stream holds for pattern redaction.
+// Text with no safe cut in that much is released.
+const maxPatternHeldBytes = 2 * harnessv2.MaxProtocolStringBytes
+
+// redactionProbes stand in for a value that has not arrived yet. If one
+// changes when appended, the text before it ends in a construct that redacts
+// what follows, such as "token is " or `password: "`.
+var redactionProbes = []string{
+	"Q7f2Lk9Xw3Rt8Zp1Vn5Bc6Md4Hs0Gy", `Q7f2Lk9Xw3Rt8Zp1Vn5Bc6Md4Hs0Gy"`, `Q7f2Lk9Xw3Rt8Zp1Vn5Bc6Md4Hs0Gy'`,
+}
+
+// patternSafeCut returns where text can be cut, at or before limit, so that
+// pattern redaction of the part before the cut cannot change with what
+// follows, or 0 when there is no such cut yet. A cut follows whitespace, so
+// no word is split; nothing before it waits for a value; and no match crosses
+// it. Only the last whitespace and the last line break are tried, which keeps
+// the cost linear in the held text.
+func patternSafeCut(text string, limit int) int {
+	space := strings.LastIndexAny(text[:limit], " \t\n\f\r") + 1
+	line := strings.LastIndexByte(text[:limit], '\n') + 1
+	for _, cut := range []int{space, line} {
+		if cut > 0 && patternFinal(text[:cut], text[cut:]) {
+			return cut
+		}
+	}
+	if len(text) > maxPatternHeldBytes {
+		return limit
+	}
+	return 0
+}
+
+// patternFinal reports whether prefix redacts the same whatever follows it.
+func patternFinal(prefix, rest string) bool {
+	redacted := executionevents.RedactExecutionEventText(prefix)
+	for _, probe := range redactionProbes {
+		if executionevents.RedactExecutionEventText(prefix+probe) != redacted+probe {
+			return false
+		}
+	}
+	return redacted+executionevents.RedactExecutionEventText(rest) == executionevents.RedactExecutionEventText(prefix+rest)
 }
 
 // flush returns the held text once its stream ended.

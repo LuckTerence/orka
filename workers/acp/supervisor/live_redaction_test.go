@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/orka-agents/orka/internal/acp"
+	executionevents "github.com/orka-agents/orka/internal/events"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
 
@@ -64,12 +65,13 @@ func TestRedactionStreamReplacesACredentialSplitAcrossChunks(t *testing.T) {
 	}
 }
 
-func TestRedactionStreamHoldsOnlyAPossibleCredentialPrefix(t *testing.T) {
+func TestRedactionStreamHoldsTheLastWordAndACredentialPrefix(t *testing.T) {
 	stream := newCredentialRedactor(testLiveCredential).stream()
-	if got := stream.write("plain text with no prefix."); got != "plain text with no prefix." {
-		t.Fatalf("unrelated text was held: %q", got)
+	// The last word may still grow into a credential shape.
+	if got := stream.write("plain text with no prefix."); got != "plain text with no " {
+		t.Fatalf("write = %q, want the last word held", got)
 	}
-	if got := stream.write("ends with orka-ses"); got != "ends with " {
+	if got := stream.write(" ends with orka-ses"); got != "prefix. ends with " {
 		t.Fatalf("write = %q, want the credential prefix held", got)
 	}
 	// The stream ends at turn end: the held text was not a credential.
@@ -78,6 +80,61 @@ func TestRedactionStreamHoldsOnlyAPossibleCredentialPrefix(t *testing.T) {
 	}
 	if stream.pending() {
 		t.Fatal("flush left text pending")
+	}
+}
+
+// streamPublished streams chunks as the supervisor publishes them: every
+// released piece is pattern-redacted on its own.
+func streamPublished(stream *redactionStream, chunks ...string) []string {
+	_, emitted := streamThrough(stream, chunks...)
+	for i := range emitted {
+		emitted[i] = executionevents.RedactExecutionEventText(emitted[i])
+	}
+	return emitted
+}
+
+func TestRedactionStreamKeepsCredentialPatternsWholeAcrossChunks(t *testing.T) {
+	const token = "ghp_" + "abcdefghijklmnopqrstuvwxyz0123"
+	cases := map[string]struct {
+		chunks []string
+		secret string
+	}{
+		"well-known token":     {[]string{"use ghp_", token[4:] + " now"}, token[4:]},
+		"token is":             {[]string{"the token is ", "s3cr3tvalue123 ok"}, "s3cr3tvalue123"},
+		"token is on its line": {[]string{"the token is\n", "s3cr3tvalue123 ok"}, "s3cr3tvalue123"},
+		"quoted assignment":    {[]string{`password: "my `, `hidden value" done`}, "hidden value"},
+		"bearer header":        {[]string{"Authorization: Bearer ", "abcdef0123456789xyz\nnext"}, "abcdef0123456789xyz"},
+		"cookie line":          {[]string{"Cookie: a=1; ", "session=s3cr3tcookie\nnext line"}, "s3cr3tcookie"},
+		"assignment":           {[]string{"export GITHUB_TOKEN=", "s3cr3tvalue123 && run"}, "s3cr3tvalue123"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			// Patterns apply without any exact credential configured.
+			pieces := streamPublished(newCredentialRedactor().stream(), tc.chunks...)
+			whole := executionevents.RedactExecutionEventText(strings.Join(tc.chunks, ""))
+			if joined := strings.Join(pieces, ""); joined != whole {
+				t.Fatalf("published %q, want %q", joined, whole)
+			}
+			for _, piece := range pieces {
+				if strings.Contains(piece, tc.secret) {
+					t.Fatalf("published piece %q carries the credential", piece)
+				}
+			}
+		})
+	}
+}
+
+func TestRedactionStreamReleasesProseWordByWord(t *testing.T) {
+	stream := newCredentialRedactor().stream()
+	if got := stream.write("hello wor"); got != "hello " {
+		t.Fatalf("write = %q", got)
+	}
+	if got := stream.write("ld and more\nnext"); got != "world and more\n" {
+		t.Fatalf("write = %q", got)
+	}
+	// Text with no safe cut is released once it passes the hold bound.
+	if got := stream.write(strings.Repeat("x", maxPatternHeldBytes)); got == "" || stream.held != "" {
+		t.Fatalf("an oversized word was held: %d bytes released, %d held", len(got), len(stream.held))
 	}
 }
 
@@ -222,8 +279,8 @@ func TestSupervisorStreamNeverCarriesASessionCredential(t *testing.T) {
 			if bytes.Contains(body, []byte(credential)) || bytes.Contains(body, []byte(credential[:25])) {
 				t.Fatalf("NDJSON stream carries the session credential or a prefix of it")
 			}
-			var assistant strings.Builder
-			var thoughts, diffs, rawInputs int
+			var assistant, thought strings.Builder
+			var diffs, rawInputs int
 			for _, event := range events {
 				if event.Update == nil {
 					continue
@@ -232,7 +289,7 @@ func TestSupervisorStreamNeverCarriesASessionCredential(t *testing.T) {
 					assistant.WriteString(event.Update.AssistantMessage.Text)
 				}
 				if event.Update.AssistantThought != nil {
-					thoughts++
+					thought.WriteString(event.Update.AssistantThought.Text)
 				}
 				if tool := event.Update.ToolCall; tool != nil {
 					diffs += len(tool.Diffs)
@@ -253,8 +310,10 @@ func TestSupervisorStreamNeverCarriesASessionCredential(t *testing.T) {
 			if terminal.Completed == nil || terminal.Completed.Result.Content[0].Text != "key: [REDACTED] end" {
 				t.Fatalf("terminal result = %#v", terminal)
 			}
-			if live != (thoughts == 1 && diffs == 1 && rawInputs == 1) {
-				t.Fatalf("live=%v carried thoughts=%d diffs=%d rawInputs=%d", live, thoughts, diffs, rawInputs)
+			// A held word can make the thought arrive in more than one event.
+			thoughts := thought.String()
+			if live != (thoughts == "thinking about [REDACTED]" && diffs == 1 && rawInputs == 1) {
+				t.Fatalf("live=%v carried thought=%q diffs=%d rawInputs=%d", live, thoughts, diffs, rawInputs)
 			}
 		})
 	}
