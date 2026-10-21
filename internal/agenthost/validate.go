@@ -60,7 +60,8 @@ func validateSettings(spec *corev1alpha1.AgentHostTemplateSpec) error {
 	default:
 		return fmt.Errorf("githubToken %q is not supported", spec.GitHubToken)
 	}
-	if spec.IdleStatusFile != "" && !statusFile.MatchString(spec.IdleStatusFile) {
+	if spec.IdleStatusFile != "" && (!statusFile.MatchString(spec.IdleStatusFile) ||
+		spec.IdleStatusFile == "." || spec.IdleStatusFile == "..") {
 		return fmt.Errorf("idleStatusFile must be a plain file name")
 	}
 	if spec.IdleSuspend != nil && (spec.IdleStatusFile == "" || spec.IdleSuspend.After.Duration <= 0) {

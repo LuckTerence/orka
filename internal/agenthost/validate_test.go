@@ -61,6 +61,8 @@ func TestValidateTemplate(t *testing.T) {
 		"relay without token": func(s *corev1alpha1.AgentHostTemplateSpec) { s.GitHubToken = corev1alpha1.AgentHostCredentialOptional },
 		"root user":           func(s *corev1alpha1.AgentHostTemplateSpec) { s.SecurityContext.RunAsUser = 0 },
 		"status file path":    func(s *corev1alpha1.AgentHostTemplateSpec) { s.IdleStatusFile = "../idle.json" },
+		"status file dot":     func(s *corev1alpha1.AgentHostTemplateSpec) { s.IdleStatusFile = "." },
+		"status file dot dot": func(s *corev1alpha1.AgentHostTemplateSpec) { s.IdleStatusFile = ".." },
 		"empty storage":       func(s *corev1alpha1.AgentHostTemplateSpec) { s.Storage.Size = resource.MustParse("0") },
 		"unknown access":      func(s *corev1alpha1.AgentHostTemplateSpec) { s.Access = "Tunnel" },
 		"host as init": func(s *corev1alpha1.AgentHostTemplateSpec) {

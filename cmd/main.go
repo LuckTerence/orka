@@ -1882,8 +1882,8 @@ func main() {
 
 	if agentHostsEnabled {
 		controllerLabels, err := parseExactLabels(agentHostControllerPodLabels)
-		if err != nil || len(controllerLabels) == 0 {
-			setupLog.Error(err, "invalid --agent-host-controller-pod-labels")
+		if err != nil {
+			setupLog.Error(fmt.Errorf("--agent-host-controller-pod-labels: %w", err), "invalid agent host configuration")
 			os.Exit(1)
 		}
 		if err := (&controller.AgentHostReconciler{
@@ -2360,15 +2360,15 @@ func parseExactLabels(raw string) (map[string]string, error) {
 		key, value, ok := strings.Cut(entry, "=")
 		key, value = strings.TrimSpace(key), strings.TrimSpace(value)
 		if !ok || key == "" || value == "" {
-			return nil, fmt.Errorf("provider proxy Pod label %q must be key=value", entry)
+			return nil, fmt.Errorf("label %q must be key=value", entry)
 		}
 		if _, exists := result[key]; exists {
-			return nil, fmt.Errorf("provider proxy Pod label %q is duplicated", key)
+			return nil, fmt.Errorf("label %q is duplicated", key)
 		}
 		result[key] = value
 	}
 	if len(result) == 0 {
-		return nil, fmt.Errorf("at least one provider proxy Pod label is required")
+		return nil, fmt.Errorf("at least one label is required")
 	}
 	return result, nil
 }
