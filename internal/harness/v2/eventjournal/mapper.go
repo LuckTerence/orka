@@ -1096,6 +1096,8 @@ const (
 // across update boundaries. Journal state supplies tool text only after the
 // logical stream is complete, and assistant text is persisted from the
 // terminal transcript.
+//
+//nolint:gocyclo // Each update kind maps in one explicit switch, easier to audit together.
 func mapUpdate(event harnessv2.Event, mapCtx MapContext, options mapUpdateOptions) (*store.ExecutionEvent, error) {
 	if err := mapCtx.validate(); err != nil {
 		return nil, err

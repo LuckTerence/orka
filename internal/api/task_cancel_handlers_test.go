@@ -43,13 +43,13 @@ func cancelTestTask(name string, taskType corev1alpha1.TaskType, phase corev1alp
 	}
 }
 
-func setupCancelHandlers(t *testing.T, mode executionmode.Mode, tasks ...*corev1alpha1.Task) (*Handlers, *fiber.App) {
+func setupCancelHandlers(t *testing.T, tasks ...*corev1alpha1.Task) (*Handlers, *fiber.App) {
 	t.Helper()
 	builder := fake.NewClientBuilder().WithScheme(newTestScheme())
 	for _, task := range tasks {
 		builder = builder.WithObjects(task)
 	}
-	h := NewHandlers(HandlersConfig{Client: builder.Build(), ExecutionMode: mode})
+	h := NewHandlers(HandlersConfig{Client: builder.Build(), ExecutionMode: executionmode.HarnessV2})
 	callers := map[string]*UserInfo{"alice": cancelRequester, "bob": cancelStranger, "operator": cancelOperator}
 	app := fiber.New()
 	app.Use(func(c fiber.Ctx) error {
@@ -86,7 +86,7 @@ func cancelAnnotation(t *testing.T, h *Handlers, name string) (string, bool) {
 }
 
 func TestCancelTaskRecordsTheRequestersCancel(t *testing.T) {
-	h, app := setupCancelHandlers(t, executionmode.HarnessV2,
+	h, app := setupCancelHandlers(t,
 		cancelTestTask("running", corev1alpha1.TaskTypeAgent, corev1alpha1.TaskPhaseRunning))
 
 	status, body := postCancel(t, app, "running", "alice")
@@ -103,7 +103,7 @@ func TestCancelTaskRecordsTheRequestersCancel(t *testing.T) {
 }
 
 func TestCancelTaskRefusesAnotherPerson(t *testing.T) {
-	h, app := setupCancelHandlers(t, executionmode.HarnessV2,
+	h, app := setupCancelHandlers(t,
 		cancelTestTask("running", corev1alpha1.TaskTypeAgent, corev1alpha1.TaskPhaseRunning))
 
 	if status, _ := postCancel(t, app, "running", "bob"); status != http.StatusForbidden {
@@ -117,7 +117,7 @@ func TestCancelTaskRefusesAnotherPerson(t *testing.T) {
 func TestCancelTaskRefusesAnUnstampedRequester(t *testing.T) {
 	task := cancelTestTask("forged", corev1alpha1.TaskTypeAgent, corev1alpha1.TaskPhaseRunning)
 	delete(task.Annotations, labels.AnnotationRequestedBySource)
-	_, app := setupCancelHandlers(t, executionmode.HarnessV2, task)
+	_, app := setupCancelHandlers(t, task)
 
 	if status, _ := postCancel(t, app, "forged", "alice"); status != http.StatusForbidden {
 		t.Fatalf("cancel of a Task without an API requester stamp = %d, want 403", status)
@@ -125,7 +125,7 @@ func TestCancelTaskRefusesAnUnstampedRequester(t *testing.T) {
 }
 
 func TestCancelTaskAllowsServiceAccountsWithRBAC(t *testing.T) {
-	h, app := setupCancelHandlers(t, executionmode.HarnessV2,
+	h, app := setupCancelHandlers(t,
 		cancelTestTask("queued", corev1alpha1.TaskTypeAgent, corev1alpha1.TaskPhasePending))
 
 	if status, _ := postCancel(t, app, "queued", "operator"); status != http.StatusAccepted {
@@ -137,7 +137,7 @@ func TestCancelTaskAllowsServiceAccountsWithRBAC(t *testing.T) {
 }
 
 func TestCancelTaskReportsFinishedTasks(t *testing.T) {
-	_, app := setupCancelHandlers(t, executionmode.HarnessV2,
+	_, app := setupCancelHandlers(t,
 		cancelTestTask("done", corev1alpha1.TaskTypeAgent, corev1alpha1.TaskPhaseSucceeded),
 		cancelTestTask("stopped", corev1alpha1.TaskTypeAgent, corev1alpha1.TaskPhaseCancelled))
 
@@ -151,7 +151,7 @@ func TestCancelTaskReportsFinishedTasks(t *testing.T) {
 }
 
 func TestCancelTaskRecordsAContainerTask(t *testing.T) {
-	h, app := setupCancelHandlers(t, executionmode.HarnessV2,
+	h, app := setupCancelHandlers(t,
 		cancelTestTask("job", corev1alpha1.TaskTypeContainer, corev1alpha1.TaskPhaseRunning))
 
 	// The Task reconciler completes a container Task's recorded cancel request.

@@ -63,6 +63,7 @@ const (
 	defaultACPTaskTimeout                    = 30 * time.Minute
 	defaultPromptLeaseDuration               = 90 * time.Second
 	acpTaskTimeoutReason                     = "TaskTimeout"
+	acpTaskCancelledReason                   = "Cancelled"
 	acpTaskTimeoutCancellationSettledMessage = "task deadline cancellation settled"
 	acpCancelledOperation                    = "cancelled"
 	acpSettlingOperation                     = "settling"
@@ -3838,9 +3839,9 @@ func (d *ACPDispatcher) settleTaskBeforeRuntimeAdmission(ctx context.Context, ta
 	deadline, hasDeadline := acpTaskDeadline(task, now)
 	switch {
 	case !task.DeletionTimestamp.IsZero() || task.Status.Phase == corev1alpha1.TaskPhaseCancelled:
-		operation, reason, message = "cancelled-before-admission", "Cancelled", "task cancelled before runtime admission"
+		operation, reason, message = "cancelled-before-admission", acpTaskCancelledReason, "task cancelled before runtime admission"
 	case acpTaskCancelRequested(task):
-		operation, reason, message = "cancelled-before-admission", "Cancelled", "task cancelled by request before runtime admission"
+		operation, reason, message = "cancelled-before-admission", acpTaskCancelledReason, "task cancelled by request before runtime admission"
 	case hasDeadline && !now.Before(deadline):
 		operation, reason, message = "timeout-before-admission", acpTaskTimeoutReason, "task deadline exceeded before runtime admission"
 	default:
