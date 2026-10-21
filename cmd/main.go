@@ -348,7 +348,6 @@ func main() {
 	var contextTokenMonitorOperateScopes string
 	var contextTokenConnectorReadScopes string
 	var contextTokenConnectorManageScopes string
-	var contextTokenAHPTokenScopes string
 	var contextTokenSkillReadScopes string
 	var contextTokenSkillWriteScopes string
 	var contextTokenGatewayReadScopes string
@@ -785,10 +784,6 @@ func main() {
 		os.Getenv("ORKA_CONTEXT_TOKEN_CONNECTOR_MANAGE_SCOPES"),
 		"Comma-separated context-token scopes that authorize linking, updating, and disconnecting a person's own connector Connections. "+
 			"Defaults to orka:connectors:manage.")
-	flag.StringVar(&contextTokenAHPTokenScopes, "context-token-ahp-token-scopes",
-		os.Getenv("ORKA_CONTEXT_TOKEN_AHP_TOKEN_SCOPES"),
-		"Comma-separated context-token scopes that authorize minting, listing, and revoking a person's own AHP connection tokens. "+
-			"Defaults to orka:ahp:tokens.")
 
 	opts := zap.Options{
 		Development: true,
@@ -936,7 +931,6 @@ func main() {
 		MonitorOperateScopes:       contextTokenMonitorOperateScopes,
 		ConnectorReadScopes:        contextTokenConnectorReadScopes,
 		ConnectorManageScopes:      contextTokenConnectorManageScopes,
-		AHPTokenScopes:             contextTokenAHPTokenScopes,
 		SkillReadScopes:            contextTokenSkillReadScopes,
 		SkillWriteScopes:           contextTokenSkillWriteScopes,
 		GatewayReadScopes:          contextTokenGatewayReadScopes,
@@ -2068,7 +2062,7 @@ func main() {
 			setupLog.Error(err, "invalid AHP workspace configuration")
 			os.Exit(1)
 		}
-		ahpHost, err = newAHPHost(sqliteStore, ahpTokenMaxTTL, api.AHPTokenOwnerCheck(oidcConfig, contextTokenConfig))
+		ahpHost, err = newAHPHost(sqliteStore, ahpTokenMaxTTL, api.AHPTokenOwnerCheck(oidcConfig))
 		if err != nil {
 			setupLog.Error(err, "unable to set up the AHP host")
 			os.Exit(1)

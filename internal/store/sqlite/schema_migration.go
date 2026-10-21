@@ -22,7 +22,7 @@ const (
 	schema162 = "b8ddc48210dbf5cce95a315cff79b2bad966a97e299e396f5574040e0732f6d7" // #701, 57583975
 	schema166 = "1bf39f576acdc853d6512b62e0c526734fdf4e8a972dc1435b881b609f9a0c36" // #732, abd2c040
 	schema167 = "01af383a41304d65579d5221976bf479c7e8561a4ec363ba41dcb5f4d571af6c" // #574, harness v1 tables removed
-	schema168 = "888760aa5742d238228d946b84f449e53c3c308323bcf4207eaa1eeaf1ae8d0c" // Agent Host Protocol store
+	schema168 = "8684a793545402da208de005fbef878006b25dc6f0700c617a93d57ad9b02372" // Agent Host Protocol store
 
 	// #700's tables were subsequently changed by #701. Adding empty tables
 	// alone cannot upgrade this layout, even when its custody tables are empty.

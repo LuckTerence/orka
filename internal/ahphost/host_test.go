@@ -415,8 +415,9 @@ func TestExpiredTokensCloseTheirConnections(t *testing.T) {
 	env := newTestEnv(t, store.AHPJournalLimits{})
 	ctx := ctx5(t)
 	soon := time.Now().Add(1500 * time.Millisecond)
-	env.tokens.Now = func() time.Time { return soon.Add(-2 * time.Minute) }
-	minted, err := env.tokens.Mint(ctx, MintRequest{Issuer: "https://issuer.example", Subject: "alice", TTL: time.Hour, NotAfter: &soon})
+	// Minted a minute before soon with the shortest lifetime, it expires at soon.
+	env.tokens.Now = func() time.Time { return soon.Add(-time.Minute) }
+	minted, err := env.tokens.Mint(ctx, MintRequest{Issuer: "https://issuer.example", Subject: "alice", TTL: time.Minute})
 	require.NoError(t, err)
 	env.tokens.Now = nil
 	client := env.connect(minted.Token)

@@ -652,8 +652,8 @@ namespace the controller never shares with its watch or ACP runtime namespaces.
 
 {{- define "orka.validateAHP" -}}
 {{- if include "orka.ahpEnabled" . -}}
-{{- if not (or (dig "oidc" "issuer" "" .Values.controller) (dig "contextToken" "issuer" "" .Values.controller)) -}}
-{{- fail "controller.ahp.enabled requires controller.oidc.issuer or controller.contextToken.issuer: only those identities can mint AHP connection tokens" -}}
+{{- if not (dig "oidc" "issuer" "" .Values.controller) -}}
+{{- fail "controller.ahp.enabled requires controller.oidc.issuer: AHP connection tokens are minted only for a person's own OIDC sign-in" -}}
 {{- end -}}
 {{- if include "orka.ahpWorkspacesEnabled" . -}}
 {{- if not (regexMatch `^[^@\s]+@sha256:[a-f0-9]{64}$` (include "orka.ahpWorkspaceImage" .)) -}}

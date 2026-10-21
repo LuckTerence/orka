@@ -339,17 +339,10 @@ type ahpExchange struct {
 	Reply string `json:"reply,omitempty"`
 }
 
+// ahpPrincipalUserInfo is the person behind a connection: AHP tokens are
+// minted only for a person's own OIDC sign-in.
 func ahpPrincipalUserInfo(p ahphost.Principal) *UserInfo {
-	ui := &UserInfo{AuthType: AuthTypeOIDC, Issuer: p.Issuer, Subject: p.Subject, Username: p.Username, Namespace: p.Namespace}
-	if p.Constraints.Delegated {
-		ui.AuthType = AuthTypeContextToken
-		ui.Roles = append([]string{}, p.Constraints.Scopes...)
-		ui.ContextToken = &ContextToken{
-			Issuer: p.Issuer, Subject: p.Subject, Scopes: append([]string{}, p.Constraints.Scopes...),
-			TransactionContext: cloneMap(p.Constraints.TransactionContext),
-		}
-	}
-	return ui
+	return &UserInfo{AuthType: AuthTypeOIDC, Issuer: p.Issuer, Subject: p.Subject, Username: p.Username, Namespace: p.Namespace}
 }
 
 func ahpHash(parts ...string) string {
@@ -386,15 +379,14 @@ type ahpAgentChoice struct {
 	Model   string
 }
 
-// agentChoices lists the built-in-runtime Agents in the user's namespace that
-// the user's token allows, one per runtime and model.
+// agentChoices lists the built-in-runtime Agents in the user's namespace, one
+// per runtime and model. Each turn's Task is authorized when it is created.
 func (b *ahpBackend) agentChoices(ctx context.Context, principal ahphost.Principal) ([]ahpAgentChoice, error) {
 	var agents corev1alpha1.AgentList
 	if err := b.h.client.List(ctx, &agents, client.InNamespace(principal.Namespace)); err != nil {
 		return nil, fmt.Errorf("list agents: %w", err)
 	}
 	sort.Slice(agents.Items, func(i, j int) bool { return agents.Items[i].Name < agents.Items[j].Name })
-	ui := ahpPrincipalUserInfo(principal)
 	seen := map[string]bool{}
 	var choices []ahpAgentChoice
 	for i := range agents.Items {
@@ -410,14 +402,6 @@ func (b *ahpBackend) agentChoices(ctx context.Context, principal ahphost.Princip
 		key := string(runtime) + "\x00" + agent.Spec.Model.Name
 		if seen[key] {
 			continue
-		}
-		// Offer only Agents the user's token may start Tasks with. This checks
-		// the token's scope and agent limits only: the project is not known
-		// yet, so repository limits apply to each turn's complete Task.
-		if ui.ContextToken != nil {
-			if err := authorizeContextTokenAgentTaskReference(ui.ContextToken, b.h.contextTokenAuthorization, principal.Namespace, agent.Name); err != nil {
-				continue
-			}
 		}
 		seen[key] = true
 		choices = append(choices, ahpAgentChoice{Agent: agent.Name, Runtime: runtime, Model: agent.Spec.Model.Name})
@@ -437,9 +421,7 @@ func ahpModelConfigSchema() *ahptypes.ConfigSchema {
 // each labelled with the runtime that runs it.
 func (b *ahpBackend) Agents(ctx context.Context, principal ahphost.Principal) ([]ahptypes.AgentInfo, error) {
 	b.recoverTurns(ctx, principal)
-	if b.mayUseWorkspace(principal) == nil {
-		b.workspaces.warm(principal)
-	}
+	b.workspaces.warm(principal)
 	choices, err := b.agentChoices(ctx, principal)
 	if err != nil {
 		return nil, err
@@ -547,7 +529,7 @@ func (b *ahpBackend) HandleExtension(ctx context.Context, principal ahphost.Prin
 		if err != nil {
 			return nil, err
 		}
-		if b.workspaces.enabled() && b.mayUseWorkspace(principal) == nil {
+		if b.workspaces.enabled() {
 			go func() {
 				bg, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 				defer cancel()
@@ -617,9 +599,6 @@ func (b *ahpBackend) setApproveAllCommand(ctx context.Context, principal ahphost
 	}
 	if len(params) == 0 || json.Unmarshal(params, &req) != nil || req.Channel == "" || req.Enabled == nil {
 		return &ahphost.Rejection{Reason: "a session channel and enabled are required"}
-	}
-	if err := b.mayOperateTasks(principal); err != nil {
-		return err
 	}
 	record, err := b.sessionForChannel(ctx, principal.UserKey, req.Channel)
 	if errors.Is(err, store.ErrNotFound) {
@@ -861,7 +840,7 @@ func (b *ahpBackend) CreateSession(ctx context.Context, principal ahphost.Princi
 	if err := b.putRecord(ctx, principal.UserKey, ahpRecordSession, req.Session, record); err != nil {
 		return nil, err
 	}
-	if b.workspaces.enabled() && b.mayUseWorkspace(principal) == nil {
+	if b.workspaces.enabled() {
 		// Clients run git in the session's working directory right away. A
 		// worktree that takes longer is finished before a terminal opens in it.
 		if pod, err := b.workspaces.ensure(ctx, principal, ahpWorkspaceStartWait); err == nil {
@@ -912,14 +891,7 @@ func (b *ahpBackend) DisposeSession(ctx context.Context, principal ahphost.Princ
 		}
 		return err
 	}
-	turn := b.activeTurn(principal.UserKey, session)
-	// Disposing of a session cancels its running turn's Task.
-	if turn != nil || record.ActiveTask != "" {
-		if err := b.mayOperateTasks(principal); err != nil {
-			return err
-		}
-	}
-	if turn != nil {
+	if turn := b.activeTurn(principal.UserKey, session); turn != nil {
 		turn.stop()
 	}
 	if record.ActiveTask != "" {
@@ -1040,11 +1012,8 @@ func (b *ahpBackend) AuthorizeClientAction(ctx context.Context, principal ahphos
 		if record.ActiveTurn == "" || a.TurnId != record.ActiveTurn {
 			return &ahphost.Rejection{Reason: "the turn is not running"}
 		}
-		return b.mayOperateTasks(principal)
+		return nil
 	case *ahptypes.ChatToolCallConfirmedAction:
-		if err := b.mayOperateTasks(principal); err != nil {
-			return err
-		}
 		turn := b.activeTurn(principal.UserKey, record.Session)
 		if turn == nil || a.TurnId != turn.id || !turn.awaitingConfirmation(a.ToolCallId) {
 			return &ahphost.Rejection{Reason: "the tool call is not waiting for a decision"}
@@ -1059,10 +1028,6 @@ func (b *ahpBackend) AuthorizeClientAction(ctx context.Context, principal ahphos
 			case ahpConfigApprovalMode:
 				if _, err := ahpApprovalModeFrom(a.Config); err != nil {
 					return &ahphost.Rejection{Reason: err.Error()}
-				}
-				// The mode decides whether later turns ask the person first.
-				if err := b.mayOperateTasks(principal); err != nil {
-					return err
 				}
 			case ahpConfigAvailableModes, ahpConfigEffectiveMode:
 				return &ahphost.Rejection{Reason: key + " is read-only"}
@@ -1108,21 +1073,10 @@ func (b *ahpBackend) authorizeMessage(ctx context.Context, principal ahphost.Pri
 		if _, _, err := b.resolveModel(ctx, principal, record, a.Message.Model); err != nil {
 			return err
 		}
-		return b.mayOperateTasks(principal)
+		return nil
 	default:
 		return nil
 	}
-}
-
-// mayOperateTasks refuses a delegated token without the scopes that update
-// Tasks, before its decision or cancel is shown as accepted. The decision and
-// cancel paths check the same identity again.
-func (b *ahpBackend) mayOperateTasks(principal ahphost.Principal) error {
-	cfg := b.h.contextTokenAuthorization
-	if principal.Constraints.Delegated && cfg.Enabled() && !hasAnyScope(principal.Constraints.Scopes, cfg.TaskUpdateScopes) {
-		return &ahphost.Rejection{Reason: "this connection's token may not operate Tasks"}
-	}
-	return nil
 }
 
 // HandleClientAction runs what an admitted client action asks for.

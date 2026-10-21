@@ -314,9 +314,6 @@ spec:
             {{- if .connectorManage }}
             - {{ printf "--context-token-connector-manage-scopes=%s" .connectorManage | quote }}
             {{- end }}
-            {{- if .ahpTokens }}
-            - {{ printf "--context-token-ahp-token-scopes=%s" .ahpTokens | quote }}
-            {{- end }}
             {{- if .skillRead }}
             - {{ printf "--context-token-skill-read-scopes=%s" .skillRead | quote }}
             {{- end }}

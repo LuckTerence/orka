@@ -43,7 +43,7 @@ func newAHPTestServer(t *testing.T) *ahpTestServer {
 			w.WriteHeader(http.StatusCreated)
 			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
 				"id": "ahpt_0123456789abcdef", "token": ahpTestToken, "description": s.minted["description"],
-				"namespace": "team", "expiresAt": time.Now().Add(720 * time.Hour).UTC(), "delegated": false,
+				"namespace": "team", "expiresAt": time.Now().Add(720 * time.Hour).UTC(),
 			})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/ahp-tokens":
 			json.NewEncoder(w).Encode(map[string]any{"items": s.tokens}) //nolint:errcheck
@@ -162,13 +162,13 @@ func TestAHPTokensListShowsActiveTokensWithoutSecrets(t *testing.T) {
 		{"id": "ahpt_active", "description": "laptop", "namespace": "team", "createdAt": now.Add(-time.Hour), "expiresAt": now.Add(time.Hour)},
 		{"id": "ahpt_expired", "description": "old", "namespace": "team", "createdAt": now.Add(-48 * time.Hour), "expiresAt": now.Add(-time.Hour)},
 		{"id": "ahpt_revoked", "description": "lost phone", "namespace": "team", "createdAt": now.Add(-time.Hour), "expiresAt": now.Add(time.Hour), "revokedAt": now},
-		{"id": "ahpt_delegated", "namespace": "team", "createdAt": now, "expiresAt": now.Add(time.Hour), "delegated": true, "token": "orka_ahp_never-printed"},
+		{"id": "ahpt_desktop", "namespace": "team", "createdAt": now, "expiresAt": now.Add(time.Hour), "token": "orka_ahp_never-printed"},
 	}
 	out, _, err := runAHPCommand(t, "ahp", "tokens", "list", "--server", srv.URL, "--token", "person-token")
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
-	if !strings.Contains(out, "ahpt_active") || !strings.Contains(out, "laptop") || !strings.Contains(out, "(delegated)") ||
+	if !strings.Contains(out, "ahpt_active") || !strings.Contains(out, "laptop") || !strings.Contains(out, "ahpt_desktop") ||
 		strings.Contains(out, "ahpt_expired") || strings.Contains(out, "ahpt_revoked") || strings.Contains(out, "never-printed") {
 		t.Fatalf("default listing:\n%s", out)
 	}
@@ -187,7 +187,7 @@ func TestAHPTokensListShowsActiveTokensWithoutSecrets(t *testing.T) {
 	for _, item := range list.Items {
 		statuses[item.ID] = item.Status
 	}
-	want := map[string]string{"ahpt_active": ahpStatusActive, "ahpt_expired": ahpStatusExpired, "ahpt_revoked": ahpStatusRevoked, "ahpt_delegated": ahpStatusActive}
+	want := map[string]string{"ahpt_active": ahpStatusActive, "ahpt_expired": ahpStatusExpired, "ahpt_revoked": ahpStatusRevoked, "ahpt_desktop": ahpStatusActive}
 	if len(statuses) != len(want) {
 		t.Fatalf("statuses = %v, want %v", statuses, want)
 	}
@@ -262,7 +262,7 @@ func TestAHPErrorExplainsCommonFailures(t *testing.T) {
 		switch r.Header.Get("Authorization") {
 		case "Bearer service-account":
 			w.WriteHeader(http.StatusForbidden)
-			w.Write([]byte(`{"error":"AHP tokens require a verified OIDC or context-token identity"}`)) //nolint:errcheck
+			w.Write([]byte(`{"error":"AHP tokens require the person's own OIDC sign-in; delegated context tokens are not accepted"}`)) //nolint:errcheck
 		default:
 			w.WriteHeader(http.StatusNotImplemented)
 			w.Write([]byte(`{"error":"the AHP API is not enabled on this controller"}`)) //nolint:errcheck
@@ -270,7 +270,7 @@ func TestAHPErrorExplainsCommonFailures(t *testing.T) {
 	}))
 	defer srv.Close()
 	_, _, err := runAHPCommand(t, "ahp", "tokens", "list", "--server", srv.URL, "--token", "service-account")
-	if err == nil || !strings.Contains(err.Error(), "belong to a signed-in person") {
+	if err == nil || !strings.Contains(err.Error(), "belong to a person signed in with OIDC") {
 		t.Fatalf("ServiceAccount error = %v", err)
 	}
 	_, _, err = runAHPCommand(t, "ahp", "connect", "--server", srv.URL, "--token", "person-token")

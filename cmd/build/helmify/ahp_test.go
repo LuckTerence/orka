@@ -46,7 +46,7 @@ func ahpControllerArgs(t *testing.T, args ...string) []string {
 func TestStaticChartAHPIsOffByDefault(t *testing.T) {
 	rendered := requireHelmRender(t)
 	for _, unwanted := range []string{
-		"--enable-ahp-api", "--ahp-", "--context-token-ahp-token-scopes", ahpTestWorkspaceNamespace,
+		"--enable-ahp-api", "--ahp-", ahpTestWorkspaceNamespace,
 	} {
 		if strings.Contains(rendered, unwanted) {
 			t.Fatalf("default render contains %q", unwanted)
@@ -80,13 +80,6 @@ func TestStaticChartAHPControllerFlags(t *testing.T) {
 	rendered := requireHelmRender(t, ahpEnabled()...)
 	if strings.Contains(rendered, "name: "+ahpTestWorkspaceNamespace) {
 		t.Fatal("the workspace namespace is rendered without a workspace image")
-	}
-}
-
-func TestStaticChartAHPContextTokenScope(t *testing.T) {
-	args := ahpControllerArgs(t, "--set-string", "controller.contextToken.scopes.ahpTokens=orka:ahp:connect")
-	if !containsString(args, "--context-token-ahp-token-scopes=orka:ahp:connect") {
-		t.Fatalf("controller args are missing the AHP token scope:\n%s", strings.Join(args, "\n"))
 	}
 }
 
@@ -232,7 +225,7 @@ func TestStaticChartRejectsInvalidAHPValues(t *testing.T) {
 		{
 			name: "no identity that can mint tokens",
 			args: []string{"--set", "controller.ahp.enabled=true"},
-			want: "controller.ahp.enabled requires controller.oidc.issuer or controller.contextToken.issuer",
+			want: "controller.ahp.enabled requires controller.oidc.issuer",
 		},
 		{
 			name: "release namespace",

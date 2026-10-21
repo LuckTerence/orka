@@ -31,7 +31,6 @@ func ahpSchemaStatements() []string {
 			subject     TEXT NOT NULL,
 			username    TEXT NOT NULL,
 			namespace   TEXT NOT NULL,
-			constraints BLOB NOT NULL,
 			description TEXT NOT NULL DEFAULT '',
 			created_at  TIMESTAMP NOT NULL,
 			expires_at  TIMESTAMP NOT NULL,
@@ -94,29 +93,25 @@ func (s *Store) CreateAHPToken(ctx context.Context, token store.AHPToken) error 
 	if strings.TrimSpace(token.ID) == "" || strings.TrimSpace(token.TokenHash) == "" || strings.TrimSpace(token.UserKey) == "" {
 		return fmt.Errorf("%w: AHP token id, hash and user are required", store.ErrValidation)
 	}
-	constraints := token.Constraints
-	if constraints == nil {
-		constraints = []byte("{}")
-	}
 	_, err := s.db.ExecContext(ctx, `INSERT INTO ahp_tokens
-		(id, token_hash, user_key, issuer, subject, username, namespace, constraints, description, created_at, expires_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		(id, token_hash, user_key, issuer, subject, username, namespace, description, created_at, expires_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		token.ID, token.TokenHash, token.UserKey, token.Issuer, token.Subject, token.Username, token.Namespace,
-		constraints, token.Description, token.CreatedAt.UTC(), token.ExpiresAt.UTC())
+		token.Description, token.CreatedAt.UTC(), token.ExpiresAt.UTC())
 	if err != nil {
 		return fmt.Errorf("create AHP token: %w", err)
 	}
 	return nil
 }
 
-const ahpTokenColumns = `id, token_hash, user_key, issuer, subject, username, namespace, constraints, description,
+const ahpTokenColumns = `id, token_hash, user_key, issuer, subject, username, namespace, description,
 	created_at, expires_at, revoked_at`
 
 func scanAHPToken(row interface{ Scan(...any) error }) (store.AHPToken, error) {
 	var token store.AHPToken
 	var revoked sql.NullTime
 	if err := row.Scan(&token.ID, &token.TokenHash, &token.UserKey, &token.Issuer, &token.Subject, &token.Username,
-		&token.Namespace, &token.Constraints, &token.Description, &token.CreatedAt, &token.ExpiresAt, &revoked); err != nil {
+		&token.Namespace, &token.Description, &token.CreatedAt, &token.ExpiresAt, &revoked); err != nil {
 		return store.AHPToken{}, err
 	}
 	if revoked.Valid {

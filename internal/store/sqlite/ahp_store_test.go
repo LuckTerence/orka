@@ -22,7 +22,7 @@ func TestAHPTokensAreScopedToTheirUser(t *testing.T) {
 	now := time.Date(2026, 10, 17, 22, 0, 0, 0, time.UTC)
 	token := store.AHPToken{
 		ID: "tok-1", TokenHash: "hash-1", UserKey: "alice", Issuer: "https://issuer", Subject: "alice",
-		Username: "alice@example.com", Namespace: "team", Constraints: []byte(`{"scopes":["orka.ahp"]}`),
+		Username: "alice@example.com", Namespace: "team",
 		CreatedAt: now, ExpiresAt: now.Add(time.Hour),
 	}
 	require.NoError(t, s.CreateAHPToken(ctx, token))
@@ -31,7 +31,6 @@ func TestAHPTokensAreScopedToTheirUser(t *testing.T) {
 	got, err := s.GetAHPTokenByHash(ctx, "hash-1")
 	require.NoError(t, err)
 	require.Equal(t, "alice", got.UserKey)
-	require.JSONEq(t, `{"scopes":["orka.ahp"]}`, string(got.Constraints))
 	require.Nil(t, got.RevokedAt)
 	_, err = s.GetAHPTokenByHash(ctx, "missing")
 	require.ErrorIs(t, err, store.ErrNotFound)

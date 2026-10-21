@@ -14,7 +14,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -94,7 +93,6 @@ func TestAHPTokenRoutesMintListAndRevoke(t *testing.T) {
 	minted := h.mint(`{"ttl":"2h","description":"laptop"}`)
 	require.True(t, strings.HasPrefix(minted.Token, ahphost.TokenPrefix))
 	require.WithinDuration(t, time.Now().Add(2*time.Hour), minted.ExpiresAt, time.Minute)
-	require.False(t, minted.Delegated)
 
 	status, raw := h.do(http.MethodGet, "/api/v1/ahp-tokens", "")
 	require.Equal(t, http.StatusOK, status)
@@ -159,67 +157,38 @@ func TestAHPTokenRoutesRefuseNonHumanIdentities(t *testing.T) {
 	require.Equal(t, http.StatusNotImplemented, resp.StatusCode)
 }
 
-func TestAHPTokenFromAContextTokenKeepsItsConstraints(t *testing.T) {
+func TestAHPTokensRefuseContextTokens(t *testing.T) {
 	authz, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationConfigOptions{Mode: ContextTokenAuthorizationModeEnforce})
 	require.NoError(t, err)
 	h := newAHPTestHarness(t, authz)
-	exp := time.Now().Add(30 * time.Minute).Truncate(time.Second)
-	contextToken := func(claims map[string]any, scopes ...string) *UserInfo {
-		return &UserInfo{
-			AuthType: AuthTypeContextToken, Username: "carol", Subject: "carol", Issuer: ahpTestIssuer, Namespace: "team",
-			ContextToken: &ContextToken{
-				Subject: "carol", Issuer: ahpTestIssuer, Scopes: scopes,
-				TransactionContext: map[string]any{"namespace": "team"}, Claims: claims,
-			},
-		}
+	h.identity = &UserInfo{
+		AuthType: AuthTypeContextToken, Username: "carol", Subject: "carol", Issuer: ahpTestIssuer, Namespace: "team",
+		ContextToken: &ContextToken{Subject: "carol", Issuer: ahpTestIssuer, Scopes: []string{"orka:tasks:create"}},
 	}
-	withExp := map[string]any{"exp": json.Number(strconv.FormatInt(exp.Unix(), 10))}
-
-	h.identity = contextToken(withExp, "orka:tasks:get")
-	status, _ := h.do(http.MethodPost, "/api/v1/ahp-tokens", "")
-	require.Equal(t, http.StatusForbidden, status, "an unrelated scope cannot mint")
-
-	h.identity = contextToken(map[string]any{}, ContextTokenScopeAHPTokens)
-	status, _ = h.do(http.MethodPost, "/api/v1/ahp-tokens", "")
-	require.Equal(t, http.StatusForbidden, status, "a context token without an expiry cannot mint")
-
-	h.identity = contextToken(withExp, ContextTokenScopeAHPTokens)
-	status, _ = h.do(http.MethodPost, "/api/v1/ahp-tokens?namespace=other", "")
-	require.Equal(t, http.StatusForbidden, status, "the token's namespace constraint applies")
-
-	minted := h.mint(`{"ttl":"720h"}`)
-	require.True(t, minted.Delegated)
-	require.Equal(t, exp.UTC(), minted.ExpiresAt.UTC(), "expires no later than the context token")
-	principal, err := h.host.Tokens().Verify(t.Context(), minted.Token)
-	require.NoError(t, err)
-	require.Equal(t, ahphost.UserKey(ahpTestIssuer, "carol"), principal.UserKey)
-	require.Equal(t, "team", principal.Namespace)
-	require.True(t, principal.Constraints.Delegated)
-	require.Equal(t, []string{ContextTokenScopeAHPTokens}, principal.Constraints.Scopes)
-	require.Equal(t, "team", principal.Constraints.TransactionContext["namespace"])
+	for _, request := range []struct{ method, path string }{
+		{http.MethodPost, "/api/v1/ahp-tokens"}, {http.MethodGet, "/api/v1/ahp-tokens"}, {http.MethodDelete, "/api/v1/ahp-tokens/ahpt_0123456789abcdef"},
+	} {
+		status, raw := h.do(request.method, request.path, "")
+		require.Equal(t, http.StatusForbidden, status, "%s %s: %s", request.method, request.path, raw)
+		require.Contains(t, string(raw), "own OIDC sign-in")
+	}
 }
 
 func TestAHPTokenOwnerCheckFollowsTheCurrentSignInPolicy(t *testing.T) {
 	oidc := OIDCConfig{Issuer: ahpTestIssuer, Audience: "orka", AllowedSubjects: []string{"alice", "team-*"}}
-	contextTokens := ContextTokenConfig{Profiles: []ContextTokenProfileConfig{{Name: "txn", Issuer: "https://txn.example"}}}
-	check := AHPTokenOwnerCheck(oidc, contextTokens)
+	check := AHPTokenOwnerCheck(oidc)
 	oidcOwner := func(issuer, subject string) ahphost.Principal {
 		return ahphost.Principal{Issuer: issuer, Subject: subject}
-	}
-	delegated := func(issuer string) ahphost.Principal {
-		return ahphost.Principal{Issuer: issuer, Subject: "carol", Constraints: ahphost.Constraints{Delegated: true}}
 	}
 
 	require.NoError(t, check(oidcOwner(ahpTestIssuer, "alice")))
 	require.NoError(t, check(oidcOwner(ahpTestIssuer, "team-bob")), "allowlist patterns apply")
 	require.Error(t, check(oidcOwner(ahpTestIssuer, "mallory")), "a subject the allowlist no longer admits")
 	require.Error(t, check(oidcOwner("https://old-issuer.example", "alice")), "an issuer that is no longer configured")
-	require.NoError(t, check(delegated("https://txn.example")))
-	require.Error(t, check(delegated(ahpTestIssuer)), "a delegated token needs a configured context-token issuer")
 
-	require.Error(t, AHPTokenOwnerCheck(OIDCConfig{}, ContextTokenConfig{})(oidcOwner(ahpTestIssuer, "alice")),
+	require.Error(t, AHPTokenOwnerCheck(OIDCConfig{})(oidcOwner(ahpTestIssuer, "alice")),
 		"with OIDC turned off, no OIDC-minted token connects")
-	require.Error(t, AHPTokenOwnerCheck(OIDCConfig{Issuer: ahpTestIssuer, Audience: "orka"}, ContextTokenConfig{})(oidcOwner(ahpTestIssuer, "alice")),
+	require.Error(t, AHPTokenOwnerCheck(OIDCConfig{Issuer: ahpTestIssuer, Audience: "orka"})(oidcOwner(ahpTestIssuer, "alice")),
 		"an empty allowlist admits no one, as at sign-in")
 }
 

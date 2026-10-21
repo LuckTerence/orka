@@ -281,7 +281,6 @@ controller:
       monitorOperate: ""
       connectorRead: ""
       connectorManage: ""
-      ahpTokens: ""
       skillRead: ""
       skillWrite: ""
       gatewayRead: ""

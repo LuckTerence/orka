@@ -12,9 +12,7 @@ import (
 )
 
 // AHPToken is a minted Agent Host Protocol connection token. Only a hash of
-// the secret is stored. Constraints carry the authority it was minted with,
-// for example the scopes and transaction context of a delegated context
-// token, never the raw token itself.
+// the secret is stored, never the token itself.
 type AHPToken struct {
 	ID          string
 	TokenHash   string
@@ -23,7 +21,6 @@ type AHPToken struct {
 	Subject     string
 	Username    string
 	Namespace   string
-	Constraints []byte
 	Description string
 	CreatedAt   time.Time
 	ExpiresAt   time.Time

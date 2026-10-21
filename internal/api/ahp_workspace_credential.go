@@ -41,7 +41,7 @@ const AHPWorkspaceTokenHorizon = 45 * time.Minute
 // is removed.
 func (w *ahpWorkspaces) provideCredential(ctx context.Context, principal ahphost.Principal, pod *corev1.Pod) {
 	fetch := w.b.cfg.RepositoryCredential
-	if fetch == nil || !w.enabled() || w.b.mayUseWorkspace(principal) != nil {
+	if fetch == nil || !w.enabled() {
 		return
 	}
 	now := w.b.now()

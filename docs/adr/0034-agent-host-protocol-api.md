@@ -60,26 +60,24 @@ OpenAI- and Anthropic-compatible groups. It is off by default.
 
 ### AHP connection tokens identify users and carry no more authority than they had
 
-- Minting an AHP connection token requires explicit permission, checked like any other
-  API operation, and an OIDC or context-token caller (the identities that may own
-  Connections). ServiceAccount callers cannot mint one.
-- A token minted from a context token keeps that token's scopes, namespace and
-  transaction constraints and expires no later than it; Orka stores the constraints and
-  never the raw context token or TxToken.
+- Minting an AHP connection token requires a person's own OIDC sign-in. ServiceAccount
+  callers and delegated context tokens cannot mint one: a connection could not yet keep
+  to a context token's scopes and transaction constraints everywhere it reaches, from
+  workspace shells to session reads, and built-in runtimes do not run Tasks with
+  transaction delegation. Delegated connections are left for a later decision.
 - Tokens are stored hashed, compared in constant time, revocable and scoped to `/ahp`.
 - The token arrives as `?tkn=` or `Authorization: Bearer`. A missing, wrong or revoked
   token is refused with 401 before the WebSocket upgrade. Browser origins are refused.
   URLs and `authenticate` frames are redacted from every log.
 - Every AHP command and client action is authorized as the Orka operation it causes
-  (for example creating a Task or answering an approval), with the token's constraints;
+  (for example creating a Task or answering an approval) as the token's owner;
   being allowed onto `/ahp` authorizes nothing else. `requestedBy` is stamped only after
   that check, as provenance.
 - Revocation or expiry closes every connection using the token and stops delivery,
   including queued output; passive subscribers are not exempt.
 - A token outlives the sign-in that minted it, so its owner is checked against the
-  controller's current sign-in policy at connect and on every recheck: an OIDC-minted
-  token needs the configured issuer and a subject the allowlist still admits, and a
-  token minted from a context token needs a configured context-token issuer.
+  controller's current sign-in policy at connect and on every recheck: a token needs the
+  configured OIDC issuer and a subject the allowlist still admits.
 - A pasted host URL is long-lived. Tokens default to 30 days, are capped by
   `--ahp-token-max-ttl` (90 days by default), carry a description naming the device,
   and are listed and revoked only by their owner (`orka ahp tokens`).
@@ -181,10 +179,7 @@ restricted namespace:
 - the user's projects are cloned at their project paths, anonymously unless the operator
   names a ConnectorProvider whose github.com links serve the user's own reads;
 - each session has a git worktree at its working directory, on the session's branch;
-- AHP terminals are shells in the Pod, streamed over the terminal channel;
-- only the user's own sign-in reaches it: a shell cannot keep to a delegated context
-  token's scopes, repository limits or transaction context, so such a connection gets
-  no workspace, terminals or workspace file reads.
+- AHP terminals are shells in the Pod, streamed over the terminal channel.
 
 The Pod holds no Orka credential, accepts no inbound traffic and reaches only DNS and
 HTTPS. When an operator opts in, it holds the user's own github.com token from their

@@ -27,40 +27,33 @@ func newTokenService(t *testing.T) *TokenService {
 	return &TokenService{Store: s}
 }
 
-func TestMintStoresOnlyAHashAndKeepsConstraints(t *testing.T) {
+func TestMintStoresOnlyAHash(t *testing.T) {
 	tokens := newTokenService(t)
 	ctx := context.Background()
-	notAfter := time.Now().Add(2 * time.Hour)
 	minted, err := tokens.Mint(ctx, MintRequest{
-		Issuer: "https://issuer.example", Subject: "alice", Namespace: "team", TTL: 24 * time.Hour, NotAfter: &notAfter,
-		Constraints: Constraints{Delegated: true, Scopes: []string{"orka.ahp"}, TransactionContext: map[string]any{"namespace": "team"}},
+		Issuer: "https://issuer.example", Subject: "alice", Namespace: "team", TTL: 24 * time.Hour,
 	})
 	require.NoError(t, err)
 	require.True(t, strings.HasPrefix(minted.Token, TokenPrefix))
-	require.WithinDuration(t, notAfter, minted.ExpiresAt, time.Second, "a delegated token's own expiry bounds the new one")
+	require.WithinDuration(t, time.Now().Add(24*time.Hour), minted.ExpiresAt, time.Minute)
 
 	record, err := tokens.Store.GetAHPTokenByHash(ctx, hashToken(minted.Token))
 	require.NoError(t, err)
-	require.NotContains(t, string(record.Constraints), minted.Token)
 	require.NotEqual(t, minted.Token, record.TokenHash)
 
 	principal, err := tokens.Verify(ctx, minted.Token)
 	require.NoError(t, err)
 	require.Equal(t, UserKey("https://issuer.example", "alice"), principal.UserKey)
-	require.True(t, principal.Constraints.Delegated)
-	require.Equal(t, []string{"orka.ahp"}, principal.Constraints.Scopes)
-	require.Equal(t, "team", principal.Constraints.TransactionContext["namespace"])
+	require.Equal(t, "team", principal.Namespace)
 }
 
 func TestMintRejectsBadRequests(t *testing.T) {
 	tokens := newTokenService(t)
 	ctx := context.Background()
-	past := time.Now().Add(-time.Hour)
 	for name, req := range map[string]MintRequest{
 		"no subject":        {Issuer: "https://issuer.example"},
 		"ttl too long":      {Issuer: "i", Subject: "s", TTL: DefaultMaxTokenTTL + time.Hour},
 		"ttl too short":     {Issuer: "i", Subject: "s", TTL: time.Second},
-		"expired parent":    {Issuer: "i", Subject: "s", NotAfter: &past},
 		"description limit": {Issuer: "i", Subject: "s", Description: strings.Repeat("x", maxDescriptionLength+1)},
 		"control character": {Issuer: "i", Subject: "s", Description: "laptop\x1b[2J"},
 	} {

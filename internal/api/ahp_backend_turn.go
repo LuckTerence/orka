@@ -1046,7 +1046,7 @@ func (b *ahpBackend) nextGeneration(ctx context.Context, principal ahphost.Princ
 		return record, "", errors.New("the session could not be updated")
 	}
 	if next.WorkDir != record.WorkDir {
-		if b.workspaces.enabled() && b.mayUseWorkspace(principal) == nil {
+		if b.workspaces.enabled() {
 			if pod, err := b.workspaces.ensure(ctx, principal, ahpWorkspaceStartWait); err == nil {
 				setupCtx, cancel := context.WithTimeout(ctx, ahpWorkspaceSetupWait)
 				_ = b.workspaces.ensureWorktree(setupCtx, principal, pod, project, next)

@@ -231,12 +231,12 @@ With `--enable-ahp-api`, `/ahp` serves the [Agent Host Protocol](https://github.
 
 `/ahp` does not accept Orka bearer tokens. A client presents an AHP connection token as `?tkn=<token>` or `Authorization: Bearer <token>`; desktop clients that connect by URL alone use `wss://<API host>/ahp?tkn=<token>`, which `orka ahp connect` prints. A missing, unknown, revoked or expired token gets 401 before the upgrade, and a browser (`http` or `https`) `Origin` gets 403. So does a token whose owner the API would no longer sign in: an OIDC-minted token needs the configured issuer and a subject `--oidc-allowed-subjects` still admits, and a token minted from a context token needs its issuer still configured. Orka logs the path of `/ahp` requests, never the query. Revoking or expiring a token, or its owner losing sign-in, closes every connection that uses it; open connections are rechecked every 30 seconds.
 
-The token routes require a verified OIDC or context-token identity carrying an issuer and subject; ServiceAccount bearer tokens are refused with 403. Under context-token authorization they need `orka:ahp:tokens`. A token minted from a context token keeps that token's scopes, transaction context and namespace and expires no later than it; the context token itself is never stored. Orka stores only a hash of each token.
+The token routes require a person's own verified OIDC sign-in carrying an issuer and subject; ServiceAccount bearer tokens and delegated context tokens are refused with 403. Orka stores only a hash of each token.
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/v1/ahp-tokens` | POST | Body `{"ttl": "720h", "description": "laptop"}`, both optional. `ttl` defaults to `720h` and is at most `--ahp-token-max-ttl`. `description` names the token for its owner, such as the device it is for: at most 256 characters, trimmed, no control characters. Returns `201` with `{"id", "token", "description", "namespace", "expiresAt", "delegated"}`. The token is shown only in this response. |
-| `/api/v1/ahp-tokens` | GET | List the caller's tokens, newest first, without their secrets: `{"items": [{"id", "description", "namespace", "createdAt", "expiresAt", "revokedAt", "delegated"}]}`. Expired and revoked tokens stay listed. |
+| `/api/v1/ahp-tokens` | POST | Body `{"ttl": "720h", "description": "laptop"}`, both optional. `ttl` defaults to `720h` and is at most `--ahp-token-max-ttl`. `description` names the token for its owner, such as the device it is for: at most 256 characters, trimmed, no control characters. Returns `201` with `{"id", "token", "description", "namespace", "expiresAt"}`. The token is shown only in this response. |
+| `/api/v1/ahp-tokens` | GET | List the caller's tokens, newest first, without their secrets: `{"items": [{"id", "description", "namespace", "createdAt", "expiresAt", "revokedAt"}]}`. Expired and revoked tokens stay listed. |
 | `/api/v1/ahp-tokens/:id` | DELETE | Revoke one of the caller's tokens and close its connections. Another person's token reads as 404. |
 | `/ahp` | GET | The AHP WebSocket endpoint. |
 

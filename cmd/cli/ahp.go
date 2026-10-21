@@ -37,7 +37,6 @@ type ahpTokenView struct {
 	CreatedAt   *time.Time `json:"createdAt,omitempty"`
 	ExpiresAt   time.Time  `json:"expiresAt"`
 	RevokedAt   *time.Time `json:"revokedAt,omitempty"`
-	Delegated   bool       `json:"delegated"`
 }
 
 // ahpMintRequest asks the API for an AHP connection token.
@@ -266,11 +265,7 @@ func newAHPTokensListCmd() *cobra.Command {
 				if item.CreatedAt != nil {
 					created = item.CreatedAt.UTC().Format(time.RFC3339)
 				}
-				name := item.Description
-				if item.Delegated {
-					name = strings.TrimSpace(name + " (delegated)")
-				}
-				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", item.ID, name, item.Namespace, created, //nolint:errcheck
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", item.ID, item.Description, item.Namespace, created, //nolint:errcheck
 					item.ExpiresAt.UTC().Format(time.RFC3339), item.Status)
 			}
 			return w.Flush()
@@ -317,10 +312,8 @@ func ahpError(err error) error {
 	switch {
 	case strings.Contains(message, "HTTP 501"):
 		return errors.Join(err, errors.New("the AHP endpoint is not enabled on this Orka; an operator turns it on with controller.ahp.enabled"))
-	case strings.Contains(message, "HTTP 403") && strings.Contains(message, "not authorized"):
-		return errors.Join(err, errors.New("this context token is not delegated the AHP token scope your controller requires"))
 	case strings.Contains(message, "HTTP 403") && strings.Contains(message, "AHP tokens require"):
-		return errors.Join(err, errors.New("AHP tokens belong to a signed-in person: pass your OIDC token with --token, or a context token with --txn-token (ServiceAccount tokens cannot mint them)"))
+		return errors.Join(err, errors.New("AHP tokens belong to a person signed in with OIDC: pass your OIDC token with --token (context tokens and ServiceAccount tokens cannot mint them)"))
 	}
 	return err
 }

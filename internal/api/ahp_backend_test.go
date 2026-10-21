@@ -145,14 +145,13 @@ func newAHPTestEnvWith(t *testing.T, authz ContextTokenAuthorizationConfig, obje
 
 func (e *ahpTestEnv) connect(subject string) *ahp.Client {
 	e.t.Helper()
-	return e.connectWith(subject, "client-"+subject, ahphost.Constraints{})
+	return e.connectWith(subject, "client-"+subject)
 }
 
-func (e *ahpTestEnv) connectWith(subject, clientID string, constraints ahphost.Constraints) *ahp.Client {
+func (e *ahpTestEnv) connectWith(subject, clientID string) *ahp.Client {
 	e.t.Helper()
 	minted, err := e.tokens.Mint(context.Background(), ahphost.MintRequest{
 		Issuer: "https://issuer.example", Subject: subject, Username: subject, Namespace: ahpTestNamespace,
-		Constraints: constraints,
 	})
 	require.NoError(e.t, err)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -551,19 +550,6 @@ func TestAHPBackendDecidesAsTheConfirmingConnection(t *testing.T) {
 	}})
 	waitForActionType(t, chatSub, "chat/toolCallReady")
 
-	// A narrower token of the same person may not decide.
-	narrow := env.connectWith("alice", "client-narrow", ahphost.Constraints{Delegated: true, Scopes: []string{"orka:ahp:tokens"}})
-	_, _, err = narrow.Subscribe(ctx, chat)
-	require.NoError(t, err)
-	_, err = narrow.Dispatch(ctx, chat, ahptypes.StateAction{Value: &ahptypes.ChatToolCallConfirmedAction{
-		Type: ahptypes.ActionTypeChatToolCallConfirmed, TurnId: "turn-1", ToolCallId: "tool-1", Approved: true,
-	}})
-	require.NoError(t, err)
-	time.Sleep(200 * time.Millisecond)
-	env.mu.Lock()
-	require.Empty(t, env.decisions, "a token without Task update scopes cannot approve")
-	env.mu.Unlock()
-
 	_, err = c.Dispatch(ctx, chat, ahptypes.StateAction{Value: &ahptypes.ChatToolCallConfirmedAction{
 		Type: ahptypes.ActionTypeChatToolCallConfirmed, TurnId: "turn-1", ToolCallId: "tool-1", Approved: false,
 	}})
@@ -657,61 +643,6 @@ func TestAHPBackendSetsASessionsApproveAll(t *testing.T) {
 	bob := env.connect("bob")
 	require.Error(t, bob.Request(ctx, ahpExtensionSetSessionApproveAll, map[string]any{"channel": ahpTestSession, "enabled": true}, nil),
 		"another user's session is unknown")
-}
-
-// A delegated token without Task update scope may neither change whether
-// later turns ask first nor cancel a running turn by disposing its session.
-func TestAHPBackendDelegatedTokensNeedTaskUpdateForApprovalsAndDisposal(t *testing.T) {
-	env := newAHPTestEnvWith(t, ContextTokenAuthorizationConfig{
-		Mode: ContextTokenAuthorizationModeEnforce, TaskUpdateScopes: []string{"orka:tasks:update"},
-	})
-	c := env.connect("alice")
-	ctx := ahpCtx(t)
-	env.setUpSession(c, "manual")
-	alice := ahphost.UserKey("https://issuer.example", "alice")
-	narrow := env.connectWith("alice", "client-narrow", ahphost.Constraints{Delegated: true, Scopes: []string{"orka:tasks:create"}})
-	_, _, err := narrow.Subscribe(ctx, ahpTestSession)
-	require.NoError(t, err)
-
-	_, err = narrow.Dispatch(ctx, ahpTestSession, ahptypes.StateAction{Value: &ahptypes.SessionConfigChangedAction{
-		Type: ahptypes.ActionTypeSessionConfigChanged, Config: map[string]json.RawMessage{"approvalMode": json.RawMessage(`"allow-all"`)},
-	}})
-	require.NoError(t, err)
-	require.Error(t, narrow.Request(ctx, ahpExtensionSetSessionApproveAll, map[string]any{"channel": ahpTestSession, "enabled": true}, nil))
-	time.Sleep(200 * time.Millisecond)
-	var record ahpSession
-	require.NoError(t, env.backend.getRecord(ctx, alice, ahpRecordSession, ahpTestSession, &record))
-	require.Equal(t, "manual", record.ApprovalMode, "the narrow token could not lift the approval hold")
-
-	env.backend.updateSession(ctx, alice, ahpTestSession, func(s *ahpSession) { s.ActiveTask = "running-task" })
-	require.Error(t, narrow.Request(ctx, "disposeSession", ahptypes.DisposeSessionParams{Channel: ahpTestSession}, nil),
-		"disposing of a session with a running turn cancels its Task")
-	require.NoError(t, env.backend.getRecord(ctx, alice, ahpRecordSession, ahpTestSession, &record))
-	require.NoError(t, c.Request(ctx, "disposeSession", ahptypes.DisposeSessionParams{Channel: ahpTestSession}, nil))
-}
-
-func TestAHPBackendWorkspacesNeedThePersonsOwnSignIn(t *testing.T) {
-	env := newAHPTestEnv(t)
-	require.NoError(t, env.backend.mayUseWorkspace(ahphost.Principal{}))
-	require.Error(t, env.backend.mayUseWorkspace(ahphost.Principal{Constraints: ahphost.Constraints{
-		Delegated: true, Scopes: []string{"orka:tasks:create"},
-	}}), "a shell cannot keep to a delegated token's limits")
-}
-
-// A token limited to one repository still sees the models: the project is not
-// known when they are listed, and each turn's complete Task is authorized.
-func TestAHPBackendListsModelsForARepositoryLimitedToken(t *testing.T) {
-	env := newAHPTestEnvWith(t, ContextTokenAuthorizationConfig{
-		Mode: ContextTokenAuthorizationModeEnforce, TaskCreateScopes: []string{"orka:tasks:create"},
-	})
-	limited := env.connectWith("alice", "client-limited", ahphost.Constraints{
-		Delegated: true, Scopes: []string{"orka:tasks:create"},
-		TransactionContext: map[string]any{"repo": ahpTestRepo},
-	})
-	result, _, err := limited.Subscribe(ahpCtx(t), ahptypes.RootResourceURI)
-	require.NoError(t, err)
-	require.Len(t, result.Snapshot.State.Root.Agents, 1)
-	require.Len(t, result.Snapshot.State.Root.Agents[0].Models, 3)
 }
 
 func TestAHPBackendReopensARefusedApproval(t *testing.T) {

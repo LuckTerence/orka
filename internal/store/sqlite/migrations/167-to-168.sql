@@ -1,6 +1,6 @@
--- Additive SQLite transition: 166-to-175.
--- Source layout: abd2c0406ab660abd37af7c176b4eef610a19ce1 (166 objects).
--- Target definitions: Agent Host Protocol tokens, clients, journal, channel states, sessions and backend records (175 objects).
+-- Additive SQLite transition: 167-to-168.
+-- Source layout: fdb64ecd2c827c14422a4d5ad1e481b0026f8cfd (#574, 158 objects).
+-- Target definitions: Agent Host Protocol tokens, clients, journal, channel states, sessions and backend records (167 objects).
 -- Frozen from the target's real schema statements; do not use mutable helpers.
 -- Transaction and complete-layout validation are owned by the caller.
 
@@ -12,7 +12,6 @@ CREATE TABLE IF NOT EXISTS ahp_tokens (
 			subject     TEXT NOT NULL,
 			username    TEXT NOT NULL,
 			namespace   TEXT NOT NULL,
-			constraints BLOB NOT NULL,
 			description TEXT NOT NULL DEFAULT '',
 			created_at  TIMESTAMP NOT NULL,
 			expires_at  TIMESTAMP NOT NULL,

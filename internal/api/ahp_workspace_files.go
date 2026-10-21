@@ -149,7 +149,7 @@ func (b *ahpLimitedBuffer) Write(p []byte) (int, error) {
 // workspaceFor returns the user's running workspace when they may use it.
 // Reads never start a workspace.
 func (b *ahpBackend) workspaceFor(ctx context.Context, principal ahphost.Principal) (*corev1.Pod, bool) {
-	if !b.workspaces.enabled() || b.mayUseWorkspace(principal) != nil {
+	if !b.workspaces.enabled() {
 		return nil, false
 	}
 	return b.workspaces.running(ctx, principal)
@@ -199,7 +199,7 @@ func (b *ahpBackend) ListResource(ctx context.Context, principal ahphost.Princip
 // directory, filtered by the watch's include and exclude patterns.
 func (b *ahpBackend) WatchResources(ctx context.Context, principal ahphost.Principal, params ahptypes.CreateResourceWatchParams, changed func([]ahptypes.ResourceChange)) error {
 	root, ok := ahpWorkspacePath(params.Uri)
-	if !ok || !b.workspaces.enabled() || b.mayUseWorkspace(principal) != nil {
+	if !ok || !b.workspaces.enabled() {
 		return ahphost.ErrResourceNotFound
 	}
 	includes, excludes := ahpWatchPatterns(params.Includes), ahpWatchPatterns(params.Excludes)

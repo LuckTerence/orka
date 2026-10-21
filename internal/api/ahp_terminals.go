@@ -81,24 +81,10 @@ func (b *ahpBackend) terminal(userKey, channel string) *ahpTerminal {
 	return b.shells[ahpTerminalKey(userKey, channel)]
 }
 
-// mayUseWorkspace admits only the person's own sign-in to their workspace. A
-// workspace is a shell over their checkouts and, with workspace Connectors,
-// their linked GitHub token; a shell cannot keep to a delegated token's scopes,
-// repository limits or transaction context, so delegated tokens get none.
-func (b *ahpBackend) mayUseWorkspace(principal ahphost.Principal) error {
-	if principal.Constraints.Delegated {
-		return &ahphost.Rejection{Reason: "workspaces and terminals need the person's own sign-in, not a delegated token"}
-	}
-	return nil
-}
-
 // CreateTerminal starts a shell in the user's workspace.
 func (b *ahpBackend) CreateTerminal(ctx context.Context, principal ahphost.Principal, params ahptypes.CreateTerminalParams, emit ahphost.Emitter) (ahptypes.TerminalState, error) {
 	if !b.workspaces.enabled() {
 		return ahptypes.TerminalState{}, &ahphost.Rejection{Reason: "terminals are not enabled on this host"}
-	}
-	if err := b.mayUseWorkspace(principal); err != nil {
-		return ahptypes.TerminalState{}, err
 	}
 	if !strings.HasPrefix(params.Channel, ahpTerminalScheme) {
 		return ahptypes.TerminalState{}, &ahphost.Rejection{Reason: "terminal URIs use the ahp-terminal scheme"}
@@ -233,9 +219,6 @@ func (b *ahpBackend) endTerminal(ctx context.Context, principal ahphost.Principa
 
 // DisposeTerminal stops a shell and every process it started, then frees its slot.
 func (b *ahpBackend) DisposeTerminal(ctx context.Context, principal ahphost.Principal, channel string) error {
-	if err := b.mayUseWorkspace(principal); err != nil {
-		return err
-	}
 	term := b.terminal(principal.UserKey, channel)
 	if term == nil {
 		return nil
@@ -316,9 +299,6 @@ func (b *ahpBackend) authorizeTerminalAction(principal ahphost.Principal, channe
 	case *ahptypes.TerminalInputAction:
 		if len(a.Data) > ahpTerminalInputMax {
 			return &ahphost.Rejection{Reason: "the input is too large"}
-		}
-		if err := b.mayUseWorkspace(principal); err != nil {
-			return err
 		}
 		// Reserve room for the input now, on the terminal just checked: once
 		// admitted it is always delivered.

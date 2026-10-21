@@ -18,7 +18,7 @@ their client.
 
 The endpoint is off by default. It needs the `harness-v2` execution mode, which is the
 chart's default, and a way for people to sign in: AHP connection tokens are minted by
-people signed in with OIDC (or a delegated context token), never by ServiceAccounts.
+people signed in with OIDC, never by ServiceAccounts or delegated context tokens.
 
 ```bash
 helm upgrade --install orka orka/orka --namespace orka-system --create-namespace \
@@ -32,8 +32,8 @@ helm upgrade --install orka orka/orka --namespace orka-system --create-namespace
 
 Set `controller.oidc.namespace` to the namespace people's sessions run in, normally the
 release namespace: Orka binds OIDC callers to it, and each AHP user's Tasks, Sessions and
-Agents live there. The chart refuses `controller.ahp.enabled` without an OIDC or
-context-token issuer, or outside `harness-v2`.
+Agents live there. The chart refuses `controller.ahp.enabled` without an OIDC issuer, or
+outside `harness-v2`.
 
 Optional values:
 
@@ -45,7 +45,6 @@ Optional values:
 | `controller.ahp.workspaceClass` | `""` | ExecutionWorkspaceClass for session-scoped workspaces. Needs an installed workspace provider. |
 | `controller.ahp.workspaceImage` | `""` | Digest-pinned image with `sh` and `git` that turns on [workspaces and terminals](#workspaces-and-terminals). |
 | `controller.ahp.workspaceNamespace` | `orka-ahp-workspaces` | Namespace the chart creates for workspace Pods when `workspaceImage` is set. |
-| `controller.contextToken.scopes.ahpTokens` | `""` | Context-token scopes that may mint, list and revoke AHP tokens. Empty keeps `orka:ahp:tokens`. |
 
 Without Helm, start the controller with the equivalent flags:
 
@@ -170,8 +169,7 @@ orka ahp connect --server http://localhost:8080   # ws://localhost:8080/ahp?tkn=
 AHP connection tokens are made for URLs that stay pasted in an app:
 
 - **Lifetime.** A token lasts `720h` (30 days) unless `--ttl` asks for another lifetime,
-  up to `controller.ahp.tokenMaxTTL` (`2160h`, 90 days, by default). A token minted from a
-  context token never outlives that context token. When a token expires the client is
+  up to `controller.ahp.tokenMaxTTL` (`2160h`, 90 days, by default). When a token expires the client is
   disconnected; run `orka ahp connect` again and paste the new URL.
 - **One per device.** Mint a token for each device, named after it, so a lost or retired
   device can be cut off alone.
@@ -236,9 +234,7 @@ token. The same operations are available over the API; see the
   would allow and asks the person; policy still refuses what it refuses. With
   `allow-all`, policy decides alone. `assisted` behaves like `manual`. A client's
   approve-all toggle (`extensions/setSessionApproveAll`) selects `allow-all` or `manual`.
-  A changed mode applies from the session's next turn. A delegated context token needs
-  Task update scope to change the mode, as it does to cancel a turn, answer a
-  confirmation, or dispose of a session whose turn is running.
+  A changed mode applies from the session's next turn.
 - **New-session form.** `resolveSessionConfig` returns the approval mode and branches a
   new session would take, with the project's default branch filled in.
 
@@ -279,10 +275,7 @@ Each AHP user then gets one workspace Pod in that namespace (`--ahp-workspace-na
   as its connection keeps it, and reads never start a workspace;
 - agents never run there: each turn publishes to the session's branch, and the session's
   worktree fast-forwards to it;
-- the Pod reaches only DNS and HTTPS;
-- only the person's own sign-in uses it: a connection with a delegated context token gets
-  no workspace, terminals or file reads, because a shell cannot keep to the token's scopes,
-  repository limits or transaction context.
+- the Pod reaches only DNS and HTTPS.
 
 ### Private repositories
 

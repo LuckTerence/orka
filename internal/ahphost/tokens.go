@@ -16,7 +16,6 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -44,25 +43,15 @@ var ErrInvalidToken = errors.New("invalid AHP connection token")
 // ErrInvalidMintRequest is returned when a mint request is refused as asked.
 var ErrInvalidMintRequest = errors.New("invalid AHP token request")
 
-// Constraints is the authority a token was minted with. A token minted from a
-// delegated context token keeps that token's scopes and transaction context;
-// a token minted by a person signed in with OIDC carries none.
-type Constraints struct {
-	Delegated          bool           `json:"delegated,omitempty"`
-	Scopes             []string       `json:"scopes,omitempty"`
-	TransactionContext map[string]any `json:"transactionContext,omitempty"`
-}
-
 // Principal is the user behind an AHP connection.
 type Principal struct {
-	UserKey     string
-	Issuer      string
-	Subject     string
-	Username    string
-	Namespace   string
-	TokenID     string
-	ExpiresAt   time.Time
-	Constraints Constraints
+	UserKey   string
+	Issuer    string
+	Subject   string
+	Username  string
+	Namespace string
+	TokenID   string
+	ExpiresAt time.Time
 
 	tokenHash string
 }
@@ -78,17 +67,14 @@ func hashToken(token string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// MintRequest describes a token to mint for an authenticated person.
+// MintRequest describes a token to mint for a person signed in themselves.
 type MintRequest struct {
-	Issuer      string
-	Subject     string
-	Username    string
-	Namespace   string
-	Constraints Constraints
+	Issuer    string
+	Subject   string
+	Username  string
+	Namespace string
 	// TTL is the requested lifetime; zero means DefaultTokenTTL.
 	TTL time.Duration
-	// NotAfter bounds the expiry, for example by a delegated token's own expiry.
-	NotAfter *time.Time
 	// Description names the token for its owner, for example the device it
 	// was pasted into.
 	Description string
@@ -110,7 +96,6 @@ type TokenInfo struct {
 	CreatedAt   time.Time
 	ExpiresAt   time.Time
 	RevokedAt   *time.Time
-	Delegated   bool
 }
 
 // TokenService mints, verifies and revokes AHP connection tokens.
@@ -161,12 +146,6 @@ func (s *TokenService) Mint(ctx context.Context, req MintRequest) (MintedToken, 
 	}
 	now := s.now()
 	expires := now.Add(ttl)
-	if req.NotAfter != nil && req.NotAfter.Before(expires) {
-		expires = req.NotAfter.UTC()
-	}
-	if !expires.After(now.Add(time.Minute)) {
-		return MintedToken{}, fmt.Errorf("%w: the token would expire within a minute", ErrInvalidMintRequest)
-	}
 	secret := make([]byte, 32)
 	if _, err := rand.Read(secret); err != nil {
 		return MintedToken{}, err
@@ -176,10 +155,6 @@ func (s *TokenService) Mint(ctx context.Context, req MintRequest) (MintedToken, 
 		return MintedToken{}, err
 	}
 	token := TokenPrefix + base64.RawURLEncoding.EncodeToString(secret)
-	constraints, err := json.Marshal(req.Constraints)
-	if err != nil {
-		return MintedToken{}, err
-	}
 	id := "ahpt_" + hex.EncodeToString(idBytes)
 	if err := s.Store.CreateAHPToken(ctx, store.AHPToken{
 		ID:          id,
@@ -189,7 +164,6 @@ func (s *TokenService) Mint(ctx context.Context, req MintRequest) (MintedToken, 
 		Subject:     req.Subject,
 		Username:    req.Username,
 		Namespace:   req.Namespace,
-		Constraints: constraints,
 		Description: description,
 		CreatedAt:   now,
 		ExpiresAt:   expires,
@@ -233,22 +207,15 @@ func (s *TokenService) verifyHash(ctx context.Context, hash string) (Principal, 
 		record.UserKey != UserKey(record.Issuer, record.Subject) {
 		return Principal{}, ErrInvalidToken
 	}
-	var constraints Constraints
-	if len(record.Constraints) > 0 {
-		if err := json.Unmarshal(record.Constraints, &constraints); err != nil {
-			return Principal{}, ErrInvalidToken
-		}
-	}
 	principal := Principal{
-		UserKey:     record.UserKey,
-		Issuer:      record.Issuer,
-		Subject:     record.Subject,
-		Username:    record.Username,
-		Namespace:   record.Namespace,
-		TokenID:     record.ID,
-		ExpiresAt:   record.ExpiresAt,
-		Constraints: constraints,
-		tokenHash:   hash,
+		UserKey:   record.UserKey,
+		Issuer:    record.Issuer,
+		Subject:   record.Subject,
+		Username:  record.Username,
+		Namespace: record.Namespace,
+		TokenID:   record.ID,
+		ExpiresAt: record.ExpiresAt,
+		tokenHash: hash,
 	}
 	if s.Admit != nil && s.Admit(principal) != nil {
 		return Principal{}, ErrInvalidToken
@@ -264,12 +231,9 @@ func (s *TokenService) List(ctx context.Context, issuer, subject string) ([]Toke
 	}
 	infos := make([]TokenInfo, 0, len(records))
 	for _, record := range records {
-		var constraints Constraints
-		_ = json.Unmarshal(record.Constraints, &constraints)
 		infos = append(infos, TokenInfo{
 			ID: record.ID, Description: record.Description, Namespace: record.Namespace,
 			CreatedAt: record.CreatedAt, ExpiresAt: record.ExpiresAt, RevokedAt: record.RevokedAt,
-			Delegated: constraints.Delegated,
 		})
 	}
 	return infos, nil
