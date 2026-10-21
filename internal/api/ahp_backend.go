@@ -1116,7 +1116,7 @@ func (b *ahpBackend) HandleClientAction(ctx context.Context, principal ahphost.P
 		// turn starts, not also as input to the running turn.
 		steering := a.Kind == ahptypes.PendingMessageKindSteering
 		var order []string
-		b.updateSession(ctx, principal.UserKey, record.Session, func(s *ahpSession) {
+		if err := b.updateSession(ctx, principal.UserKey, record.Session, func(s *ahpSession) {
 			s.Pending = slices.DeleteFunc(s.Pending, func(p ahpPending) bool { return p.ID == a.Id })
 			entry := ahpPending{ID: a.Id, Kind: string(ahptypes.PendingMessageKindQueued), Message: a.Message, Version: version}
 			if steering {
@@ -1128,7 +1128,17 @@ func (b *ahpBackend) HandleClientAction(ctx context.Context, principal ahphost.P
 			for _, p := range s.Pending {
 				order = append(order, p.ID)
 			}
-		})
+		}); err != nil {
+			// The message was not queued: take it out of the client's queue.
+			logSessionUpdate(err, record.Session, "queue a message")
+			b.mu.Lock()
+			delete(b.pendingAuth, ahpPendingKey(principal.UserKey, record.Session, a.Id))
+			b.mu.Unlock()
+			_ = emit.Emit(ctx, record.Chat, ahptypes.StateAction{Value: &ahptypes.ChatPendingMessageRemovedAction{
+				Type: ahptypes.ActionTypeChatPendingMessageRemoved, Kind: a.Kind, Id: a.Id,
+			}})
+			return
+		}
 		if steering {
 			actions := []ahptypes.StateAction{
 				{Value: &ahptypes.ChatPendingMessageRemovedAction{Type: ahptypes.ActionTypeChatPendingMessageRemoved, Kind: ahptypes.PendingMessageKindSteering, Id: a.Id}},
@@ -1143,14 +1153,16 @@ func (b *ahpBackend) HandleClientAction(ctx context.Context, principal ahphost.P
 		}
 		b.runPending(ctx, principal.UserKey, record.Session, emit)
 	case *ahptypes.ChatPendingMessageRemovedAction:
-		b.updateSession(ctx, principal.UserKey, record.Session, func(s *ahpSession) {
+		logSessionUpdate(b.updateSession(ctx, principal.UserKey, record.Session, func(s *ahpSession) {
 			s.Pending = slices.DeleteFunc(s.Pending, func(p ahpPending) bool { return p.ID == a.Id })
-		})
+		}), record.Session, "remove a queued message")
 		b.mu.Lock()
 		delete(b.pendingAuth, ahpPendingKey(principal.UserKey, record.Session, a.Id))
 		b.mu.Unlock()
 	case *ahptypes.ChatQueuedMessagesReorderedAction:
-		b.updateSession(ctx, principal.UserKey, record.Session, func(s *ahpSession) { s.Pending = ahpReorderPending(s.Pending, a.Order) })
+		logSessionUpdate(b.updateSession(ctx, principal.UserKey, record.Session, func(s *ahpSession) {
+			s.Pending = ahpReorderPending(s.Pending, a.Order)
+		}), record.Session, "reorder queued messages")
 	case *ahptypes.SessionConfigChangedAction:
 		if _, ok := a.Config[ahpConfigApprovalMode]; !ok {
 			return
@@ -1167,7 +1179,10 @@ func (b *ahpBackend) HandleClientAction(ctx context.Context, principal ahphost.P
 // uses, and shows it to the session's clients. A client that changed the
 // mode itself has already shown the selection.
 func (b *ahpBackend) setApprovalMode(ctx context.Context, userKey, session, mode string, emit ahphost.Emitter, showSelection bool) error {
-	b.updateSession(ctx, userKey, session, func(s *ahpSession) { s.ApprovalMode = mode })
+	if err := b.updateSession(ctx, userKey, session, func(s *ahpSession) { s.ApprovalMode = mode }); err != nil {
+		logSessionUpdate(err, session, "set the approval mode")
+		return err
+	}
 	value, _ := json.Marshal(mode)
 	config := map[string]json.RawMessage{ahpConfigEffectiveMode: value}
 	if showSelection {
@@ -1178,15 +1193,24 @@ func (b *ahpBackend) setApprovalMode(ctx context.Context, userKey, session, mode
 	}})
 }
 
-func (b *ahpBackend) updateSession(ctx context.Context, userKey, session string, mutate func(*ahpSession)) {
+// updateSession changes a stored session. A caller whose next step depends on
+// the change must check the error: the change happened only if it is nil.
+func (b *ahpBackend) updateSession(ctx context.Context, userKey, session string, mutate func(*ahpSession)) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	var record ahpSession
 	if err := b.getRecord(ctx, userKey, ahpRecordSession, session, &record); err != nil {
-		return
+		return err
 	}
 	mutate(&record)
-	_ = b.putRecord(ctx, userKey, ahpRecordSession, session, record)
+	return b.putRecord(ctx, userKey, ahpRecordSession, session, record)
+}
+
+// logSessionUpdate records a failed session update whose caller can go on.
+func logSessionUpdate(err error, session, what string) {
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		log.Error(err, "update AHP session", "session", session, "change", what)
+	}
 }
 
 // ahpFileContent is what a changeset serves for one file of a session.

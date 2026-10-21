@@ -199,20 +199,24 @@ func (b *ahpBackend) startTurn(ctx context.Context, principal ahphost.Principal,
 	// lock means disposal either finds and cancels it, or has already deleted
 	// the session, and then the Task is cancelled here.
 	unlock := b.lockUser(principal.UserKey)
-	recorded := false
-	b.updateSession(ctx, principal.UserKey, record.Session, func(s *ahpSession) {
+	err = b.updateSession(ctx, principal.UserKey, record.Session, func(s *ahpSession) {
 		s.Agent, s.Model, s.Turns = choice.Agent, choice.Model, number
 		s.SessionTurns++
 		s.ActiveTurn, s.ActiveTask, s.ActiveStartedAt = action.TurnId, name, started.Format(time.RFC3339Nano)
 		s.History = ahpKeepHistory(append(s.History, ahpExchange{User: ahpBounded(action.Message.Text, ahpExchangeMax)}))
 		turn.session = *s
-		recorded = true
 	})
 	unlock()
-	if !recorded {
+	if err != nil {
+		// Unrecorded, the Task could not be found again: stop it. A disposed
+		// session ends quietly; otherwise the person sees the turn fail.
 		sub.Close()
 		cancel()
 		b.cancelTask(context.WithoutCancel(ctx), principal, task.Namespace, name)
+		if !errors.Is(err, store.ErrNotFound) {
+			log.Error(err, "record AHP turn", "session", record.Session, "task", name)
+			fail("the turn could not be recorded")
+		}
 		return
 	}
 	b.mu.Lock()
@@ -597,7 +601,9 @@ func (t *ahpTurn) showPlan(plan *harnessv2.PlanUpdate) {
 	if call := t.tools[t.planCall]; call != nil {
 		call.output = markdown
 	}
-	t.b.updateSession(t.ctx, t.principal.UserKey, t.session.Session, func(s *ahpSession) { s.Plan = markdown })
+	logSessionUpdate(t.b.updateSession(t.ctx, t.principal.UserKey, t.session.Session, func(s *ahpSession) {
+		s.Plan = markdown
+	}), t.session.Session, "record the plan")
 }
 
 // finishPlan completes the plan's tool call with the last plan.
@@ -879,12 +885,12 @@ func (t *ahpTurn) settle(task *corev1alpha1.Task) {
 	duration := t.b.now().Sub(t.startedAt).Milliseconds()
 	published := task.Status.Phase == corev1alpha1.TaskPhaseSucceeded && ahpDeliveryNote(task) != ""
 	reply := strings.TrimSpace(t.reply)
-	t.b.updateSession(t.ctx, t.principal.UserKey, t.session.Session, func(s *ahpSession) {
+	logSessionUpdate(t.b.updateSession(t.ctx, t.principal.UserKey, t.session.Session, func(s *ahpSession) {
 		if n := len(s.History); n > 0 && s.History[n-1].Reply == "" {
 			s.History[n-1].Reply = reply
 		}
 		s.Published = s.Published || published
-	})
+	}), t.session.Session, "record the reply")
 	switch task.Status.Phase {
 	case corev1alpha1.TaskPhaseSucceeded:
 		if note := ahpDeliveryNote(task); note != "" {
@@ -946,11 +952,11 @@ func (t *ahpTurn) settleWithError(kind, message string) {
 func (t *ahpTurn) finishSession() {
 	now := ahpNow(t.b)
 	_ = t.emit.Emit(t.ctx, t.session.Session, ahpSessionIdle(t.session.Chat, now)...)
-	t.b.updateSession(t.ctx, t.principal.UserKey, t.session.Session, func(s *ahpSession) {
+	logSessionUpdate(t.b.updateSession(t.ctx, t.principal.UserKey, t.session.Session, func(s *ahpSession) {
 		if s.ActiveTurn == t.id {
 			s.ActiveTurn, s.ActiveTask, s.ActiveStartedAt = "", "", ""
 		}
-	})
+	}), t.session.Session, "end the turn")
 	go func() {
 		// The turn's slot frees when its run loop returns.
 		<-t.ctx.Done()
@@ -1055,7 +1061,7 @@ func (b *ahpBackend) nextGeneration(ctx context.Context, principal ahphost.Princ
 		note += fmt.Sprintf(" Its changes continue on the branch `%s`, based on `%s`.", branch, record.Branch)
 	}
 	next := record
-	b.updateSession(ctx, principal.UserKey, record.Session, func(s *ahpSession) {
+	err := b.updateSession(ctx, principal.UserKey, record.Session, func(s *ahpSession) {
 		s.Generation = generation
 		s.OrkaSession = fmt.Sprintf("ahp-%s-g%d", ahpHash(principal.UserKey, record.Session)[:24], generation)
 		s.Agent, s.Model, s.SessionTurns = "", "", 0
@@ -1064,8 +1070,8 @@ func (b *ahpBackend) nextGeneration(ctx context.Context, principal ahphost.Princ
 		}
 		next = *s
 	})
-	if next.Generation != generation {
-		return record, "", errors.New("the session could not be updated")
+	if err != nil {
+		return record, "", fmt.Errorf("record the session's next generation: %w", err)
 	}
 	if next.WorkDir != record.WorkDir {
 		if b.workspaces.enabled() {
@@ -1128,10 +1134,16 @@ func (b *ahpBackend) runPending(ctx context.Context, userKey, session string, em
 		next := record.Pending[0]
 		record.Pending = record.Pending[1:]
 		// Only this version of the message leaves the queue, and only its
-		// own sender may run it; a replacement stays for the next round.
-		b.updateSession(ctx, userKey, session, func(s *ahpSession) {
+		// own sender may run it; a replacement stays for the next round. A
+		// message still stored in the queue must not start, or it would run
+		// again after this turn.
+		if err := b.updateSession(ctx, userKey, session, func(s *ahpSession) {
 			s.Pending = slices.DeleteFunc(s.Pending, func(p ahpPending) bool { return p.ID == next.ID && p.Version == next.Version })
-		})
+		}); err != nil {
+			logSessionUpdate(err, session, "take a message off the queue")
+			b.releaseTurn(userKey, session)
+			return
+		}
 		key := ahpPendingKey(userKey, session, next.ID)
 		b.mu.Lock()
 		stored, found := b.pendingAuth[key]

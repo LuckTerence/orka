@@ -7,8 +7,10 @@ MIT License - see LICENSE file for details.
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -17,6 +19,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -40,6 +43,7 @@ import (
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/liveevents"
+	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
 
@@ -1000,6 +1004,98 @@ func TestAHPBackendRunsMessagesSentDuringATurn(t *testing.T) {
 	require.Len(t, state.Turns, 3)
 	require.Nil(t, state.SteeringMessage)
 	require.Empty(t, state.QueuedMessages)
+}
+
+// ahpFailingStore fails the session writes fail selects while armed.
+type ahpFailingStore struct {
+	store.AHPStore
+	armed atomic.Bool
+	fail  func(store.AHPRecord) bool
+}
+
+func (s *ahpFailingStore) PutAHPRecord(ctx context.Context, record store.AHPRecord) error {
+	if s.armed.Load() && record.Kind == ahpRecordSession && s.fail(record) {
+		return errors.New("the store refused the write")
+	}
+	return s.AHPStore.PutAHPRecord(ctx, record)
+}
+
+func ahpUserTurn(id, text string) ahptypes.StateAction {
+	return ahptypes.StateAction{Value: &ahptypes.ChatTurnStartedAction{
+		Type: ahptypes.ActionTypeChatTurnStarted, TurnId: id, StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		Message: ahptypes.Message{Text: text, Origin: ahptypes.MessageOrigin{Kind: ahptypes.MessageKindUser}},
+	}}
+}
+
+// A queued message that cannot be taken off the stored queue does not start:
+// it would run again once that turn ended.
+func TestAHPBackendKeepsAMessageItCouldNotTakeOffTheQueue(t *testing.T) {
+	env := newAHPTestEnv(t)
+	failing := &ahpFailingStore{AHPStore: env.backend.store, fail: func(record store.AHPRecord) bool {
+		return !bytes.Contains(record.Value, []byte(`"q1"`))
+	}}
+	env.backend.store = failing
+	c := env.connect("alice")
+	ctx := ahpCtx(t)
+	chat := env.setUpSession(c, "allow-all")
+	alice := ahphost.UserKey("https://issuer.example", "alice")
+	_, err := c.Dispatch(ctx, chat, ahpUserTurn("turn-1", "first"))
+	require.NoError(t, err)
+	record := ahpSession{}
+	require.NoError(t, env.backend.getRecord(ctx, alice, ahpRecordSession, ahpTestSession, &record))
+	env.waitForTask(record.OrkaSession + "-t1")
+	require.Eventually(t, func() bool { return env.backend.activeTurn(alice, ahpTestSession) != nil }, 5*time.Second, 20*time.Millisecond)
+	_, err = c.Dispatch(ctx, chat, ahptypes.StateAction{Value: &ahptypes.ChatPendingMessageSetAction{
+		Type: ahptypes.ActionTypeChatPendingMessageSet, Kind: ahptypes.PendingMessageKindQueued, Id: "q1",
+		Message: ahptypes.Message{Text: "queued", Origin: ahptypes.MessageOrigin{Kind: ahptypes.MessageKindUser}},
+	}})
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		var current ahpSession
+		return env.backend.getRecord(ctx, alice, ahpRecordSession, ahpTestSession, &current) == nil && len(current.Pending) == 1
+	}, 5*time.Second, 20*time.Millisecond)
+
+	failing.armed.Store(true)
+	env.setPhase(record.OrkaSession+"-t1", corev1alpha1.TaskPhaseSucceeded)
+	require.Eventually(t, func() bool { return env.backend.activeTurn(alice, ahpTestSession) == nil }, 5*time.Second, 20*time.Millisecond)
+	require.Never(t, func() bool {
+		return env.kube.Get(ctx, types.NamespacedName{Namespace: ahpTestNamespace, Name: record.OrkaSession + "-t2"}, &corev1alpha1.Task{}) == nil
+	}, time.Second, 20*time.Millisecond, "a message still in the stored queue started")
+	var current ahpSession
+	require.NoError(t, env.backend.getRecord(ctx, alice, ahpRecordSession, ahpTestSession, &current))
+	require.Len(t, current.Pending, 1)
+}
+
+// A turn whose Task cannot be recorded on its session is stopped, because
+// nothing could find that Task again, and the person sees the turn fail.
+func TestAHPBackendStopsATurnItCouldNotRecord(t *testing.T) {
+	env := newAHPTestEnv(t)
+	failing := &ahpFailingStore{AHPStore: env.backend.store, fail: func(record store.AHPRecord) bool {
+		return bytes.Contains(record.Value, []byte(`"activeTask":`))
+	}}
+	env.backend.store = failing
+	c := env.connect("alice")
+	ctx := ahpCtx(t)
+	chat := env.setUpSession(c, "allow-all")
+	_, chatSub, err := c.Subscribe(ctx, chat)
+	require.NoError(t, err)
+	alice := ahphost.UserKey("https://issuer.example", "alice")
+	record := ahpSession{}
+	require.NoError(t, env.backend.getRecord(ctx, alice, ahpRecordSession, ahpTestSession, &record))
+
+	failing.armed.Store(true)
+	_, err = c.Dispatch(ctx, chat, ahpUserTurn("turn-1", "first"))
+	require.NoError(t, err)
+	taskName := record.OrkaSession + "-t1"
+	env.waitForTask(taskName)
+	waitForActionType(t, chatSub, "chat/error")
+	require.Eventually(t, func() bool {
+		current := &corev1alpha1.Task{}
+		_ = env.kube.Get(context.Background(), types.NamespacedName{Namespace: ahpTestNamespace, Name: taskName}, current)
+		_, ok := current.Annotations[labels.AnnotationCancelRequested]
+		return ok
+	}, 5*time.Second, 20*time.Millisecond, "an unrecorded turn's Task must be cancelled")
+	require.Nil(t, env.backend.activeTurn(alice, ahpTestSession))
 }
 
 func TestAHPReorderPending(t *testing.T) {
