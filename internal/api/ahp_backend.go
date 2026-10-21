@@ -79,13 +79,15 @@ const (
 )
 
 // The Copilot dialect: the extension keys and commands the GitHub Copilot app
-// and copilotd use on the wire for project management.
+// and copilotd use on the wire for projects, plans and approvals.
 const (
-	ahpCopilotProjectManagementMeta = "copilot.projectManagement"
-	ahpCopilotConfigKey             = "copilot"
-	ahpExtensionListProjects        = "extensions/listProjects"
-	ahpExtensionCloneProject        = "extensions/cloneProject"
-	ahpExtensionGetPlan             = "extensions/getPlan"
+	ahpCopilotProjectManagementMeta  = "copilot.projectManagement"
+	ahpCopilotConfigKey              = "copilot"
+	ahpExtensionListProjects         = "extensions/listProjects"
+	ahpExtensionCloneProject         = "extensions/cloneProject"
+	ahpExtensionRemoveProject        = "extensions/removeProject"
+	ahpExtensionGetPlan              = "extensions/getPlan"
+	ahpExtensionSetSessionApproveAll = "extensions/setSessionApproveAll"
 )
 
 // ahpBuiltInRuntimes are the runtimes AHP sessions run on, in the order a
@@ -554,20 +556,14 @@ func (b *ahpBackend) HandleExtension(ctx context.Context, principal ahphost.Prin
 				}
 			}()
 		}
-		projects, err := b.projects(ctx, principal.UserKey)
-		if err != nil {
-			return nil, err
-		}
-		config, err := ahpRootConfig(projects)
-		if err != nil {
-			return nil, err
-		}
-		if err := emit.Emit(ctx, ahptypes.RootResourceURI, ahptypes.StateAction{Value: &ahptypes.RootConfigChangedAction{
-			Type: ahptypes.ActionTypeRootConfigChanged, Config: config,
-		}}); err != nil {
+		if err := b.publishProjects(ctx, principal, emit); err != nil {
 			return nil, err
 		}
 		return map[string]any{"project": project.wire()}, nil
+	case ahpExtensionRemoveProject:
+		return b.removeProjectCommand(ctx, principal, params, emit)
+	case ahpExtensionSetSessionApproveAll:
+		return nil, b.setApproveAllCommand(ctx, principal, params, emit)
 	case ahpExtensionGetPlan:
 		var req struct {
 			Channel string `json:"channel"`
@@ -583,6 +579,96 @@ func (b *ahpBackend) HandleExtension(ctx context.Context, principal ahphost.Prin
 	default:
 		return nil, ahphost.ErrUnknownExtension
 	}
+}
+
+// removeProjectCommand serves extensions/removeProject. Removing a project
+// takes it off the list; its checkout stays.
+func (b *ahpBackend) removeProjectCommand(ctx context.Context, principal ahphost.Principal, params json.RawMessage, emit ahphost.Emitter) (any, error) {
+	var req struct {
+		ID              string `json:"id"`
+		DeleteClone     bool   `json:"deleteClone"`
+		DeleteWorktrees bool   `json:"deleteWorktrees"`
+		Force           bool   `json:"force"`
+	}
+	if len(params) == 0 || json.Unmarshal(params, &req) != nil || req.ID == "" {
+		return nil, &ahphost.Rejection{Reason: "a project id is required, and removal options must be booleans"}
+	}
+	if req.DeleteClone || req.DeleteWorktrees || req.Force {
+		return nil, &ahphost.Rejection{Reason: "this host does not delete a project's files"}
+	}
+	removed, err := b.removeProject(ctx, principal, req.ID)
+	if err != nil {
+		return nil, err
+	}
+	if removed {
+		if err := b.publishProjects(ctx, principal, emit); err != nil {
+			return nil, err
+		}
+	}
+	return map[string]any{"removed": removed}, nil
+}
+
+// setApproveAllCommand serves extensions/setSessionApproveAll, a client's
+// approve-all toggle for one session.
+func (b *ahpBackend) setApproveAllCommand(ctx context.Context, principal ahphost.Principal, params json.RawMessage, emit ahphost.Emitter) error {
+	var req struct {
+		Channel string `json:"channel"`
+		Enabled *bool  `json:"enabled"`
+	}
+	if len(params) == 0 || json.Unmarshal(params, &req) != nil || req.Channel == "" || req.Enabled == nil {
+		return &ahphost.Rejection{Reason: "a session channel and enabled are required"}
+	}
+	record, err := b.sessionForChannel(ctx, principal.UserKey, req.Channel)
+	if errors.Is(err, store.ErrNotFound) {
+		return &ahphost.Rejection{Reason: "unknown session"}
+	} else if err != nil {
+		return err
+	}
+	mode := ahpApprovalManual
+	if *req.Enabled {
+		mode = ahpApprovalAllowAll
+	}
+	return b.setApprovalMode(ctx, principal.UserKey, record.Session, mode, emit, true)
+}
+
+// publishProjects shows the user's clients their current project list.
+func (b *ahpBackend) publishProjects(ctx context.Context, principal ahphost.Principal, emit ahphost.Emitter) error {
+	projects, err := b.projects(ctx, principal.UserKey)
+	if err != nil {
+		return err
+	}
+	config, err := ahpRootConfig(projects)
+	if err != nil {
+		return err
+	}
+	return emit.Emit(ctx, ahptypes.RootResourceURI, ahptypes.StateAction{Value: &ahptypes.RootConfigChangedAction{
+		Type: ahptypes.ActionTypeRootConfigChanged, Config: config,
+	}})
+}
+
+// removeProject takes a project off the user's list and reports whether it
+// was there. A project a session still uses stays: its turns and worktree
+// need it. Sessions are created under the same lock.
+func (b *ahpBackend) removeProject(ctx context.Context, principal ahphost.Principal, id string) (bool, error) {
+	unlock := b.lockUser(principal.UserKey)
+	defer unlock()
+	var project ahpProject
+	if err := b.getRecord(ctx, principal.UserKey, ahpRecordProject, id, &project); errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	} else if err != nil {
+		return false, err
+	}
+	sessions, err := b.store.ListAHPRecords(ctx, principal.UserKey, ahpRecordSession)
+	if err != nil {
+		return false, err
+	}
+	for _, raw := range sessions {
+		var record ahpSession
+		if json.Unmarshal(raw.Value, &record) == nil && record.ProjectID == id {
+			return false, &ahphost.Rejection{Reason: "sessions still use this project; delete them first"}
+		}
+	}
+	return true, b.store.DeleteAHPRecord(ctx, principal.UserKey, ahpRecordProject, id)
 }
 
 // addProject records a repository. Orka never clones it here: each turn's
@@ -702,6 +788,12 @@ func ahpApprovalModeFrom(config map[string]json.RawMessage) (string, error) {
 // CreateSession starts a session in one of the user's projects. Nothing runs
 // until the first message: that turn's Task creates the Orka Session.
 func (b *ahpBackend) CreateSession(ctx context.Context, principal ahphost.Principal, req ahphost.CreateSessionRequest, _ ahphost.Emitter) (*ahphost.CreatedSession, error) {
+	// One branch of a project belongs to one session: its worktree and its
+	// publications are that session's. The project lookup, the claim and the
+	// record are made under the user's lifecycle lock, which project removal
+	// also holds.
+	unlock := b.lockUser(principal.UserKey)
+	defer unlock()
 	project, err := b.projectForDirectory(ctx, principal.UserKey, req.WorkingDirectories)
 	if err != nil {
 		return nil, err
@@ -726,11 +818,6 @@ func (b *ahpBackend) CreateSession(ctx context.Context, principal ahphost.Princi
 	if !ahpValidBranch(branch) || branch == baseBranch {
 		branch = "orka/session-" + ahpRandomHex(8)
 	}
-	// One branch of a project belongs to one session: its worktree and its
-	// publications are that session's. The claim and the record are made
-	// under the user's lifecycle lock.
-	unlock := b.lockUser(principal.UserKey)
-	defer unlock()
 	existing, err := b.store.ListAHPRecords(ctx, principal.UserKey, ahpRecordSession)
 	if err != nil {
 		return nil, err
@@ -1089,12 +1176,23 @@ func (b *ahpBackend) HandleClientAction(ctx context.Context, principal ahphost.P
 		if err != nil {
 			return
 		}
-		b.updateSession(ctx, principal.UserKey, record.Session, func(s *ahpSession) { s.ApprovalMode = mode })
-		effective, _ := json.Marshal(mode)
-		_ = emit.Emit(ctx, record.Session, ahptypes.StateAction{Value: &ahptypes.SessionConfigChangedAction{
-			Type: ahptypes.ActionTypeSessionConfigChanged, Config: map[string]json.RawMessage{ahpConfigEffectiveMode: effective},
-		}})
+		_ = b.setApprovalMode(ctx, principal.UserKey, record.Session, mode, emit, false)
 	}
+}
+
+// setApprovalMode records a session's approval mode, which its next turn
+// uses, and shows it to the session's clients. A client that changed the
+// mode itself has already shown the selection.
+func (b *ahpBackend) setApprovalMode(ctx context.Context, userKey, session, mode string, emit ahphost.Emitter, showSelection bool) error {
+	b.updateSession(ctx, userKey, session, func(s *ahpSession) { s.ApprovalMode = mode })
+	value, _ := json.Marshal(mode)
+	config := map[string]json.RawMessage{ahpConfigEffectiveMode: value}
+	if showSelection {
+		config[ahpConfigApprovalMode] = value
+	}
+	return emit.Emit(ctx, session, ahptypes.StateAction{Value: &ahptypes.SessionConfigChangedAction{
+		Type: ahptypes.ActionTypeSessionConfigChanged, Config: config,
+	}})
 }
 
 func (b *ahpBackend) updateSession(ctx context.Context, userKey, session string, mutate func(*ahpSession)) {

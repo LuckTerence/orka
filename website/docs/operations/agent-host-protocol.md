@@ -212,7 +212,9 @@ token. The same operations are available over the API; see the
 - **Projects.** The person adds a repository by its https URL. Each turn's Task clones
   it in its own workspace; with workspaces on, the person's workspace has a checkout too.
   Orka looks up a repository's default branch on github.com only, so a project on another
-  host needs the session's `baseBranch` set by the client.
+  host needs the session's `baseBranch` set by the client. Removing a project takes it off
+  the list and leaves its checkout; a project that sessions still use cannot be removed
+  until they are deleted.
 - **Sessions.** A session runs in an Orka Session, which is bound to one runtime profile.
   When the person picks another model, the session moves to a new Orka Session that
   starts with the conversation so far as context. A branch a turn already published
@@ -232,7 +234,9 @@ token. The same operations are available over the API; see the
   commands. Large and binary files show a note instead of their contents.
 - **Approvals.** With `manual` approvals, Orka holds every permission request its policy
   would allow and asks the person; policy still refuses what it refuses. With
-  `allow-all`, policy decides alone. `assisted` behaves like `manual`.
+  `allow-all`, policy decides alone. `assisted` behaves like `manual`. A client's
+  approve-all toggle (`extensions/setSessionApproveAll`) selects `allow-all` or `manual`.
+  A changed mode applies from the session's next turn.
 - **New-session form.** `resolveSessionConfig` returns the approval mode and branches a
   new session would take, with the project's default branch filled in.
 

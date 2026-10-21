@@ -198,10 +198,11 @@ allowed to create Tasks, and disposing one stops everything its shell started.
 ### Client dialects
 
 Clients extend the protocol through `_meta` keys and host-specific commands. Orka serves
-the Copilot dialect for every connection, because clients do not identify themselves at
+the Copilot dialect for every connection, because not every client identifies itself at
 `initialize`: the `copilot.projectManagement` root extension and the
-`extensions/listProjects`, `extensions/cloneProject` and `extensions/getPlan` commands.
-Unknown extension commands are answered with method-not-found.
+`extensions/listProjects`, `extensions/cloneProject`, `extensions/removeProject`,
+`extensions/getPlan` and `extensions/setSessionApproveAll` commands. Unknown extension
+commands are answered with method-not-found.
 
 ### Prerequisites in Orka core
 

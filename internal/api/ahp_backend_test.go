@@ -592,6 +592,72 @@ func TestAHPBackendDisposeKeepsOtherSessions(t *testing.T) {
 	require.Error(t, env.backend.getRecord(ctx, userKey, ahpRecordSession, ahpTestSession, &gone))
 }
 
+func TestAHPBackendRemovesAProjectNoSessionUses(t *testing.T) {
+	env := newAHPTestEnv(t)
+	c := env.connect("alice")
+	ctx := ahpCtx(t)
+	env.setUpSession(c, "manual")
+	var listed struct {
+		Projects []map[string]any `json:"projects"`
+	}
+	require.NoError(t, c.Request(ctx, ahpExtensionListProjects, map[string]any{}, &listed))
+	require.Len(t, listed.Projects, 1)
+	id := listed.Projects[0]["id"]
+
+	require.Error(t, c.Request(ctx, ahpExtensionRemoveProject, map[string]any{"id": id, "deleteClone": true}, nil),
+		"the host never deletes a project's files")
+	require.Error(t, c.Request(ctx, ahpExtensionRemoveProject, map[string]any{"id": id}, nil),
+		"a project a session uses stays")
+	var removed struct {
+		Removed bool `json:"removed"`
+	}
+	require.NoError(t, c.Request(ctx, ahpExtensionRemoveProject, map[string]any{"id": "project-unknown"}, &removed))
+	require.False(t, removed.Removed)
+
+	require.NoError(t, c.Request(ctx, "disposeSession", ahptypes.DisposeSessionParams{Channel: ahpTestSession}, nil))
+	_, rootSub, err := c.Subscribe(ctx, ahptypes.RootResourceURI)
+	require.NoError(t, err)
+	require.NoError(t, c.Request(ctx, ahpExtensionRemoveProject, map[string]any{"id": id}, &removed))
+	require.True(t, removed.Removed)
+	waitForActionType(t, rootSub, "root/configChanged")
+	require.NoError(t, c.Request(ctx, ahpExtensionListProjects, map[string]any{}, &listed))
+	require.Empty(t, listed.Projects)
+	root, _, err := c.Subscribe(ctx, ahptypes.RootResourceURI)
+	require.NoError(t, err)
+	require.JSONEq(t, `{"hostName":"orka","projects":[]}`, string(root.Snapshot.State.Root.Config.Values[ahpCopilotConfigKey]))
+	provider := "copilot"
+	require.Error(t, c.Request(ctx, "createSession", ahptypes.CreateSessionParams{
+		Channel: ahpTestSession + "-again", Provider: &provider, WorkingDirectories: []string{ahpTestDir},
+	}, nil), "a removed project takes no new sessions")
+}
+
+func TestAHPBackendSetsASessionsApproveAll(t *testing.T) {
+	env := newAHPTestEnv(t)
+	c := env.connect("alice")
+	ctx := ahpCtx(t)
+	env.setUpSession(c, "manual")
+	alice := ahphost.UserKey("https://issuer.example", "alice")
+	for _, tc := range []struct {
+		enabled bool
+		mode    string
+	}{{true, "allow-all"}, {false, "manual"}} {
+		require.NoError(t, c.Request(ctx, ahpExtensionSetSessionApproveAll, map[string]any{"channel": ahpTestSession, "enabled": tc.enabled}, nil))
+		var record ahpSession
+		require.NoError(t, env.backend.getRecord(ctx, alice, ahpRecordSession, ahpTestSession, &record))
+		require.Equal(t, tc.mode, record.ApprovalMode, "the next turn uses the mode")
+		result, _, err := c.Subscribe(ctx, ahpTestSession)
+		require.NoError(t, err)
+		values := result.Snapshot.State.Session.Config.Values
+		require.JSONEq(t, `"`+tc.mode+`"`, string(values[ahpConfigApprovalMode]), "clients show the selection")
+		require.JSONEq(t, `"`+tc.mode+`"`, string(values[ahpConfigEffectiveMode]))
+	}
+	require.Error(t, c.Request(ctx, ahpExtensionSetSessionApproveAll, map[string]any{"channel": "ahp-session:/unknown", "enabled": true}, nil))
+	require.Error(t, c.Request(ctx, ahpExtensionSetSessionApproveAll, map[string]any{"channel": ahpTestSession}, nil), "enabled is required")
+	bob := env.connect("bob")
+	require.Error(t, bob.Request(ctx, ahpExtensionSetSessionApproveAll, map[string]any{"channel": ahpTestSession, "enabled": true}, nil),
+		"another user's session is unknown")
+}
+
 func TestAHPBackendReopensARefusedApproval(t *testing.T) {
 	env := newAHPTestEnv(t)
 	refusals := 1
