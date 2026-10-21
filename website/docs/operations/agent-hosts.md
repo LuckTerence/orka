@@ -146,7 +146,8 @@ do not reap processes they never started, so start the daemon with
 exits with its status. When the template sets
 `idleStatusFile`, the host writes JSON with at least `idle` and `idleSince` there, and
 rewrites it at least every five minutes. Orka judges freshness by its `updatedAt`, or by the
-file's modification time when it has none, and treats the status as stale after ten minutes. copilotd's `--idle-status-file` format fits.
+file's modification time when it has none, and treats the status as stale after ten minutes,
+or when that time or `idleSince` is more than ten minutes ahead. copilotd's `--idle-status-file` format fits.
 
 The `orka-host-agent` sidecar answers the host's probes. The Pod is Ready only after an AHP
 `initialize` and `ping` succeed against the loopback listener; the check never sends

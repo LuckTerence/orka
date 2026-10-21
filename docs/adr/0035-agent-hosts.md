@@ -112,7 +112,7 @@ The workload may declare `idleStatusFile`, a path inside the Pod where it writes
 with at least `idle` (boolean) and `idleSince` (RFC 3339 or null), rewritten at least every
 five minutes. Freshness is judged by `updatedAt` (RFC 3339) when the file has one and by the
 file's modification time otherwise. A status is stale ten minutes after that time, twice the
-rewrite interval, or when that time is more than ten minutes ahead.
+rewrite interval, or when that time or `idleSince` is more than ten minutes ahead.
 copilotd's `--idle-status-file` format satisfies it.
 
 ### Readiness and status come from an Orka sidecar

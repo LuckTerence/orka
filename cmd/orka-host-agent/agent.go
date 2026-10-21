@@ -173,6 +173,11 @@ func (a *agent) readStatus() (agenthost.IdleStatus, error) {
 	}
 	age := a.now().Sub(updated)
 	parsed.Stale = age > staleAfter || age < -staleAfter
+	// So is an idleSince that far ahead: idle time would count from the
+	// future, and the host would not suspend until then.
+	if parsed.IdleSince != nil && parsed.IdleSince.Sub(a.now()) > staleAfter {
+		parsed.Stale = true
+	}
 	return parsed, nil
 }
 
