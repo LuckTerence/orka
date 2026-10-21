@@ -110,6 +110,9 @@ func (r *credentialRedactor) heldPrefixLength(text string) int {
 type redactionStream struct {
 	redactor *credentialRedactor
 	held     string
+	// refused is how far into the held text every whitespace has already
+	// been tried as a cut and refused, so a long hold is searched only once.
+	refused int
 }
 
 func (r *credentialRedactor) stream() *redactionStream {
@@ -123,23 +126,35 @@ func (s *redactionStream) write(chunk string) string {
 	if s == nil {
 		return chunk
 	}
-	text := s.held + chunk
-	limit := len(text)
+	joined := s.held + chunk
+	text, limit := joined, len(joined)
 	if s.redactor != nil && s.redactor.replacer != nil {
-		text = s.redactor.replace(text)
+		text = s.redactor.replace(joined)
 		limit = len(text) - s.redactor.heldPrefixLength(text)
 	}
-	cut := patternSafeCut(text, limit)
+	refused := s.refused
+	if text != joined {
+		// A replacement moved the held text; search it again.
+		refused = 0
+	}
+	cut, searched := patternSafeCut(text, limit, refused)
 	for cut > 0 && cut < len(text) && !utf8.RuneStart(text[cut]) {
 		cut--
 	}
-	s.held = text[cut:]
+	s.held, s.refused = text[cut:], 0
+	if cut == 0 {
+		s.refused = searched
+	}
 	return text[:cut]
 }
 
-// maxPatternHeldBytes bounds the text a stream holds for pattern redaction.
-// Text with no safe cut in that much is released.
+// maxPatternHeldBytes is how much a stream holds before it also looks for a
+// cut further back. Text with no safe cut is never released early: it waits
+// for more text or the end of the stream.
 const maxPatternHeldBytes = 2 * harnessv2.MaxProtocolStringBytes
+
+// redactionWhitespace is what `\s` matches in the redaction patterns.
+const redactionWhitespace = " \t\n\f\r"
 
 // redactionProbes stand in for a value that has not arrived yet. If one
 // changes when appended, the text before it ends in a construct that redacts
@@ -152,20 +167,28 @@ var redactionProbes = []string{
 // pattern redaction of the part before the cut cannot change with what
 // follows, or 0 when there is no such cut yet. A cut follows whitespace, so
 // no word is split; nothing before it waits for a value; and no match crosses
-// it. Only the last whitespace and the last line break are tried, which keeps
-// the cost linear in the held text.
-func patternSafeCut(text string, limit int) int {
-	space := strings.LastIndexAny(text[:limit], " \t\n\f\r") + 1
+// it. The last whitespace and the last line break are tried. Past
+// maxPatternHeldBytes every earlier whitespace after refused is tried too, so
+// a long unfinished construct does not hold back the text before it. It also
+// returns how far the text has now been searched without a cut.
+func patternSafeCut(text string, limit, refused int) (int, int) {
+	space := strings.LastIndexAny(text[:limit], redactionWhitespace) + 1
 	line := strings.LastIndexByte(text[:limit], '\n') + 1
 	for _, cut := range []int{space, line} {
-		if cut > 0 && patternFinal(text[:cut], text[cut:]) {
-			return cut
+		if cut > refused && patternFinal(text[:cut], text[cut:]) {
+			return cut, 0
 		}
 	}
-	if len(text) > maxPatternHeldBytes {
-		return limit
+	if len(text) <= maxPatternHeldBytes {
+		return 0, refused
 	}
-	return 0
+	for cut := space; cut > refused+1; {
+		cut = strings.LastIndexAny(text[:cut-1], redactionWhitespace) + 1
+		if cut > refused && patternFinal(text[:cut], text[cut:]) {
+			return cut, 0
+		}
+	}
+	return 0, max(space, refused)
 }
 
 // patternFinal reports whether prefix redacts the same whatever follows it.

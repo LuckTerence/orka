@@ -132,9 +132,32 @@ func TestRedactionStreamReleasesProseWordByWord(t *testing.T) {
 	if got := stream.write("ld and more\nnext"); got != "world and more\n" {
 		t.Fatalf("write = %q", got)
 	}
-	// Text with no safe cut is released once it passes the hold bound.
-	if got := stream.write(strings.Repeat("x", maxPatternHeldBytes)); got == "" || stream.held != "" {
-		t.Fatalf("an oversized word was held: %d bytes released, %d held", len(got), len(stream.held))
+	// A word longer than the hold bound waits for its end, like any other.
+	long := strings.Repeat("x", maxPatternHeldBytes+1)
+	if got := stream.write(long); got != "" {
+		t.Fatalf("an unfinished word was released: %d bytes", len(got))
+	}
+	if got := stream.write(" done"); got != "next"+long+" " {
+		t.Fatalf("an oversized word was not released at its end: %d bytes", len(got))
+	}
+}
+
+// Past the hold bound, text before an unfinished construct is released and
+// the construct is kept whole, never released before its value arrives.
+func TestRedactionStreamKeepsAnUnfinishedConstructPastTheHoldBound(t *testing.T) {
+	long := strings.Repeat("x", maxPatternHeldBytes+1)
+	chunks := []string{long, ` password: "my `, `hidden value" done`}
+	pieces := streamPublished(newCredentialRedactor().stream(), chunks...)
+	if joined, whole := strings.Join(pieces, ""), executionevents.RedactExecutionEventText(strings.Join(chunks, "")); joined != whole {
+		t.Fatalf("published %q, want %q", joined, whole)
+	}
+	for _, piece := range pieces {
+		if strings.Contains(piece, "hidden value") {
+			t.Fatalf("published piece %q carries the credential", piece)
+		}
+	}
+	if pieces[1] != long+" " {
+		t.Fatalf("second piece = %d bytes, want the long word released before the construct", len(pieces[1]))
 	}
 }
 
