@@ -81,7 +81,7 @@ func newAHPConnectCmd() *cobra.Command {
 		Use:   "connect",
 		Short: "Mint an AHP connection token and print the URL to paste into a desktop AHP client",
 		Long: "Mint an AHP connection token for the signed-in person and print the WebSocket URL a desktop AHP client " +
-			"connects to. The token you use must identify you as a person (OIDC or context token); ServiceAccount " +
+			"connects to. The token you use must be your own OIDC sign-in; context tokens and ServiceAccount " +
 			"tokens cannot mint AHP tokens. The URL is shown once and carries the token: anyone holding it acts as " +
 			"you on Orka until it expires or you revoke it.\n\n" +
 			"The URL is built from --url, or else from the server the CLI talks to. Use --url with the public " +

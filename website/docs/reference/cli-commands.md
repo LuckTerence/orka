@@ -363,7 +363,7 @@ Use "orka ahp [command] --help" for more information about a command.
 ## `orka ahp connect`
 
 ```text
-Mint an AHP connection token for the signed-in person and print the WebSocket URL a desktop AHP client connects to. The token you use must identify you as a person (OIDC or context token); ServiceAccount tokens cannot mint AHP tokens. The URL is shown once and carries the token: anyone holding it acts as you on Orka until it expires or you revoke it.
+Mint an AHP connection token for the signed-in person and print the WebSocket URL a desktop AHP client connects to. The token you use must be your own OIDC sign-in; context tokens and ServiceAccount tokens cannot mint AHP tokens. The URL is shown once and carries the token: anyone holding it acts as you on Orka until it expires or you revoke it.
 
 The URL is built from --url, or else from the server the CLI talks to. Use --url with the public https address people reach the Orka API on when the CLI reaches it another way, such as a port-forward.
 

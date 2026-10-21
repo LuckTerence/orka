@@ -405,8 +405,8 @@ orka ahp tokens list            # active tokens; --all adds expired and revoked 
 orka ahp tokens revoke ahpt_<id>
 ```
 
-Like linked accounts, these commands need a personal identity (OIDC or context
-token). `--name` defaults to this machine's host name, `--ttl` to the server's
+These commands need your own OIDC sign-in; context tokens and ServiceAccount
+tokens are refused. `--name` defaults to this machine's host name, `--ttl` to the server's
 default lifetime (`720h`), and `--url` to `--server`. A plaintext `ws://` URL for
 any host but this machine is refused unless `--insecure` is given.
 
