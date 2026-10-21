@@ -108,9 +108,12 @@ Secret reaches the running host without a restart.
 
 ### Standalone access
 
-A template with `access: Standalone` skips the relay. The client port-forwards to the
-host's loopback listener and presents the host's connection token, which Orka writes to
-the Secret named in `status.connectionSecretRef`:
+A template with `access: Standalone` skips the relay. `access` changes only what Orka
+publishes, not the daemon's arguments, so the template must also start the daemon in its
+standalone mode: for copilotd, `--standalone` instead of `--relay` and the Mission Control
+token options. The client port-forwards to the host's loopback listener and presents the
+host's connection token, which Orka writes to the Secret named in
+`status.connectionSecretRef`:
 
 ```bash
 ns=$(kubectl get secret alice-connection -o jsonpath='{.data.namespace}' | base64 -d)
