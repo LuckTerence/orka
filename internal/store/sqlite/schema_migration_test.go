@@ -385,33 +385,6 @@ func schemaVersion1StoreDB(t *testing.T, origin string, complete bool) (string, 
 	return path, db
 }
 
-type version1StoreState struct {
-	fingerprint  string
-	version      int
-	origin       string
-	complete     bool
-	canBootstrap bool
-}
-
-func readVersion1StoreState(t *testing.T, db *sql.DB, path string) version1StoreState {
-	t.Helper()
-	schema, err := readSchema(db)
-	require.NoError(t, err)
-	version, err := readSchemaVersion(db)
-	require.NoError(t, err)
-	record, err := readDataset(db)
-	require.NoError(t, err)
-	info, err := NewStore(db, path).DatasetInfo()
-	require.NoError(t, err)
-	return version1StoreState{
-		fingerprint:  schemaFingerprint(schema),
-		version:      version,
-		origin:       record.origin,
-		complete:     record.complete,
-		canBootstrap: info.CanBootstrapSnapshotKey,
-	}
-}
-
 // A 159-object fixture rebuilt from historical DDL plus 167-to-168.sql has the
 // current layout, but it is not a store this release writes. It passes the
 // version-0 migration gate and is adopted, while every real version-1 store is
