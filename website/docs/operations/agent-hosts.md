@@ -71,6 +71,11 @@ With either install, create an `AgentHostTemplate` (see
 and grant `use` on it to the people who may run hosts. Write the Role as a manifest:
 `kubectl create role` refuses `use` because the API does not list that verb.
 
+Whoever may update an AgentHost controls it. They can suspend or delete it, and deleting
+it deletes its volume. They can also point it at a token Secret they can read, which
+restarts it on its volume as them. So give each person their own namespace for hosts,
+and bind this Role to that person there:
+
 ```yaml
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -85,6 +90,11 @@ rules:
     resources: ["agenthosts"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 ```
+
+If people must share a namespace, keep `create` and the template's `use` in a shared
+Role, and give each person a Role of their own for `get`, `update`, `patch` and `delete`,
+with `resourceNames` naming only their host. `create` cannot be limited by name, so
+agree on names before hosts are created.
 
 Creating an `AgentHost` requires `use` on its template, and naming a token Secret requires
 `get` on that Secret, both checked against the caller by an admission policy.

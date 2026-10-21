@@ -68,7 +68,9 @@ model-routing sidecar did not hold up in review.
   `githubTokenSecretRef` naming a Secret in the AgentHost's namespace.
 - Creating an AgentHost requires `use` on the template, checked against the live
   admission caller, as classes are for Tasks and Tools. RBAC on `agenthosts` decides who
-  may create one at all.
+  may create one at all, and who controls it afterwards: anyone who may update a host can
+  point it at a Secret they can read and restart it on its volume. People who share a
+  namespace therefore need Roles scoped to their own hosts.
 - Naming a GitHub token Secret, on creation or by changing the reference, requires `get`
   on that Secret for the same caller. The controller reads Secrets with its own
   credentials, so without this check anyone allowed to create a host could mount someone
@@ -212,7 +214,8 @@ image and pinned by digest (`--agent-host-agent-image`):
   root filesystem where the workload allows; Pod Security `restricted` in the host
   namespace; optional `runtimeClassName` (for example gVisor or Kata).
 - The NetworkPolicy denies all ingress except the controller (its namespace and Pod
-  labels together) to the sidecar's status port, and allows egress to DNS, TCP 443 on public
+  labels together) to the sidecar's status port, and allows egress to DNS (the cluster DNS
+  Pods, and port 53 on link-local addresses for node-local DNS caches), TCP 443 on public
   addresses (private, shared, link-local and loopback ranges excluded) and the template's
   extra rules. It confines hosts only on clusters whose network plugin
   enforces NetworkPolicy.
