@@ -9,6 +9,9 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"reflect"
+	"strings"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -51,6 +54,24 @@ func TestUpdateAgentTool_Parameters(t *testing.T) {
 	for _, key := range []string{nameField, namespaceField, systemPromptField, toolsField, modelField} {
 		if _, ok := props[key]; !ok {
 			t.Errorf("missing %s property", key)
+		}
+	}
+	systemPrompt, ok := props[systemPromptField].(map[string]any)
+	description, _ := systemPrompt[jsonSchemaDescriptionField].(string)
+	if !ok || !strings.Contains(description, "native instruction mechanism") {
+		t.Fatalf("systemPrompt schema = %#v, want OpenCode restriction guidance", systemPrompt)
+	}
+	model, ok := props[modelField].(map[string]any)
+	if !ok {
+		t.Fatalf("model schema = %#v, want object", props[modelField])
+	}
+	modelProps, ok := model[jsonSchemaPropertiesField].(map[string]any)
+	if !ok {
+		t.Fatalf("model properties = %#v, want object", model[jsonSchemaPropertiesField])
+	}
+	for _, key := range []string{"provider", nameField, "temperature", "contextWindow", "maxTokens"} {
+		if _, ok := modelProps[key]; !ok {
+			t.Errorf("model schema missing %s property", key)
 		}
 	}
 }
@@ -196,6 +217,554 @@ func TestUpdateAgentTool_Execute_VerifyUpdatedFields(t *testing.T) {
 	}
 	if len(updated.Spec.Tools) != 1 || updated.Spec.Tools[0].Name != webSearchToolName {
 		t.Errorf("tools not updated, got %v", updated.Spec.Tools)
+	}
+}
+
+func TestUpdateAgentTool_Execute_UpdatesNestedModelFields(t *testing.T) {
+	temperature := 0.2
+	contextWindow := int32(32768)
+	maxTokens := int32(4096)
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: testMyAgentName, Namespace: defaultNamespace},
+		Spec: corev1alpha1.AgentSpec{Model: &corev1alpha1.ModelConfig{
+			Provider:      providerOpenAI,
+			Name:          testGPT4OModel,
+			Temperature:   &temperature,
+			ContextWindow: &contextWindow,
+			MaxTokens:     &maxTokens,
+		}},
+	}
+	fc := newFakeClient(agent)
+	ctx := WithToolContext(context.Background(), &ToolContext{Client: fc, Namespace: defaultNamespace})
+	result, err := (&UpdateAgentTool{}).Execute(ctx, json.RawMessage(`{
+		"name":"my-agent",
+		"model":{"provider":"anthropic","name":"claude-sonnet-4-20250514","temperature":0.4,"contextWindow":200000,"maxTokens":8192}
+	}`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var response ChatToolResult
+	if err := json.Unmarshal([]byte(result), &response); err != nil {
+		t.Fatalf("failed to parse result: %v", err)
+	}
+	if !response.Success {
+		t.Fatalf("expected success, got error: %s", response.Error)
+	}
+
+	var updated corev1alpha1.Agent
+	if err := fc.Get(context.Background(), apitypes.NamespacedName{Name: testMyAgentName, Namespace: defaultNamespace}, &updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.Spec.Model == nil || updated.Spec.Model.Provider != "anthropic" || updated.Spec.Model.Name != "claude-sonnet-4-20250514" {
+		t.Fatalf("model identity = %#v, want nested provider/name update", updated.Spec.Model)
+	}
+	if updated.Spec.Model.Temperature == nil || *updated.Spec.Model.Temperature != 0.4 {
+		t.Fatalf("model.temperature = %#v, want 0.4", updated.Spec.Model.Temperature)
+	}
+	if updated.Spec.Model.ContextWindow == nil || *updated.Spec.Model.ContextWindow != 200000 {
+		t.Fatalf("model.contextWindow = %#v, want 200000", updated.Spec.Model.ContextWindow)
+	}
+	if updated.Spec.Model.MaxTokens == nil || *updated.Spec.Model.MaxTokens != 8192 {
+		t.Fatalf("model.maxTokens = %#v, want 8192", updated.Spec.Model.MaxTokens)
+	}
+}
+
+// The Registry preserves numeric-string text, and the fake client does not
+// enforce CRD bounds: validation must reject before any Agent update.
+func TestUpdateAgentTool_Execute_TemperatureBounds(t *testing.T) {
+	cases := []struct {
+		name  string
+		value string
+		want  float64
+		valid bool
+	}{
+		{name: "minimum", value: "0", want: 0, valid: true},
+		{name: "maximum", value: "2", want: 2, valid: true},
+		{name: "ordinary control", value: "0.7", want: 0.7, valid: true},
+		{name: "maximum exponent", value: "2e0", want: 2, valid: true},
+		{name: "scaled maximum exponent", value: "20E-1", want: 2, valid: true},
+		{name: "negative zero", value: "-0", want: 0, valid: true},
+		{name: "zero exponent", value: "0e50", want: 0, valid: true},
+		{name: "underflow control", value: "1e-1000", want: 0, valid: true},
+		{name: "huge negative exponent", value: "1e-999999999999999999999", want: 0, valid: true},
+		{name: "zero huge exponent", value: "0e999999999999999999999", want: 0, valid: true},
+		{name: "inside maximum", value: "1.9999999999999999", want: 2, valid: true},
+		{name: "above maximum", value: "2.1"},
+		{name: "rounded maximum", value: "2.0000000000000001"},
+		{name: "rounded maximum exponent", value: "2.0000000000000001e0"},
+		{name: "scaled rounded maximum exponent", value: "20000000000000001e-16"},
+		{name: "negative", value: "-0.1"},
+		{name: "negative underflow", value: "-1e-1000"},
+		{name: "negative huge exponent", value: "-1e-999999999999999999999"},
+	}
+	for _, mode := range []string{"direct", "registry", "registry numeric string"} {
+		for _, tc := range cases {
+			t.Run(mode+"/"+tc.name, func(t *testing.T) {
+				temperature := 0.4
+				original := &corev1alpha1.Agent{
+					ObjectMeta: metav1.ObjectMeta{Name: testMyAgentName, Namespace: defaultNamespace},
+					Spec: corev1alpha1.AgentSpec{
+						Model: &corev1alpha1.ModelConfig{
+							Provider: providerOpenAI, Name: testGPT4OModel, Temperature: &temperature,
+						},
+						SystemPrompt: &corev1alpha1.PromptSource{Inline: "original prompt"},
+						Tools:        []corev1alpha1.ToolReference{{Name: "web_search"}},
+					},
+				}
+				fc := newFakeClient(original.DeepCopy())
+				ctx := WithToolContext(context.Background(), &ToolContext{Client: fc, Namespace: defaultNamespace})
+				key := apitypes.NamespacedName{Name: testMyAgentName, Namespace: defaultNamespace}
+				if err := fc.Get(ctx, key, original); err != nil {
+					t.Fatal(err)
+				}
+				tool := &UpdateAgentTool{}
+				execute := tool.Execute
+				if mode != "direct" {
+					registry := NewRegistry()
+					registry.Register(tool)
+					execute = func(ctx context.Context, args json.RawMessage) (string, error) {
+						return registry.Execute(ctx, tool.Name(), args)
+					}
+				}
+				value := tc.value
+				if mode == "registry numeric string" {
+					value = fmt.Sprintf("%q", value)
+				}
+				result, err := execute(ctx, json.RawMessage(`{"name":"my-agent","systemPrompt":"updated prompt","tools":["file_read"],"model":{"name":"updated-model","temperature":`+value+`}}`))
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				var response ChatToolResult
+				if err := json.Unmarshal([]byte(result), &response); err != nil {
+					t.Fatal(err)
+				}
+				var persisted corev1alpha1.Agent
+				if err := fc.Get(ctx, key, &persisted); err != nil {
+					t.Fatal(err)
+				}
+				if !tc.valid {
+					if response.Success || response.ErrorType != errTypeInvalidArgs || !strings.Contains(response.Error, "model.temperature") {
+						t.Errorf("result = %#v, want invalid_arguments naming model.temperature", response)
+					}
+					if !reflect.DeepEqual(&persisted, original) {
+						t.Errorf("rejected temperature mutated Agent (resourceVersion %q -> %q)", original.ResourceVersion, persisted.ResourceVersion)
+					}
+					return
+				}
+				if !response.Success {
+					t.Fatalf("expected success, got error: %s", response.Error)
+				}
+				want := original.DeepCopy()
+				want.Spec.Model.Name = "updated-model"
+				want.Spec.Model.Temperature = &tc.want
+				want.Spec.SystemPrompt.Inline = "updated prompt"
+				want.Spec.Tools = []corev1alpha1.ToolReference{{Name: "file_read"}}
+				if !reflect.DeepEqual(persisted.Spec, want.Spec) {
+					t.Errorf("persisted spec = %#v, want %#v", persisted.Spec, want.Spec)
+				}
+			})
+		}
+	}
+}
+
+func TestUpdateAgentTool_Execute_ModelTemperatureCompatibility(t *testing.T) {
+	for _, mode := range []string{"direct", "registry"} {
+		for _, tc := range []struct {
+			name      string
+			modelJSON string
+			wantName  string
+			wantError bool
+		}{
+			{name: "omitted temperature", modelJSON: `{"name":"updated-model"}`, wantName: "updated-model"},
+			{name: "null temperature", modelJSON: `{"name":"updated-model","temperature":null}`, wantName: "updated-model", wantError: mode == "direct"},
+			{name: "null model", modelJSON: `null`, wantName: testGPT4OModel, wantError: mode == "direct"},
+			{name: "legacy scalar model", modelJSON: `"updated-model"`, wantName: "updated-model"},
+		} {
+			t.Run(mode+"/"+tc.name, func(t *testing.T) {
+				temperature := 0.4
+				original := &corev1alpha1.Agent{
+					ObjectMeta: metav1.ObjectMeta{Name: testMyAgentName, Namespace: defaultNamespace},
+					Spec: corev1alpha1.AgentSpec{Model: &corev1alpha1.ModelConfig{
+						Provider: providerOpenAI, Name: testGPT4OModel, Temperature: &temperature,
+					}},
+				}
+				fc := newFakeClient(original.DeepCopy())
+				ctx := WithToolContext(context.Background(), &ToolContext{Client: fc, Namespace: defaultNamespace})
+				key := apitypes.NamespacedName{Name: testMyAgentName, Namespace: defaultNamespace}
+				if err := fc.Get(ctx, key, original); err != nil {
+					t.Fatal(err)
+				}
+				tool := &UpdateAgentTool{}
+				execute := tool.Execute
+				if mode == "registry" {
+					registry := NewRegistry()
+					registry.Register(tool)
+					execute = func(ctx context.Context, args json.RawMessage) (string, error) {
+						return registry.Execute(ctx, tool.Name(), args)
+					}
+				}
+				result, err := execute(ctx, json.RawMessage(`{"name":"my-agent","model":`+tc.modelJSON+`}`))
+				if err != nil {
+					t.Fatal(err)
+				}
+				var response ChatToolResult
+				if err := json.Unmarshal([]byte(result), &response); err != nil {
+					t.Fatal(err)
+				}
+				var persisted corev1alpha1.Agent
+				if err := fc.Get(ctx, key, &persisted); err != nil {
+					t.Fatal(err)
+				}
+				if tc.wantError {
+					if response.Success || response.ErrorType != errTypeInvalidArgs {
+						t.Errorf("result = %#v, want invalid_arguments", response)
+					}
+					if !reflect.DeepEqual(&persisted, original) {
+						t.Error("rejected null value mutated Agent")
+					}
+					return
+				}
+				if !response.Success {
+					t.Fatalf("expected success, got error: %s", response.Error)
+				}
+				want := original.DeepCopy()
+				want.Spec.Model.Name = tc.wantName
+				if !reflect.DeepEqual(persisted.Spec, want.Spec) {
+					t.Errorf("persisted spec = %#v, want %#v", persisted.Spec, want.Spec)
+				}
+			})
+		}
+	}
+}
+
+func TestUpdateAgentTool_Execute_LegacyModelStringKeepsProviderBackedSplitting(t *testing.T) {
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: testMyAgentName, Namespace: defaultNamespace},
+		Spec: corev1alpha1.AgentSpec{Model: &corev1alpha1.ModelConfig{
+			Provider: providerOpenAI,
+			Name:     testGPT4OModel,
+		}},
+	}
+	fc := newFakeClient(agent)
+	ctx := WithToolContext(context.Background(), &ToolContext{Client: fc, Namespace: defaultNamespace})
+	result, err := (&UpdateAgentTool{}).Execute(ctx, json.RawMessage(`{
+		"name":"my-agent",
+		"model":"anthropic/claude-haiku-4-5"
+	}`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var response ChatToolResult
+	if err := json.Unmarshal([]byte(result), &response); err != nil {
+		t.Fatalf("failed to parse result: %v", err)
+	}
+	if !response.Success {
+		t.Fatalf("expected success, got error: %s", response.Error)
+	}
+
+	var updated corev1alpha1.Agent
+	if err := fc.Get(context.Background(), apitypes.NamespacedName{Name: testMyAgentName, Namespace: defaultNamespace}, &updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.Spec.Model == nil || updated.Spec.Model.Provider != "anthropic" || updated.Spec.Model.Name != "claude-haiku-4-5" {
+		t.Fatalf("model identity = %#v, want legacy provider/name split", updated.Spec.Model)
+	}
+}
+
+func TestUpdateAgentTool_Execute_RejectsModelLimitsForNonOpenCodeBuiltIns(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		runtime   corev1alpha1.AgentRuntimeType
+		modelJSON string
+		wantError string
+	}{
+		{name: "codex context window", runtime: corev1alpha1.AgentRuntimeCodex, modelJSON: `{"contextWindow":32768}`, wantError: "contextWindow"},
+		{name: "claude max tokens", runtime: corev1alpha1.AgentRuntimeClaude, modelJSON: `{"maxTokens":4096}`, wantError: "maxTokens"},
+		{name: "copilot context window", runtime: corev1alpha1.AgentRuntimeCopilot, modelJSON: `{"contextWindow":32768}`, wantError: "contextWindow"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			original := &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Name: testMyAgentName, Namespace: defaultNamespace},
+				Spec: corev1alpha1.AgentSpec{
+					Runtime: &corev1alpha1.AgentCLIRuntime{Type: tt.runtime},
+					Model:   &corev1alpha1.ModelConfig{Name: "model"},
+				},
+			}
+			fc := newFakeClient(original.DeepCopy())
+			ctx := WithToolContext(context.Background(), &ToolContext{Client: fc, Namespace: defaultNamespace})
+			result, err := (&UpdateAgentTool{}).Execute(ctx, json.RawMessage(`{"name":"my-agent","model":`+tt.modelJSON+`}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var response ChatToolResult
+			if err := json.Unmarshal([]byte(result), &response); err != nil {
+				t.Fatal(err)
+			}
+			if response.Success || !strings.Contains(response.Error, tt.wantError) {
+				t.Fatalf("response = %#v, want %q rejection", response, tt.wantError)
+			}
+			var persisted corev1alpha1.Agent
+			if err := fc.Get(context.Background(), apitypes.NamespacedName{Name: testMyAgentName, Namespace: defaultNamespace}, &persisted); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(persisted.Spec, original.Spec) {
+				t.Fatalf("persisted spec changed after rejection: got %#v want %#v", persisted.Spec, original.Spec)
+			}
+		})
+	}
+}
+
+func TestUpdateAgentTool_Execute_NormalizesOpenCodeModelAndPreservesOmittedFields(t *testing.T) {
+	temperature := 0.7
+	contextWindow := int32(32768)
+	maxTokens := int32(4096)
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: testMyAgentName, Namespace: defaultNamespace},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeOpencode},
+			Model: &corev1alpha1.ModelConfig{
+				Name:          "openai/gpt-5.4",
+				Temperature:   &temperature,
+				ContextWindow: &contextWindow,
+				MaxTokens:     &maxTokens,
+			},
+		},
+	}
+	fc := newFakeClient(agent)
+	ctx := WithToolContext(context.Background(), &ToolContext{Client: fc, Namespace: defaultNamespace})
+	result, err := (&UpdateAgentTool{}).Execute(ctx, json.RawMessage(`{
+		"name":"my-agent",
+		"model":{"name":"gpt-5.5"}
+	}`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var response ChatToolResult
+	if err := json.Unmarshal([]byte(result), &response); err != nil {
+		t.Fatalf("failed to parse result: %v", err)
+	}
+	if !response.Success {
+		t.Fatalf("expected success, got error: %s", response.Error)
+	}
+
+	var updated corev1alpha1.Agent
+	if err := fc.Get(context.Background(), apitypes.NamespacedName{Name: testMyAgentName, Namespace: defaultNamespace}, &updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.Spec.Model == nil || updated.Spec.Model.Name != "openai/gpt-5.5" || updated.Spec.Model.Provider != "" {
+		t.Fatalf("model identity = %#v, want normalized OpenCode model", updated.Spec.Model)
+	}
+	if updated.Spec.Model.Temperature == nil || *updated.Spec.Model.Temperature != temperature ||
+		updated.Spec.Model.ContextWindow == nil || *updated.Spec.Model.ContextWindow != contextWindow ||
+		updated.Spec.Model.MaxTokens == nil || *updated.Spec.Model.MaxTokens != maxTokens {
+		t.Fatalf("model = %#v, want omitted controls preserved", updated.Spec.Model)
+	}
+}
+
+func TestUpdateAgentTool_Execute_PreservesNestedOpenCodeLegacyModelString(t *testing.T) {
+	agent := testOpenCodeAgent()
+	fc := newFakeClient(agent)
+	ctx := WithToolContext(context.Background(), &ToolContext{Client: fc, Namespace: defaultNamespace})
+	result, err := (&UpdateAgentTool{}).Execute(ctx, json.RawMessage(`{
+		"name":"my-agent",
+		"model":"openrouter/anthropic/claude-sonnet-4"
+	}`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var response ChatToolResult
+	if err := json.Unmarshal([]byte(result), &response); err != nil {
+		t.Fatalf("failed to parse result: %v", err)
+	}
+	if !response.Success {
+		t.Fatalf("expected success, got error: %s", response.Error)
+	}
+
+	var updated corev1alpha1.Agent
+	if err := fc.Get(context.Background(), apitypes.NamespacedName{Name: testMyAgentName, Namespace: defaultNamespace}, &updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.Spec.Model == nil || updated.Spec.Model.Name != "openrouter/anthropic/claude-sonnet-4" || updated.Spec.Model.Provider != "" {
+		t.Fatalf("model identity = %#v, want full nested OpenCode model ID", updated.Spec.Model)
+	}
+}
+
+func TestUpdateAgentTool_Execute_PreservesNestedOpenCodeObjectModelName(t *testing.T) {
+	agent := testOpenCodeAgent()
+	fc := newFakeClient(agent)
+	ctx := WithToolContext(context.Background(), &ToolContext{Client: fc, Namespace: defaultNamespace})
+	result, err := (&UpdateAgentTool{}).Execute(ctx, json.RawMessage(`{
+		"name":"my-agent",
+		"model":{"name":"openrouter/google/gemini-3.1-pro"}
+	}`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var response ChatToolResult
+	if err := json.Unmarshal([]byte(result), &response); err != nil {
+		t.Fatalf("failed to parse result: %v", err)
+	}
+	if !response.Success {
+		t.Fatalf("expected success, got error: %s", response.Error)
+	}
+
+	var updated corev1alpha1.Agent
+	if err := fc.Get(context.Background(), apitypes.NamespacedName{Name: testMyAgentName, Namespace: defaultNamespace}, &updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.Spec.Model == nil || updated.Spec.Model.Name != "openrouter/google/gemini-3.1-pro" || updated.Spec.Model.Provider != "" {
+		t.Fatalf("model identity = %#v, want full nested OpenCode object model ID", updated.Spec.Model)
+	}
+}
+
+func TestUpdateAgentTool_Execute_UpdatesAllOpenCodeModelFields(t *testing.T) {
+	contextWindow := int32(32768)
+	maxTokens := int32(4096)
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: testMyAgentName, Namespace: defaultNamespace},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeOpencode},
+			Model: &corev1alpha1.ModelConfig{
+				Name:          "openai/gpt-5.4",
+				ContextWindow: &contextWindow,
+				MaxTokens:     &maxTokens,
+			},
+		},
+	}
+	fc := newFakeClient(agent)
+	ctx := WithToolContext(context.Background(), &ToolContext{Client: fc, Namespace: defaultNamespace})
+	result, err := (&UpdateAgentTool{}).Execute(ctx, json.RawMessage(`{
+		"name":"my-agent",
+		"model":{"provider":"anthropic","name":"claude-sonnet-4-20250514","temperature":0.7,"contextWindow":200000,"maxTokens":8192}
+	}`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var response ChatToolResult
+	if err := json.Unmarshal([]byte(result), &response); err != nil {
+		t.Fatalf("failed to parse result: %v", err)
+	}
+	if !response.Success {
+		t.Fatalf("expected success, got error: %s", response.Error)
+	}
+
+	var updated corev1alpha1.Agent
+	if err := fc.Get(context.Background(), apitypes.NamespacedName{Name: testMyAgentName, Namespace: defaultNamespace}, &updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.Spec.Model == nil || updated.Spec.Model.Name != "anthropic/claude-sonnet-4-20250514" || updated.Spec.Model.Provider != "" {
+		t.Fatalf("model identity = %#v, want normalized OpenCode provider/model", updated.Spec.Model)
+	}
+	if updated.Spec.Model.Temperature == nil || *updated.Spec.Model.Temperature != 0.7 ||
+		updated.Spec.Model.ContextWindow == nil || *updated.Spec.Model.ContextWindow != 200000 ||
+		updated.Spec.Model.MaxTokens == nil || *updated.Spec.Model.MaxTokens != 8192 {
+		t.Fatalf("model controls = %#v, want all nested fields persisted", updated.Spec.Model)
+	}
+}
+
+func TestUpdateAgentTool_Execute_RejectsInvalidOpenCodeModelUpdates(t *testing.T) {
+	tests := []struct {
+		name      string
+		modelJSON string
+		wantError string
+	}{
+		{name: "unsupported temperature", modelJSON: `{"temperature":1}`, wantError: "temperature"},
+		{name: "invalid token limits", modelJSON: `{"contextWindow":4096,"maxTokens":4096}`, wantError: "must exceed"},
+		{name: "substitution model", modelJSON: `{"name":"{env:PROVIDER}/gpt"}`, wantError: "substitution braces"},
+		{name: "conflicting provider", modelJSON: `{"provider":"anthropic","name":"openai/gpt-5.4"}`, wantError: "provider"},
+		{name: "nested model with conflicting provider", modelJSON: `{"provider":"openrouter","name":"anthropic/claude-sonnet-4"}`, wantError: "provider"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			original := testOpenCodeAgent()
+			fc := newFakeClient(original.DeepCopy())
+			ctx := WithToolContext(context.Background(), &ToolContext{Client: fc, Namespace: defaultNamespace})
+			result, err := (&UpdateAgentTool{}).Execute(ctx, json.RawMessage(`{"name":"my-agent","model":`+tt.modelJSON+`}`))
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			var response ChatToolResult
+			if err := json.Unmarshal([]byte(result), &response); err != nil {
+				t.Fatalf("failed to parse result: %v", err)
+			}
+			if response.Success || response.ErrorType != errTypeInvalidArgs || !strings.Contains(response.Error, tt.wantError) {
+				t.Fatalf("response = %#v, want rejection containing %q", response, tt.wantError)
+			}
+
+			var persisted corev1alpha1.Agent
+			if err := fc.Get(context.Background(), apitypes.NamespacedName{Name: testMyAgentName, Namespace: defaultNamespace}, &persisted); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(persisted.Spec, original.Spec) {
+				t.Fatalf("persisted spec changed after rejected update:\n got: %#v\nwant: %#v", persisted.Spec, original.Spec)
+			}
+		})
+	}
+}
+
+func TestUpdateAgentTool_Execute_RejectsUnusableResultingOpenCodeAgent(t *testing.T) {
+	agent := testOpenCodeAgent()
+	unsupportedTemperature := 1.0
+	agent.Spec.Model.Temperature = &unsupportedTemperature
+	fc := newFakeClient(agent.DeepCopy())
+	ctx := WithToolContext(context.Background(), &ToolContext{Client: fc, Namespace: defaultNamespace})
+	result, err := (&UpdateAgentTool{}).Execute(ctx, json.RawMessage(`{"name":"my-agent","tools":["web_search"]}`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var response ChatToolResult
+	if err := json.Unmarshal([]byte(result), &response); err != nil {
+		t.Fatalf("failed to parse result: %v", err)
+	}
+	if response.Success || response.ErrorType != errTypeInvalidArgs || !strings.Contains(response.Error, "temperature") {
+		t.Fatalf("response = %#v, want unusable resulting Agent rejection", response)
+	}
+	var persisted corev1alpha1.Agent
+	if err := fc.Get(context.Background(), apitypes.NamespacedName{Name: testMyAgentName, Namespace: defaultNamespace}, &persisted); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(persisted.Spec, agent.Spec) {
+		t.Fatalf("persisted spec changed after rejected update:\n got: %#v\nwant: %#v", persisted.Spec, agent.Spec)
+	}
+}
+
+func TestUpdateAgentTool_Execute_AcceptsOpenCodeSystemPrompt(t *testing.T) {
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: testMyAgentName, Namespace: defaultNamespace},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeOpencode},
+			Model:   &corev1alpha1.ModelConfig{Name: "openai/gpt-test", ContextWindow: new(int32(32768)), MaxTokens: new(int32(4096))},
+		},
+	}
+	fc := newFakeClient(agent)
+	ctx := WithToolContext(context.Background(), &ToolContext{Client: fc, Namespace: defaultNamespace})
+	result, err := (&UpdateAgentTool{}).Execute(ctx, json.RawMessage(`{"name":"my-agent","systemPrompt":"You write code"}`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var response ChatToolResult
+	if err := json.Unmarshal([]byte(result), &response); err != nil {
+		t.Fatalf("failed to parse result: %v", err)
+	}
+	if !response.Success {
+		t.Fatalf("native prompt was rejected: %s", response.Error)
+	}
+	var updated corev1alpha1.Agent
+	if err := fc.Get(context.Background(), apitypes.NamespacedName{Name: testMyAgentName, Namespace: defaultNamespace}, &updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.Spec.SystemPrompt == nil || updated.Spec.SystemPrompt.Inline != "You write code" {
+		t.Fatalf("systemPrompt = %#v, want inline %q", updated.Spec.SystemPrompt, "You write code")
+	}
+}
+
+func testOpenCodeAgent() *corev1alpha1.Agent {
+	return &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: testMyAgentName, Namespace: defaultNamespace},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeOpencode},
+			Model:   testOpenCodeModelConfig("openai/gpt-5.4"),
+		},
 	}
 }
 

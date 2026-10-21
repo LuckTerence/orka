@@ -8,7 +8,10 @@ rules:
   - ""
   resources:
   - configmaps
+  - namespaces
+  - pods
   - secrets
+  - services
   verbs:
   - create
   - delete
@@ -16,22 +19,6 @@ rules:
   - list
   - patch
   - update
-  - watch
-- apiGroups:
-  - ""
-  resources:
-  - endpoints
-  - namespaces
-  - nodes
-  - persistentvolumeclaims
-  - persistentvolumes
-  - pods
-  - pods/status
-  - replicationcontrollers
-  - services
-  verbs:
-  - get
-  - list
   - watch
 - apiGroups:
   - ""
@@ -46,16 +33,19 @@ rules:
 - apiGroups:
   - ""
   resources:
-  - pods/log
+  - persistentvolumeclaims
+  - persistentvolumes
+  - pods/status
   verbs:
   - get
+  - list
+  - watch
 - apiGroups:
   - ""
   resources:
-  - pods/portforward
-  - serviceaccounts/token
+  - pods/log
   verbs:
-  - create
+  - get
 - apiGroups:
   - ""
   resources:
@@ -67,18 +57,16 @@ rules:
   - update
   - watch
 - apiGroups:
+  - ""
+  resources:
+  - serviceaccounts/token
+  verbs:
+  - create
+- apiGroups:
   - admissionregistration.k8s.io
   resources:
   - validatingadmissionpolicies
   - validatingadmissionpolicybindings
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - agents.x-k8s.io
-  resources:
-  - sandboxes
   verbs:
   - get
   - list
@@ -105,21 +93,15 @@ rules:
 - apiGroups:
   - apps
   resources:
-  - daemonsets
   - deployments
   - replicasets
-  - statefulsets
   verbs:
+  - create
+  - delete
   - get
   - list
-  - watch
-- apiGroups:
-  - ate.dev
-  resources:
-  - actortemplates
-  verbs:
-  - get
-  - list
+  - patch
+  - update
   - watch
 - apiGroups:
   - authorization.k8s.io
@@ -127,22 +109,6 @@ rules:
   - subjectaccessreviews
   verbs:
   - create
-- apiGroups:
-  - autoscaling
-  resources:
-  - horizontalpodautoscalers
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - batch
-  resources:
-  - cronjobs
-  verbs:
-  - get
-  - list
-  - watch
 - apiGroups:
   - batch
   resources:
@@ -178,10 +144,18 @@ rules:
   resources:
   - agentruntimes
   - agents
+  - branchclaims
+  - connections
+  - controllerepochs
+  - externaleffects
   - memorybackends
+  - promptattempts
   - providers
+  - publications
   - repositorymonitors
   - repositoryscans
+  - runtimepools
+  - runtimesessioncontrols
   - skills
   - substrateactorpools
   - tasks
@@ -199,11 +173,20 @@ rules:
   resources:
   - agentruntimes/finalizers
   - agents/finalizers
+  - branchclaims/finalizers
+  - connections/finalizers
+  - connectorproviders/finalizers
+  - controllerepochs/finalizers
+  - externaleffects/finalizers
   - memorybackends/finalizers
   - outboundaccesspolicies/finalizers
+  - promptattempts/finalizers
   - providers/finalizers
+  - publications/finalizers
   - repositorymonitors/finalizers
   - repositoryscans/finalizers
+  - runtimepools/finalizers
+  - runtimesessioncontrols/finalizers
   - skills/finalizers
   - substrateactorpools/finalizers
   - tasks/finalizers
@@ -215,11 +198,20 @@ rules:
   resources:
   - agentruntimes/status
   - agents/status
+  - branchclaims/status
+  - connections/status
+  - connectorproviders/status
+  - controllerepochs/status
+  - externaleffects/status
   - memorybackends/status
   - outboundaccesspolicies/status
+  - promptattempts/status
   - providers/status
+  - publications/status
   - repositorymonitors/status
   - repositoryscans/status
+  - runtimepools/status
+  - runtimesessioncontrols/status
   - skills/status
   - substrateactorpools/status
   - tasks/status
@@ -231,11 +223,29 @@ rules:
 - apiGroups:
   - core.orka.ai
   resources:
+  - connectorproviders
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - core.orka.ai
+  resources:
   - outboundaccesspolicies
   verbs:
   - get
   - list
   - watch
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - sessions
+  verbs:
+  - delete
+  - get
+  - list
 - apiGroups:
   - discovery.k8s.io
   resources:
@@ -249,29 +259,10 @@ rules:
   resources:
   - events
   verbs:
-  - get
-  - list
-- apiGroups:
-  - extensions.agents.x-k8s.io
-  resources:
-  - sandboxclaims
-  verbs:
   - create
-  - delete
   - get
   - list
   - patch
-  - update
-  - watch
-- apiGroups:
-  - extensions.agents.x-k8s.io
-  resources:
-  - sandboxtemplates
-  - sandboxwarmpools
-  verbs:
-  - get
-  - list
-  - watch
 - apiGroups:
   - gateway.orka.ai
   resources:
@@ -305,22 +296,6 @@ rules:
   - patch
   - update
 - apiGroups:
-  - metrics.k8s.io
-  resources:
-  - nodes
-  - pods
-  verbs:
-  - get
-  - list
-- apiGroups:
-  - networking.k8s.io
-  resources:
-  - ingresses
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
   - networking.k8s.io
   resources:
   - networkpolicies
@@ -329,26 +304,19 @@ rules:
   - delete
   - get
   - list
+  - patch
+  - update
   - watch
 - apiGroups:
   - policy
   resources:
   - poddisruptionbudgets
   verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - rbac.authorization.k8s.io
-  resources:
-  - clusterrolebindings
-  - rolebindings
-  - roles
-  verbs:
   - create
   - delete
   - get
   - list
+  - patch
   - update
   - watch
 - apiGroups:
@@ -370,18 +338,35 @@ rules:
   verbs:
   - bind
 - apiGroups:
-  - storage.k8s.io
+  - rbac.authorization.k8s.io
   resources:
-  - storageclasses
+  - rolebindings
+  - roles
   verbs:
+  - create
+  - delete
   - get
   - list
+  - update
+  - watch
+- apiGroups:
+  - workspace.orka.ai
+  resources:
+  - executionworkspacecheckpoints
+  verbs:
+  - admit
+  - get
+  - list
+  - patch
+  - update
+  - use
   - watch
 - apiGroups:
   - workspace.orka.ai
   resources:
   - executionworkspaceclasses
   verbs:
+  - admit
   - create
   - delete
   - get
@@ -414,6 +399,7 @@ rules:
   resources:
   - executionworkspacepools
   verbs:
+  - admit
   - get
   - list
   - watch
@@ -422,6 +408,7 @@ rules:
   resources:
   - executionworkspaceproviders
   verbs:
+  - admit
   - get
   - list
   - patch

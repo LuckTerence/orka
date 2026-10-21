@@ -63,7 +63,7 @@ func TestPrintMemoryMutationOutcomeUsesMemorySubjectAfterWait(t *testing.T) {
 			cmd := newRootCmd()
 			var output bytes.Buffer
 			cmd.SetOut(&output)
-			action := strings.Split(test.want, ":")[0]
+			action, _, _ := strings.Cut(test.want, ":")
 			response := &orkaclient.JSONResponse{StatusCode: http.StatusOK, Body: test.body}
 			if err := printMemoryMutationOutcome(cmd, action, test.subject, response); err != nil {
 				t.Fatal(err)

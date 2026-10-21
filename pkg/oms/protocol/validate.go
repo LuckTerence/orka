@@ -34,8 +34,8 @@ var (
 // the deterministic tenant derivation.
 func ValidateBinding(binding Binding) error {
 	for name, value := range map[string]string{
-		"clusterId": binding.ClusterID, "namespaceUid": binding.NamespaceUID,
-		"backendUid": binding.BackendUID, "storeUuid": binding.StoreUUID,
+		jsonFieldClusterID: binding.ClusterID, jsonFieldNamespaceUID: binding.NamespaceUID,
+		jsonFieldBackendUID: binding.BackendUID, jsonFieldStoreUUID: binding.StoreUUID,
 	} {
 		if err := validateIdentity(name, value); err != nil {
 			return err
@@ -60,7 +60,9 @@ func ValidateBinding(binding Binding) error {
 // before a stable store UUID and authority epochs exist.
 func ValidateStoreResolutionBinding(binding StoreResolutionBinding) error {
 	for name, value := range map[string]string{
-		"clusterId": binding.ClusterID, "namespaceUid": binding.NamespaceUID, "backendUid": binding.BackendUID,
+		jsonFieldClusterID:    binding.ClusterID,
+		jsonFieldNamespaceUID: binding.NamespaceUID,
+		jsonFieldBackendUID:   binding.BackendUID,
 	} {
 		if err := validateIdentity(name, value); err != nil {
 			return err
@@ -432,10 +434,10 @@ func ValidateMutationReceipt(receipt *MutationReceipt) error {
 	if receipt.AppliedGeneration > math.MaxInt64 {
 		return errors.New("appliedGeneration exceeds signed 64-bit range")
 	}
-	if err := validateOptionalSafeString("backendVersion", receipt.BackendVersion); err != nil {
+	if err := validateOptionalSafeString(jsonFieldBackendVersion, receipt.BackendVersion); err != nil {
 		return err
 	}
-	if err := validateOptionalSafeString("backendMemoryId", receipt.BackendMemoryID); err != nil {
+	if err := validateOptionalSafeString(jsonFieldBackendMemoryID, receipt.BackendMemoryID); err != nil {
 		return err
 	}
 	switch receipt.Result {
@@ -549,12 +551,12 @@ func ValidateMemoryRecord(record *MemoryRecord, binding Binding) error {
 		return errors.New("record generation is invalid")
 	}
 	if err := validateOptionalSafeString(
-		"backendVersion", record.BackendVersion,
+		jsonFieldBackendVersion, record.BackendVersion,
 	); err != nil || record.BackendVersion == "" {
 		return errors.New("record backendVersion is required and must be safe")
 	}
 	if err := validateOptionalSafeString(
-		"backendMemoryId", record.BackendMemoryID,
+		jsonFieldBackendMemoryID, record.BackendMemoryID,
 	); err != nil || record.BackendMemoryID == "" {
 		return errors.New("record backendMemoryId is required and must be safe")
 	}

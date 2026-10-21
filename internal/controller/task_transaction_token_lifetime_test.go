@@ -32,7 +32,6 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/contexttoken"
-	"github.com/orka-agents/orka/internal/harness/harnesstest"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/tokenexchange"
 	"github.com/orka-agents/orka/internal/transactiontoken"
@@ -135,7 +134,7 @@ func TestDirectTaskTransactionTokenRotatesBeyondOriginalTTL(t *testing.T) {
 				}
 			}
 			if test.taskType == corev1alpha1.TaskTypeAgent {
-				runtimeToken, _, err := r.harnessBrokeredTransactionAuthority(context.Background(), task)
+				runtimeToken, err := readTaskOwnedTransactionToken(context.Background(), r.Client, task)
 				if err != nil {
 					t.Fatalf("runtimeRef authority: %v", err)
 				}
@@ -252,84 +251,12 @@ func TestDelegatedChildTransactionTokenRotatesBeyondTTL(t *testing.T) {
 				t.Fatalf("delegated agent request details = %#v", details)
 			}
 			if taskType == corev1alpha1.TaskTypeAgent {
-				resolved, _, err := r.harnessBrokeredTransactionAuthority(context.Background(), task)
+				resolved, err := readTaskOwnedTransactionToken(context.Background(), r.Client, task)
 				if err != nil || resolved != string(latest.Data[transactiontoken.TokenSecretKey]) {
 					t.Fatal("delegated runtimeRef did not resolve latest token")
 				}
 			}
 		})
-	}
-}
-
-func TestTransactionalRuntimeRefStartsOnSecondReconcileWithLatestToken(t *testing.T) {
-	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{
-		Behavior: harnesstest.BehaviorLongRunning, RuntimeName: testRuntimeRefName,
-	})
-	defer server.Close()
-
-	now := time.Now().UTC()
-	task, agent := harnessWrapperTaskAndAgent()
-	task.Finalizers = []string{labels.TaskFinalizer}
-	task.Spec.Transaction = &corev1alpha1.TaskTransaction{
-		ID: "txn-runtime-second-reconcile", Scope: directTokenMemoryReadScope,
-		Scopes: []string{directTokenMemoryReadScope},
-	}
-	task.Annotations = map[string]string{
-		labels.AnnotationTransactionTokenPending:      scheduledRunLabelValue,
-		labels.AnnotationTransactionTokenPendingSince: now.Add(-time.Second).Format(time.RFC3339Nano),
-		labels.AnnotationTransactionTokenSecret:       testRenewableSecretName,
-	}
-	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{
-		RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: testRuntimeRefName},
-	}
-	workload := directTaskTokenWorkloadSecretForTest(task, testRenewableSecretName)
-	authority := directTaskTokenAuthoritySecretForTest(task, testRenewableSubjectToken)
-	runtime, runtimeAuth := harnessWrapperReadyAgentRuntime(task.Namespace, server.URL())
-	latestToken := taskTokenJWTForTest(t, now.Add(5*time.Minute), "runtime-latest")
-	exchanger := &queuedTaskTokenExchanger{tokens: []string{latestToken}}
-	r := newUnitReconciler(newTestScheme(), task, agent, workload, authority, runtime, runtimeAuth)
-	r.BrokeredTransactionExchange = testTaskTransactionExchangeConfig(exchanger)
-	request := ctrl.Request{NamespacedName: types.NamespacedName{Name: task.Name, Namespace: task.Namespace}}
-
-	if _, err := r.Reconcile(context.Background(), request); err != nil {
-		t.Fatalf("first Reconcile() error = %v", err)
-	}
-	current := &corev1alpha1.Task{}
-	if err := r.Get(context.Background(), client.ObjectKeyFromObject(task), current); err != nil {
-		t.Fatalf("get planned runtimeRef Task: %v", err)
-	}
-	if !taskHasPlannedHarnessWrapperTurn(current) || taskHasHarnessWrapperTurn(current) {
-		t.Fatalf("first reconciliation did not stop at durable turn planning: %#v", current.Annotations)
-	}
-	freshReader := r.Client
-	r.APIReader = freshReader
-	r.Client = interceptor.NewClient(freshReader.(client.WithWatch), interceptor.Funcs{
-		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, object client.Object, opts ...client.GetOption) error {
-			if secret, ok := object.(*corev1.Secret); ok && key.Name == workload.Name {
-				stale := workload.DeepCopy()
-				stale.DeepCopyInto(secret)
-				return nil
-			}
-			return c.Get(ctx, key, object, opts...)
-		},
-	})
-
-	if _, err := r.Reconcile(context.Background(), request); err != nil {
-		t.Fatalf("second Reconcile() error = %v", err)
-	}
-	if err := r.Get(context.Background(), client.ObjectKeyFromObject(task), current); err != nil {
-		t.Fatalf("get running runtimeRef Task: %v", err)
-	}
-	if current.Status.Phase != corev1alpha1.TaskPhaseRunning || !taskHasHarnessWrapperTurn(current) {
-		t.Fatalf("runtimeRef Task did not start on second reconciliation: phase=%s annotations=%#v",
-			current.Status.Phase, current.Annotations)
-	}
-	resolvedToken, _, err := r.harnessBrokeredTransactionAuthority(context.Background(), current)
-	if err != nil {
-		t.Fatalf("resolve latest runtimeRef token: %v", err)
-	}
-	if resolvedToken != latestToken || exchanger.calls != 1 {
-		t.Fatalf("runtimeRef authority/calls did not use the latest rotation: calls=%d", exchanger.calls)
 	}
 }
 

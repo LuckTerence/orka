@@ -91,8 +91,7 @@ func taskTokenTransientExchangeFailure(err error) bool {
 	if errors.Is(exchangeFailure.err, context.DeadlineExceeded) {
 		return true
 	}
-	var endpointFailure *tokenexchange.ExchangeError
-	if errors.As(exchangeFailure.err, &endpointFailure) {
+	if endpointFailure, ok := errors.AsType[*tokenexchange.ExchangeError](exchangeFailure.err); ok {
 		if endpointFailure.StatusCode == http.StatusUnauthorized || endpointFailure.StatusCode == http.StatusForbidden {
 			return false
 		}
@@ -104,8 +103,7 @@ func taskTokenTransientExchangeFailure(err error) bool {
 		return (endpointFailure.StatusCode == 0 || endpointFailure.StatusCode == http.StatusBadRequest) &&
 			(endpointFailure.Code == "server_error" || endpointFailure.Code == "temporarily_unavailable")
 	}
-	var networkFailure net.Error
-	if errors.As(exchangeFailure.err, &networkFailure) {
+	if networkFailure, ok := errors.AsType[net.Error](exchangeFailure.err); ok {
 		return networkFailure.Timeout() || networkFailure.Temporary() //nolint:staticcheck // net.Error is the concrete transport retry signal here.
 	}
 	return exchangeFailure.err.Error() == taskTokenEndpointRequestFailed
@@ -131,8 +129,7 @@ func taskTokenTransientKubernetesFailure(err error) bool {
 			return true
 		}
 	}
-	var networkFailure net.Error
-	if errors.As(err, &networkFailure) {
+	if networkFailure, ok := errors.AsType[net.Error](err); ok {
 		if networkFailure.Timeout() || networkFailure.Temporary() { //nolint:staticcheck // net.Error is the concrete transport retry signal here.
 			return true
 		}

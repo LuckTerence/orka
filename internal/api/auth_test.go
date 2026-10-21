@@ -13,6 +13,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -391,6 +392,50 @@ func TestValidateToken_CacheHit(t *testing.T) {
 	}
 	if userInfo.UID != "uid-cached" {
 		t.Errorf("UID = %s, want uid-cached", userInfo.UID)
+	}
+}
+
+func TestValidateToken_AudienceScopedCacheAndResponse(t *testing.T) {
+	tokenCache.Range(func(key, _ any) bool {
+		tokenCache.Delete(key)
+		return true
+	})
+
+	scheme := runtime.NewScheme()
+	_ = authenticationv1.AddToScheme(scheme)
+
+	callCount := 0
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				callCount++
+				if tr, ok := obj.(*authenticationv1.TokenReview); ok {
+					tr.Status.Authenticated = true
+					tr.Status.User = authenticationv1.UserInfo{
+						Username: "system:serviceaccount:ns:retirement-hook",
+						UID:      "uid-audience",
+					}
+					if slices.Equal(tr.Spec.Audiences, []string{"retirement"}) {
+						tr.Status.Audiences = []string{"retirement"}
+					}
+				}
+				return nil
+			},
+		}).
+		Build()
+
+	if _, err := validateToken(context.Background(), fakeClient, "shared-token"); err != nil {
+		t.Fatalf("unscoped validateToken failed: %v", err)
+	}
+	if _, err := validateToken(context.Background(), fakeClient, "shared-token", "retirement"); err != nil {
+		t.Fatalf("audience-scoped validateToken failed: %v", err)
+	}
+	if callCount != 2 {
+		t.Fatalf("TokenReview calls = %d, want 2 for isolated unscoped and scoped cache entries", callCount)
+	}
+	if _, err := validateToken(context.Background(), fakeClient, "shared-token", "wrong-audience"); err == nil {
+		t.Fatal("validateToken accepted a TokenReview response without the requested audience")
 	}
 }
 
@@ -1012,7 +1057,7 @@ func TestNewAuthMiddleware_InvalidAuthorizationPreventsXAPIKeyFallback(t *testin
 	}
 }
 
-func TestNewAuthMiddleware_CustomTokenSource(t *testing.T) {
+func TestNewAuthMiddleware_XAPIKeyTokenReachesTokenReview(t *testing.T) {
 	tokenCache.Range(func(key, _ any) bool {
 		tokenCache.Delete(key)
 		return true
@@ -1042,15 +1087,13 @@ func TestNewAuthMiddleware_CustomTokenSource(t *testing.T) {
 		Build()
 
 	app := fiber.New()
-	app.Use(NewAuthMiddleware(fakeClient, AuthConfig{
-		TokenSources: []AuthTokenSource{{Header: "X-Custom-Token"}},
-	}))
+	app.Use(NewAuthMiddleware(fakeClient, AuthConfig{}))
 	app.Get("/test", func(ctx fiber.Ctx) error {
 		return ctx.SendString("OK")
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/test", nil)
-	req.Header.Set("X-Custom-Token", "custom-source-token")
+	req.Header.Set(XAPIKeyHeader, "custom-source-token")
 	resp, err := app.Test(req)
 	if err != nil {
 		t.Fatalf("Test request failed: %v", err)
@@ -1185,6 +1228,11 @@ func TestParseServiceAccountNamespace(t *testing.T) {
 		{"partial prefix", "system:serviceaccount:", ""},
 		{"missing name part", "system:serviceaccount:ns", ""},
 		{"empty namespace", "system:serviceaccount::sa", ""},
+		{"empty name", "system:serviceaccount:ns:", ""},
+		{"extra colon", "system:serviceaccount:ns:sa:extra", ""},
+		{"invalid namespace", "system:serviceaccount:../ns:sa", ""},
+		{"invalid name", "system:serviceaccount:ns:sa/name", ""},
+		{"valid dotted name", "system:serviceaccount:ns:chat.client", "ns"},
 	}
 
 	for _, tt := range tests {

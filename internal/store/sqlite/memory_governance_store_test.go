@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -38,16 +37,11 @@ func TestMemoryOperationPayloadCapIsImmutable512KiB(t *testing.T) {
 	}
 }
 
-func TestMemoryGovernanceMigrationIdempotent(t *testing.T) {
+func TestMemoryGovernanceSchemaInFreshStore(t *testing.T) {
 	s := setupTestStore(t)
-	for range 2 {
-		if err := migrate(s.db); err != nil {
-			t.Fatalf("migrate: %v", err)
-		}
-	}
 
 	for _, table := range []string{
-		"memory_governance_migrations", "legacy_memory_archive", "memory_legacy_fences", "controller_feature_heartbeats",
+		"legacy_memory_archive", "memory_legacy_fences", "controller_feature_heartbeats",
 		"memory_backend_bindings", "remote_memory_catalog", "remote_memory_generation_watermarks", "memory_operations",
 		"memory_idempotency", "memory_audit",
 	} {
@@ -81,39 +75,6 @@ func TestMemoryGovernanceMigrationIdempotent(t *testing.T) {
 		if count != 1 {
 			t.Fatalf("memory_proposals column %s count = %d, want 1", column, count)
 		}
-	}
-}
-
-func TestMemoryGovernanceMigrationTightensOperationPayloadConstraint(t *testing.T) {
-	s := setupTestStore(t)
-	ctx := context.Background()
-	now := time.Date(2026, 7, 29, 14, 0, 0, 0, time.UTC)
-	binding := activateMemoryBackendForTest(t, s, "team-payload-migration", "team-payload-migration-uid", now)
-	admitted, err := s.AdmitRemoteMemoryCreate(ctx,
-		newRemoteCreateAdmission(binding, now.Add(time.Second), "payload-migration", "payload-migration-request", []byte(`{"content":"v1"}`)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, legacyLimit := range []int{1 << 20, 2 << 20} {
-		rebuildMemoryOperationsPayloadLimitForTest(t, s.db, legacyLimit)
-		if err := migrate(s.db); err != nil {
-			t.Fatalf("migrate legacy payload constraint %d: %v", legacyLimit, err)
-		}
-	}
-	operation, err := s.GetMemoryOperation(ctx, binding.NamespaceUID, admitted.Operation.ID)
-	if err != nil || operation.ID != admitted.Operation.ID {
-		t.Fatalf("preserved operation = %+v, %v", operation, err)
-	}
-	var schema string
-	if err := s.db.QueryRow(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memory_operations'`).Scan(&schema); err != nil {
-		t.Fatal(err)
-	}
-	normalized := strings.ToLower(strings.Join(strings.Fields(schema), ""))
-	if !strings.Contains(normalized, fmt.Sprintf("check(length(payload)<=%d)", store.MaxMemoryOperationPayloadBytes)) {
-		t.Fatalf("migrated memory_operations schema did not tighten payload constraint: %s", schema)
-	}
-	if err := migrate(s.db); err != nil {
-		t.Fatalf("second migrate after payload rebuild: %v", err)
 	}
 }
 
@@ -188,46 +149,6 @@ func TestRemoteMemoryAdmissionRetainsMaxEscapedOMSRequest(t *testing.T) {
 	}
 }
 
-func rebuildMemoryOperationsPayloadLimitForTest(t *testing.T, db *sql.DB, limit int) {
-	t.Helper()
-	var schema string
-	if err := db.QueryRow(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memory_operations'`).Scan(&schema); err != nil {
-		t.Fatal(err)
-	}
-	open := strings.Index(schema, "(")
-	if open < 0 {
-		t.Fatalf("memory_operations schema is malformed: %s", schema)
-	}
-	rebuildSchema := "CREATE TABLE memory_operations_rebuild " + schema[open:]
-	rebuildSchema = strings.Replace(rebuildSchema, fmt.Sprint(store.MaxMemoryOperationPayloadBytes), fmt.Sprint(limit), 1)
-	tx, err := db.Begin()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer tx.Rollback() //nolint:errcheck
-	for _, statement := range []string{
-		`DROP TABLE IF EXISTS memory_operations_rebuild`, rebuildSchema,
-		`INSERT INTO memory_operations_rebuild SELECT * FROM memory_operations`,
-		`DROP TABLE memory_operations`,
-		`ALTER TABLE memory_operations_rebuild RENAME TO memory_operations`,
-		`CREATE UNIQUE INDEX idx_memory_operations_unresolved_memory ON memory_operations(namespace_uid, memory_id)
-			WHERE state IN ('queued','leased','dispatching','ambiguous','dead_lettered')`,
-		`CREATE UNIQUE INDEX idx_memory_operations_operation_idempotency
-			ON memory_operations(namespace_uid, operation_idempotency_key)`,
-		`CREATE INDEX idx_memory_operations_claim
-			ON memory_operations(namespace_uid, backend_uid, authority_epoch, routing_epoch, state, next_retry_at, sequence)`,
-		`CREATE INDEX idx_memory_operations_proposal ON memory_operations(namespace_uid, proposal_id, sequence DESC)
-			WHERE proposal_id <> ''`,
-	} {
-		if _, err := tx.Exec(statement); err != nil {
-			t.Fatalf("rebuild test memory_operations schema: %v", err)
-		}
-	}
-	if err := tx.Commit(); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestAppendMemoryAuditIsInsertOnly(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
@@ -252,35 +173,8 @@ func TestAppendMemoryAuditIsInsertOnly(t *testing.T) {
 	}
 }
 
-func TestMemoryGovernanceMigrationUpgradesLegacyProposalSchema(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "legacy.db")
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatalf("sql.Open: %v", err)
-	}
-	defer db.Close() //nolint:errcheck
-	if _, err := db.Exec(`CREATE TABLE memories (
-		id TEXT PRIMARY KEY, namespace TEXT NOT NULL, session_name TEXT NOT NULL DEFAULT '',
-		agent_name TEXT NOT NULL DEFAULT '', task_name TEXT NOT NULL DEFAULT '', parent_task TEXT NOT NULL DEFAULT '',
-		source TEXT NOT NULL DEFAULT '', source_proposal_id TEXT NOT NULL DEFAULT '', content TEXT NOT NULL,
-		tags_json TEXT NOT NULL DEFAULT '[]', disabled BOOLEAN NOT NULL DEFAULT FALSE,
-		deleted BOOLEAN NOT NULL DEFAULT FALSE, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, last_recalled_at TIMESTAMP,
-		recalled_count INTEGER NOT NULL DEFAULT 0
-	)`); err != nil {
-		t.Fatalf("create legacy memories: %v", err)
-	}
-	if _, err := db.Exec(`CREATE TABLE memory_proposals (
-		id TEXT PRIMARY KEY, namespace TEXT NOT NULL, task_name TEXT NOT NULL DEFAULT '', agent_name TEXT NOT NULL DEFAULT '',
-		type TEXT NOT NULL, skill_name TEXT NOT NULL DEFAULT '', title TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
-		content TEXT NOT NULL DEFAULT '', patch TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'pending',
-		reviewer TEXT NOT NULL DEFAULT '', review_note TEXT NOT NULL DEFAULT '', applied_memory_id TEXT NOT NULL DEFAULT '',
-		applied_by TEXT NOT NULL DEFAULT '', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, reviewed_at TIMESTAMP, applied_at TIMESTAMP
-	)`); err != nil {
-		t.Fatalf("create legacy memory_proposals: %v", err)
-	}
-
+func TestSchemaVersion1UpgradeBackfillsOnlyCanonicalAppliedProposals(t *testing.T) {
+	path, db := schemaVersion1StoreDB(t, datasetOriginAdopted, true)
 	appliedAt := time.Date(2026, 7, 31, 22, 0, 0, 0, time.UTC)
 	if _, err := db.Exec(`INSERT INTO memories
 		(id, namespace, source, source_proposal_id, content, created_at, updated_at)
@@ -312,88 +206,76 @@ func TestMemoryGovernanceMigrationUpgradesLegacyProposalSchema(t *testing.T) {
 		appliedAt.Add(-time.Hour), appliedAt); err != nil {
 		t.Fatalf("insert legacy mismatched proposal: %v", err)
 	}
-
-	if err := migrate(db); err != nil {
-		t.Fatalf("migrate legacy schema: %v", err)
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
 	}
-	columns := map[string]bool{}
-	rows, err := db.Query(`PRAGMA table_info(memory_proposals)`)
+
+	upgraded, err := OpenLockedStore(path)
 	if err != nil {
-		t.Fatalf("PRAGMA memory_proposals: %v", err)
+		t.Fatalf("OpenLockedStore(version 1): %v", err)
 	}
-	for rows.Next() {
-		var cid, notNull, pk int
-		var name, typ string
-		var defaultValue any
-		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
-			rows.Close() //nolint:errcheck
-			t.Fatalf("scan memory_proposals: %v", err)
-		}
-		columns[name] = true
-	}
-	_ = rows.Close()
-	for _, column := range []string{"apply_operation_id", "application_abandoned_by", "application_abandoned_reason", "application_abandoned_at"} {
-		if !columns[column] {
-			t.Fatalf("missing migrated memory_proposals column %s", column)
-		}
-	}
-
 	var operationID string
-	if err := db.QueryRow(`SELECT apply_operation_id FROM memory_proposals WHERE id = ?`,
+	if err := upgraded.db.QueryRow(`SELECT apply_operation_id FROM memory_proposals WHERE id = ?`,
 		"proposal-legacy-reviewed").Scan(&operationID); err != nil {
 		t.Fatalf("read backfilled operation id: %v", err)
 	}
 	if operationID != legacyAppliedProposalBackfillPrefix+"proposal-legacy-reviewed" {
 		t.Fatalf("backfilled operation id = %q", operationID)
 	}
-	if err := db.QueryRow(`SELECT apply_operation_id FROM memory_proposals WHERE id = ?`,
+	if err := upgraded.db.QueryRow(`SELECT apply_operation_id FROM memory_proposals WHERE id = ?`,
 		"proposal-legacy-mismatch").Scan(&operationID); err != nil {
 		t.Fatalf("read mismatched operation id: %v", err)
 	}
 	if operationID != "" {
 		t.Fatalf("mismatched proposal operation id = %q, want empty", operationID)
 	}
-
-	storeAfterUpgrade := NewStore(db, path)
-	reviewed, err := storeAfterUpgrade.GetMemory(context.Background(), "team-legacy", "mem-legacy-reviewed")
+	ctx := context.Background()
+	reviewed, err := upgraded.GetMemory(ctx, "team-legacy", "mem-legacy-reviewed")
 	if err != nil {
-		t.Fatalf("GetMemory after legacy upgrade: %v", err)
+		t.Fatalf("GetMemory after upgrade: %v", err)
 	}
 	if reviewed.Trust != store.MemoryTrustReviewed {
-		t.Fatalf("legacy upgraded memory trust = %q, want reviewed", reviewed.Trust)
+		t.Fatalf("upgraded memory trust = %q, want reviewed", reviewed.Trust)
 	}
-	mismatched, err := storeAfterUpgrade.GetMemory(context.Background(), "team-legacy", "mem-legacy-mismatch")
+	mismatched, err := upgraded.GetMemory(ctx, "team-legacy", "mem-legacy-mismatch")
 	if err != nil {
-		t.Fatalf("GetMemory mismatched after legacy upgrade: %v", err)
+		t.Fatalf("GetMemory mismatched after upgrade: %v", err)
 	}
 	if mismatched.Trust != store.MemoryTrustUntrusted {
-		t.Fatalf("legacy mismatched memory trust = %q, want untrusted", mismatched.Trust)
+		t.Fatalf("mismatched memory trust = %q, want untrusted", mismatched.Trust)
 	}
 
-	if _, err := db.Exec(`INSERT INTO memories
+	// The backfill is part of the frozen transition, so rows written after the
+	// upgrade can never be promoted by reopening the store.
+	if _, err := upgraded.db.Exec(`INSERT INTO memories
 		(id, namespace, source, source_proposal_id, content) VALUES (?, ?, ?, ?, ?)`,
-		"mem-post-migration-spoof", "team-legacy", memorySourceProposal, "proposal-post-migration-spoof",
-		"post migration spoof"); err != nil {
-		t.Fatalf("insert post-migration spoofed memory: %v", err)
+		"mem-post-upgrade-spoof", "team-legacy", memorySourceProposal, "proposal-post-upgrade-spoof",
+		"post upgrade spoof"); err != nil {
+		t.Fatalf("insert post-upgrade spoofed memory: %v", err)
 	}
-	if _, err := db.Exec(`INSERT INTO memory_proposals
+	if _, err := upgraded.db.Exec(`INSERT INTO memory_proposals
 		(id, namespace, type, title, content, status, reviewer, applied_memory_id, apply_operation_id,
 		 applied_by, reviewed_at, applied_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?)`,
-		"proposal-post-migration-spoof", "team-legacy", proposalTypeMemory, "post-migration spoof",
-		"post migration spoof", proposalStatusApplied, "reviewer", "mem-post-migration-spoof", "applier",
+		"proposal-post-upgrade-spoof", "team-legacy", proposalTypeMemory, "post-upgrade spoof",
+		"post upgrade spoof", proposalStatusApplied, "reviewer", "mem-post-upgrade-spoof", "applier",
 		appliedAt.Add(-time.Hour), appliedAt); err != nil {
-		t.Fatalf("insert post-migration spoofed proposal: %v", err)
+		t.Fatalf("insert post-upgrade spoofed proposal: %v", err)
 	}
-	if err := migrate(db); err != nil {
-		t.Fatalf("second migrate legacy schema: %v", err)
+	if err := upgraded.close(); err != nil {
+		t.Fatal(err)
 	}
-	spoofed, err := storeAfterUpgrade.GetMemory(context.Background(), "team-legacy", "mem-post-migration-spoof")
+	reopened, err := OpenLockedStore(path)
 	if err != nil {
-		t.Fatalf("GetMemory post-migration spoof: %v", err)
+		t.Fatalf("reopen upgraded store: %v", err)
+	}
+	defer func() { _ = reopened.close() }()
+	spoofed, err := reopened.GetMemory(ctx, "team-legacy", "mem-post-upgrade-spoof")
+	if err != nil {
+		t.Fatalf("GetMemory post-upgrade spoof: %v", err)
 	}
 	if spoofed.Trust != store.MemoryTrustUntrusted {
-		t.Fatalf("post-migration spoof trust = %q, want untrusted", spoofed.Trust)
+		t.Fatalf("post-upgrade spoof trust = %q, want untrusted", spoofed.Trust)
 	}
 }
 
@@ -4653,7 +4535,8 @@ func TestRefreshMemoryBackendBindingRejectsGenerationRegression(t *testing.T) {
 func TestSupersededOperationExtendsIdempotencyTerminalRetention(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
-	now := time.Date(2026, 7, 30, 18, 30, 0, 0, time.UTC)
+	// GetMemoryIdempotency hides records expired against the wall clock.
+	now := time.Now().UTC().Truncate(time.Second)
 	binding := activateMemoryBackendForTest(t, s, "team-terminal-idempotency", "team-terminal-idempotency-uid", now)
 	create := newRemoteCreateAdmission(binding, now.Add(time.Second), "terminal-retention-create", "create-request", []byte("content"))
 	created, err := s.AdmitRemoteMemoryCreate(ctx, create)
@@ -4963,27 +4846,6 @@ func TestManualReplacementDemotesReviewedProposalProvenance(t *testing.T) {
 	}
 	if updated.Trust != store.MemoryTrustUntrusted || updated.SourceProposalID != "" || updated.Source != memorySourceManual {
 		t.Fatalf("manual replacement retained reviewed provenance: %+v", updated)
-	}
-}
-
-func TestMigrationFencesBindingsMissingValidatedRouteIdentity(t *testing.T) {
-	s := setupTestStore(t)
-	now := time.Date(2026, 7, 30, 22, 0, 0, 0, time.UTC)
-	binding := activateMemoryBackendForTest(t, s, "team-migration-route", "team-migration-route-uid", now)
-	if _, err := s.db.Exec(`UPDATE memory_backend_bindings
-		SET resolved_address_digest = '', server_certificate_digest = '', state = ?, validation_expires_at = ?
-		WHERE namespace_uid = ?`, store.MemoryBackendBindingAccepting, now.Add(time.Hour), binding.NamespaceUID); err != nil {
-		t.Fatal(err)
-	}
-	if err := migrate(s.db); err != nil {
-		t.Fatal(err)
-	}
-	migrated, err := s.GetMemoryBackendBinding(context.Background(), binding.NamespaceUID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if migrated.State != store.MemoryBackendBindingRecovering {
-		t.Fatalf("migrated binding state = %q, want recovering", migrated.State)
 	}
 }
 

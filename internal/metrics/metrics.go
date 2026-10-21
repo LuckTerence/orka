@@ -7,19 +7,53 @@ MIT License - see LICENSE file for details.
 package metrics
 
 import (
+	"strings"
+
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 )
 
+const (
+	labelUnknown  = "unknown"
+	labelClosed   = "closed"
+	labelDraining = "draining"
+)
+
+const (
+	labelStreamType = "stream_type"
+	labelAmbiguous  = "ambiguous"
+)
+
+const (
+	labelStatus      = "status"
+	labelNamespace   = "namespace"
+	labelResult      = "result"
+	labelReason      = "reason"
+	labelRuntimePool = "runtime_pool"
+	labelEventType   = "event_type"
+	labelScope       = "scope"
+	labelAccepting   = "accepting"
+)
+
 var (
+	// Approval labels are restricted to lifecycle outcomes and execution paths.
+	ApprovalDecisionDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "orka_approval_decision_duration_seconds",
+			Help:    "Time from approval request to committed decision in seconds",
+			Buckets: []float64{1, 5, 15, 30, 60, 120, 300, 600, 1800, 3600, 14400, 86400},
+		},
+		[]string{"outcome", "path"},
+	)
+
 	// API metrics
 	APIRequestsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "orka_api_requests_total",
 			Help: "Total API requests by endpoint, method, and status",
 		},
-		[]string{"endpoint", "method", "status"},
+		[]string{"endpoint", "method", labelStatus},
 	)
 
 	APIRequestDuration = prometheus.NewHistogramVec(
@@ -37,7 +71,7 @@ var (
 			Name: "orka_skills_loaded_total",
 			Help: "Skills loaded by namespace and name",
 		},
-		[]string{"skill", "namespace"},
+		[]string{"skill", labelNamespace},
 	)
 
 	// Context-token metrics
@@ -46,7 +80,7 @@ var (
 			Name: "orka_context_token_auth_total",
 			Help: "Total context-token authentication attempts by profile and result",
 		},
-		[]string{"profile", "result"},
+		[]string{"profile", labelResult},
 	)
 
 	ContextTokenAuthorizationTotal = prometheus.NewCounterVec(
@@ -54,7 +88,7 @@ var (
 			Name: "orka_context_token_authorization_total",
 			Help: "Total context-token authorization decisions by action, result, and low-cardinality reason",
 		},
-		[]string{"action", "result", "reason"},
+		[]string{"action", labelResult, labelReason},
 	)
 
 	ContextTokenTTSExchangeTotal = prometheus.NewCounterVec(
@@ -62,7 +96,7 @@ var (
 			Name: "orka_context_token_tts_exchange_total",
 			Help: "Total context-token TTS exchange attempts by result and low-cardinality reason",
 		},
-		[]string{"result", "reason"},
+		[]string{labelResult, labelReason},
 	)
 
 	ContextTokenTTSExchangeDuration = prometheus.NewHistogramVec(
@@ -71,7 +105,7 @@ var (
 			Help:    "Context-token TTS exchange latency in seconds",
 			Buckets: prometheus.DefBuckets,
 		},
-		[]string{"result", "reason"},
+		[]string{labelResult, labelReason},
 	)
 
 	TokenExchangeTotal = prometheus.NewCounterVec(
@@ -79,7 +113,7 @@ var (
 			Name: "orka_token_exchange_total",
 			Help: "Total OAuth token exchanges by adapter, grant class, result, and low-cardinality reason",
 		},
-		[]string{"adapter", "grant_class", "result", "reason"},
+		[]string{"adapter", "grant_class", labelResult, labelReason},
 	)
 
 	TokenExchangeDuration = prometheus.NewHistogramVec(
@@ -88,7 +122,76 @@ var (
 			Help:    "OAuth token exchange latency by adapter, grant class, result, and low-cardinality reason",
 			Buckets: prometheus.DefBuckets,
 		},
-		[]string{"adapter", "grant_class", "result", "reason"},
+		[]string{"adapter", "grant_class", labelResult, labelReason},
+	)
+
+	// ACP RuntimePool metrics mirror authoritative controller status. Pool name
+	// and namespace are Kubernetes object identity labels, never Task/session IDs.
+	// ACPWorkspaceRetentionActionsTotal counts retention enforcement actions on
+	// class-backed ACP execution workspaces. Labels stay bounded: no object
+	// names, class names, or session identifiers.
+	ACPWorkspaceRetentionActionsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "orka_acp_workspace_retention_actions_total",
+			Help: "Retention enforcement actions applied to class-backed ACP execution workspaces",
+		},
+		[]string{"action", labelReason},
+	)
+
+	ACPRuntimePoolDesiredReplicas = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "orka_acp_runtime_pool_desired_replicas",
+			Help: "Desired replicas for a controller-owned ACP RuntimePool",
+		},
+		[]string{labelNamespace, labelRuntimePool},
+	)
+
+	ACPRuntimePoolReadyReplicas = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "orka_acp_runtime_pool_ready_replicas",
+			Help: "Authoritatively selected Ready replicas for a controller-owned ACP RuntimePool",
+		},
+		[]string{labelNamespace, labelRuntimePool},
+	)
+
+	ACPRuntimePoolSessionsActive = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "orka_acp_runtime_pool_sessions_active",
+			Help: "Authenticated supervisor count of resident RuntimeSessions",
+		},
+		[]string{labelNamespace, labelRuntimePool},
+	)
+
+	ACPRuntimePoolPromptsInFlight = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "orka_acp_runtime_pool_prompts_in_flight",
+			Help: "Authenticated supervisor count of active prompts",
+		},
+		[]string{labelNamespace, labelRuntimePool},
+	)
+
+	ACPRuntimePoolQueuedTasks = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "orka_acp_runtime_pool_queued_tasks",
+			Help: "Durable unsatisfied Task demand assigned to an ACP RuntimePool",
+		},
+		[]string{labelNamespace, labelRuntimePool},
+	)
+
+	ACPRuntimePoolAdmissionState = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "orka_acp_runtime_pool_admission_state",
+			Help: "Authoritative RuntimePool admission state as a one-hot gauge",
+		},
+		[]string{labelNamespace, labelRuntimePool, "state"},
+	)
+
+	ACPRuntimePoolScaleToZeroTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "orka_acp_runtime_pool_scale_to_zero_total",
+			Help: "Completed RuntimePool scale-to-zero transitions",
+		},
+		[]string{labelNamespace, labelRuntimePool},
 	)
 
 	// Repository monitor workflow metrics. Labels are low-cardinality intent/action/status values.
@@ -97,7 +200,7 @@ var (
 			Name: "orka_repository_monitor_commands_total",
 			Help: "Repository monitor command events by intent and status",
 		},
-		[]string{"intent", "status"},
+		[]string{"intent", labelStatus},
 	)
 
 	RepositoryMonitorWorkActionsTotal = prometheus.NewCounterVec(
@@ -105,7 +208,7 @@ var (
 			Name: "orka_repository_monitor_work_actions_total",
 			Help: "Repository monitor workflow actions by desired action and status",
 		},
-		[]string{"desired_action", "status"},
+		[]string{"desired_action", labelStatus},
 	)
 
 	RepositoryMonitorGitHubMutationsTotal = prometheus.NewCounterVec(
@@ -113,7 +216,7 @@ var (
 			Name: "orka_repository_monitor_github_mutations_total",
 			Help: "Repository monitor controller-owned GitHub mutations by operation and status",
 		},
-		[]string{"operation", "status"},
+		[]string{"operation", labelStatus},
 	)
 
 	RepositoryMonitorBlocksTotal = prometheus.NewCounterVec(
@@ -121,7 +224,7 @@ var (
 			Name: "orka_repository_monitor_blocks_total",
 			Help: "Repository monitor policy, stale snapshot, and rate-limit blocks by reason",
 		},
-		[]string{"reason"},
+		[]string{labelReason},
 	)
 
 	// Execution event metrics. Labels intentionally exclude task/session IDs.
@@ -130,7 +233,7 @@ var (
 			Name: "orka_execution_events_appended_total",
 			Help: "Total execution events appended by stream type and event type",
 		},
-		[]string{"stream_type", "event_type"},
+		[]string{labelStreamType, labelEventType},
 	)
 
 	ExecutionEventAppendFailuresTotal = prometheus.NewCounterVec(
@@ -138,7 +241,7 @@ var (
 			Name: "orka_execution_event_append_failures_total",
 			Help: "Total execution event append failures by stream type and event type",
 		},
-		[]string{"stream_type", "event_type"},
+		[]string{labelStreamType, labelEventType},
 	)
 
 	ExecutionEventAppendDuration = prometheus.NewHistogramVec(
@@ -147,7 +250,7 @@ var (
 			Help:    "Execution event append latency in seconds",
 			Buckets: prometheus.DefBuckets,
 		},
-		[]string{"stream_type", "event_type", "result"},
+		[]string{labelStreamType, labelEventType, labelResult},
 	)
 
 	ExecutionEventListRequestsTotal = prometheus.NewCounterVec(
@@ -155,7 +258,7 @@ var (
 			Name: "orka_execution_event_list_requests_total",
 			Help: "Total execution event list/read-model requests by scope and result",
 		},
-		[]string{"scope", "result"},
+		[]string{labelScope, labelResult},
 	)
 
 	ExecutionEventListDuration = prometheus.NewHistogramVec(
@@ -164,7 +267,7 @@ var (
 			Help:    "Execution event list/read-model latency in seconds",
 			Buckets: prometheus.DefBuckets,
 		},
-		[]string{"scope", "result"},
+		[]string{labelScope, labelResult},
 	)
 
 	ExecutionEventStreamConnections = prometheus.NewGaugeVec(
@@ -172,7 +275,7 @@ var (
 			Name: "orka_execution_event_stream_connections_current",
 			Help: "Current execution event SSE stream connections by scope",
 		},
-		[]string{"scope"},
+		[]string{labelScope},
 	)
 
 	ExecutionEventStreamReconnectsTotal = prometheus.NewCounterVec(
@@ -180,7 +283,7 @@ var (
 			Name: "orka_execution_event_stream_reconnects_total",
 			Help: "Total execution event SSE reconnects detected by after cursor by scope",
 		},
-		[]string{"scope"},
+		[]string{labelScope},
 	)
 
 	ExecutionEventStreamErrorsTotal = prometheus.NewCounterVec(
@@ -188,7 +291,7 @@ var (
 			Name: "orka_execution_event_stream_errors_total",
 			Help: "Total execution event SSE stream errors by scope and low-cardinality reason",
 		},
-		[]string{"scope", "reason"},
+		[]string{labelScope, labelReason},
 	)
 
 	ExecutionEventRedactionsTotal = prometheus.NewCounterVec(
@@ -196,7 +299,7 @@ var (
 			Name: "orka_execution_event_redactions_total",
 			Help: "Total execution events whose payloads contained redacted sensitive values by stream type and event type",
 		},
-		[]string{"stream_type", "event_type"},
+		[]string{labelStreamType, labelEventType},
 	)
 
 	ExecutionEventTruncationsTotal = prometheus.NewCounterVec(
@@ -204,29 +307,14 @@ var (
 			Name: "orka_execution_event_truncations_total",
 			Help: "Total execution events whose payloads were truncated by stream type and event type",
 		},
-		[]string{"stream_type", "event_type"},
-	)
-
-	ExecutionEventDerivedLatency = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Name:    "orka_execution_event_derived_latency_seconds",
-			Help:    "Latency derived from execution event start/end pairs",
-			Buckets: prometheus.DefBuckets,
-		},
-		[]string{"measurement", "result"},
-	)
-
-	ExecutionEventDerivedFailuresTotal = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "orka_execution_event_derived_failures_total",
-			Help: "Failure counts derived from execution event terminal/failure event types",
-		},
-		[]string{"category", "event_type"},
+		[]string{labelStreamType, labelEventType},
 	)
 )
 
 func init() {
 	metrics.Registry.MustRegister(
+		ApprovalDecisionDuration,
+		ACPWorkspaceRetentionActionsTotal,
 		APIRequestsTotal,
 		APIRequestDuration,
 		SkillsLoaded,
@@ -236,6 +324,13 @@ func init() {
 		ContextTokenTTSExchangeDuration,
 		TokenExchangeTotal,
 		TokenExchangeDuration,
+		ACPRuntimePoolDesiredReplicas,
+		ACPRuntimePoolReadyReplicas,
+		ACPRuntimePoolSessionsActive,
+		ACPRuntimePoolPromptsInFlight,
+		ACPRuntimePoolQueuedTasks,
+		ACPRuntimePoolAdmissionState,
+		ACPRuntimePoolScaleToZeroTotal,
 		RepositoryMonitorCommandsTotal,
 		RepositoryMonitorWorkActionsTotal,
 		RepositoryMonitorGitHubMutationsTotal,
@@ -250,8 +345,6 @@ func init() {
 		ExecutionEventStreamErrorsTotal,
 		ExecutionEventRedactionsTotal,
 		ExecutionEventTruncationsTotal,
-		ExecutionEventDerivedLatency,
-		ExecutionEventDerivedFailuresTotal,
 	)
 }
 
@@ -297,6 +390,69 @@ func RecordTokenExchange(adapter, grantClass, result, reason string, durationSec
 	reason = normalizeMetricLabel(reason)
 	TokenExchangeTotal.WithLabelValues(adapter, grantClass, result, reason).Inc()
 	TokenExchangeDuration.WithLabelValues(adapter, grantClass, result, reason).Observe(durationSeconds)
+}
+
+var acpRuntimePoolAdmissionStates = [...]string{labelUnknown, labelClosed, labelAccepting, labelDraining, labelAmbiguous}
+
+// RecordACPRuntimePoolStatus publishes one authoritative RuntimePool status
+// snapshot. Admission state is one-hot so state changes cannot leave a stale 1.
+func RecordACPRuntimePoolStatus(
+	namespace, runtimePool string,
+	desiredReplicas, readyReplicas, sessionsActive, promptsInFlight, queuedTasks int32,
+	admissionState string,
+) {
+	namespace = normalizeMetricLabel(namespace)
+	runtimePool = normalizeMetricLabel(runtimePool)
+	ACPRuntimePoolDesiredReplicas.WithLabelValues(namespace, runtimePool).Set(float64(desiredReplicas))
+	ACPRuntimePoolReadyReplicas.WithLabelValues(namespace, runtimePool).Set(float64(readyReplicas))
+	ACPRuntimePoolSessionsActive.WithLabelValues(namespace, runtimePool).Set(float64(sessionsActive))
+	ACPRuntimePoolPromptsInFlight.WithLabelValues(namespace, runtimePool).Set(float64(promptsInFlight))
+	ACPRuntimePoolQueuedTasks.WithLabelValues(namespace, runtimePool).Set(float64(queuedTasks))
+	admissionState = normalizeACPRuntimePoolAdmissionState(admissionState)
+	for _, state := range acpRuntimePoolAdmissionStates {
+		value := 0.0
+		if state == admissionState {
+			value = 1
+		}
+		ACPRuntimePoolAdmissionState.WithLabelValues(namespace, runtimePool, state).Set(value)
+	}
+}
+
+// RecordACPRuntimePoolScaleToZero records one completed scale-to-zero transition.
+func RecordACPRuntimePoolScaleToZero(namespace, runtimePool string) {
+	ACPRuntimePoolScaleToZeroTotal.WithLabelValues(
+		normalizeMetricLabel(namespace), normalizeMetricLabel(runtimePool),
+	).Inc()
+}
+
+// DeleteACPRuntimePool removes stale metric series after a RuntimePool is deleted.
+func DeleteACPRuntimePool(namespace, runtimePool string) {
+	namespace = normalizeMetricLabel(namespace)
+	runtimePool = normalizeMetricLabel(runtimePool)
+	ACPRuntimePoolDesiredReplicas.DeleteLabelValues(namespace, runtimePool)
+	ACPRuntimePoolReadyReplicas.DeleteLabelValues(namespace, runtimePool)
+	ACPRuntimePoolSessionsActive.DeleteLabelValues(namespace, runtimePool)
+	ACPRuntimePoolPromptsInFlight.DeleteLabelValues(namespace, runtimePool)
+	ACPRuntimePoolQueuedTasks.DeleteLabelValues(namespace, runtimePool)
+	for _, state := range acpRuntimePoolAdmissionStates {
+		ACPRuntimePoolAdmissionState.DeleteLabelValues(namespace, runtimePool, state)
+	}
+	ACPRuntimePoolScaleToZeroTotal.DeleteLabelValues(namespace, runtimePool)
+}
+
+func normalizeACPRuntimePoolAdmissionState(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case labelClosed:
+		return labelClosed
+	case labelAccepting:
+		return labelAccepting
+	case labelDraining:
+		return labelDraining
+	case labelAmbiguous:
+		return labelAmbiguous
+	default:
+		return labelUnknown
+	}
 }
 
 // RecordExecutionEventAppend records append success/failure and latency using low-cardinality labels.
@@ -361,16 +517,6 @@ func CounterVecValue(counter *prometheus.CounterVec, labels ...string) float64 {
 	return m.GetCounter().GetValue()
 }
 
-// RecordExecutionEventDerivedLatency records one idempotent event-derived latency observation.
-func RecordExecutionEventDerivedLatency(measurement, result string, durationSeconds float64) {
-	ExecutionEventDerivedLatency.WithLabelValues(normalizeMetricLabel(measurement), normalizeMetricLabel(result)).Observe(durationSeconds)
-}
-
-// RecordExecutionEventDerivedFailure records one event-derived failure category.
-func RecordExecutionEventDerivedFailure(category, eventType string) {
-	ExecutionEventDerivedFailuresTotal.WithLabelValues(normalizeMetricLabel(category), normalizeMetricLabel(eventType)).Inc()
-}
-
 // RecordRepositoryMonitorCommand records a durable command event decision.
 func RecordRepositoryMonitorCommand(intent, status string) {
 	RepositoryMonitorCommandsTotal.WithLabelValues(normalizeMetricLabel(intent), normalizeMetricLabel(status)).Inc()
@@ -391,9 +537,16 @@ func RecordRepositoryMonitorBlock(reason string) {
 	RepositoryMonitorBlocksTotal.WithLabelValues(normalizeMetricLabel(reason)).Inc()
 }
 
+// RecordACPWorkspaceRetentionAction records one retention enforcement action
+// (suspend or delete) with its bounded reason.
+func RecordACPWorkspaceRetentionAction(action, reason string) {
+	ACPWorkspaceRetentionActionsTotal.WithLabelValues(normalizeMetricLabel(action), normalizeMetricLabel(reason)).Inc()
+}
+
 func normalizeMetricLabel(value string) string {
 	if value == "" {
-		return "unknown"
+		return labelUnknown
 	}
-	return value
+	// Prometheus retains labels; callers may supply borrowed HTTP request strings.
+	return strings.Clone(value)
 }

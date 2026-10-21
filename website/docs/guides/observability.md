@@ -1,16 +1,23 @@
 ---
 slug: /observability
+description: "OpenTelemetry traces, GenAI metrics, and how to follow one task through them."
 ---
 
 # Observability
 
-Orka emits OpenTelemetry traces and metrics for controller, chat, tool, AI
-worker, and harness-backed agent runtime paths when telemetry is enabled. The
-GenAI signals are backend instrumentation: they are exported over OTLP to your
+Orka emits OpenTelemetry traces and metrics for controller, chat, tool, native AI
+worker, and Orka harness v2 controller/supervisor paths when telemetry is enabled. ACP runtime
+internals remain observable primarily through durable Task execution/delivery
+status, RuntimePool status, bounded events, and structured logs. The GenAI
+signals are backend instrumentation: they are exported over OTLP to your
 collector/backend and are separate from the Orka React UI.
 
 Telemetry is disabled by default. Disabled mode keeps the hot path on the global
 OpenTelemetry no-op providers and does not configure OTLP exporters.
+
+For retained team usage and tokens per merged PR in the dashboard, see
+[Usage and PR outcomes](usage-and-pr-outcomes.md). That report records counts
+independently of telemetry and includes measurement gaps.
 
 ## Enable telemetry
 
@@ -18,7 +25,7 @@ Start the controller with telemetry enabled and point it at an OTLP endpoint.
 gRPC is the default exporter protocol:
 
 ```bash
-OTEL_EXPORTER_OTLP_ENDPOINT=otel-collector.otel.svc:4317 \
+OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector.otel.svc:4317 \
   orka-controller --enable-telemetry
 ```
 
@@ -30,10 +37,17 @@ For an existing Kubernetes Deployment, set both the controller flag and the
 collector environment. Setting `OTEL_EXPORTER_OTLP_ENDPOINT` alone does not
 enable telemetry:
 
+:::note[These commands assume a Helm install named `orka`]
+That makes the Deployment `orka-controller`. If you installed with
+`kubectl apply -f .../deploy/orka.yaml` it is `orka-controller-manager` instead. See
+[Troubleshooting](../operations/troubleshooting.md#what-is-my-controller-deployment-called).
+:::
+
+
 ```bash
 kubectl patch deployment orka-controller -n orka-system --type=json -p='[
   {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--enable-telemetry"},
-  {"op":"add","path":"/spec/template/spec/containers/0/env/-","value":{"name":"OTEL_EXPORTER_OTLP_ENDPOINT","value":"otel-collector.otel.svc:4317"}},
+  {"op":"add","path":"/spec/template/spec/containers/0/env/-","value":{"name":"OTEL_EXPORTER_OTLP_ENDPOINT","value":"http://otel-collector.otel.svc:4317"}},
   {"op":"add","path":"/spec/template/spec/containers/0/env/-","value":{"name":"OTEL_EXPORTER_OTLP_INSECURE","value":"true"}}
 ]'
 ```
@@ -73,23 +87,57 @@ Telemetry environment for AI workers is controller-owned: task-supplied
 preserve user-supplied telemetry env, because Orka does not instrument arbitrary
 container processes.
 
-Harness-wrapper and agent-runtime worker telemetry is explicit opt-in: set
-`ORKA_ENABLE_TELEMETRY=true` and OTLP exporter configuration on those workloads
-when you want their process-local spans exported.
+Managed ACP RuntimePools are not per-Task Jobs and do not inherit `Task.spec.env`.
+The controller emits `acp.prompt`, `acp.session.create`,
+`acp.session.continue`, and `acp.publication.reconcile` spans from the Task's
+trace annotations. It also exports RuntimePool desired/ready replica,
+resident-session, active-prompt, queued-Task, admission-state, and completed
+scale-to-zero metrics on the Prometheus metrics endpoint.
 
-For the singleton CLI harness wrapper Deployment, opt in explicitly:
+With controller telemetry enabled and a worker-reachable trace endpoint,
+managed supervisors receive `ORKA_ENABLE_TELEMETRY=true` and non-secret OTLP
+endpoint, protocol, insecure and compression settings. Generic and trace-specific
+endpoints retain their normal SDK semantics; trace-specific settings take precedence.
+A missing or invalid trace endpoint disables supervisor export. Metrics-only
+configuration does not enable supervisor tracing. Headers, certificate paths,
+resource attributes and content-capture settings are never copied.
 
-```bash
-kubectl set env deployment/orka-agent-harness-wrapper -n orka-system \
-  ORKA_ENABLE_TELEMETRY=true \
-  OTEL_EXPORTER_OTLP_ENDPOINT=otel-collector.otel.svc:4317 \
-  OTEL_EXPORTER_OTLP_INSECURE=true
-```
+The v2 mutation client sends W3C `traceparent`/`tracestate` HTTP headers outside canonical
+request bodies and operation capabilities. Authenticated supervisor operations
+emit `acp.supervisor.*` spans under the current controller operation, with Task
+UID/attempt, prompt/operation IDs and runtime pool/session identity. Context is
+request-local, including for reused sessions. Missing or invalid context starts
+a separate trace; disabled telemetry does not affect execution. Provider CLI
+children receive no tracing environment variables or instrumentation. Supervisor
+spans never capture prompts, completions, raw tool arguments or error text, even
+if a content-capture environment variable is set.
 
-For per-Task agent runtime Jobs, set telemetry env in the Task `spec.env` where
-you intentionally want that runtime process to export spans. Orka reserves and
-overwrites trace-context env (`ORKA_TRACEPARENT`, `ORKA_TRACESTATE`,
-`ORKA_BAGGAGE`) so user-supplied values cannot forge parentage.
+**Collector routing is an operator prerequisite.** Managed RuntimePool network
+policies permit DNS, controller API and provider proxy traffic; enabling telemetry
+does not add collector egress. Under an enforcing CNI, configure a separate,
+narrowly selected collector route/policy before expecting exports. Pod-level
+collector access also permits provider children to reach that collector, because
+they share the Pod network. Choose a collector and authorization boundary
+accordingly. This feature does not install a collector or alter managed policies.
+External supervisors can opt in with the same environment settings. Supervisor
+exporters require `http://` or `https://` endpoint URLs and the scalar settings
+listed above. Unsupported ambient SDK settings (including OTLP headers, certificate
+paths and resource attributes) disable supervisor telemetry before SDK initialization,
+so malformed values cannot enter SDK diagnostics. The content-capture flag is ignored.
+Use an authorized local collector.
+
+Export is asynchronous and bounded. Initialization/export failure does not fail
+a Task, and supervisor shutdown spends at most two additional seconds flushing
+traces. Unavailable collectors can result in dropped spans. Use these sources of
+truth for runtime state:
+
+- `Task.status.execution` for fenced attempt, RuntimePool, RuntimeSession, prompt, and terminal outcome;
+- `Task.status.delivery` for workspace validation/publication state and non-secret receipts;
+- `RuntimePool.status` for lifecycle, admission, exact Pod/boot identity, capacity, and pressure;
+- Task execution events and controller/runtime/publisher structured logs.
+
+Do not add credential-bearing OTLP headers to runtime images or provider child environments.
+The provider child-environment allowlist remains unchanged.
 
 Credential-bearing OTLP header environment variables are not copied from the
 controller into task workloads. Use an in-cluster collector endpoint or a
@@ -99,6 +147,41 @@ Kubernetes task workloads require `ORKA_ENABLE_TELEMETRY=true`; OTLP endpoint va
 do not enable telemetry. Standard SDK sampling is
 available through `OTEL_TRACES_SAMPLER` and `OTEL_TRACES_SAMPLER_ARG` (for
 example `always_off`, `always_on`, or `parentbased_traceidratio`).
+
+## Approval decision duration
+
+The Prometheus endpoint on `--metrics-bind-address` exports
+`orka_approval_decision_duration_seconds`, independently of OpenTelemetry enablement.
+It measures seconds between the stored approval request timestamp and the first
+committed terminal decision timestamp. Buckets cover one second through one day,
+with longer waits included in the `+Inf` bucket.
+
+The only labels are:
+
+| Label | Values |
+|---|---|
+| `outcome` | `approved`, `denied`, `cancelled`, `expired` |
+| `path` | `acp` for broker-owned approvals with a call binding; `worker` for built-in AI worker approvals |
+
+Human approvals and declines record `approved` and `denied`. ACP wait/deadline
+expiry records `expired`; Task cancellation or loss of the original tool/prompt
+authority records `cancelled`. Recovery records a sample when it commits a missing
+terminal decision from a verified execution receipt. Revocation after a human
+decision preserves that original decision and adds no second sample. Polling,
+receipt replay, rejected decisions and rolled-back writes add no samples.
+
+Worker approvals currently have human decisions only: passive timeout metadata,
+Task termination and cancellation do not create worker terminal approval events.
+This metric does not introduce worker expiry or agent parking. A pending approval
+whose expiry is derived for display is counted only when a terminal event commits.
+Missing or backwards timestamps are omitted. Labels contain no Task names,
+approval IDs, users or request text.
+
+Histograms are in memory and reset on process restart. Existing terminal events
+are not replayed into the histogram. A crash between committing a decision and
+observing it, or between scrapes, can lose a sample; use durable approval events
+for audits. Pending requests retained across a restart still use their original
+request timestamps when a new decision commits.
 
 ## Trace topology
 
@@ -116,19 +199,53 @@ task.run
                   └─ execute_tool {tool.name}
 ```
 
+An Orka harness v2 Task continues the same Task-carried trace across controller and supervisor:
+
+```text
+<Task-carried parent span>
+  ├─ acp.session.create / acp.session.continue
+  │   └─ acp.supervisor.session.create  # when a runtime session is created
+  ├─ acp.prompt
+  │   ├─ acp.supervisor.prompt
+  │   └─ acp.publication.reconcile  # live write-workspace delivery
+  └─ acp.publication.reconcile      # recovery after the prompt span is gone
+```
+
 Model client spans measure provider-call latency only. Tool spans are siblings
 of the model client span under the same agent/chat step, not children of the
 model client span.
 
 Task creation stamps the current W3C trace context into Task annotations. The
-controller extracts that context when reconciling the Task and injects
-`ORKA_TRACEPARENT` into worker Jobs or harness-wrapper turn metadata. Delegation
-stamps the active `execute_tool delegate_task` span context onto the child Task,
-so the child `task.run` span is linked to the parent tool call.
+controller extracts that context for `task.reconcile` and controller-side ACP
+spans. Supported native worker Tasks also receive `ORKA_TRACEPARENT` in their
+Jobs. Orka harness v2 runtime requests carry `traceparent` and `tracestate` headers to
+authenticated supervisor operations; provider CLI children remain outside this
+instrumentation. Delegation stamps the active `execute_tool delegate_task` span
+context onto the child Task so child controller, supervisor and native-worker
+spans remain linked.
 
 Outbound HTTP and MCP Tool CRD requests receive W3C `traceparent` headers. If a
 Tool config supplies its own `traceparent` header, the active Orka trace context
 wins.
+
+### Instrumented components
+
+| Tracer | Span | Attributes |
+|--------|------|------------|
+| `orka.api` | HTTP/API middleware spans | HTTP request/route/status metadata |
+| `orka.chat` | `chat.request`, `chat.tool_loop.iteration` | session metadata; `chat.iteration`, `orka.tenant`, requested model, tool-call count |
+| `orka.worker` | `task.run` | `orka.task.id`, namespace, and agent name when known |
+| `orka.acp` | `acp.prompt`, `acp.session.create`, `acp.session.continue`, `acp.publication.reconcile` | `orka.task.id`, namespace, attempt/prompt identity, RuntimePool/RuntimeSession identity, prompt/session outcome, publication identity, and agent name when known |
+| `orka.acp.supervisor` | `acp.supervisor.*` authenticated runtime operations | Task UID/attempt, prompt/operation IDs and runtime pool/session identity; no request content |
+| `orka.agent` | `agent.step` | iteration, requested model/provider, tool-call count, Orka task metadata |
+| `orka.gen_ai` | `chat {model}` | `gen_ai.*` provider/model/token metadata and `error.type` |
+| `orka.gen_ai` | `execute_tool {tool.name}` | `gen_ai.tool.*`, `orka.tool.name`, `orka.tool.kind`, `orka.tool.result.size_bytes`, parent/child task fields for delegation |
+| `orka.controller` | `task.reconcile` | task name, namespace, type, and propagated trace context |
+
+Use `orka.task.id` to find a Task trace, `orka.tool.name` to find specific tool
+executions, and `orka.parent_task.id` / `orka.child_task.id` to follow delegated
+children. Tool spans do not include raw arguments or complete result bodies, but a structured tool
+error message can appear in the span status description.
 
 ### OpenTelemetry traces vs Task trace read model
 
@@ -229,8 +346,8 @@ service:
 For local Jaeger all-in-one, expose its OTLP gRPC endpoint and set:
 
 ```bash
-kubectl set env deployment/orka-controller \
-  OTEL_EXPORTER_OTLP_ENDPOINT=jaeger-collector.observability.svc:4317
+kubectl -n orka-system set env deployment/orka-controller \
+  OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger-collector.observability.svc:4317
 ```
 
 ## Content capture and privacy

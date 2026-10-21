@@ -1,0 +1,444 @@
+package supervisor
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+)
+
+func TestMCPProxyIsPromptScopedAndForwardsExactAuthorization(t *testing.T) {
+	var calls atomic.Int32
+	captured := make(chan harnessv2.MCPBrokerCallRequest, 1)
+	broker := MCPBrokerFunc(func(_ context.Context, request harnessv2.MCPBrokerCallRequest) (harnessv2.MCPBrokerCallResponse, error) {
+		calls.Add(1)
+		captured <- request
+		return harnessv2.MCPBrokerCallResponse{
+			Protocol: harnessv2.ProtocolVersion, CallID: request.Call.CallID,
+			Result: json.RawMessage(`{"value":"ok"}`),
+		}, nil
+	})
+	session, server := newTestMCPProxySession(t, broker, false)
+
+	initialize := doMCPRequest(t, server, "credential", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`)
+	if initialize.StatusCode != http.StatusOK {
+		t.Fatalf("initialize status = %d", initialize.StatusCode)
+	}
+	_ = initialize.Body.Close()
+
+	idleList := decodeMCPResponse(t, doMCPRequest(t, server, "credential", `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`))
+	if idleList.Error != nil || responseToolCount(idleList.Result) != 1 {
+		t.Fatalf("idle tools/list = %#v", idleList)
+	}
+	idleCall := decodeMCPResponse(t, doMCPRequest(t, server, "credential", `{"jsonrpc":"2.0","id":"call-1","method":"tools/call","params":{"name":"lookup","arguments":{},"_meta":{"progressToken":1}}}`))
+	if idleCall.Error == nil || calls.Load() != 0 {
+		t.Fatalf("idle tool call = %#v calls=%d", idleCall, calls.Load())
+	}
+
+	now := time.Now().UTC()
+	authorization, lease := testMCPAuthorization(t, session.fence, now, false)
+	if err := session.activate(t.Context(), authorization, lease, now); err != nil {
+		t.Fatal(err)
+	}
+	pendingCall := decodeMCPResponse(t, doMCPRequest(t, server, "credential", `{"jsonrpc":"2.0","id":"call-2","method":"tools/call","params":{"name":"lookup","arguments":{},"_meta":{"progressToken":2}}}`))
+	if pendingCall.Error == nil || calls.Load() != 0 {
+		t.Fatalf("pre-accept tool call = %#v calls=%d", pendingCall, calls.Load())
+	}
+	if err := session.markRunning(authorization.PromptID, now.Add(time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	activeList := decodeMCPResponse(t, doMCPRequest(t, server, "credential", `{"jsonrpc":"2.0","id":3,"method":"tools/list"}`))
+	if activeList.Error != nil || responseToolCount(activeList.Result) != 1 {
+		t.Fatalf("active tools/list = %#v", activeList)
+	}
+	activeCall := decodeMCPResponse(t, doMCPRequest(t, server, "credential", `{"jsonrpc":"2.0","id":"call-3","method":"tools/call","params":{"name":"lookup","arguments":{"query":"x"}}}`))
+	if activeCall.Error != nil {
+		t.Fatalf("active tool call = %#v", activeCall)
+	}
+	select {
+	case request := <-captured:
+		if request.Metadata.Fence != session.fence || request.Authorization.RuntimeSessionUID != session.fence.RuntimeSessionUID ||
+			request.Authorization.SessionGeneration != session.fence.RuntimeSessionGeneration ||
+			request.Metadata.TaskUID != authorization.TaskUID || request.Metadata.TaskAttempt != authorization.TaskAttempt ||
+			request.Metadata.PromptID != authorization.PromptID || request.Lease.Generation != lease.Generation ||
+			request.Authorization.ToolPolicy.DescriptorDigest != authorization.ToolPolicy.DescriptorDigest {
+			t.Fatalf("forwarded request lost exact prompt authorization: %#v", request)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("broker did not receive active tool call")
+	}
+
+	unauthorized := doMCPRequest(t, server, "wrong", `{"jsonrpc":"2.0","id":4,"method":"tools/list"}`)
+	if unauthorized.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("wrong credential status = %d", unauthorized.StatusCode)
+	}
+	_ = unauthorized.Body.Close()
+}
+
+func TestMCPProxyToolCallMetadata(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		fields    string
+		errorCode int
+	}{
+		{name: "metadata omitted"},
+		{name: "empty metadata object", fields: `,"_meta":{}`},
+		{name: "numeric progress token", fields: `,"_meta":{"progressToken":2}`},
+		{name: "string progress token and extensions", fields: `,"_meta":{"progressToken":"progress-1","client":{"version":1}}`},
+		{name: "unknown parameter", fields: `,"progressToken":2`, errorCode: -32602},
+		{name: "metadata must be an object", fields: `,"_meta":[2]`, errorCode: -32602},
+		{name: "null metadata", fields: `,"_meta":null`, errorCode: -32602},
+		{name: "string metadata", fields: `,"_meta":"progress"`, errorCode: -32602},
+		{name: "numeric metadata", fields: `,"_meta":2`, errorCode: -32602},
+		{name: "boolean metadata", fields: `,"_meta":false`, errorCode: -32602},
+		{name: "metadata stays request bounded", fields: `,"_meta":{"padding":"` + strings.Repeat("x", harnessv2.MaxMCPArgumentsBytes+(64<<10)) + `"}`, errorCode: -32600},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			captured := make(chan harnessv2.MCPBrokerCallRequest, 1)
+			session, endpoint := newTestMCPProxySession(t, MCPBrokerFunc(func(_ context.Context, request harnessv2.MCPBrokerCallRequest) (harnessv2.MCPBrokerCallResponse, error) {
+				captured <- request
+				return harnessv2.MCPBrokerCallResponse{
+					Protocol: harnessv2.ProtocolVersion, CallID: request.Call.CallID, Result: json.RawMessage(`{"value":"ok"}`),
+				}, nil
+			}), false)
+			now := time.Now().UTC()
+			authorization, lease := testMCPAuthorization(t, session.fence, now, false)
+			if err := session.activate(t.Context(), authorization, lease, now); err != nil {
+				t.Fatal(err)
+			}
+			if err := session.markRunning(authorization.PromptID, now); err != nil {
+				t.Fatal(err)
+			}
+			payload := `{"jsonrpc":"2.0","id":"call-1","method":"tools/call","params":{"name":"lookup","arguments":{"query":"x"}` + tc.fields + `}}`
+			response := decodeMCPResponse(t, doMCPRequest(t, endpoint, "credential", payload))
+			if tc.errorCode != 0 {
+				if response.Error == nil || response.Error.Code != tc.errorCode {
+					t.Fatalf("MCP response = %#v, want error %d", response, tc.errorCode)
+				}
+				if len(captured) != 0 {
+					t.Fatal("invalid tool call reached the broker")
+				}
+				return
+			}
+			if response.Error != nil {
+				t.Fatalf("MCP metadata rejected: %#v", response.Error)
+			}
+			select {
+			case request := <-captured:
+				if request.Metadata.Fence != session.fence || request.Metadata.TaskUID != authorization.TaskUID ||
+					request.Metadata.PromptID != authorization.PromptID || request.Call.ToolName != "lookup" ||
+					!bytes.Equal(request.Call.Arguments, []byte(`{"query":"x"}`)) {
+					t.Fatal("MCP metadata changed the broker call or its authority")
+				}
+			default:
+				t.Fatal("tool call did not reach the broker")
+			}
+		})
+	}
+}
+
+func TestMCPProxySessionCapacityPreservesOtherRequests(t *testing.T) {
+	started := make(chan struct{}, defaultMCPMaxSessionCalls)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	defer unblock()
+	var calls, cancelled atomic.Int32
+	broker := MCPBrokerFunc(func(ctx context.Context, request harnessv2.MCPBrokerCallRequest) (harnessv2.MCPBrokerCallResponse, error) {
+		if calls.Add(1) <= defaultMCPMaxSessionCalls {
+			started <- struct{}{}
+		}
+		select {
+		case <-release:
+			return harnessv2.MCPBrokerCallResponse{
+				Protocol: harnessv2.ProtocolVersion, CallID: request.Call.CallID,
+				Result: json.RawMessage(`{"value":"ok"}`),
+			}, nil
+		case <-ctx.Done():
+			cancelled.Add(1)
+			return harnessv2.MCPBrokerCallResponse{}, ctx.Err()
+		}
+	})
+	session, endpoint := newTestMCPProxySession(t, broker, false)
+	now := time.Now().UTC()
+	authorization, lease := testMCPAuthorization(t, session.fence, now, false)
+	if err := session.activate(t.Context(), authorization, lease, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.markRunning(authorization.PromptID, now); err != nil {
+		t.Fatal(err)
+	}
+
+	type callResult struct {
+		response mcpJSONRPCResponse
+		err      error
+	}
+	results := make(chan callResult, defaultMCPMaxSessionCalls)
+	ctx := t.Context()
+	for i := range defaultMCPMaxSessionCalls {
+		go func() {
+			payload := fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"tools/call","params":{"name":"lookup","arguments":{}}}`, i)
+			request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(payload))
+			if err != nil {
+				results <- callResult{err: err}
+				return
+			}
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("Authorization", "Bearer credential")
+			response, err := (&http.Client{Timeout: 5 * time.Second}).Do(request)
+			if err != nil {
+				results <- callResult{err: err}
+				return
+			}
+			defer response.Body.Close() //nolint:errcheck
+			var decoded mcpJSONRPCResponse
+			err = json.NewDecoder(response.Body).Decode(&decoded)
+			results <- callResult{response: decoded, err: err}
+		}()
+	}
+	for range defaultMCPMaxSessionCalls {
+		select {
+		case <-started:
+		case <-time.After(3 * time.Second):
+			t.Fatal("admitted tool calls did not start")
+		}
+	}
+
+	response := doMCPRequest(t, endpoint, "credential", `{"jsonrpc":"2.0","id":"overflow","method":"tools/call","params":{"name":"lookup","arguments":{}}}`)
+	status := response.StatusCode
+	rejected := decodeMCPResponse(t, response)
+	if status != http.StatusOK || string(rejected.ID) != `"overflow"` || rejected.Error == nil || rejected.Error.Code != -32003 || rejected.Result != nil {
+		t.Fatalf("capacity response = HTTP %d %#v, want a correlated JSON-RPC error", status, rejected)
+	}
+	for _, method := range []string{"ping", "tools/list"} {
+		control := decodeMCPResponse(t, doMCPRequest(t, endpoint, "credential", fmt.Sprintf(`{"jsonrpc":"2.0","id":"control","method":%q}`, method)))
+		if control.Error != nil {
+			t.Fatalf("%s was blocked by active tool calls: %#v", method, control)
+		}
+	}
+	if calls.Load() != defaultMCPMaxSessionCalls || cancelled.Load() != 0 {
+		t.Fatalf("capacity rejection changed admitted calls: calls=%d cancelled=%d", calls.Load(), cancelled.Load())
+	}
+	unblock()
+	for range defaultMCPMaxSessionCalls {
+		select {
+		case result := <-results:
+			if result.err != nil || result.response.Error != nil {
+				t.Fatalf("admitted call failed: %#v error=%v", result.response, result.err)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("admitted tool call did not finish")
+		}
+	}
+	recovery := decodeMCPResponse(t, doMCPRequest(t, endpoint, "credential", `{"jsonrpc":"2.0","id":"later","method":"tools/call","params":{"name":"lookup","arguments":{}}}`))
+	if recovery.Error != nil || calls.Load() != defaultMCPMaxSessionCalls+1 || cancelled.Load() != 0 {
+		t.Fatalf("later call = %#v calls=%d cancelled=%d", recovery, calls.Load(), cancelled.Load())
+	}
+}
+
+func TestMCPProxySettlementRevokesAndCancelsInflightCall(t *testing.T) {
+	entered := make(chan struct{})
+	cancelled := make(chan struct{})
+	var once sync.Once
+	broker := MCPBrokerFunc(func(ctx context.Context, request harnessv2.MCPBrokerCallRequest) (harnessv2.MCPBrokerCallResponse, error) {
+		once.Do(func() { close(entered) })
+		<-ctx.Done()
+		close(cancelled)
+		return harnessv2.MCPBrokerCallResponse{}, ctx.Err()
+	})
+	session, server := newTestMCPProxySession(t, broker, false)
+	now := time.Now().UTC()
+	authorization, lease := testMCPAuthorization(t, session.fence, now, false)
+	if err := session.activate(t.Context(), authorization, lease, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.markRunning(authorization.PromptID, now.Add(time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+
+	responseDone := make(chan mcpJSONRPCResponse, 1)
+	go func() {
+		responseDone <- decodeMCPResponse(t, doMCPRequest(t, server, "credential", `{"jsonrpc":"2.0","id":"inflight","method":"tools/call","params":{"name":"lookup","arguments":{}}}`))
+	}()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("broker call did not start")
+	}
+	session.deactivate(authorization.PromptID, harnessv2.RuntimeSessionStateValidating)
+	select {
+	case <-cancelled:
+	case <-time.After(time.Second):
+		t.Fatal("settlement did not cancel in-flight broker call")
+	}
+	select {
+	case response := <-responseDone:
+		if response.Error == nil {
+			t.Fatalf("cancelled call response = %#v", response)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancelled MCP request did not return")
+	}
+	postSettlement := decodeMCPResponse(t, doMCPRequest(t, server, "credential", `{"jsonrpc":"2.0","id":"after","method":"tools/call","params":{"name":"lookup","arguments":{}}}`))
+	if postSettlement.Error == nil {
+		t.Fatalf("post-settlement call = %#v", postSettlement)
+	}
+}
+
+// Copilot CLI 1.0.96 sends this exact server/discover request to every HTTP MCP
+// server before initialize, and falls back to initialize when it gets a
+// JSON-RPC error. The proxy must answer it as an unsupported method rather
+// than fail the request at the transport.
+func TestMCPProxyAnswersCopilotServerDiscoverAsUnsupported(t *testing.T) {
+	broker := MCPBrokerFunc(func(context.Context, harnessv2.MCPBrokerCallRequest) (harnessv2.MCPBrokerCallResponse, error) {
+		t.Error("server/discover reached the broker")
+		return harnessv2.MCPBrokerCallResponse{}, nil
+	})
+	_, server := newTestMCPProxySession(t, broker, false)
+	response := doMCPRequest(t, server, "credential", `{"jsonrpc":"2.0","id":0,"method":"server/discover","params":{"_meta":{`+
+		`"io.modelcontextprotocol/protocolVersion":"2026-07-28",`+
+		`"io.modelcontextprotocol/clientInfo":{"name":"copilot-cli","version":"1.0.96"},`+
+		`"io.modelcontextprotocol/clientCapabilities":{"sampling":{}}}}}`)
+	if response.StatusCode != http.StatusOK {
+		_ = response.Body.Close()
+		t.Fatalf("server/discover status = %d", response.StatusCode)
+	}
+	decoded := decodeMCPResponse(t, response)
+	if decoded.Error == nil || decoded.Error.Code != -32601 || string(decoded.ID) != "0" {
+		t.Fatalf("server/discover response = %#v", decoded)
+	}
+}
+
+func newTestMCPProxySession(t *testing.T, broker MCPBroker, requireApproval bool) (*mcpProxySession, string) {
+	t.Helper()
+	proxy, err := newMCPProxy(broker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = proxy.close(ctx)
+	})
+	fence := harnessv2.Fence{
+		RuntimeInstanceID: "runtime-instance", SupervisorBootID: "boot", ControllerEpoch: 2,
+		RuntimePoolUID: "pool-uid", RuntimePoolGeneration: 4,
+		RuntimeSessionUID: "session-uid", RuntimeSessionGeneration: 3,
+		RuntimeProfileDigest:       harnessv2.ProfileDigest(testDigest("profile")),
+		ProfileDigestSchemaVersion: harnessv2.ProfileDigestSchemaVersion,
+	}
+	authorization, _ := testMCPAuthorization(t, fence, time.Now().UTC(), requireApproval)
+	session, binding, err := proxy.newSession(fence, authorization.Configuration())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if binding.Type != providerProxyScheme || binding.URL == "" || len(binding.Headers) != 1 {
+		t.Fatalf("MCP binding = %#v", binding)
+	}
+	// The helper uses a stable credential so requests are concise and the random
+	// production credential never appears in test failure output.
+	session.mu.Lock()
+	session.credential = []byte("credential")
+	session.mu.Unlock()
+	return session, binding.URL
+}
+
+func testMCPAuthorization(t *testing.T, fence harnessv2.Fence, now time.Time, requireApproval bool) (harnessv2.PromptMCPAuthorization, harnessv2.PromptLease) {
+	t.Helper()
+	name, effect := "lookup", harnessv2.MCPToolEffectReadOnly
+	if requireApproval {
+		name, effect = "mutate", harnessv2.MCPToolEffectConsequential
+	}
+	return buildTestMCPAuthorization(t, fence, now, name, effect, requireApproval)
+}
+
+func buildTestMCPAuthorization(
+	t *testing.T, fence harnessv2.Fence, now time.Time,
+	name string, effect harnessv2.MCPToolEffect, requireApproval bool,
+) (harnessv2.PromptMCPAuthorization, harnessv2.PromptLease) {
+	t.Helper()
+	descriptors := []harnessv2.MCPToolDescriptor{{
+		Name: name, Description: "test tool", InputSchema: json.RawMessage(`{"type":"object"}`),
+		Source: harnessv2.MCPToolSourceBrokeredBuiltin, Effect: effect,
+	}}
+	digest, err := harnessv2.CanonicalMCPToolDescriptorDigest(descriptors)
+	if err != nil {
+		t.Fatal(err)
+	}
+	approval := harnessv2.MCPApprovalPolicy{}
+	if requireApproval {
+		approval.RequiredTools = []string{name}
+	}
+	toolPolicy := harnessv2.MCPToolPolicy{
+		AllowedToolNames: []string{name}, AllowBash: true, Tools: descriptors, DescriptorDigest: digest,
+	}
+	toolDigest, err := harnessv2.CanonicalRuntimeToolPolicyDigest(toolPolicy.AllowedToolNames, toolPolicy.DisallowedToolNames, toolPolicy.AllowBash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	approvalDigest, err := harnessv2.CanonicalMCPApprovalPolicyDigest(approval)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mcpDigest, err := harnessv2.CanonicalMCPConfigurationDigest(toolPolicy.AllowedToolNames)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease := harnessv2.PromptLease{Generation: 1, IssuedAt: now, ExpiresAt: now.Add(2 * time.Minute)}
+	return harnessv2.PromptMCPAuthorization{
+		RuntimeSessionUID: fence.RuntimeSessionUID, SessionGeneration: fence.RuntimeSessionGeneration,
+		TaskUID: "task-uid", TaskAttempt: 1, PromptID: testPromptOneID, LeaseGeneration: lease.Generation,
+		ToolPolicyDigest: toolDigest, ApprovalPolicyDigest: approvalDigest, MCPConfigurationDigest: mcpDigest,
+		ToolPolicy: toolPolicy, ApprovalPolicy: approval, ExpiresAt: now.Add(time.Minute),
+	}, lease
+}
+
+func doMCPRequest(t *testing.T, endpoint, credential, payload string) *http.Response {
+	t.Helper()
+	request, err := http.NewRequest(http.MethodPost, endpoint, strings.NewReader(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer "+credential)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return response
+}
+
+func decodeMCPResponse(t *testing.T, response *http.Response) mcpJSONRPCResponse {
+	t.Helper()
+	defer response.Body.Close() //nolint:errcheck
+	data, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded mcpJSONRPCResponse
+	if err := json.NewDecoder(bytes.NewReader(data)).Decode(&decoded); err != nil {
+		t.Fatalf("decode MCP response: %v body=%s", err, data)
+	}
+	return decoded
+}
+
+func responseToolCount(value any) int {
+	object, ok := value.(map[string]any)
+	if !ok {
+		return -1
+	}
+	tools, ok := object["tools"].([]any)
+	if !ok {
+		return -1
+	}
+	return len(tools)
+}

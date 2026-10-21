@@ -94,10 +94,10 @@ func (h *Handlers) persistDirectTaskTransactionTokenSubject(
 	}}
 	taskUIDLabel := labels.SelectorValue(string(task.UID))
 	requestDetails := map[string]any{
-		"operation": "createTask",
-		"namespace": task.Namespace,
-		"taskName":  task.Name,
-		"taskUID":   string(task.UID),
+		"operation":       "createTask",
+		"namespace":       task.Namespace,
+		apiFieldTaskName:  task.Name,
+		contextTaskUIDKey: string(task.UID),
 	}
 	if transactionID := strings.TrimSpace(task.Spec.Transaction.ID); transactionID != "" {
 		requestDetails["txn"] = transactionID

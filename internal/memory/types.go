@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"context"
 	"time"
 
 	"github.com/orka-agents/orka/internal/store"
@@ -142,6 +143,9 @@ type MutationContext struct {
 	RequestID      string
 	Reason         string
 	LocationBase   string
+	// AuthorizeExistingMemory gates a legacy proposal apply that resolves to an
+	// already existing memory; see store.MemoryProposalApply.
+	AuthorizeExistingMemory func(context.Context, string, string) error
 }
 
 // MutationResult is either an immediately materialized Memory or a durable operation.

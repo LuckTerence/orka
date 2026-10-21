@@ -10,9 +10,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -23,6 +25,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/apierror"
+	"github.com/orka-agents/orka/internal/executionmode"
 	memoryruntime "github.com/orka-agents/orka/internal/memory"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
@@ -39,8 +42,8 @@ func TestNewServer(t *testing.T) {
 
 	config := ServerConfig{
 		Port:           8080,
-		MetricsPort:    9090,
 		WatchNamespace: "default",
+		ExecutionMode:  executionmode.HarnessV2,
 	}
 
 	server := NewServer(fakeClient, nil, config)
@@ -56,6 +59,11 @@ func TestNewServer(t *testing.T) {
 	}
 	if server.config.Port != 8080 {
 		t.Errorf("Port = %d, want 8080", server.config.Port)
+	}
+	if server.config.Chat.ExecutionMode != executionmode.HarnessV2 ||
+		server.handlers.executionMode != executionmode.HarnessV2 ||
+		server.chatHandler.config.ExecutionMode != executionmode.HarnessV2 {
+		t.Fatal("execution mode was not propagated to every Agent producer")
 	}
 }
 
@@ -182,15 +190,11 @@ func TestCustomErrorHandler(t *testing.T) {
 func TestServerConfig(t *testing.T) {
 	config := ServerConfig{
 		Port:           8080,
-		MetricsPort:    9090,
 		WatchNamespace: "custom-ns",
 	}
 
 	if config.Port != 8080 {
 		t.Errorf("Port = %d, want 8080", config.Port)
-	}
-	if config.MetricsPort != 9090 {
-		t.Errorf("MetricsPort = %d, want 9090", config.MetricsPort)
 	}
 	if config.WatchNamespace != "custom-ns" {
 		t.Errorf("WatchNamespace = %s, want custom-ns", config.WatchNamespace)
@@ -298,6 +302,7 @@ func TestCustomErrorHandler_NonAPI404_ServesSPA(t *testing.T) {
 	app := fiber.New(fiber.Config{
 		ErrorHandler: customErrorHandler,
 	})
+	app.State().Set(dashboardStateKey, true)
 	app.Get("/api/test", func(c fiber.Ctx) error {
 		return c.SendString("api")
 	})
@@ -308,11 +313,28 @@ func TestCustomErrorHandler_NonAPI404_ServesSPA(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Test request failed: %v", err)
 	}
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("StatusCode = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "text/html") {
+		t.Errorf("Content-Type = %s, want text/html", ct)
+	}
+}
 
-	// Should serve SPA (200 with index.html) or fall through to JSON error
-	// depending on whether embedded UI assets are available
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound {
-		t.Errorf("StatusCode = %d, want 200 or 404", resp.StatusCode)
+func TestCustomErrorHandler_NonAPI404_WithoutDashboardReturnsJSON(t *testing.T) {
+	app := fiber.New(fiber.Config{
+		ErrorHandler: customErrorHandler,
+	})
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/some-ui-route", nil))
+	if err != nil {
+		t.Fatalf("Test request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("StatusCode = %d, want %d", resp.StatusCode, http.StatusNotFound)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "application/json") {
+		t.Errorf("Content-Type = %s, want application/json", ct)
 	}
 }
 
@@ -354,6 +376,117 @@ func TestCustomErrorHandler_Health404_ReturnsJSON(t *testing.T) {
 
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("StatusCode = %d, want %d", resp.StatusCode, http.StatusNotFound)
+	}
+}
+
+func TestCustomErrorHandler_CompatAPI404_ReturnsProviderError(t *testing.T) {
+	// An unrouted path under a compatibility API must not be answered with the
+	// dashboard's index page: the caller is a provider SDK, and HTML parsed as
+	// JSON surfaces several frames from the cause. It also has to carry that
+	// provider's error envelope, which is the only shape its client reads.
+	tests := []struct {
+		name      string
+		path      string
+		assertErr func(t *testing.T, body []byte)
+	}{
+		{
+			name: "openai",
+			path: "/openai/v1/nonexistent",
+			assertErr: func(t *testing.T, body []byte) {
+				t.Helper()
+				var payload OAIError
+				if err := json.Unmarshal(body, &payload); err != nil {
+					t.Fatalf("body is not an OpenAI error envelope: %v (%s)", err, body)
+				}
+				if payload.Error.Type != "invalid_request_error" {
+					t.Errorf("error.type = %q, want invalid_request_error", payload.Error.Type)
+				}
+				if !strings.Contains(payload.Error.Message, "/openai/v1/nonexistent") {
+					t.Errorf("error.message = %q, want it to name the path", payload.Error.Message)
+				}
+			},
+		},
+		{
+			name: "openai upper case",
+			path: "/OPENAI/v1/nonexistent",
+			assertErr: func(t *testing.T, body []byte) {
+				t.Helper()
+				var payload OAIError
+				if err := json.Unmarshal(body, &payload); err != nil {
+					t.Fatalf("body is not an OpenAI error envelope: %v (%s)", err, body)
+				}
+				if payload.Error.Type != "invalid_request_error" {
+					t.Errorf("error.type = %q, want invalid_request_error", payload.Error.Type)
+				}
+			},
+		},
+		{
+			name: "anthropic",
+			path: "/anthropic/v1/nonexistent",
+			assertErr: func(t *testing.T, body []byte) {
+				t.Helper()
+				var payload AnthropicError
+				if err := json.Unmarshal(body, &payload); err != nil {
+					t.Fatalf("body is not an Anthropic error envelope: %v (%s)", err, body)
+				}
+				if payload.Type != "error" {
+					t.Errorf("type = %q, want error", payload.Type)
+				}
+				if payload.Error.Type != "not_found_error" {
+					t.Errorf("error.type = %q, want not_found_error", payload.Error.Type)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			app := fiber.New(fiber.Config{ErrorHandler: customErrorHandler})
+
+			resp, err := app.Test(httptest.NewRequest(http.MethodPost, tt.path, nil))
+			if err != nil {
+				t.Fatalf("Test request failed: %v", err)
+			}
+			if resp.StatusCode != http.StatusNotFound {
+				t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusNotFound)
+			}
+			if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "application/json") {
+				t.Fatalf("Content-Type = %q, want application/json", ct)
+			}
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatalf("Failed to read body: %v", err)
+			}
+			tt.assertErr(t, body)
+		})
+	}
+}
+
+func TestCustomErrorHandler_OpenAIConversations_ReturnsNotImplemented(t *testing.T) {
+	// Saved conversations remain unsupported; the error names the stateless route.
+	app := fiber.New(fiber.Config{ErrorHandler: customErrorHandler})
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodPost, "/openai/v1/conversations", nil))
+	if err != nil {
+		t.Fatalf("Test request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusNotImplemented {
+		t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusNotImplemented)
+	}
+	if got := resp.Header.Get("X-Should-Retry"); got != "false" {
+		t.Fatalf("X-Should-Retry = %q, want false", got)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("Failed to read body: %v", err)
+	}
+	var payload OAIError
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatalf("body is not an OpenAI error envelope: %v (%s)", err, body)
+	}
+	if !strings.Contains(payload.Error.Message, "/openai/v1/responses") {
+		t.Errorf("error.message = %q, want it to name the supported route", payload.Error.Message)
 	}
 }
 
@@ -401,6 +534,7 @@ func TestServer_SetupRoutes_OpenAI(t *testing.T) {
 		path   string
 	}{
 		{http.MethodPost, "/openai/v1/chat/completions"},
+		{http.MethodPost, "/openai/v1/responses"},
 		{http.MethodGet, "/openai/v1/models"},
 	}
 

@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
 )
 
@@ -28,15 +29,8 @@ type Client struct {
 	TxnToken   string
 	Namespace  string
 	HTTPClient *http.Client
-}
-
-// New creates a new Orka API client.
-func New(baseURL, token string) *Client {
-	return &Client{
-		BaseURL:    baseURL,
-		Token:      token,
-		HTTPClient: http.DefaultClient,
-	}
+	// NativeSessionMaxBytes bounds migration bundles independently of ordinary API responses.
+	NativeSessionMaxBytes int
 }
 
 // NewWithNamespace creates a new Orka API client with a default namespace.
@@ -163,7 +157,7 @@ func (c *Client) StreamChat(ctx context.Context, req ChatRequest) (*SSEReader, *
 
 	if resp.StatusCode == http.StatusUnauthorized {
 		_ = resp.Body.Close()
-		return nil, nil, fmt.Errorf("authentication failed (HTTP 401): try 'orka login' or provide --token")
+		return nil, nil, fmt.Errorf("authentication failed (HTTP 401): provide --token, save one with 'orka config set-token', or check your kubeconfig credentials")
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -485,7 +479,8 @@ type CreateTaskRequest struct {
 	AgentRef *struct {
 		Name string `json:"name"`
 	} `json:"agentRef,omitempty"`
-	AI *struct {
+	AgentRuntime *corev1alpha1.AgentRuntimeSpec `json:"agentRuntime,omitempty"`
+	AI           *struct {
 		ProviderRef *struct {
 			Name string `json:"name"`
 		} `json:"providerRef,omitempty"`
@@ -499,11 +494,16 @@ type TaskDetail map[string]any
 
 // TaskSummary is a lightweight representation of a task for list display.
 type TaskSummary struct {
-	Name          string `json:"name" yaml:"name"`
-	Namespace     string `json:"namespace,omitempty" yaml:"namespace,omitempty"`
-	Type          string `json:"type,omitempty" yaml:"type,omitempty"`
-	Phase         string `json:"phase,omitempty" yaml:"phase,omitempty"`
-	Age           string `json:"age,omitempty" yaml:"age,omitempty"`
+	Name      string `json:"name" yaml:"name"`
+	Namespace string `json:"namespace,omitempty" yaml:"namespace,omitempty"`
+	Type      string `json:"type,omitempty" yaml:"type,omitempty"`
+	Phase     string `json:"phase,omitempty" yaml:"phase,omitempty"`
+	Age       string `json:"age,omitempty" yaml:"age,omitempty"`
+	Agent     string `json:"agent,omitempty" yaml:"agent,omitempty"`
+	// Image feeds the table's AGENT column for container Tasks; it is not
+	// part of the structured list output, which gains only the agent
+	// reference.
+	Image         string `json:"-" yaml:"-"`
 	Iteration     int    `json:"iteration,omitempty" yaml:"iteration,omitempty"`
 	TransactionID string `json:"transactionId,omitempty" yaml:"transactionId,omitempty"`
 	ParentTask    string `json:"parentTask,omitempty" yaml:"parentTask,omitempty"`
@@ -524,6 +524,8 @@ type ListTasksOptions struct {
 	Limit     int
 	Continue  string
 	All       bool
+	// LabelSelector filters server-side with kubectl -l syntax.
+	LabelSelector string
 }
 
 // ListTasksResult contains a page of task summaries and pagination metadata.
@@ -543,15 +545,6 @@ type TaskLogsResponse struct {
 // TaskResultResponse is the response for getting task results.
 type TaskResultResponse struct {
 	Result string `json:"result"`
-}
-
-// CreateTask creates a new task.
-func (c *Client) CreateTask(ctx context.Context, req CreateTaskRequest) (*TaskDetail, error) {
-	body, err := json.Marshal(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request: %w", err)
-	}
-	return c.CreateTaskRaw(ctx, body)
 }
 
 // CreateTaskRaw creates a task from a JSON request body.
@@ -594,6 +587,9 @@ func (c *Client) ListTasksPage(ctx context.Context, opts ListTasksOptions) (*Lis
 	}
 	if opts.Continue != "" {
 		q.Set("continue", opts.Continue)
+	}
+	if opts.LabelSelector != "" {
+		q.Set("labelSelector", opts.LabelSelector)
 	}
 	u.RawQuery = q.Encode()
 
@@ -1056,6 +1052,8 @@ func extractTaskSummary(item TaskDetail) TaskSummary {
 		Type:          StringField(item, "spec", "type"),
 		Phase:         StringField(item, "status", "phase"),
 		Age:           StringField(item, "metadata", "creationTimestamp"),
+		Agent:         StringField(item, "spec", "agentRef", "name"),
+		Image:         StringField(item, "spec", "image"),
 		TransactionID: StringField(item, "spec", "transaction", "id"),
 		ParentTask:    StringField(item, "metadata", "annotations", labels.AnnotationParentTaskName),
 	}

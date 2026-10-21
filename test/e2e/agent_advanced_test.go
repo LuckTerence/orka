@@ -17,6 +17,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/test/utils"
 )
 
@@ -32,7 +33,7 @@ var _ = Describe("Agent Advanced Features", func() {
 		}
 	})
 
-	It("should include skill content metadata in the harness-wrapper turn", func() {
+	It("should reject skill-backed built-in ACP tasks before RuntimePool demand", func() {
 		skillName := prefix + "skill"
 		agentName := prefix + "skill-agent"
 		taskName := prefix + "skill-task"
@@ -73,10 +74,12 @@ var _ = Describe("Agent Advanced Features", func() {
 			},
 			"spec": {
 				"runtime": {
+					"contractVersion": "orka.harness.v2",
 					"type": "claude",
 					"defaultMaxTurns": 3,
 					"defaultAllowBash": false
 				},
+				"model": {"name": "claude-sonnet-4-20250514"},
 				"skills": [{
 					"name": "%s"
 				}]
@@ -119,13 +122,24 @@ var _ = Describe("Agent Advanced Features", func() {
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to create task with skill agent")
 
-		By("verifying harness-wrapper metadata is planned for the skill task")
-		verifyHarnessWrapperMetadataForTask(taskName, map[string]string{
-			"runtime":   "claude",
-			"wrapper":   "cli",
-			"maxTurns":  "1",
-			"allowBash": "false",
-		}, 2*time.Minute)
+		By("verifying unsupported skills fail before ACP queue admission")
+		Eventually(func(g Gomega) {
+			task := fetchTaskForACPAssertion(g, taskName)
+			g.Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhaseFailed))
+			g.Expect(task.Status.Message).To(Equal(
+				"built-in ACP runtimes do not support Agent.spec.skills; refusing to omit declared skills",
+			))
+			g.Expect(task.Status.Attempts).To(BeZero())
+			g.Expect(task.Status.Execution).NotTo(BeNil())
+			g.Expect(task.Status.Execution.State).To(Equal(corev1alpha1.TaskExecutionStateFailed))
+			g.Expect(task.Status.Execution.Reason).To(Equal(corev1alpha1.TaskExecutionReason("InvalidRuntimeProfile")))
+			g.Expect(task.Status.Execution.Attempt).To(BeZero())
+			g.Expect(task.Status.Execution.PromptID).To(BeEmpty())
+			g.Expect(task.Status.Execution.RuntimePoolName).To(BeEmpty())
+			g.Expect(task.Status.Delivery).NotTo(BeNil())
+			g.Expect(task.Status.Delivery.State).To(Equal(corev1alpha1.TaskDeliveryStateNotRequested))
+			g.Expect(task.Status.Delivery.Outcome).To(Equal(corev1alpha1.TaskDeliveryOutcomeNotRequested))
+		}, 30*time.Second, time.Second).Should(Succeed())
 
 		By("verifying the Task does not use a worker Job")
 		verifyNoJobForTask(taskName, 5*time.Second)
@@ -148,10 +162,12 @@ var _ = Describe("Agent Advanced Features", func() {
 			},
 			"spec": {
 				"runtime": {
+					"contractVersion": "orka.harness.v2",
 					"type": "claude",
 					"defaultMaxTurns": 3,
 					"defaultAllowBash": false
 				},
+				"model": {"name": "claude-sonnet-4-20250514"},
 				"resources": {
 					"requests": {"memory": "128Mi", "cpu": "100m"},
 					"limits": {"memory": "256Mi", "cpu": "200m"}
@@ -209,6 +225,8 @@ var _ = Describe("Agent Advanced Features", func() {
 		taskName1 := prefix + "session-t1"
 		taskName2 := prefix + "session-t2"
 		sessionName := prefix + "session"
+		firstMarker := "[e2e:agent-session-first]"
+		secondMarker := "[e2e:agent-session-second]"
 
 		defer dumpDebugInfo(taskName1, taskName2)
 
@@ -241,12 +259,12 @@ var _ = Describe("Agent Advanced Features", func() {
 					"create": true
 				},
 				"ai": {
-					"prompt": "What is 2+2? Reply with just the number.",
+					"prompt": "What is 2+2? Reply with just the number. %s",
 					"model": "%s",
 					"providerRef": {"name": "%s"}
 				}
 			}
-		}`, taskName1, namespace, sessionName, model, providerName)
+		}`, taskName1, namespace, sessionName, firstMarker, model, providerName)
 
 		cmd = exec.Command("kubectl", "apply", "-f", "-")
 		cmd.Stdin = stringReader(task1Manifest)
@@ -274,12 +292,12 @@ var _ = Describe("Agent Advanced Features", func() {
 					"maxMessages": 2
 				},
 				"ai": {
-					"prompt": "What was my previous question? Reply briefly.",
+					"prompt": "What was my previous question? Reply briefly. %s",
 					"model": "%s",
 					"providerRef": {"name": "%s"}
 				}
 			}
-		}`, taskName2, namespace, sessionName, model, providerName)
+		}`, taskName2, namespace, sessionName, secondMarker, model, providerName)
 
 		cmd = exec.Command("kubectl", "apply", "-f", "-")
 		cmd.Stdin = stringReader(task2Manifest)
@@ -292,5 +310,28 @@ var _ = Describe("Agent Advanced Features", func() {
 
 		By("verifying the second task has a result")
 		verifyResultAvailable(taskName2)
+
+		if e2eMockOpenAI {
+			By("verifying the second task replayed at most maxMessages of session history")
+			requests := expectMockLLMServed(secondMarker, time.Minute)
+			messages := requests[0].Body.Messages
+			lastUser := -1
+			for i, message := range messages {
+				if message.Role == "user" {
+					lastUser = i
+				}
+			}
+			Expect(lastUser).To(BeNumerically(">=", 0), "second task request should carry its prompt")
+			Expect(messages[lastUser].Text()).To(ContainSubstring(secondMarker))
+			var history []mockLLMMessage
+			for _, message := range messages[:lastUser] {
+				if message.Role == "user" || message.Role == "assistant" {
+					history = append(history, message)
+				}
+			}
+			Expect(len(history)).To(BeNumerically("<=", 2), "maxMessages: 2 should bound the replayed history")
+			Expect(requests[0].RoleText("assistant")).To(ContainSubstring("E2E_SESSION_FIRST_ANSWER"),
+				"the first task's answer should be replayed from the session")
+		}
 	})
 })

@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/labels"
 )
 
 func TestStampTaskRequesterPreservesAttachedCompositeTransaction(t *testing.T) {
@@ -25,8 +26,9 @@ func TestStampTaskRequesterPreservesAttachedCompositeTransaction(t *testing.T) {
 		AuthType: AuthTypeTokenReview, Username: "system:serviceaccount:default:worker", ContextToken: token,
 	})
 
-	if task.Spec.RequestedBy == nil || task.Spec.RequestedBy.Username != "system:serviceaccount:default:worker" {
-		t.Fatalf("RequestedBy = %#v", task.Spec.RequestedBy)
+	// The ServiceAccount primary caller is a workload, not a signed-in requester.
+	if task.Spec.RequestedBy != nil || task.Annotations[labels.AnnotationRequestedBySource] != "" {
+		t.Fatalf("RequestedBy = %#v annotations = %v", task.Spec.RequestedBy, task.Annotations)
 	}
 	if task.Spec.Transaction == nil || task.Spec.Transaction.ID != token.TransactionID ||
 		task.Spec.Transaction.Context["taskName"] != "task-a" || task.Spec.Transaction.Context["taskUID"] != "task-uid" {
@@ -131,5 +133,18 @@ func TestTaskTransactionPreservesCredentialSecretConstraint(t *testing.T) {
 	tx := taskTransactionFromContextToken(token)
 	if tx.Context["secret"] != "resource-credential" {
 		t.Fatalf("context = %#v", tx.Context)
+	}
+}
+
+func TestStampTaskRequesterMarksSource(t *testing.T) {
+	task := &corev1alpha1.Task{}
+	stampTaskRequesterFromUserInfo(task, &UserInfo{AuthType: AuthTypeOIDC, Subject: "alice", Issuer: "https://issuer.example.test"})
+	if task.Spec.RequestedBy == nil || task.Annotations[labels.AnnotationRequestedBySource] != labels.RequestedBySourceAPI {
+		t.Fatalf("requester stamp = %+v annotations = %v", task.Spec.RequestedBy, task.Annotations)
+	}
+	unverified := &corev1alpha1.Task{}
+	stampTaskRequesterFromUserInfo(unverified, &UserInfo{AuthType: AuthTypeTokenReview, Username: "system:serviceaccount:ns:bot"})
+	if unverified.Spec.RequestedBy != nil || unverified.Annotations[labels.AnnotationRequestedBySource] != "" {
+		t.Fatalf("service accounts must not be stamped: %+v %v", unverified.Spec.RequestedBy, unverified.Annotations)
 	}
 }

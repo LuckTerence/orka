@@ -62,6 +62,13 @@ rules:
   - create
   - update
   - delete
+# Registered external runtime policy lookup for delegate_task materialization
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - agentruntimes
+  verbs:
+  - get
 # Orka Task CRDs (for coordination - delegate and wait)
 - apiGroups:
   - core.orka.ai
@@ -107,9 +114,9 @@ rules:
   - pods/log
   verbs:
   - get
-# code_exec Kubernetes backend: per-job ServiceAccounts. This ClusterRole is
-# bound through a ClusterRoleBinding, so these create/delete permissions are
-# cluster-wide and reserved for the AI worker trust tier.
+# code_exec Kubernetes backend: per-job ServiceAccounts. Static installations
+# bind this ClusterRole through a RoleBinding, so these create/delete
+# permissions remain inside the selected workload namespace.
 - apiGroups:
   - ""
   resources:
@@ -201,36 +208,6 @@ rules:
   - get
   - list
   - watch
-# Agent sandbox workspace backend: create/reattach/delete claims and connect to sandbox pods
-- apiGroups:
-  - extensions.agents.x-k8s.io
-  resources:
-  - sandboxclaims
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - extensions.agents.x-k8s.io
-  resources:
-  - sandboxtemplates
-  - sandboxwarmpools
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - agents.x-k8s.io
-  resources:
-  - sandboxes
-  verbs:
-  - get
-  - list
-  - watch
 - apiGroups:
   - ""
   resources:
@@ -286,6 +263,13 @@ rules:
   - create
   - update
   - delete
+# Registered external runtime policy lookup for delegate_task materialization
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - agentruntimes
+  verbs:
+  - get
 # Orka Task CRDs (for coordination - delegate and wait)
 - apiGroups:
   - core.orka.ai
@@ -356,36 +340,6 @@ rules:
   - discovery.k8s.io
   resources:
   - endpointslices
-  verbs:
-  - get
-  - list
-  - watch
-# Agent sandbox workspace backend for agent task workers: create/reattach/delete claims and connect to sandbox pods
-- apiGroups:
-  - extensions.agents.x-k8s.io
-  resources:
-  - sandboxclaims
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - extensions.agents.x-k8s.io
-  resources:
-  - sandboxtemplates
-  - sandboxwarmpools
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - agents.x-k8s.io
-  resources:
-  - sandboxes
   verbs:
   - get
   - list
@@ -464,9 +418,10 @@ rules:
   - get
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
+kind: RoleBinding
 metadata:
   name: ai-worker-rolebinding
+  namespace: system
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
@@ -477,9 +432,10 @@ subjects:
   namespace: system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
+kind: RoleBinding
 metadata:
   name: vendor-worker-rolebinding
+  namespace: system
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
@@ -490,9 +446,10 @@ subjects:
   namespace: system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
+kind: RoleBinding
 metadata:
   name: container-worker-rolebinding
+  namespace: system
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole

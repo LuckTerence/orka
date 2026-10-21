@@ -1,10 +1,11 @@
 import { z } from 'zod'
-import { conditionSchema } from './task'
+import { conditionSchema, harnessContractVersionSchema } from './task'
 
 export const modelConfigSchema = z.object({
   provider: z.string().optional(),
   name: z.string().optional(),
   temperature: z.number().optional(),
+  contextWindow: z.number().int().positive().optional(),
   maxTokens: z.number().optional(),
 })
 
@@ -13,13 +14,31 @@ export const toolRefSchema = z.object({
   enabled: z.boolean().optional(),
 })
 
-export const agentCLIRuntimeSchema = z.object({
-  type: z.enum(['copilot', 'claude', 'codex', 'opencode']),
+const agentRuntimeDefaultsSchema = {
   defaultMaxTurns: z.number().optional(),
   defaultAllowedTools: z.array(z.string()).optional(),
   defaultAllowBash: z.boolean().optional(),
   defaultReasoningEffort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).optional(),
-})
+}
+
+export const builtInAgentRuntimeTypes = ['claude', 'codex', 'copilot', 'opencode'] as const
+
+export const builtInAgentRuntimeTypeSchema = z.enum(builtInAgentRuntimeTypes)
+
+export const builtInAgentRuntimeSchema = z.object({
+  type: builtInAgentRuntimeTypeSchema,
+  contractVersion: harnessContractVersionSchema.optional(),
+  ...agentRuntimeDefaultsSchema,
+}).strict()
+
+export const externalAgentRuntimeSchema = z.object({
+  runtimeRef: z.object({
+    name: z.string(),
+  }),
+  ...agentRuntimeDefaultsSchema,
+}).strict()
+
+export const agentRuntimeSchema = z.union([builtInAgentRuntimeSchema, externalAgentRuntimeSchema])
 
 export const agentSpecSchema = z.object({
   providerRef: z.object({ name: z.string(), namespace: z.string().optional() }).optional(),
@@ -28,26 +47,77 @@ export const agentSpecSchema = z.object({
     inline: z.string().optional(),
     configMapRef: z.object({ name: z.string(), key: z.string() }).optional(),
   }).optional(),
+  soul: z.object({
+    inline: z.string().min(1).max(8192).optional(),
+    configMapRef: z.object({ name: z.string().min(1), key: z.string().min(1) }).optional(),
+    digest: z.string().regex(/^sha256:[0-9a-f]{64}$/).optional(),
+  }).superRefine((source, ctx) => {
+    if (!!source.inline === !!source.configMapRef) {
+      ctx.addIssue({ code: 'custom', message: 'Soul requires exactly one of inline or configMapRef' })
+    }
+    if (source.configMapRef && !source.digest) {
+      ctx.addIssue({ code: 'custom', message: 'ConfigMap-backed souls require an expected digest', path: ['digest'] })
+    }
+    if (source.inline && (new TextEncoder().encode(source.inline).length > 8192 || !source.inline.trim() || source.inline.includes('\0'))) {
+      ctx.addIssue({ code: 'custom', message: 'Soul must be nonempty UTF-8 text without NUL, at most 8192 bytes', path: ['inline'] })
+    }
+  }).optional(),
   tools: z.array(toolRefSchema).optional(),
   skills: z.array(z.object({ configMapRef: z.object({ name: z.string(), key: z.string().optional() }) })).optional(),
   resources: z.any().optional(),
   secretRef: z.object({ name: z.string() }).optional(),
   session: z.object({
-    persistence: z.string().optional(),
-    ttl: z.string().optional(),
     maxMessages: z.number().optional(),
-  }).optional(),
-  rateLimit: z.object({
-    requestsPerMinute: z.number().optional(),
-    tokensPerMinute: z.number().optional(),
   }).optional(),
   coordination: z.object({
     enabled: z.boolean(),
     allowedAgents: z.array(z.object({ name: z.string(), namespace: z.string().optional() })).optional(),
     maxConcurrentChildren: z.number().optional(),
     maxDepth: z.number().optional(),
+    autonomous: z.boolean().optional(),
+    maxIterations: z.number().optional(),
+    approvalRequiredTools: z.array(z.string()).optional(),
   }).optional(),
-  runtime: agentCLIRuntimeSchema.optional(),
+  runtime: agentRuntimeSchema.optional(),
+}).superRefine((spec, ctx) => {
+  if (spec.soul && spec.runtime && 'runtimeRef' in spec.runtime) {
+    ctx.addIssue({ code: 'custom', message: 'Soul is only supported by AI and built-in runtimes', path: ['soul'] })
+  }
+  if (spec.runtime && 'type' in spec.runtime && spec.runtime.type === 'opencode') {
+
+    if (!spec.model?.name?.trim()) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'OpenCode requires model.name',
+        path: ['model', 'name'],
+      })
+    }
+    if (spec.model?.contextWindow === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'OpenCode requires model.contextWindow',
+        path: ['model', 'contextWindow'],
+      })
+    }
+    if (spec.model?.maxTokens === undefined || !Number.isInteger(spec.model.maxTokens) || spec.model.maxTokens <= 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'OpenCode requires a positive integer model.maxTokens',
+        path: ['model', 'maxTokens'],
+      })
+    }
+    if (
+      spec.model?.contextWindow !== undefined
+      && spec.model?.maxTokens !== undefined
+      && spec.model.contextWindow <= spec.model.maxTokens
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'OpenCode model.contextWindow must exceed model.maxTokens',
+        path: ['model', 'contextWindow'],
+      })
+    }
+  }
 })
 
 export const agentStatusSchema = z.object({
@@ -71,6 +141,14 @@ export const agentSchema = z.object({
   status: agentStatusSchema.optional(),
 })
 
+/** The text an Agent's spec.systemPrompt.configMapRef selects. */
+export const agentSystemPromptSchema = z.object({
+  configMapRef: z.object({ name: z.string(), key: z.string() }),
+  content: z.string(),
+})
+
+export type BuiltInAgentRuntimeType = z.infer<typeof builtInAgentRuntimeTypeSchema>
 export type Agent = z.infer<typeof agentSchema>
 export type AgentSpec = z.infer<typeof agentSpecSchema>
 export type AgentStatus = z.infer<typeof agentStatusSchema>
+export type AgentSystemPrompt = z.infer<typeof agentSystemPromptSchema>

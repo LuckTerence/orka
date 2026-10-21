@@ -26,7 +26,33 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/llm"
 	"github.com/orka-agents/orka/internal/worker"
+	"github.com/orka-agents/orka/workers/common"
 )
+
+// executeAgentLoop runs the agent loop with tool execution
+func executeAgentLoop(
+	ctx context.Context,
+	provider llm.Provider,
+	messages []llm.Message,
+	systemPrompt string,
+	model string,
+	llmTools []llm.Tool,
+	customTools map[string]*corev1alpha1.Tool,
+	toolExecutor *worker.ToolExecutor,
+) (string, error) {
+	return executeAgentLoopWithEvents(
+		ctx,
+		provider,
+		messages,
+		systemPrompt,
+		model,
+		modelSettings{maxTokens: 4096},
+		llmTools,
+		customTools,
+		toolExecutor,
+		common.NoopEventRecorder{},
+	)
+}
 
 const testSessionDir = "/session"
 
@@ -65,7 +91,7 @@ func TestRun_InvalidProviderType(t *testing.T) {
 	// but will be found via secret file. Since no secret files exist, API key check
 	// will fail first for an unknown provider.
 
-	err := run()
+	err := run("")
 	if err == nil {
 		t.Fatal("expected error for unknown provider")
 	}
@@ -83,7 +109,7 @@ func TestRun_ValidProviderHitsK8sError(t *testing.T) {
 	// Clear fallback vars
 	t.Setenv("ORKA_AI_FALLBACK_COUNT", "")
 
-	err := run()
+	err := run("")
 	if err == nil {
 		t.Fatal("expected error for k8s client creation")
 	}
@@ -99,7 +125,7 @@ func TestRun_WithFallbackCountZero(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "test-key")
 	t.Setenv("ORKA_AI_FALLBACK_COUNT", "0")
 
-	err := run()
+	err := run("")
 	if err == nil {
 		t.Fatal("expected error (no k8s)")
 	}
@@ -119,7 +145,7 @@ func TestRun_WithFallbackMissingProviderKey(t *testing.T) {
 	t.Setenv("ORKA_AI_FALLBACK_0_PROVIDER", "")
 	t.Setenv("ORKA_AI_FALLBACK_0_API_KEY", "")
 
-	err := run()
+	err := run("")
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -138,7 +164,7 @@ func TestRun_WithFallbackInvalidProviderType(t *testing.T) {
 	t.Setenv("ORKA_AI_FALLBACK_0_PROVIDER", "unknown-fb-provider")
 	t.Setenv("ORKA_AI_FALLBACK_0_API_KEY", "fb-key")
 
-	err := run()
+	err := run("")
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -161,7 +187,7 @@ func TestRun_WithValidFallback(t *testing.T) {
 	t.Setenv("ORKA_AI_FALLBACK_0_BASE_URL", "http://localhost:9998")
 	t.Setenv("ORKA_AI_FALLBACK_0_AZURE_API_VERSION", "")
 
-	err := run()
+	err := run("")
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -179,7 +205,7 @@ func TestRun_WithToolsString(t *testing.T) {
 	t.Setenv("ORKA_AI_TOOLS", "web_search,code_exec")
 	t.Setenv("ORKA_AI_FALLBACK_COUNT", "")
 
-	err := run()
+	err := run("")
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -197,7 +223,7 @@ func TestRun_AzureOpenAIProvider(t *testing.T) {
 	t.Setenv("ORKA_AI_AZURE_API_VERSION", "2024-02-01")
 	t.Setenv("ORKA_AI_FALLBACK_COUNT", "")
 
-	err := run()
+	err := run("")
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -213,7 +239,7 @@ func TestRun_FallbackCountNonNumeric(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "test-key")
 	t.Setenv("ORKA_AI_FALLBACK_COUNT", "abc")
 
-	err := run()
+	err := run("")
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -271,7 +297,7 @@ func TestLoadCustomTools_WithFakeClient(t *testing.T) {
 		WithObjects(tool).
 		Build()
 
-	result := loadCustomTools(context.Background(), fakeClient, "default", []string{"my-custom-tool"})
+	result, _ := loadCustomTools(context.Background(), fakeClient, "default", []string{"my-custom-tool"})
 	if len(result) != 1 {
 		t.Fatalf("expected 1 custom tool, got %d", len(result))
 	}
@@ -288,7 +314,7 @@ func TestLoadCustomTools_ToolNotFound(t *testing.T) {
 		WithScheme(newTestScheme()).
 		Build()
 
-	result := loadCustomTools(context.Background(), fakeClient, "default", []string{"nonexistent-tool"})
+	result, _ := loadCustomTools(context.Background(), fakeClient, "default", []string{"nonexistent-tool"})
 	if len(result) != 0 {
 		t.Errorf("expected 0 tools for missing CRD, got %d", len(result))
 	}
@@ -311,7 +337,7 @@ func TestLoadCustomTools_MixedBuiltinAndCustom(t *testing.T) {
 		Build()
 
 	// web_search is built-in and should be skipped; my-tool is custom
-	result := loadCustomTools(context.Background(), fakeClient, "test-ns", []string{"web_search", "my-tool"})
+	result, _ := loadCustomTools(context.Background(), fakeClient, "test-ns", []string{"web_search", "my-tool"})
 	if len(result) != 1 {
 		t.Fatalf("expected 1 custom tool (builtin skipped), got %d", len(result))
 	}
@@ -630,8 +656,8 @@ func TestExecuteAgentLoop_ToolExecutionError(t *testing.T) {
 // --- loadSessionContext tests ---
 
 func TestLoadSessionContext_CreatedFile(t *testing.T) {
-	// The function reads from /session/transcript.jsonl (hardcoded path).
-	// If we can create it, test full parsing; otherwise verify graceful handling.
+	// This test passes /session/transcript.jsonl to the path-parameterized loader.
+	// Exercise parsing if that directory is writable; otherwise skip.
 	sessionDir := testSessionDir
 	transcriptPath := filepath.Join(sessionDir, "transcript.jsonl")
 
@@ -652,7 +678,10 @@ not valid json
 	}
 	defer os.Remove(transcriptPath) //nolint:errcheck
 
-	messages := loadSessionContext()
+	messages, err := loadSessionContext(transcriptPath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(messages) != 3 {
 		t.Errorf("expected 3 messages (user, assistant, user), got %d", len(messages))
 	}
@@ -678,7 +707,10 @@ func TestLoadSessionContext_EmptyFile(t *testing.T) {
 	}
 	defer os.Remove(transcriptPath) //nolint:errcheck
 
-	messages := loadSessionContext()
+	messages, err := loadSessionContext(transcriptPath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(messages) != 0 {
 		t.Errorf("expected 0 messages for empty file, got %d", len(messages))
 	}
@@ -698,7 +730,10 @@ func TestLoadSessionContext_OnlyInvalidJSON(t *testing.T) {
 	}
 	defer os.Remove(transcriptPath) //nolint:errcheck
 
-	messages := loadSessionContext()
+	messages, err := loadSessionContext(transcriptPath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(messages) != 0 {
 		t.Errorf("expected 0 messages for invalid JSON, got %d", len(messages))
 	}
@@ -735,7 +770,10 @@ func TestLoadPlanContext_WithAuthHeader(t *testing.T) {
 		}
 	}
 
-	result := loadPlanContext()
+	result, err := loadPlanContext(t.Context())
+	if err != nil {
+		t.Fatalf("load plan context: %v", err)
+	}
 	if result == "" {
 		t.Fatal("expected non-empty plan context")
 	}
@@ -756,7 +794,10 @@ func TestLoadPlanContext_MissingTaskName(t *testing.T) {
 	t.Setenv("ORKA_TASK_NAME", "")
 	t.Setenv("ORKA_TASK_NAMESPACE", "default")
 
-	result := loadPlanContext()
+	result, err := loadPlanContext(t.Context())
+	if err != nil {
+		t.Fatalf("load plan context: %v", err)
+	}
 	if result != "" {
 		t.Errorf("expected empty result when task name missing, got: %s", result)
 	}
@@ -767,7 +808,10 @@ func TestLoadPlanContext_MissingTaskNamespace(t *testing.T) {
 	t.Setenv("ORKA_TASK_NAME", "task1")
 	t.Setenv("ORKA_TASK_NAMESPACE", "")
 
-	result := loadPlanContext()
+	result, err := loadPlanContext(t.Context())
+	if err != nil {
+		t.Fatalf("load plan context: %v", err)
+	}
 	if result != "" {
 		t.Errorf("expected empty result when namespace missing, got: %s", result)
 	}
@@ -778,7 +822,10 @@ func TestLoadPlanContext_ConnectionRefused(t *testing.T) {
 	t.Setenv("ORKA_TASK_NAME", "task1")
 	t.Setenv("ORKA_TASK_NAMESPACE", "default")
 
-	result := loadPlanContext()
+	result, err := loadPlanContext(t.Context())
+	if err == nil {
+		t.Fatal("expected plan fetch error")
+	}
 	if result != "" {
 		t.Errorf("expected empty result for connection refused, got: %s", result)
 	}
@@ -796,7 +843,10 @@ func TestLoadPlanContext_RequestPathFormat(t *testing.T) {
 	t.Setenv("ORKA_TASK_NAME", "my-task")
 	t.Setenv("ORKA_TASK_NAMESPACE", "my-ns")
 
-	_ = loadPlanContext()
+	_, err := loadPlanContext(t.Context())
+	if err != nil {
+		t.Fatalf("load plan context: %v", err)
+	}
 	expected := "/internal/v1/plans/my-ns/my-task"
 	if capturedPath != expected {
 		t.Errorf("path = %q, want %q", capturedPath, expected)
@@ -805,17 +855,17 @@ func TestLoadPlanContext_RequestPathFormat(t *testing.T) {
 
 // --- writeResult tests ---
 
-func TestWriteResult_ServerError(t *testing.T) {
+func TestWriteResult_PermanentHTTPError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
+		w.WriteHeader(http.StatusUnauthorized)
 	}))
 	defer server.Close()
 
 	t.Setenv("ORKA_RESULT_ENDPOINT", server.URL)
 
-	err := writeResult("test result")
-	if err == nil {
-		t.Fatal("expected error for server error response")
+	err := writeResult(context.Background(), "test result")
+	if err == nil || !strings.Contains(err.Error(), "HTTP 401") {
+		t.Fatalf("writeResult() error = %v, want HTTP 401", err)
 	}
 }
 
@@ -833,7 +883,7 @@ func TestRun_AutonomousModeEnvParsing(t *testing.T) {
 	t.Setenv("ORKA_COORDINATION_ENABLED", "")
 	t.Setenv("ORKA_CONTROLLER_URL", "")
 
-	err := run()
+	err := run("")
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -854,7 +904,7 @@ func TestRun_AutonomousModeInvalidIteration(t *testing.T) {
 	t.Setenv("ORKA_AUTONOMOUS_MAX_ITERATIONS", "also-not-a-number")
 	t.Setenv("ORKA_CONTROLLER_URL", "")
 
-	err := run()
+	err := run("")
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -872,7 +922,7 @@ func TestRun_CoordinationEnabled(t *testing.T) {
 	t.Setenv("ORKA_COORDINATION_ENABLED", "true")
 	t.Setenv("ORKA_AUTONOMOUS_MODE", "")
 
-	err := run()
+	err := run("")
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -906,7 +956,7 @@ func TestRun_AutonomousModeWithPlanContext(t *testing.T) {
 	t.Setenv("ORKA_TASK_NAME", "t1")
 	t.Setenv("ORKA_TASK_NAMESPACE", "ns1")
 
-	err := run()
+	err := run("")
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -925,7 +975,7 @@ func TestLoadCustomToolsSkipsToolWhenOutboundApprovalBindingFails(t *testing.T) 
 		}},
 	}
 	fakeClient := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(tool).Build()
-	got := loadCustomTools(context.Background(), fakeClient, "default", []string{tool.Name})
+	got, _ := loadCustomTools(context.Background(), fakeClient, "default", []string{tool.Name})
 	if len(got) != 0 {
 		t.Fatalf("loaded tools = %#v, want fail-closed omission", got)
 	}

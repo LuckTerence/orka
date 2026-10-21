@@ -181,7 +181,7 @@ func waitForMemoryOperation(
 		}
 		state := memoryOperationState(response.Body)
 		switch state {
-		case "succeeded":
+		case phaseSucceeded:
 			return response, nil
 		case "dead_lettered", "abandoned", "superseded", "orphaned":
 			return nil, fmt.Errorf("memory operation finished in %s state", state)

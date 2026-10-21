@@ -1,0 +1,289 @@
+/*
+Copyright (c) 2026.
+
+MIT License - see LICENSE file for details.
+*/
+
+package admission
+
+import (
+	"context"
+	"encoding/json"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+	admissionv1 "k8s.io/api/admission/v1"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	ctrladmission "sigs.k8s.io/controller-runtime/pkg/webhook/admission"
+
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/executionmode"
+)
+
+func TestTaskExecutionAuthorityValidatorRestrictsStatusWriters(t *testing.T) {
+	validator := newTestTaskExecutionAuthorityValidator(t)
+
+	tests := []struct {
+		name   string
+		mutate func(*corev1alpha1.Task)
+	}{
+		{
+			name: "phase",
+			mutate: func(task *corev1alpha1.Task) {
+				task.Status.Phase = corev1alpha1.TaskPhaseRunning
+			},
+		},
+		{
+			name: "execution",
+			mutate: func(task *corev1alpha1.Task) {
+				task.Status.Execution = &corev1alpha1.TaskExecutionStatus{
+					State: corev1alpha1.TaskExecutionStateRunning,
+				}
+			},
+		},
+		{
+			name: "delivery",
+			mutate: func(task *corev1alpha1.Task) {
+				task.Status.Delivery = &corev1alpha1.TaskDeliveryStatus{
+					State: corev1alpha1.TaskDeliveryStatePreparing,
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			oldTask := newAdmissionTestTask()
+			oldTask.Status.AgentExecutionBinding = &corev1alpha1.AgentExecutionBinding{ContractVersion: corev1alpha1.AgentRuntimeContractHarnessV2, Backend: corev1alpha1.AgentExecutionBackendRuntimePool}
+			statusUpdate := oldTask.DeepCopy()
+			tt.mutate(statusUpdate)
+
+			response := validator.Handle(context.Background(), admissionRequest(
+				t, admissionv1.Update, untrustedUsername, statusUpdate, oldTask, statusSubresource,
+			))
+			require.False(t, response.Allowed)
+			require.Contains(t, response.Result.Message, "only an authorized controller identity may update Task status")
+		})
+	}
+}
+
+func TestTaskExecutionAuthorityValidatorAllowsControllerStatusUpdate(t *testing.T) {
+	validator := newTestTaskExecutionAuthorityValidator(t)
+	oldTask := newAdmissionTestTask()
+	oldTask.Status.AgentExecutionBinding = &corev1alpha1.AgentExecutionBinding{ContractVersion: corev1alpha1.AgentRuntimeContractHarnessV2, Backend: corev1alpha1.AgentExecutionBackendRuntimePool}
+	statusUpdate := oldTask.DeepCopy()
+	statusUpdate.Status.Phase = corev1alpha1.TaskPhaseRunning
+
+	response := validator.Handle(context.Background(), admissionRequest(
+		t, admissionv1.Update, trustedControllerUser, statusUpdate, oldTask, statusSubresource,
+	))
+	require.True(t, response.Allowed, response.Result.Message)
+}
+
+func TestTaskExecutionAuthorityValidatorAllowsUnchangedStatus(t *testing.T) {
+	validator := newTestTaskExecutionAuthorityValidator(t)
+	oldTask := newAdmissionTestTask()
+
+	t.Run("spec update", func(t *testing.T) {
+		specUpdate := withImage(oldTask.DeepCopy(), "alpine")
+		response := validator.Handle(context.Background(), admissionRequest(
+			t, admissionv1.Update, untrustedUsername, specUpdate, oldTask, "",
+		))
+		require.True(t, response.Allowed, response.Result.Message)
+	})
+
+	t.Run("no-op status update", func(t *testing.T) {
+		response := validator.Handle(context.Background(), admissionRequest(
+			t, admissionv1.Update, untrustedUsername, oldTask.DeepCopy(), oldTask, statusSubresource,
+		))
+		require.True(t, response.Allowed, response.Result.Message)
+	})
+}
+
+func newTestTaskExecutionAuthorityValidator(t *testing.T) *TaskExecutionAuthorityValidator {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	return &TaskExecutionAuthorityValidator{
+		decoder: ctrladmission.NewDecoder(scheme),
+		config:  ExecutionModeConfig{ControllerUsernames: []string{trustedControllerUser}}.normalized(),
+	}
+}
+
+func admissionNamespace(mode string) *corev1.Namespace {
+	labels := map[string]string{}
+	if mode != "" {
+		labels[executionmode.NamespaceLabel] = mode
+	}
+	return &corev1.Namespace{
+		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Namespace"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   "orka-test",
+			Labels: labels,
+		},
+	}
+}
+
+func TestAgentContractValidatorDefaultsContractFromNamespaceMode(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	namespace := admissionNamespace(string(executionmode.HarnessV2))
+	validator := &AgentContractValidator{
+		decoder: ctrladmission.NewDecoder(scheme),
+		reader:  fake.NewClientBuilder().WithScheme(scheme).WithObjects(namespace).Build(),
+	}
+	v2 := executionmode.HarnessV2.ContractVersion()
+	v1 := corev1alpha1.AgentRuntimeContractVersion("orka.harness.v1")
+	agent := func(contract *corev1alpha1.AgentRuntimeContractVersion) *corev1alpha1.Agent {
+		return &corev1alpha1.Agent{
+			TypeMeta:   metav1.TypeMeta{APIVersion: "core.orka.ai/v1alpha1", Kind: "Agent"},
+			ObjectMeta: metav1.ObjectMeta{Name: "implementer", Namespace: namespace.Name},
+			Spec: corev1alpha1.AgentSpec{
+				Model:   &corev1alpha1.ModelConfig{Name: "claude-sonnet-4-20250514"},
+				Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeClaude, ContractVersion: contract},
+			},
+		}
+	}
+	request := func(operation admissionv1.Operation, object, old *corev1alpha1.Agent) ctrladmission.Request {
+		raw, err := json.Marshal(object)
+		require.NoError(t, err)
+		req := ctrladmission.Request{AdmissionRequest: admissionv1.AdmissionRequest{
+			Operation: operation,
+			Namespace: namespace.Name,
+			Object:    runtime.RawExtension{Raw: raw},
+		}}
+		if old != nil {
+			oldRaw, err := json.Marshal(old)
+			require.NoError(t, err)
+			req.OldObject = runtime.RawExtension{Raw: oldRaw}
+		}
+		return req
+	}
+
+	tests := []struct {
+		name        string
+		operation   admissionv1.Operation
+		object      *corev1alpha1.Agent
+		old         *corev1alpha1.Agent
+		allowed     bool
+		messagePart string
+	}{
+		{name: "create without contract takes the namespace mode", operation: admissionv1.Create, object: agent(nil), allowed: true},
+		{name: "create with the namespace contract", operation: admissionv1.Create, object: agent(&v2), allowed: true},
+		{name: "create with an unsupported contract", operation: admissionv1.Create, object: agent(&v1), messagePart: "only orka.harness.v2 is supported"},
+		{name: "update keeps an omitted contract omitted", operation: admissionv1.Update, object: agent(nil), old: agent(nil), allowed: true},
+		{name: "update may write the namespace contract", operation: admissionv1.Update, object: agent(&v2), old: agent(nil), allowed: true},
+		{name: "update may not write an unsupported contract", operation: admissionv1.Update, object: agent(&v1), old: agent(nil), messagePart: "only orka.harness.v2 is supported"},
+		{name: "update may not remove a written contract", operation: admissionv1.Update, object: agent(nil), old: agent(&v2), messagePart: "immutable"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			response := validator.Handle(context.Background(), request(tt.operation, tt.object, tt.old))
+			require.Equal(t, tt.allowed, response.Allowed, response.Result.Message)
+			if tt.messagePart != "" {
+				require.Contains(t, response.Result.Message, tt.messagePart)
+			}
+		})
+	}
+}
+
+func TestAgentContractValidatorRequiresModelForHarnessV2Agents(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	namespace := admissionNamespace(string(executionmode.HarnessV2))
+	validator := &AgentContractValidator{
+		decoder: ctrladmission.NewDecoder(scheme),
+		reader:  fake.NewClientBuilder().WithScheme(scheme).WithObjects(namespace).Build(),
+	}
+	contract := executionmode.HarnessV2.ContractVersion()
+	agent := func(model string) *corev1alpha1.Agent {
+		object := &corev1alpha1.Agent{
+			TypeMeta:   metav1.TypeMeta{APIVersion: "core.orka.ai/v1alpha1", Kind: "Agent"},
+			ObjectMeta: metav1.ObjectMeta{Name: "implementer", Namespace: namespace.Name},
+			Spec: corev1alpha1.AgentSpec{
+				Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex, ContractVersion: &contract},
+			},
+		}
+		if model != "" {
+			object.Spec.Model = &corev1alpha1.ModelConfig{Name: model}
+		}
+		return object
+	}
+	request := func(object *corev1alpha1.Agent) ctrladmission.Request {
+		raw, err := json.Marshal(object)
+		require.NoError(t, err)
+		return ctrladmission.Request{AdmissionRequest: admissionv1.AdmissionRequest{
+			Operation: admissionv1.Create,
+			Namespace: namespace.Name,
+			Object:    runtime.RawExtension{Raw: raw},
+		}}
+	}
+	denied := validator.Handle(context.Background(), request(agent("")))
+	require.False(t, denied.Allowed, denied.Result.Message)
+	require.Contains(t, denied.Result.Message, "requires spec.model.name")
+	allowed := validator.Handle(context.Background(), request(agent("gpt-5.6-sol")))
+	require.True(t, allowed.Allowed, allowed.Result.Message)
+}
+
+func TestTaskSoulBindingAuthority(t *testing.T) {
+	validator := newTestTaskExecutionAuthorityValidator(t)
+	original := newAdmissionTestTask()
+	original.Spec.Type = corev1alpha1.TaskTypeAI
+	original.Generation = 1
+	bound := original.DeepCopy()
+	const digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	bound.Status.SoulBinding = &corev1alpha1.TaskSoulBinding{TaskGeneration: 1, AgentUID: "agent-uid", AgentGeneration: 1, SoulDigest: digest, PromptDigest: digest}
+	response := validator.Handle(context.Background(), admissionRequest(t, admissionv1.Create, trustedControllerUser, bound, nil, ""))
+	require.False(t, response.Allowed)
+	response = validator.Handle(context.Background(), admissionRequest(t, admissionv1.Update, untrustedUsername, bound, original, statusSubresource))
+	require.False(t, response.Allowed)
+	response = validator.Handle(context.Background(), admissionRequest(t, admissionv1.Update, trustedControllerUser, bound, original, statusSubresource))
+	require.True(t, response.Allowed)
+	cleared := bound.DeepCopy()
+	cleared.Status.SoulBinding = nil
+	response = validator.Handle(context.Background(), admissionRequest(t, admissionv1.Update, trustedControllerUser, cleared, bound, statusSubresource))
+	require.False(t, response.Allowed)
+	changed := bound.DeepCopy()
+	changed.Spec.Prompt = "another task"
+	response = validator.Handle(context.Background(), admissionRequest(t, admissionv1.Update, trustedControllerUser, changed, bound, ""))
+	require.False(t, response.Allowed)
+}
+
+// A soul-only binding freezes the execution inputs but leaves control fields
+// mutable, so an autonomous soul Task can still be paused. An ACP execution
+// binding keeps the whole spec frozen.
+func TestTaskSoulBindingLeavesControlFieldsMutable(t *testing.T) {
+	validator := newTestTaskExecutionAuthorityValidator(t)
+	const digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	soulBound := newAdmissionTestTask()
+	soulBound.Spec.Type = corev1alpha1.TaskTypeAI
+	soulBound.Generation = 1
+	soulBound.Status.SoulBinding = &corev1alpha1.TaskSoulBinding{TaskGeneration: 1, AgentUID: "agent-uid",
+		AgentGeneration: 1, SoulDigest: digest, PromptDigest: digest, InputsDigest: digest}
+	acpBound := soulBound.DeepCopy()
+	acpBound.Status.SoulBinding = nil
+	acpBound.Status.AgentExecutionBinding = &corev1alpha1.AgentExecutionBinding{}
+	mixed := soulBound.DeepCopy()
+	mixed.Status.AgentExecutionBinding = &corev1alpha1.AgentExecutionBinding{}
+	update := func(old *corev1alpha1.Task, mutate func(*corev1alpha1.Task)) bool {
+		changed := old.DeepCopy()
+		mutate(changed)
+		return validator.Handle(context.Background(), admissionRequest(t, admissionv1.Update, untrustedUsername, changed, old, "")).Allowed
+	}
+	suspend := func(task *corev1alpha1.Task) { task.Spec.Suspend = new(true) }
+	prompt := func(task *corev1alpha1.Task) { task.Spec.Prompt = "another task" }
+	require.True(t, update(soulBound, suspend), "soul-bound Tasks must remain pausable")
+	resumed := soulBound.DeepCopy()
+	resumed.Spec.Suspend = new(true)
+	require.True(t, update(resumed, func(task *corev1alpha1.Task) { task.Spec.Suspend = nil }), "soul-bound Tasks must resume")
+	require.False(t, update(soulBound, prompt), "soul-bound execution inputs must stay frozen")
+	require.False(t, update(soulBound, func(task *corev1alpha1.Task) { suspend(task); prompt(task) }),
+		"a control-field edit must not carry an input edit")
+	require.False(t, update(acpBound, suspend), "ACP-bound Tasks keep the whole spec frozen")
+	require.False(t, update(mixed, suspend), "an ACP binding keeps the whole spec frozen")
+}

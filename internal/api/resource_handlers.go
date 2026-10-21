@@ -1,11 +1,13 @@
 package api
 
 import (
+	"errors"
 	"fmt"
 	neturl "net/url"
 	"strings"
 
 	"github.com/gofiber/fiber/v3"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
@@ -179,18 +181,21 @@ func providerReadItem(provider *corev1alpha1.Provider) fiber.Map {
 		return fiber.Map{}
 	}
 	return fiber.Map{
-		"name":         provider.Name,
-		"namespace":    provider.Namespace,
-		"type":         provider.Spec.Type,
-		"defaultModel": provider.Spec.DefaultModel,
-		"ready":        provider.Status.Ready,
+		apiFieldName:     provider.Name,
+		toolNamespaceArg: provider.Namespace,
+		apiFieldType:     provider.Spec.Type,
+		"defaultModel":   provider.Spec.DefaultModel,
+		"ready":          provider.Status.Ready,
 	}
 }
 
 // ListProviders lists configured LLM providers.
 func (h *Handlers) ListProviders(c fiber.Ctx) error {
-	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
+	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
 	if err != nil {
+		return err
+	}
+	if err := h.authorizeCoreResourceAction(c, "list", "providers", namespace, ""); err != nil {
 		return err
 	}
 	if err := h.authorizeContextTokenAction(
@@ -204,43 +209,53 @@ func (h *Handlers) ListProviders(c fiber.Ctx) error {
 	if err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, err.Error())
 	}
-	list := &corev1alpha1.ProviderList{}
-	if err := h.client.List(c.Context(), list, &client.ListOptions{
-		Namespace: namespace,
-		Limit:     pagination.Limit,
-		Continue:  pagination.Continue,
-	}); err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list providers: %v", err))
-	}
-	items := list.Items
 	filteredList := false
-	if h.contextTokenAuthorization.Enabled() {
-		filtered := make([]corev1alpha1.Provider, 0, len(items))
-		for i := range items {
-			provider := &items[i]
-			allowed := contextTokenAllowsListedProviderModel(
-				c,
-				h.contextTokenAuthorization,
-				"listProviders",
-				namespace,
-				providerResolutionInfo(provider),
-				provider.Spec.DefaultModel,
-			)
-			if allowed {
-				filtered = append(filtered, *provider)
-			}
+	var remainingItemCount *int64
+	items, continueToken, err := collectAuthorizedPages(pagination.Limit, pagination.Continue, func(continueToken string, pageLimit int64) ([]corev1alpha1.Provider, string, error) {
+		list := &corev1alpha1.ProviderList{}
+		if err := h.listPage(c.Context(), list, &client.ListOptions{
+			Namespace: namespace,
+			Limit:     pageLimit,
+			Continue:  continueToken,
+		}, "providers"); err != nil {
+			return nil, "", err
 		}
-		filteredList = len(filtered) != len(items)
-		items = filtered
+		remainingItemCount = list.RemainingItemCount
+		items := list.Items
+		if h.contextTokenAuthorization.Enabled() {
+			filtered := make([]corev1alpha1.Provider, 0, len(items))
+			for i := range items {
+				provider := &items[i]
+				allowed := contextTokenAllowsListedProviderModel(
+					c,
+					h.contextTokenAuthorization,
+					"listProviders",
+					namespace,
+					providerResolutionInfo(provider),
+					provider.Spec.DefaultModel,
+				)
+				if allowed {
+					filtered = append(filtered, *provider)
+				}
+			}
+			if len(filtered) != len(items) {
+				filteredList = true
+			}
+			items = filtered
+		}
+		return items, list.Continue, nil
+	})
+	if err != nil {
+		return err
 	}
-	remainingItemCount := list.RemainingItemCount
 	if filteredList {
+		// The raw count describes Providers the caller is not allowed to see.
 		remainingItemCount = nil
 	}
 	return c.JSON(ListResponse{
 		Items: providerReadItems(c, items),
 		Metadata: ListMeta{
-			Continue:           list.Continue,
+			Continue:           NormalizeListContinue(continueToken),
 			RemainingItemCount: remainingItemCount,
 		},
 	})
@@ -248,7 +263,17 @@ func (h *Handlers) ListProviders(c fiber.Ctx) error {
 
 // GetProvider returns a configured LLM provider.
 func (h *Handlers) GetProvider(c fiber.Ctx) error {
-	provider, err := h.fetchProvider(c, c.Params("name"))
+	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
+	if err != nil {
+		return err
+	}
+	// Authorize the requested name before any controller-credential read so
+	// an unauthorized caller cannot tell an existing Provider (403) from an
+	// unknown one (404).
+	if err := h.authorizeCoreResourceAction(c, "get", "providers", namespace, c.Params(apiFieldName)); err != nil {
+		return err
+	}
+	provider, err := h.fetchProvider(c, c.Params(apiFieldName))
 	if err != nil {
 		return err
 	}
@@ -303,6 +328,9 @@ func (h *Handlers) CreateProvider(c fiber.Ctx) error {
 		if apierrors.IsAlreadyExists(err) {
 			return fiber.NewError(fiber.StatusConflict, "provider already exists")
 		}
+		if invalid := invalidObjectError("provider", err); invalid != nil {
+			return invalid
+		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create provider: %v", err))
 	}
 	return c.Status(fiber.StatusCreated).JSON(provider)
@@ -313,7 +341,8 @@ func (h *Handlers) UpdateProvider(c fiber.Ctx) error {
 	if err := rejectContextTokenResourceMutation(c, "provider"); err != nil {
 		return err
 	}
-	provider, err := h.fetchProvider(c, c.Params("name"))
+	name := c.Params(apiFieldName)
+	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
 	if err != nil {
 		return err
 	}
@@ -321,14 +350,64 @@ func (h *Handlers) UpdateProvider(c fiber.Ctx) error {
 	if err := c.Bind().JSON(&req); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
 	}
-	if err := validateProviderRESTUpdate(req.Spec, provider.Spec); err != nil {
-		return err
+
+	reader := h.apiReader
+	if reader == nil {
+		reader = h.client
 	}
-	// REST updates cannot set protected routing fields, but they also must not
-	// clear values that were created through the Kubernetes API/RBAC path.
-	req.Spec.BaseURL = provider.Spec.BaseURL
-	provider.Spec = req.Spec
-	if err := h.client.Update(c.Context(), provider); err != nil {
+	ctx := c.Context()
+	key := types.NamespacedName{Name: name, Namespace: namespace}
+	var (
+		provider          *corev1alpha1.Provider
+		initialGeneration int64
+		initialSpec       *corev1alpha1.ProviderSpec
+		initialUID        types.UID
+	)
+	errProviderSpecChanged := errors.New("provider spec changed concurrently")
+	err = retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		current := &corev1alpha1.Provider{}
+		if err := reader.Get(ctx, key, current); err != nil {
+			return err
+		}
+		if initialSpec == nil {
+			initialGeneration = current.Generation
+			initialSpec = current.Spec.DeepCopy()
+			initialUID = current.UID
+		} else if current.UID != initialUID ||
+			current.Generation != initialGeneration ||
+			!apiequality.Semantic.DeepEqual(current.Spec, *initialSpec) {
+			return errProviderSpecChanged
+		}
+		if err := validateProviderRESTUpdate(req.Spec, current.Spec); err != nil {
+			return err
+		}
+		// REST updates cannot set protected routing fields, but they also must
+		// not clear values that were created through the Kubernetes API/RBAC path.
+		desiredSpec := req.Spec.DeepCopy()
+		desiredSpec.BaseURL = current.Spec.BaseURL
+		current.Spec = *desiredSpec
+		if err := h.client.Update(ctx, current); err != nil {
+			return err
+		}
+		provider = current
+		return nil
+	})
+	if err != nil {
+		if errors.Is(err, errProviderSpecChanged) {
+			return fiber.NewError(fiber.StatusConflict, "provider spec was modified concurrently")
+		}
+		if _, ok := errors.AsType[*fiber.Error](err); ok {
+			return err
+		}
+		if apierrors.IsNotFound(err) {
+			return fiber.NewError(fiber.StatusNotFound, "provider not found")
+		}
+		if apierrors.IsConflict(err) {
+			return fiber.NewError(fiber.StatusConflict, "provider was modified concurrently")
+		}
+		if invalid := invalidObjectError("provider", err); invalid != nil {
+			return invalid
+		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to update provider: %v", err))
 	}
 	return c.JSON(provider)
@@ -339,7 +418,7 @@ func (h *Handlers) DeleteProvider(c fiber.Ctx) error {
 	if err := rejectContextTokenResourceMutation(c, "provider"); err != nil {
 		return err
 	}
-	provider, err := h.fetchProvider(c, c.Params("name"))
+	provider, err := h.fetchProvider(c, c.Params(apiFieldName))
 	if err != nil {
 		return err
 	}
@@ -350,18 +429,7 @@ func (h *Handlers) DeleteProvider(c fiber.Ctx) error {
 }
 
 func (h *Handlers) fetchProvider(c fiber.Ctx, name string) (*corev1alpha1.Provider, error) {
-	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
-	if err != nil {
-		return nil, err
-	}
-	provider := &corev1alpha1.Provider{}
-	if err := h.client.Get(c.Context(), types.NamespacedName{Name: name, Namespace: namespace}, provider); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil, fiber.NewError(fiber.StatusNotFound, "provider not found")
-		}
-		return nil, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get provider: %v", err))
-	}
-	return provider, nil
+	return fetchNamespaced(h, c, &corev1alpha1.Provider{}, name, "provider")
 }
 
 // CreateTool creates a Tool CRD.
@@ -405,6 +473,9 @@ func (h *Handlers) CreateTool(c fiber.Ctx) error {
 		if apierrors.IsAlreadyExists(err) {
 			return fiber.NewError(fiber.StatusConflict, "tool already exists")
 		}
+		if invalid := invalidObjectError("tool", err); invalid != nil {
+			return invalid
+		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create tool: %v", err))
 	}
 	return c.Status(fiber.StatusCreated).JSON(tool)
@@ -415,19 +486,13 @@ func (h *Handlers) UpdateTool(c fiber.Ctx) error {
 	if err := rejectContextTokenResourceMutation(c, "tool"); err != nil {
 		return err
 	}
-	name := c.Params("name")
+	name := c.Params(apiFieldName)
 	if _, builtin := builtinToolsMap[name]; builtin {
 		return fiber.NewError(fiber.StatusConflict, "built-in tools cannot be updated")
 	}
-	tool, err := h.fetchToolCRD(c, name)
+	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
 	if err != nil {
 		return err
-	}
-	if toolSpecHasProtectedAuth(tool.Spec) {
-		return fiber.NewError(
-			fiber.StatusBadRequest,
-			"tools with protected HTTP auth configuration must be updated with Kubernetes RBAC",
-		)
 	}
 	var req UpdateToolRequest
 	if err := c.Bind().JSON(&req); err != nil {
@@ -436,11 +501,66 @@ func (h *Handlers) UpdateTool(c fiber.Ctx) error {
 	if err := validateToolRESTMutation(req.Spec); err != nil {
 		return err
 	}
-	tool.Spec = req.Spec
-	if err := authorizeToolWorkspaceClassUse(c.Context(), h.clientset, GetUserInfo(c), tool); err != nil {
-		return err
+
+	reader := h.apiReader
+	if reader == nil {
+		reader = h.client
 	}
-	if err := h.client.Update(c.Context(), tool); err != nil {
+	ctx := c.Context()
+	key := types.NamespacedName{Name: name, Namespace: namespace}
+	var (
+		tool              *corev1alpha1.Tool
+		initialGeneration int64
+		initialSpec       *corev1alpha1.ToolSpec
+		initialUID        types.UID
+	)
+	errToolSpecChanged := errors.New("tool spec changed concurrently")
+	err = retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		current := &corev1alpha1.Tool{}
+		if err := reader.Get(ctx, key, current); err != nil {
+			return err
+		}
+		if initialSpec == nil {
+			initialGeneration = current.Generation
+			initialSpec = current.Spec.DeepCopy()
+			initialUID = current.UID
+		} else if current.UID != initialUID ||
+			current.Generation != initialGeneration ||
+			!apiequality.Semantic.DeepEqual(current.Spec, *initialSpec) {
+			return errToolSpecChanged
+		}
+		if toolSpecHasProtectedAuth(current.Spec) {
+			return fiber.NewError(
+				fiber.StatusBadRequest,
+				"tools with protected HTTP auth configuration must be updated with Kubernetes RBAC",
+			)
+		}
+		current.Spec = req.Spec
+		if err := authorizeToolWorkspaceClassUse(ctx, h.clientset, GetUserInfo(c), current); err != nil {
+			return err
+		}
+		if err := h.client.Update(ctx, current); err != nil {
+			return err
+		}
+		tool = current
+		return nil
+	})
+	if err != nil {
+		if errors.Is(err, errToolSpecChanged) {
+			return fiber.NewError(fiber.StatusConflict, "tool spec was modified concurrently")
+		}
+		if _, ok := errors.AsType[*fiber.Error](err); ok {
+			return err
+		}
+		if apierrors.IsNotFound(err) {
+			return fiber.NewError(fiber.StatusNotFound, "tool not found")
+		}
+		if apierrors.IsConflict(err) {
+			return fiber.NewError(fiber.StatusConflict, "tool was modified concurrently")
+		}
+		if invalid := invalidObjectError("tool", err); invalid != nil {
+			return invalid
+		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to update tool: %v", err))
 	}
 	return c.JSON(tool)
@@ -451,7 +571,7 @@ func (h *Handlers) DeleteTool(c fiber.Ctx) error {
 	if err := rejectContextTokenResourceMutation(c, "tool"); err != nil {
 		return err
 	}
-	name := c.Params("name")
+	name := c.Params(apiFieldName)
 	if _, builtin := builtinToolsMap[name]; builtin {
 		return fiber.NewError(fiber.StatusConflict, "built-in tools cannot be deleted")
 	}
@@ -466,23 +586,12 @@ func (h *Handlers) DeleteTool(c fiber.Ctx) error {
 }
 
 func (h *Handlers) fetchToolCRD(c fiber.Ctx, name string) (*corev1alpha1.Tool, error) {
-	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
-	if err != nil {
-		return nil, err
-	}
-	tool := &corev1alpha1.Tool{}
-	if err := h.client.Get(c.Context(), types.NamespacedName{Name: name, Namespace: namespace}, tool); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil, fiber.NewError(fiber.StatusNotFound, "tool not found")
-		}
-		return nil, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get tool: %v", err))
-	}
-	return tool, nil
+	return fetchNamespaced(h, c, &corev1alpha1.Tool{}, name, "tool")
 }
 
 // ListSubstrateActorPools lists Orka Substrate actor pools.
 func (h *Handlers) ListSubstrateActorPools(c fiber.Ctx) error {
-	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
+	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
 	if err != nil {
 		return err
 	}
@@ -493,17 +602,9 @@ func (h *Handlers) ListSubstrateActorPools(c fiber.Ctx) error {
 	); err != nil {
 		return err
 	}
-	pagination, err := ParsePagination(c.Query("limit", "100"), c.Query("continue", ""))
-	if err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, err.Error())
-	}
 	list := &corev1alpha1.SubstrateActorPoolList{}
-	if err := h.client.List(c.Context(), list, &client.ListOptions{
-		Namespace: namespace,
-		Limit:     pagination.Limit,
-		Continue:  pagination.Continue,
-	}); err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list substrate actor pools: %v", err))
+	if err := h.listNamespaced(c, list, namespace, "substrate actor pools"); err != nil {
+		return err
 	}
 	return c.JSON(ListResponse{
 		Items: list.Items,
@@ -516,7 +617,7 @@ func (h *Handlers) ListSubstrateActorPools(c fiber.Ctx) error {
 
 // GetSubstrateActorPool gets an Orka Substrate actor pool.
 func (h *Handlers) GetSubstrateActorPool(c fiber.Ctx) error {
-	pool, err := h.fetchSubstrateActorPool(c, c.Params("name"))
+	pool, err := h.fetchSubstrateActorPool(c, c.Params(apiFieldName))
 	if err != nil {
 		return err
 	}
@@ -562,6 +663,9 @@ func (h *Handlers) CreateSubstrateActorPool(c fiber.Ctx) error {
 		if apierrors.IsAlreadyExists(err) {
 			return fiber.NewError(fiber.StatusConflict, "substrate actor pool already exists")
 		}
+		if invalid := invalidObjectError("substrate actor pool", err); invalid != nil {
+			return invalid
+		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create substrate actor pool: %v", err))
 	}
 	return c.Status(fiber.StatusCreated).JSON(pool)
@@ -579,7 +683,7 @@ func (h *Handlers) UpdateSubstrateActorPool(c fiber.Ctx) error {
 	var updated *corev1alpha1.SubstrateActorPool
 	var fetchErr error
 	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		pool, err := h.fetchSubstrateActorPool(c, c.Params("name"))
+		pool, err := h.fetchSubstrateActorPool(c, c.Params(apiFieldName))
 		if err != nil {
 			fetchErr = err
 			return nil
@@ -591,6 +695,9 @@ func (h *Handlers) UpdateSubstrateActorPool(c fiber.Ctx) error {
 		updated = pool
 		return nil
 	}); err != nil {
+		if invalid := invalidObjectError("substrate actor pool", err); invalid != nil {
+			return invalid
+		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to update substrate actor pool: %v", err))
 	}
 	if fetchErr != nil {
@@ -604,7 +711,7 @@ func (h *Handlers) DeleteSubstrateActorPool(c fiber.Ctx) error {
 	if err := rejectContextTokenResourceMutation(c, "substrate actor pool"); err != nil {
 		return err
 	}
-	pool, err := h.fetchSubstrateActorPool(c, c.Params("name"))
+	pool, err := h.fetchSubstrateActorPool(c, c.Params(apiFieldName))
 	if err != nil {
 		return err
 	}
@@ -615,21 +722,7 @@ func (h *Handlers) DeleteSubstrateActorPool(c fiber.Ctx) error {
 }
 
 func (h *Handlers) fetchSubstrateActorPool(c fiber.Ctx, name string) (*corev1alpha1.SubstrateActorPool, error) {
-	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
-	if err != nil {
-		return nil, err
-	}
-	pool := &corev1alpha1.SubstrateActorPool{}
-	if err := h.client.Get(c.Context(), types.NamespacedName{Name: name, Namespace: namespace}, pool); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil, fiber.NewError(fiber.StatusNotFound, "substrate actor pool not found")
-		}
-		return nil, fiber.NewError(
-			fiber.StatusInternalServerError,
-			fmt.Sprintf("failed to get substrate actor pool: %v", err),
-		)
-	}
-	return pool, nil
+	return fetchNamespaced(h, c, &corev1alpha1.SubstrateActorPool{}, name, "substrate actor pool")
 }
 
 // handleAuthWhoAmI returns a sanitized authenticated identity.
@@ -639,21 +732,21 @@ func (s *Server) handleAuthWhoAmI(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusUnauthorized, "missing authenticated identity")
 	}
 	identity := fiber.Map{
-		"authenticated": true,
-		"authType":      ui.AuthType,
-		"username":      ui.Username,
-		"uid":           ui.UID,
-		"groups":        ui.Groups,
-		"namespace":     ui.Namespace,
-		"subject":       ui.Subject,
-		"email":         ui.Email,
-		"issuer":        ui.Issuer,
-		"roles":         ui.Roles,
+		"authenticated":  true,
+		"authType":       ui.AuthType,
+		"username":       ui.Username,
+		"uid":            ui.UID,
+		"groups":         ui.Groups,
+		toolNamespaceArg: ui.Namespace,
+		"subject":        ui.Subject,
+		"email":          ui.Email,
+		"issuer":         ui.Issuer,
+		"roles":          ui.Roles,
 	}
 	if ui.ContextToken != nil {
 		identity["transaction"] = fiber.Map{
 			"profile":            ui.ContextToken.Profile,
-			"type":               ui.ContextToken.Type,
+			apiFieldType:         ui.ContextToken.Type,
 			"id":                 ui.ContextToken.TransactionID,
 			"issuer":             ui.ContextToken.Issuer,
 			"subject":            ui.ContextToken.Subject,

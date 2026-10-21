@@ -8,15 +8,22 @@ package controller
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
+	"k8s.io/apimachinery/pkg/util/validation"
+
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/workspace"
 )
 
 const (
 	EnvSubstrateAPIEndpoint               = "ORKA_SUBSTRATE_API_ENDPOINT"
 	EnvSubstrateAPICAFile                 = "ORKA_SUBSTRATE_API_CA_FILE"
+	EnvSubstrateAPICertFile               = "ORKA_SUBSTRATE_API_CERT_FILE"
+	EnvSubstrateAPIKeyFile                = "ORKA_SUBSTRATE_API_KEY_FILE"
+	EnvSubstrateAPIBearerTokenFile        = "ORKA_SUBSTRATE_API_BEARER_TOKEN_FILE"
 	EnvSubstrateAPIInsecureSkipVerify     = "ORKA_SUBSTRATE_API_INSECURE_SKIP_VERIFY"
 	EnvSubstrateRouterURL                 = "ORKA_SUBSTRATE_ROUTER_URL"
 	EnvSubstrateActorDNSSuffix            = "ORKA_SUBSTRATE_ACTOR_DNS_SUFFIX"
@@ -27,7 +34,6 @@ const (
 	EnvSubstrateSessionIdentitySecretName = "ORKA_SUBSTRATE_SESSION_IDENTITY_TOKEN_SECRET_NAME"
 	EnvSubstrateSessionIdentitySecretKey  = "ORKA_SUBSTRATE_SESSION_IDENTITY_TOKEN_SECRET_KEY"
 	EnvSubstrateSessionIdentityRequired   = "ORKA_SUBSTRATE_SESSION_IDENTITY_REQUIRED"
-	EnvSubstrateSessionIdentityMintCert   = "ORKA_SUBSTRATE_SESSION_IDENTITY_MINT_CERT"
 	EnvSubstrateSessionIdentityAudience   = "ORKA_SUBSTRATE_SESSION_IDENTITY_AUDIENCE"
 	EnvSubstrateSessionIdentityAppID      = "ORKA_SUBSTRATE_SESSION_IDENTITY_APP_ID"
 	EnvSubstrateSessionIdentityUserID     = "ORKA_SUBSTRATE_SESSION_IDENTITY_USER_ID"
@@ -47,10 +53,15 @@ const (
 )
 
 // SubstrateConfig holds disabled-by-default alpha configuration for the
-// Agent Substrate execution workspace provider.
+// in-tree Substrate MCP Tool support.
 type SubstrateConfig struct {
-	APIEndpoint               string
-	APICAFile                 string
+	APIEndpoint        string
+	APICAFile          string
+	APICertFile        string
+	APIKeyFile         string
+	APIBearerTokenFile string
+	// Atespace is selected from the immutable workspace binding by the controller.
+	Atespace                  string
 	APIInsecureSkipVerify     bool
 	RouterURL                 string
 	ActorDNSSuffix            string
@@ -61,7 +72,6 @@ type SubstrateConfig struct {
 	SessionIdentitySecretName string
 	SessionIdentitySecretKey  string
 	SessionIdentityRequired   bool
-	SessionIdentityMintCert   bool
 	SessionIdentityAudience   string
 	SessionIdentityAppID      string
 	SessionIdentityUserID     string
@@ -93,9 +103,19 @@ func SubstrateConfigFromEnv(getenv func(string) string) (SubstrateConfig, error)
 	if value := strings.TrimSpace(getenv(EnvSubstrateAPICAFile)); value != "" {
 		cfg.APICAFile = value
 	}
+	if value := strings.TrimSpace(getenv(EnvSubstrateAPICertFile)); value != "" {
+		cfg.APICertFile = value
+	}
+	if value := strings.TrimSpace(getenv(EnvSubstrateAPIKeyFile)); value != "" {
+		cfg.APIKeyFile = value
+	}
+	if value := strings.TrimSpace(getenv(EnvSubstrateAPIBearerTokenFile)); value != "" {
+		cfg.APIBearerTokenFile = value
+	}
 	if value := strings.TrimSpace(getenv(EnvSubstrateAPIInsecureSkipVerify)); value != "" {
 		cfg.APIInsecureSkipVerify = strings.EqualFold(value, "true")
 	}
+
 	if value := strings.TrimSpace(getenv(EnvSubstrateRouterURL)); value != "" {
 		cfg.RouterURL = value
 	}
@@ -122,9 +142,6 @@ func SubstrateConfigFromEnv(getenv func(string) string) (SubstrateConfig, error)
 	}
 	if value := strings.TrimSpace(getenv(EnvSubstrateSessionIdentityRequired)); value != "" {
 		cfg.SessionIdentityRequired = strings.EqualFold(value, "true")
-	}
-	if value := strings.TrimSpace(getenv(EnvSubstrateSessionIdentityMintCert)); value != "" {
-		cfg.SessionIdentityMintCert = strings.EqualFold(value, "true")
 	}
 	if value := strings.TrimSpace(getenv(EnvSubstrateSessionIdentityAudience)); value != "" {
 		cfg.SessionIdentityAudience = value
@@ -185,8 +202,8 @@ func (c SubstrateConfig) WithDefaults() SubstrateConfig {
 	return c
 }
 
-// Validate rejects unsupported Substrate config values.
-func (c SubstrateConfig) Validate() error {
+// ValidateMCPTools validates the control API and routing used by MCP actors.
+func (c SubstrateConfig) ValidateMCPTools() error {
 	cfg := c.WithDefaults()
 
 	if strings.TrimSpace(cfg.APIEndpoint) == "" {
@@ -197,11 +214,53 @@ func (c SubstrateConfig) Validate() error {
 			"substrate API trust requires --substrate-api-ca-file or --substrate-api-insecure-skip-verify=true",
 		)
 	}
+	if (cfg.APICertFile == "") != (cfg.APIKeyFile == "") {
+		return fmt.Errorf("substrate control authentication requires both --substrate-api-cert-file and --substrate-api-key-file")
+	}
+	if (cfg.APICertFile != "") == (cfg.APIBearerTokenFile != "") {
+		return fmt.Errorf("substrate control authentication requires either a client certificate/key pair or --substrate-api-bearer-token-file")
+	}
 	if strings.TrimSpace(cfg.RouterURL) == "" {
 		return fmt.Errorf("substrate router URL is required")
 	}
 	if strings.TrimSpace(cfg.ActorDNSSuffix) == "" {
 		return fmt.Errorf("substrate actor DNS suffix is required")
+	}
+	if cfg.ClaimTimeout <= 0 {
+		return fmt.Errorf("substrate claim timeout must be greater than zero")
+	}
+	return validateSubstrateRouting(cfg.RouterURL, cfg.ActorDNSSuffix)
+}
+
+// validateSubstrateRouting checks the router URL and actor DNS suffix that MCP
+// actor requests are routed with.
+func validateSubstrateRouting(routerURL, actorDNSSuffix string) error {
+	trimmed := strings.TrimSpace(routerURL)
+	parsed, err := url.Parse(trimmed)
+	if err != nil || parsed.Host == "" || (parsed.Scheme != urlSchemeHTTP && parsed.Scheme != urlSchemeHTTPS) {
+		return fmt.Errorf("substrate router URL is invalid")
+	}
+	// Tool.status.endpoint republishes the router URL to Tool readers, and the
+	// MCP path is appended to it as text.
+	if parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" ||
+		strings.Contains(trimmed, "#") {
+		return fmt.Errorf("substrate router URL must not contain credentials, a query, or a fragment")
+	}
+	suffix := strings.ToLower(strings.Trim(strings.TrimSpace(actorDNSSuffix), "."))
+	if suffix == "" {
+		return fmt.Errorf("substrate actor DNS suffix is required")
+	}
+	if problems := validation.IsDNS1123Subdomain(suffix); len(problems) > 0 {
+		return fmt.Errorf("substrate actor DNS suffix is invalid: %s", strings.Join(problems, "; "))
+	}
+	return nil
+}
+
+// Validate rejects unsupported legacy Substrate workspace-agent config values.
+func (c SubstrateConfig) Validate() error {
+	cfg := c.WithDefaults()
+	if err := cfg.ValidateMCPTools(); err != nil {
+		return err
 	}
 	if strings.TrimSpace(cfg.BootstrapSecretName) == "" {
 		return fmt.Errorf("substrate workspace bootstrap token secret name is required")
@@ -211,12 +270,6 @@ func (c SubstrateConfig) Validate() error {
 	}
 	if cfg.SessionIdentityRequired && strings.TrimSpace(cfg.SessionIdentitySecretName) == "" {
 		return fmt.Errorf("substrate SessionIdentity requires --substrate-session-identity-token-secret-name")
-	}
-	if cfg.SessionIdentityMintCert {
-		return fmt.Errorf("substrate SessionIdentity certificate minting is not supported yet")
-	}
-	if cfg.ClaimTimeout <= 0 {
-		return fmt.Errorf("substrate claim timeout must be greater than zero")
 	}
 	if cfg.CommandTimeout <= 0 {
 		return fmt.Errorf("substrate command timeout must be greater than zero")
@@ -229,4 +282,16 @@ func (c SubstrateConfig) Validate() error {
 	}
 
 	return nil
+}
+
+// WorkspaceClientConfig keeps authentication and routing consistent across ACP,
+// direct workspaces, MCP actor pools and native resource operations.
+func (c SubstrateConfig) WorkspaceClientConfig() workspace.SubstrateConfig {
+	c = c.WithDefaults()
+	return workspace.SubstrateConfig{
+		APIEndpoint: c.APIEndpoint, APICAFile: c.APICAFile,
+		APICertFile: c.APICertFile, APIKeyFile: c.APIKeyFile,
+		APIBearerTokenFile: c.APIBearerTokenFile, APIInsecureSkipVerify: c.APIInsecureSkipVerify,
+		Atespace: c.Atespace, RouterURL: c.RouterURL, ActorDNSSuffix: c.ActorDNSSuffix,
+	}
 }

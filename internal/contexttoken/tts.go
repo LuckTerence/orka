@@ -8,7 +8,6 @@ package contexttoken
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -179,20 +178,6 @@ func NewTTSClient(cfg TTSConfig) (*TTSClient, error) {
 	}, nil
 }
 
-// NewTTSClientWithExchanger creates a TTS client using an injected exchange
-// implementation. It is intended for conformance tests and internal adapters.
-func NewTTSClientWithExchanger(cfg TTSConfig, exchanger tokenexchange.Exchanger) (*TTSClient, error) {
-	client, err := NewTTSClient(cfg)
-	if err != nil {
-		return nil, err
-	}
-	if exchanger == nil {
-		return nil, errors.New("token exchanger is required")
-	}
-	client.exchanger = exchanger
-	return client, nil
-}
-
 // Exchange exchanges the subject token for a transaction token and requires
 // the strict txn_token/N_A response profile.
 func (c *TTSClient) Exchange(ctx context.Context, req ExchangeRequest) (token string, err error) {
@@ -249,7 +234,7 @@ func (c *TTSClient) Exchange(ctx context.Context, req ExchangeRequest) (token st
 		GrantType:               tokenexchange.GrantTypeTokenExchange,
 		SubjectToken:            req.SubjectToken,
 		SubjectTokenType:        subjectTokenType,
-		SubjectExpiresAt:        unverifiedJWTExpiry(req.SubjectToken),
+		SubjectExpiresAt:        tokenexchange.UnverifiedJWTExpiry(req.SubjectToken),
 		Audiences:               audiences,
 		Scopes:                  strings.Fields(req.Scope),
 		RequestedTokenType:      transactiontoken.RequestedTokenType,
@@ -263,28 +248,4 @@ func (c *TTSClient) Exchange(ctx context.Context, req ExchangeRequest) (token st
 		return "", exchangeErr
 	}
 	return exchangeResult.AccessToken, nil
-}
-
-func unverifiedJWTExpiry(token string) time.Time {
-	parts := strings.Split(token, ".")
-	if len(parts) != 3 {
-		return time.Time{}
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return time.Time{}
-	}
-	var claims struct {
-		Expiration json.Number `json:"exp"`
-	}
-	decoder := json.NewDecoder(strings.NewReader(string(payload)))
-	decoder.UseNumber()
-	if decoder.Decode(&claims) != nil || claims.Expiration == "" {
-		return time.Time{}
-	}
-	seconds, err := claims.Expiration.Int64()
-	if err != nil || seconds <= 0 {
-		return time.Time{}
-	}
-	return time.Unix(seconds, 0)
 }

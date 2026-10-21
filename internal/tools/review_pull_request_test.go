@@ -7,12 +7,15 @@ MIT License - see LICENSE file for details.
 package tools
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -111,13 +114,11 @@ func TestReviewPullRequestTool_MissingSecret(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
-			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
-				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo: testSozercanAynaRepoURL,
-					Branch:  testBranch,
-					GitSecretRef: &corev1.LocalObjectReference{
-						Name: testGitCredsSecretName,
-					},
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				GitRepo: testSozercanAynaRepoURL,
+				Branch:  testBranch,
+				ReadCredentialRef: &corev1alpha1.WorkspaceCredentialReference{
+					Name: testGitCredsSecretName,
 				},
 			},
 		},
@@ -198,13 +199,11 @@ func TestReviewPullRequestTool_Success(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
-			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
-				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo: testSozercanAynaRepoURL,
-					Branch:  testBranch,
-					GitSecretRef: &corev1.LocalObjectReference{
-						Name: testGitCredsSecretName,
-					},
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				GitRepo: testSozercanAynaRepoURL,
+				Branch:  testBranch,
+				ReadCredentialRef: &corev1alpha1.WorkspaceCredentialReference{
+					Name: testGitCredsSecretName,
 				},
 			},
 		},
@@ -320,6 +319,7 @@ func TestReviewPullRequestTool_WithRepoURL(t *testing.T) {
 	defer server.Close()
 
 	task, secret := githubRepoTaskWithSecret(testSozercanAynaRepoURL)
+	task.Spec.Workspace.ForgeCredentialRef = nil
 	k8sClient := newFakeClient(task, secret)
 	tool := &ReviewPullRequestTool{k8sClient: k8sClient, apiBaseURL: server.URL}
 	ctx := contextWithTaskScope()
@@ -390,6 +390,7 @@ func TestReviewPullRequestTool_RejectsRepoURLOutsideTaskScope(t *testing.T) {
 	defer server.Close()
 
 	task, secret := githubRepoTaskWithSecret(testSozercanAynaRepoURL)
+	task.Spec.Workspace.ForgeCredentialRef = nil
 	k8sClient := newFakeClient(task, secret)
 	tool := &ReviewPullRequestTool{k8sClient: k8sClient, apiBaseURL: server.URL}
 
@@ -428,13 +429,11 @@ func TestReviewPullRequestTool_Execute_APIError(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
-			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
-				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo: testSozercanAynaRepoURL,
-					Branch:  testBranch,
-					GitSecretRef: &corev1.LocalObjectReference{
-						Name: testGitCredsSecretName,
-					},
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				GitRepo: testSozercanAynaRepoURL,
+				Branch:  testBranch,
+				ReadCredentialRef: &corev1alpha1.WorkspaceCredentialReference{
+					Name: testGitCredsSecretName,
 				},
 			},
 		},
@@ -504,13 +503,11 @@ func TestReviewPullRequestTool_Execute_PRNotFound(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
-			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
-				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo: testSozercanAynaRepoURL,
-					Branch:  testBranch,
-					GitSecretRef: &corev1.LocalObjectReference{
-						Name: testGitCredsSecretName,
-					},
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				GitRepo: testSozercanAynaRepoURL,
+				Branch:  testBranch,
+				ReadCredentialRef: &corev1alpha1.WorkspaceCredentialReference{
+					Name: testGitCredsSecretName,
 				},
 			},
 		},
@@ -584,13 +581,11 @@ func TestReviewPullRequestTool_Execute_EmptyDiff(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
-			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
-				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo: testSozercanAynaRepoURL,
-					Branch:  testBranch,
-					GitSecretRef: &corev1.LocalObjectReference{
-						Name: testGitCredsSecretName,
-					},
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				GitRepo: testSozercanAynaRepoURL,
+				Branch:  testBranch,
+				ReadCredentialRef: &corev1alpha1.WorkspaceCredentialReference{
+					Name: testGitCredsSecretName,
 				},
 			},
 		},
@@ -673,10 +668,8 @@ func TestReviewPullRequestTool_NoGitRepo(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
-			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
-				Workspace: &corev1alpha1.WorkspaceConfig{
-					Branch: testBranch,
-				},
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				Branch: testBranch,
 			},
 		},
 	}
@@ -729,11 +722,9 @@ func TestReviewPullRequestTool_NoGitSecretRefFallsBackToEnvToken(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
-			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
-				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo: testSozercanAynaRepoURL,
-					Branch:  testBranch,
-				},
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				GitRepo: testSozercanAynaRepoURL,
+				Branch:  testBranch,
 			},
 		},
 	}
@@ -768,18 +759,16 @@ func TestReviewPullRequestTool_EmptyToken(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
-			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
-				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo:      testSozercanAynaRepoURL,
-					Branch:       testBranch,
-					GitSecretRef: &corev1.LocalObjectReference{Name: testGitCredsSecretName},
-				},
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				GitRepo:           testSozercanAynaRepoURL,
+				Branch:            testBranch,
+				ReadCredentialRef: &corev1alpha1.WorkspaceCredentialReference{Name: testGitCredsSecretName},
 			},
 		},
 	}
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: testGitCredsSecretName, Namespace: defaultNamespace},
-		Data:       map[string][]byte{otherSecretKey: []byte("value")},
+		Data:       map[string][]byte{tokenKey: []byte(" \n")},
 	}
 
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build()
@@ -792,12 +781,12 @@ func TestReviewPullRequestTool_EmptyToken(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for empty token")
 	}
-	if !strings.Contains(err.Error(), "does not contain a 'token', 'password', or 'GITHUB_TOKEN' key") {
+	if !strings.Contains(err.Error(), `contains an empty configured key "token"`) {
 		t.Errorf("unexpected error: %s", err.Error())
 	}
 }
 
-func TestReviewPullRequestTool_PasswordKeyFallback(t *testing.T) {
+func TestReviewPullRequestTool_CustomPasswordKey(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		accept := r.Header.Get("Accept")
 		path := r.URL.Path
@@ -826,12 +815,10 @@ func TestReviewPullRequestTool_PasswordKeyFallback(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
-			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
-				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo:      testSozercanAynaRepoURL,
-					Branch:       testBranch,
-					GitSecretRef: &corev1.LocalObjectReference{Name: testGitCredsSecretName},
-				},
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				GitRepo:           testSozercanAynaRepoURL,
+				Branch:            testBranch,
+				ReadCredentialRef: &corev1alpha1.WorkspaceCredentialReference{Name: testGitCredsSecretName, Key: passwordKey},
 			},
 		},
 	}
@@ -857,5 +844,122 @@ func TestReviewPullRequestTool_PasswordKeyFallback(t *testing.T) {
 	}
 	if reviewResult.Status != testFetched {
 		t.Errorf("unexpected status: %s", reviewResult.Status)
+	}
+}
+
+// TestReviewPullRequestTool_RefusesOversizedPages covers a files page past
+// the GitHub document limit and a diff past the diff limit: both are refused
+// before use instead of being parsed or returned from a cut prefix.
+func TestReviewPullRequestTool_RefusesOversizedPages(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		bigFiles  bool
+		wantError string
+	}{
+		{name: "diff", wantError: "failed to fetch PR diff"},
+		{name: "files", bigFiles: true, wantError: "failed to fetch PR files"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.URL.Path == "/repos/sozercan/ayna/pulls/7" && r.Header.Get("Accept") == testDiffAccept:
+					if tc.bigFiles {
+						_, _ = fmt.Fprint(w, "diff --git a/x b/x\n")
+						return
+					}
+					_, _ = w.Write(bytes.Repeat([]byte("+"), int(prDiffResponseLimit)+1))
+				case r.URL.Path == "/repos/sozercan/ayna/pulls/7":
+					_, _ = fmt.Fprint(w, `{"title": "t", "user": {"login": "a"}, "base": {"ref": "main"}, "head": {"ref": "b"}}`)
+				case r.URL.Path == "/repos/sozercan/ayna/pulls/7/files":
+					_, _ = fmt.Fprintf(w, `[{"filename": "x", "patch": %q}]`, strings.Repeat("y", int(githubResponseLimit)))
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer server.Close()
+			task, secret := githubRepoTaskWithSecret(testSozercanAynaRepoURL)
+			task.Spec.Workspace.ForgeCredentialRef = nil
+			tool := &ReviewPullRequestTool{k8sClient: newFakeClient(task, secret), apiBaseURL: server.URL}
+			args, _ := json.Marshal(ReviewPullRequestArgs{RepoURL: testSozercanAynaRepoURL, PRNumber: 7})
+			_, err := tool.Execute(contextWithTaskScope(), args)
+			if err == nil || !strings.Contains(err.Error(), tc.wantError) || !strings.Contains(err.Error(), "exceeds") {
+				t.Fatalf("err = %v, want %q refusing the oversized response", err, tc.wantError)
+			}
+		})
+	}
+}
+
+// TestFetchPRFilesPaginates covers a pull request with more changed files
+// than one page holds: every page is read up to the cap, and a list cut at
+// the cap is reported as possibly incomplete.
+func TestFetchPRFilesPaginates(t *testing.T) {
+	serve := func(totalFiles int) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+			if r.URL.Query().Get("per_page") != strconv.Itoa(prFilesPerPage) || page < 1 {
+				t.Errorf("unexpected query %s", r.URL.RawQuery)
+			}
+			start := (page - 1) * prFilesPerPage
+			count := min(prFilesPerPage, max(0, totalFiles-start))
+			entries := make([]string, count)
+			for i := range entries {
+				entries[i] = fmt.Sprintf(`{"filename":"f%d.go","status":"modified","additions":1,"deletions":0}`, start+i)
+			}
+			_, _ = fmt.Fprint(w, "["+strings.Join(entries, ",")+"]")
+		}))
+	}
+	small := serve(prFilesPerPage + 5)
+	defer small.Close()
+	files, complete, err := fetchPRFiles(context.Background(), small.Client(), small.URL, "token", "o", "r", 42)
+	if err != nil || !complete || len(files) != prFilesPerPage+5 {
+		t.Fatalf("files = %d complete = %t err = %v, want every file across two pages", len(files), complete, err)
+	}
+	large := serve((maxPRFilePages + 2) * prFilesPerPage)
+	defer large.Close()
+	files, complete, err = fetchPRFiles(context.Background(), large.Client(), large.URL, "token", "o", "r", 42)
+	if err != nil || complete || len(files) != maxPRFilePages*prFilesPerPage {
+		t.Fatalf("files = %d complete = %t err = %v, want the cap reported incomplete", len(files), complete, err)
+	}
+}
+
+// TestFetchPRFilesSplitsOversizedPages covers changed-file pages whose
+// patches exceed the document limit: the page is re-read as smaller pages
+// covering the same files instead of failing the call, and the byte budget
+// over all pages cuts the list, reported as possibly incomplete.
+func TestFetchPRFilesSplitsOversizedPages(t *testing.T) {
+	const totalFiles = prFilesPerPage + 20
+	patch := strings.Repeat("y", 15000)
+	var sizes sync.Map
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		perPage, _ := strconv.Atoi(r.URL.Query().Get("per_page"))
+		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+		sizes.Store(perPage, true)
+		start := (page - 1) * perPage
+		count := min(perPage, max(0, totalFiles-start))
+		entries := make([]string, count)
+		for i := range entries {
+			entries[i] = fmt.Sprintf(`{"filename":"f%d.go","status":"modified","patch":%q}`, start+i, patch)
+		}
+		_, _ = fmt.Fprint(w, "["+strings.Join(entries, ",")+"]")
+	}))
+	defer server.Close()
+	files, complete, err := fetchPRFiles(context.Background(), server.Client(), server.URL, "token", "o", "r", 42)
+	if err != nil || !complete || len(files) != totalFiles {
+		t.Fatalf("files = %d complete = %t err = %v, want every file through smaller pages", len(files), complete, err)
+	}
+	for i, file := range files {
+		if file.Filename != fmt.Sprintf("f%d.go", i) {
+			t.Fatalf("file %d = %q, want the smaller pages to cover exactly the oversized page's files in order", i, file.Filename)
+		}
+	}
+	if _, split := sizes.Load(prFilesSplitSizes[0]); !split {
+		t.Fatal("the oversized page was never re-read as smaller pages")
+	}
+	previous := maxPRFilesBytes
+	maxPRFilesBytes = githubResponseLimit / 2
+	t.Cleanup(func() { maxPRFilesBytes = previous })
+	files, complete, err = fetchPRFiles(context.Background(), server.Client(), server.URL, "token", "o", "r", 42)
+	if err != nil || complete || len(files) == 0 || len(files) >= totalFiles {
+		t.Fatalf("files = %d complete = %t err = %v, want the byte budget to cut the list and report it incomplete", len(files), complete, err)
 	}
 }

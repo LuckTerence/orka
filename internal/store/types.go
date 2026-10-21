@@ -1,14 +1,19 @@
 package store
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"strings"
 	"time"
 )
 
-// SessionTypeGateway identifies canonical Sessions exclusively owned by gateway admission/projection.
-const SessionTypeGateway = "gateway"
+const (
+	// SessionTypeChat identifies Sessions owned by the interactive chat API.
+	SessionTypeChat = "chat"
+	// SessionTypeGateway identifies canonical Sessions exclusively owned by gateway admission/projection.
+	SessionTypeGateway = "gateway"
+)
 
 // SessionRecord represents a full session.
 type SessionRecord struct {
@@ -37,6 +42,13 @@ type SessionMetadata struct {
 	UpdatedAt     time.Time
 	ActiveTask    string
 	ActiveTaskUID string
+}
+
+// SessionPageCursor is the position a ListSessionsPage page ended at: the
+// creation time and name of its last session.
+type SessionPageCursor struct {
+	CreatedAt time.Time
+	Name      string
 }
 
 // SessionMessage is a single transcript entry.
@@ -130,10 +142,21 @@ type TranscriptSearchFilter struct {
 	Namespace          string
 	Query              string
 	SessionName        string
+	SessionNames       []string
+	HistoryBounds      []TranscriptSearchHistoryBound
 	ExcludeSessionName string
 	Roles              []string
 	Limit              int
 	MaxSnippetLength   int
+}
+
+// TranscriptSearchHistoryBound limits a session to its latest MaxMessages at
+// or before ThroughMessageID, using the same logical order as LoadTranscript.
+// Search intersects all bounds for a session before applying search filters.
+type TranscriptSearchHistoryBound struct {
+	SessionName      string `json:"sessionName"`
+	MaxMessages      int    `json:"maxMessages"`
+	ThroughMessageID string `json:"throughMessageId"`
 }
 
 // TranscriptSearchResult is a compact prior transcript hit.
@@ -199,6 +222,10 @@ type MemoryProposalApply struct {
 	Namespace string `json:"namespace"`
 	ID        string `json:"id"`
 	AppliedBy string `json:"appliedBy"`
+	// AuthorizeExistingMemory runs inside the apply transaction before returning
+	// an existing memory or changing the proposal to reference it. New memories
+	// are covered by the caller's separate create permission.
+	AuthorizeExistingMemory func(context.Context, string, string) error `json:"-"`
 }
 
 // MemoryTrust is the server-owned trust classification for a memory.

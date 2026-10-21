@@ -96,6 +96,9 @@ func (t *MergePullRequestTool) Execute(ctx context.Context, argsJSON json.RawMes
 	if args.MergeMethod == "" {
 		args.MergeMethod = defaultMergeMethod
 	}
+	if err := validateMergeMethod(args.MergeMethod); err != nil {
+		return "", err
+	}
 
 	// Determine namespace from environment
 	ns := os.Getenv(envOrkaTaskNamespace)
@@ -126,25 +129,15 @@ func (t *MergePullRequestTool) Execute(ctx context.Context, argsJSON json.RawMes
 		return "", fmt.Errorf("failed to parse GitHub repo from %s: %w", repoURL, err)
 	}
 
-	// Get the git token from the referenced secret
-	if ws.GitSecretRef == nil {
-		return "", fmt.Errorf("task %s workspace has no gitSecretRef configured", args.TaskName)
+	// Forge API operations must use the forge credential, not the repository
+	// publication credential used for Git pushes.
+	if ws.ForgeCredentialRef == nil {
+		return "", fmt.Errorf("task %s workspace has no forgeCredentialRef configured", args.TaskName)
 	}
 
-	var secret corev1.Secret
-	if err := t.k8sClient.Get(ctx, types.NamespacedName{Name: ws.GitSecretRef.Name, Namespace: ns}, &secret); err != nil {
-		return "", fmt.Errorf("failed to get git secret %s: %w", ws.GitSecretRef.Name, err)
-	}
-
-	token := ""
-	for _, key := range []string{tokenKey, passwordKey} {
-		if v, ok := secret.Data[key]; ok {
-			token = strings.TrimSpace(string(v))
-			break
-		}
-	}
-	if token == "" {
-		return "", fmt.Errorf("git secret %s does not contain a 'token' or 'password' key", ws.GitSecretRef.Name)
+	token, err := resolveForgeCredentialToken(ctx, t.k8sClient, ns, ws.ForgeCredentialRef)
+	if err != nil {
+		return "", err
 	}
 
 	baseURL := githubAPIBaseURL
@@ -188,6 +181,46 @@ func (t *MergePullRequestTool) Execute(ctx context.Context, argsJSON json.RawMes
 	}
 	resultJSON, _ := json.Marshal(result)
 	return string(resultJSON), nil
+}
+
+func resolveForgeCredentialToken(
+	ctx context.Context,
+	k8sClient client.Client,
+	namespace string,
+	credentialRef *corev1alpha1.WorkspaceCredentialReference,
+) (string, error) {
+	if credentialRef == nil {
+		return "", fmt.Errorf("forgeCredentialRef is required")
+	}
+
+	if tc := GetToolContext(ctx); tc != nil {
+		if tc.AuthorizeSecretRead == nil {
+			if tc.RequireSecretReadAuthorization {
+				return "", fmt.Errorf("forge credential secret %s/%s requires a secret credential authorizer", namespace, credentialRef.Name)
+			}
+		} else if authzErr := tc.AuthorizeSecretRead(ctx, namespace, credentialRef.Name); authzErr != nil {
+			return "", fmt.Errorf("not authorized to read forge credential secret %s/%s: %s", namespace, credentialRef.Name, authzErr.Message)
+		}
+	}
+
+	var secret corev1.Secret
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: credentialRef.Name, Namespace: namespace}, &secret); err != nil {
+		return "", fmt.Errorf("failed to get forge credential secret %s: %w", credentialRef.Name, err)
+	}
+
+	key := strings.TrimSpace(credentialRef.Key)
+	if key == "" {
+		key = tokenKey
+	}
+	value, ok := secret.Data[key]
+	if !ok {
+		return "", fmt.Errorf("forge credential secret %s does not contain configured key %q", credentialRef.Name, key)
+	}
+	token := strings.TrimSpace(string(value))
+	if token == "" {
+		return "", fmt.Errorf("forge credential secret %s contains an empty configured key %q", credentialRef.Name, key)
+	}
+	return token, nil
 }
 
 // getGitHubPRHeadSHA retrieves the head SHA for a pull request.
@@ -280,6 +313,16 @@ func checkGitHubCIStatus(ctx context.Context, token, owner, repo, sha, baseURL s
 	}
 
 	return true, "", nil
+}
+
+// validateMergeMethod rejects a merge method GitHub does not support before
+// any GitHub call is made.
+func validateMergeMethod(method string) error {
+	switch method {
+	case mergeMethodMerge, defaultMergeMethod, mergeMethodRebase:
+		return nil
+	}
+	return fmt.Errorf("invalid merge_method %q: must be %s, %s, or %s", method, mergeMethodMerge, defaultMergeMethod, mergeMethodRebase)
 }
 
 // mergeGitHubPR merges a pull request via the GitHub REST API.

@@ -122,8 +122,9 @@ func TestPublicMemoryProposalGovernanceRequiresOperateScope(t *testing.T) {
 			MemoryOperateScopes: []string{ContextTokenScopeMemoryOperate},
 		},
 	})
+	// Review and apply record the signed-in identity, so the caller has one.
 	user := &UserInfo{
-		AuthType: AuthTypeContextToken, Namespace: testDefaultNamespace,
+		AuthType: AuthTypeContextToken, Namespace: testDefaultNamespace, Subject: "memory-operator",
 		ContextToken: &ContextToken{TransactionContext: map[string]any{testMemoryProposalNamespaceKey: testDefaultNamespace}},
 	}
 	app := fiber.New()
@@ -178,8 +179,8 @@ func TestPublicMemoryProposalGovernanceRequiresOperateScope(t *testing.T) {
 		t.Fatalf("proposal after denied review = %#v, %v", pending, err)
 	}
 	user.ContextToken.Scopes = []string{ContextTokenScopeMemoryOperate}
-	if response := request(reviewTarget, `{"status":"accepted"}`); response.StatusCode != http.StatusNoContent {
-		t.Fatalf("operate-scoped proposal review status = %d, want %d", response.StatusCode, http.StatusNoContent)
+	if response := request(reviewTarget, `{"status":"accepted"}`); response.StatusCode != http.StatusOK {
+		t.Fatalf("operate-scoped proposal review status = %d, want %d", response.StatusCode, http.StatusOK)
 	}
 
 	applyProposal := &store.MemoryProposal{

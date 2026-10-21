@@ -425,7 +425,7 @@ func (r *MemoryBackendReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		if err := r.Update(ctx, backend); err != nil {
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{Requeue: true}, nil
+		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 	status.Protected = true
 	conditions.protected = true
@@ -510,7 +510,7 @@ func (r *MemoryBackendReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 				expireMemoryBackendValidation(&status, now)
 				return r.publishMemoryBackendStatus(ctx, backend, status, conditions, now, defaultMemoryBackendRequeueInterval)
 			}
-			return ctrl.Result{Requeue: true}, nil
+			return ctrl.Result{RequeueAfter: time.Second}, nil
 		}
 		persistedCandidate = &candidate
 	}
@@ -582,7 +582,7 @@ func (r *MemoryBackendReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			expireMemoryBackendValidation(&status, now)
 			return r.publishMemoryBackendStatus(ctx, backend, status, conditions, now, defaultMemoryBackendRequeueInterval)
 		}
-		return ctrl.Result{Requeue: true}, nil
+		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 
 	if r.BindingCoordinator == nil {
@@ -1266,7 +1266,7 @@ func (r *MemoryBackendReconciler) reconcileMemoryBackendDeletion(
 			status.Reason, status.Message = memoryBackendProbeFailure(candidateErr)
 			return r.publishMemoryBackendStatus(ctx, backend, status, conditions, now, defaultMemoryBackendRequeueInterval)
 		}
-		return ctrl.Result{Requeue: true}, nil
+		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 	if !result.SafeToRemove {
 		status.Reason = sanitizeMemoryBackendReason(result.Reason, "DeletionBlocked")
@@ -2521,7 +2521,7 @@ func doOMSProbeRaw(
 
 func joinOMSProbeURL(baseURL, suffix string) (string, error) {
 	parsed, err := url.Parse(baseURL)
-	if err != nil || parsed.Scheme != "https" || parsed.Host == "" {
+	if err != nil || parsed.Scheme != urlSchemeHTTPS || parsed.Host == "" {
 		return "", fmt.Errorf("invalid OMS base URL")
 	}
 	parsed.Path = path.Join(parsed.Path, suffix)

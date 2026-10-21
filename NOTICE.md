@@ -25,7 +25,7 @@ upstream revision, and Orka modification notes.
 
 ## GitHub Copilot CLI
 
-Orka embeds the GitHub Copilot CLI in the `agent-harness-wrapper` binary using `github.com/github/copilot-sdk/go/cmd/bundler`. The embedded CLI version is resolved at build time by the bundler based on the `github.com/github/copilot-sdk/go` version in `go.mod`.
+The digest-pinned Copilot ACP runtime image redistributes the unmodified official GitHub Copilot CLI executable as one component of Orka's fenced RuntimePool service. The image includes this license at `/usr/share/licenses/github-copilot-cli/LICENSE.md`; the controller and Publisher images do not include Copilot CLI.
 
 GitHub Copilot CLI License
 
@@ -65,7 +65,7 @@ GitHub Copilot CLI License
 
 ## GitHub Copilot SDK for Go
 
-Orka uses `github.com/github/copilot-sdk/go` to integrate with GitHub Copilot CLI.
+The source dependency graph includes `github.com/github/copilot-sdk/go` for compatibility and integration work. The supported built-in ACP runtime profiles are Codex, Claude, Copilot, and OpenCode.
 
 MIT License
 
@@ -89,15 +89,41 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
+## OpenCode
+
+The digest-pinned OpenCode ACP runtime image redistributes the unmodified OpenCode 1.19.0 native binary under the following MIT license.
+
+MIT License
+
+Copyright (c) 2025 opencode
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
 ## Anthropic Claude Code
 
-Orka installs `@anthropic-ai/claude-code` and the corresponding Linux platform package in the agent harness image.
+The digest-pinned Claude ACP runtime image installs `@anthropic-ai/claude-code` and the corresponding Linux platform package. The controller and Publisher images do not include Claude Code.
 
 © Anthropic PBC. All rights reserved. Use is subject to the Legal Agreements outlined here: https://code.claude.com/docs/en/legal-and-compliance.
 
 ## OpenAI Codex CLI
 
-Orka installs `@openai/codex` and the corresponding Linux platform package in the agent harness image. The npm package declares the Apache License 2.0.
+The digest-pinned Codex ACP runtime image installs `@openai/codex` and the corresponding Linux platform package. The controller and Publisher images do not include Codex. The npm package declares the Apache License 2.0.
 
 Apache License
 Version 2.0, January 2004
@@ -166,3 +192,31 @@ Licensed under the Apache License, Version 2.0 (the "License"); you may not use 
 http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
+
+## SessionKit
+
+Orka uses `github.com/orka-agents/sessionkit` for Codex native conversation
+capture and installation. The sanitized paginated fixture in
+`internal/codexstate/testdata` is from the same dependency.
+
+MIT License
+
+Copyright (c) 2026 SessionKit contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

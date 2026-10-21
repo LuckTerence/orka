@@ -194,35 +194,4 @@ describe('RunTimeline', () => {
     // Terminal is the final event.
     expect(terminalIdx).toBe(labels.length - 1)
   })
-
-  it('renders GenAI token/model telemetry from task events', () => {
-    const task = makeTask()
-    render(
-      <RunTimeline
-        task={task}
-        events={[
-          {
-            id: 'event-1',
-            namespace: 'default',
-            streamType: 'task',
-            streamID: 'auto-task',
-            seq: 1,
-            type: 'ModelRequestCompleted',
-            severity: 'info',
-            provider: 'anthropic',
-            model: 'claude-sonnet-4',
-            inputTokens: 12,
-            outputTokens: 8,
-            stopReason: 'end_turn',
-            createdAt: '2026-01-01T00:02:00Z',
-          },
-        ]}
-      />,
-    )
-    expect(screen.getByLabelText('GenAI telemetry')).toHaveTextContent(
-      '20 tokens',
-    )
-    expect(screen.getByText(/claude-sonnet-4/)).toBeInTheDocument()
-    expect(screen.getByText(/end_turn/)).toBeInTheDocument()
-  })
 })

@@ -352,8 +352,7 @@ func (d *Dispatcher) handleSendError(
 ) (*store.MemoryOperation, error) {
 	endpointKey := memoryEndpointCircuitKey(binding)
 	credentialKey := memoryCredentialCircuitKey(binding)
-	var adapterErr *AdapterError
-	if errors.As(err, &adapterErr) {
+	if adapterErr, ok := errors.AsType[*AdapterError](err); ok {
 		if dependencyFailure := adapterDependencyFailure(adapterErr); dependencyFailure {
 			circuitKey := endpointKey
 			if adapterErr.StatusCode == http.StatusUnauthorized || adapterErr.StatusCode == http.StatusForbidden ||

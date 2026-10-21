@@ -21,6 +21,7 @@ import (
 	"github.com/gofiber/fiber/v3"
 	authenticationv1 "k8s.io/api/authentication/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	utilvalidation "k8s.io/apimachinery/pkg/util/validation"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/orka-agents/orka/internal/metrics"
@@ -114,10 +115,17 @@ type AuthConfig struct {
 	OIDC          OIDCConfig
 	ContextTokens ContextTokenConfig
 
-	// TokenSources optionally overrides the ordered request headers used to
-	// extract authentication tokens. When empty, Authorization: Bearer is used
-	// first and x-api-key remains the fallback.
-	TokenSources []AuthTokenSource
+	// TokenReviewAudiences scopes Kubernetes ServiceAccount authentication to
+	// the exact audiences requested by this listener. The cache key includes
+	// the normalized audience set so a token authenticated on an unscoped
+	// listener cannot be replayed against an audience-bound listener.
+	TokenReviewAudiences []string
+
+	// ReportTokenReviewUnavailable opts TokenReview-only listeners into returning
+	// 503 when the backend request or status reports a failure, without authenticating the caller.
+	// Explicit authentication denials still return 401. The default preserves historical
+	// 401 responses; OIDC and context-token validation are unchanged.
+	ReportTokenReviewUnavailable bool
 }
 
 // parseServiceAccountNamespace extracts the namespace from a ServiceAccount username.
@@ -128,8 +136,8 @@ func parseServiceAccountNamespace(username string) string {
 		return ""
 	}
 	rest := strings.TrimPrefix(username, prefix)
-	parts := strings.SplitN(rest, ":", 2)
-	if len(parts) < 2 || parts[0] == "" {
+	parts := strings.Split(rest, ":")
+	if len(parts) != 2 || len(utilvalidation.IsDNS1123Label(parts[0])) != 0 || len(utilvalidation.IsDNS1123Subdomain(parts[1])) != 0 {
 		return ""
 	}
 	return parts[0]
@@ -141,8 +149,6 @@ func NewAuthMiddleware(c client.Client, configs ...AuthConfig) fiber.Handler {
 	if len(configs) > 0 {
 		cfg = configs[0]
 	}
-
-	tokenExtractor := AuthTokenExtractor{Sources: cfg.TokenSources}
 
 	return func(ctx fiber.Ctx) error {
 		contextToken, profile, ok, err := extractContextTokenCandidate(ctx, cfg.ContextTokens)
@@ -156,7 +162,7 @@ func NewAuthMiddleware(c client.Client, configs ...AuthConfig) fiber.Handler {
 			contextUser, contextErr := authenticateContextToken(ctx.Context(), contextToken, profile)
 			if contextErr != nil {
 				err = contextErr
-			} else if primaryToken, extractErr := tokenExtractor.Extract(ctx); extractErr == nil && primaryToken != contextToken {
+			} else if primaryToken, extractErr := extractAuthToken(ctx); extractErr == nil && primaryToken != contextToken {
 				userInfo, err = authenticateToken(ctx.Context(), c, primaryToken, cfg)
 				if err == nil {
 					// Preserve the pod/ServiceAccount identity as the primary caller while
@@ -181,7 +187,7 @@ func NewAuthMiddleware(c client.Client, configs ...AuthConfig) fiber.Handler {
 			}
 
 			var token string
-			token, err = tokenExtractor.Extract(ctx)
+			token, err = extractAuthToken(ctx)
 			if err != nil {
 				if errors.Is(err, errInvalidAuthHeaderFormat) {
 					log.Info("authentication failed: invalid authorization header format", "ip", ctx.IP())
@@ -196,6 +202,9 @@ func NewAuthMiddleware(c client.Client, configs ...AuthConfig) fiber.Handler {
 		}
 		if err != nil {
 			log.Error(err, "token validation failed")
+			if cfg.ReportTokenReviewUnavailable && errors.Is(err, errTokenReviewUnavailable) {
+				return fiber.NewError(fiber.StatusServiceUnavailable, "token authentication is temporarily unavailable")
+			}
 			return fiber.NewError(fiber.StatusUnauthorized, "invalid token")
 		}
 
@@ -212,7 +221,7 @@ func NewAuthMiddleware(c client.Client, configs ...AuthConfig) fiber.Handler {
 
 func authenticateToken(ctx context.Context, c client.Client, token string, cfg AuthConfig) (*UserInfo, error) {
 	if !cfg.OIDC.Enabled() {
-		return validateToken(ctx, c, token)
+		return validateToken(ctx, c, token, cfg.TokenReviewAudiences...)
 	}
 
 	parsedOIDC, oidcErr := parseOIDCTokenCandidate(token, cfg.OIDC)
@@ -229,7 +238,7 @@ func authenticateToken(ctx context.Context, c client.Client, token string, cfg A
 		return nil, oidcErr
 	}
 
-	userInfo, tokenReviewErr := validateToken(ctx, c, token)
+	userInfo, tokenReviewErr := validateToken(ctx, c, token, cfg.TokenReviewAudiences...)
 	if tokenReviewErr == nil {
 		return userInfo, nil
 	}
@@ -310,9 +319,12 @@ func cloneContextTokenValue(value any) any {
 	}
 }
 
-// validateToken validates a ServiceAccount token using TokenReview with caching
-func validateToken(ctx context.Context, c client.Client, token string) (*UserInfo, error) {
-	hash := getTokenHash(token)
+var errTokenReviewUnavailable = errors.New("TokenReview backend unavailable")
+
+// validateToken validates a ServiceAccount token using TokenReview with caching.
+func validateToken(ctx context.Context, c client.Client, token string, audiences ...string) (*UserInfo, error) {
+	audiences = normalizedTokenReviewAudiences(audiences)
+	hash := tokenReviewCacheKey(token, audiences)
 
 	// Check cache
 	if entry, ok := tokenCache.Load(hash); ok {
@@ -328,19 +340,33 @@ func validateToken(ctx context.Context, c client.Client, token string) (*UserInf
 			Name: "orka-token-review",
 		},
 		Spec: authenticationv1.TokenReviewSpec{
-			Token: token,
+			Token:     token,
+			Audiences: slices.Clone(audiences),
 		},
 	}
 
-	// Submit the token review
+	// Submit the token review. Backend diagnostics are opaque and must not reach
+	// the middleware logger; retain only the availability classification.
 	if err := c.Create(ctx, review); err != nil {
-		return nil, err
+		return nil, errTokenReviewUnavailable
+	}
+
+	// A status error means the token could not be checked, even if the response
+	// also claims authentication. Never expose its opaque diagnostic in logs.
+	if review.Status.Error != "" {
+		return nil, errTokenReviewUnavailable
 	}
 
 	// Check if the token is valid
 	if !review.Status.Authenticated {
 		tokenCache.Delete(hash)
 		return nil, fiber.NewError(fiber.StatusUnauthorized, "token not authenticated")
+	}
+	for _, audience := range audiences {
+		if !slices.Contains(review.Status.Audiences, audience) {
+			tokenCache.Delete(hash)
+			return nil, fiber.NewError(fiber.StatusUnauthorized, "token audience not authenticated")
+		}
 	}
 
 	userInfo := &UserInfo{
@@ -362,6 +388,24 @@ func validateToken(ctx context.Context, c client.Client, token string) (*UserInf
 	}
 
 	return userInfo, nil
+}
+
+func normalizedTokenReviewAudiences(audiences []string) []string {
+	normalized := make([]string, 0, len(audiences))
+	for _, audience := range audiences {
+		if audience = strings.TrimSpace(audience); audience != "" && !slices.Contains(normalized, audience) {
+			normalized = append(normalized, audience)
+		}
+	}
+	slices.Sort(normalized)
+	return normalized
+}
+
+func tokenReviewCacheKey(token string, audiences []string) string {
+	if len(audiences) == 0 {
+		return getTokenHash(token)
+	}
+	return getTokenHash(token + "\x00" + strings.Join(audiences, "\x00"))
 }
 
 // GetUserInfo retrieves user info from the context

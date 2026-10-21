@@ -1,10 +1,7 @@
 import { z } from 'zod'
 
-// Mirrors internal/events ExecutionEventSeverity* constants.
-export const executionEventSeveritySchema = z.enum(['debug', 'info', 'warning', 'error'])
-
 // Mirrors internal/events/redaction.go ExecutionEventTruncation.
-export const executionEventTruncationSchema = z.object({
+const executionEventTruncationSchema = z.object({
   summaryTruncated: z.boolean().optional(),
   summaryOriginalChars: z.number().optional(),
   contentTextTruncated: z.boolean().optional(),
@@ -40,6 +37,9 @@ export const executionEventSchema = z.object({
   stopReason: z.string().optional(),
   inputTokens: z.number().optional(),
   outputTokens: z.number().optional(),
+  cachedInputTokens: z.number().optional(),
+  contextWindowUsed: z.number().optional(),
+  contextWindowSize: z.number().optional(),
   summary: z.string().optional(),
   content: z.unknown().optional(),
   contentText: z.string().optional(),
@@ -65,15 +65,13 @@ export const streamCompleteSchema = z.object({
   type: z.string(),
 })
 
-export type ExecutionEventSeverity = z.infer<typeof executionEventSeveritySchema>
-export type ExecutionEventTruncation = z.infer<typeof executionEventTruncationSchema>
 export type ExecutionEvent = z.infer<typeof executionEventSchema>
 export type ListExecutionEventsResponse = z.infer<typeof listExecutionEventsResponseSchema>
 export type StreamComplete = z.infer<typeof streamCompleteSchema>
 
 // ---- Task trace (mirrors internal/tasktrace/tasktrace.go) ----
 
-export const traceEventSchema = z.object({
+const traceEventSchema = z.object({
   seq: z.number(),
   type: z.string(),
   severity: z.string(),
@@ -88,9 +86,11 @@ export const traceEventSchema = z.object({
   createdAt: z.string(),
 })
 
-export const modelRequestTraceSchema = z.object({
+const modelRequestTraceSchema = z.object({
   id: z.string(),
   status: z.string(),
+  model: z.string().optional(),
+  provider: z.string().optional(),
   startSeq: z.number().optional(),
   endSeq: z.number().optional(),
   startedAt: z.string().optional(),
@@ -99,7 +99,7 @@ export const modelRequestTraceSchema = z.object({
   error: z.string().optional(),
 })
 
-export const toolCallTraceSchema = z.object({
+const toolCallTraceSchema = z.object({
   id: z.string(),
   name: z.string().optional(),
   status: z.string(),
@@ -111,7 +111,7 @@ export const toolCallTraceSchema = z.object({
   error: z.string().optional(),
 })
 
-export const childTaskTraceSchema = z.object({
+const childTaskTraceSchema = z.object({
   name: z.string(),
   agent: z.string().optional(),
   status: z.string().optional(),
@@ -123,14 +123,14 @@ export const childTaskTraceSchema = z.object({
   result: z.string().optional(),
 })
 
-export const workspaceTraceSchema = z.object({
+const workspaceTraceSchema = z.object({
   status: z.string(),
   seq: z.number(),
   summary: z.string().optional(),
   createdAt: z.string(),
 })
 
-export const artifactTraceSchema = z.object({
+const artifactTraceSchema = z.object({
   name: z.string().optional(),
   status: z.string(),
   seq: z.number(),
@@ -138,14 +138,14 @@ export const artifactTraceSchema = z.object({
   createdAt: z.string(),
 })
 
-export const traceIssueSchema = z.object({
+const traceIssueSchema = z.object({
   seq: z.number().optional(),
   type: z.string().optional(),
   severity: z.string().optional(),
   message: z.string(),
 })
 
-export const taskTraceSummarySchema = z.object({
+const taskTraceSummarySchema = z.object({
   namespace: z.string(),
   name: z.string(),
   type: z.string().optional(),
@@ -172,29 +172,20 @@ export const taskTraceSchema = z.object({
 })
 
 export type TraceEvent = z.infer<typeof traceEventSchema>
-export type ModelRequestTrace = z.infer<typeof modelRequestTraceSchema>
-export type ToolCallTrace = z.infer<typeof toolCallTraceSchema>
-export type ChildTaskTrace = z.infer<typeof childTaskTraceSchema>
-export type WorkspaceTrace = z.infer<typeof workspaceTraceSchema>
-export type ArtifactTrace = z.infer<typeof artifactTraceSchema>
-export type TraceIssue = z.infer<typeof traceIssueSchema>
-export type TaskTraceSummary = z.infer<typeof taskTraceSummarySchema>
 export type TaskTrace = z.infer<typeof taskTraceSchema>
 
 // ---- Approvals (mirrors internal/approvals/approvals.go) ----
 
-export const approvalStatusSchema = z.enum([
-  'pending',
-  'approved',
-  'declined',
-  'expired',
-  'cancelled',
-])
-
-export const approvalSchema = z.object({
+const approvalSchema = z.object({
   id: z.string(),
   action: z.string(),
   riskSummary: z.string().optional(),
+  targetTool: z.string().optional(),
+  targetArgsDigest: z.string().optional(),
+  targetSpecDigest: z.string().optional(),
+  targetArgsPreview: z.unknown().optional(),
+  executionOutcome: z.string().optional(),
+  executionReason: z.string().optional(),
   toolCallID: z.string().optional(),
   status: z.string(),
   createdAt: z.string(),
@@ -212,13 +203,12 @@ export const listTaskApprovalsResponseSchema = z.object({
   approvals: z.array(approvalSchema),
 })
 
-export type ApprovalStatus = z.infer<typeof approvalStatusSchema>
 export type Approval = z.infer<typeof approvalSchema>
 export type ListTaskApprovalsResponse = z.infer<typeof listTaskApprovalsResponseSchema>
 
 // ---- Fork (mirrors internal/api/fork_handlers.go + internal/fork/context.go) ----
 
-export const forkEventSummarySchema = z.object({
+const forkEventSummarySchema = z.object({
   seq: z.number(),
   type: z.string(),
   severity: z.string(),
@@ -229,7 +219,7 @@ export const forkEventSummarySchema = z.object({
   contentText: z.string().optional(),
 })
 
-export const forkContextSchema = z.object({
+const forkContextSchema = z.object({
   sourceNamespace: z.string(),
   sourceTask: z.string(),
   afterSeq: z.number(),
@@ -253,6 +243,4 @@ export interface ForkTaskRequest {
   workspace?: Record<string, unknown>
 }
 
-export type ForkEventSummary = z.infer<typeof forkEventSummarySchema>
-export type ForkContext = z.infer<typeof forkContextSchema>
 export type ForkTaskResponse = z.infer<typeof forkTaskResponseSchema>

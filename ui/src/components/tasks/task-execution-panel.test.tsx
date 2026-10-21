@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { render, screen } from '@/test/test-utils'
+import { render, screen, within } from '@/test/test-utils'
 
 vi.mock('zustand/middleware', () => ({
   persist: (fn: unknown) => fn,
@@ -43,6 +43,11 @@ describe('TaskExecutionPanel', () => {
     expect(screen.getByTestId('progress-steps')).toBeInTheDocument()
   })
 
+  it('wraps the step bar so the final step stays inside a narrow card', () => {
+    render(<TaskExecutionPanel task={makeTask({ status: { phase: 'Running', attempts: 1 } })} />)
+    expect(screen.getByTestId('progress-steps')).toHaveClass('flex', 'flex-wrap')
+  })
+
   it('treats a Scheduled task as not-yet-started (Completed step is not current)', () => {
     const { container } = render(
       <TaskExecutionPanel
@@ -60,6 +65,37 @@ describe('TaskExecutionPanel', () => {
     // a scheduled task is not mislabeled as completed.
     expect(circles[2].className).toContain('bg-muted')
     expect(circles[2].textContent).toBe('3')
+  })
+
+  it.each([
+    ['Succeeded', '✓', 'bg-status-succeeded-bg'],
+    ['Failed', '✕', 'bg-status-failed-bg'],
+    ['Cancelled', '✕', 'bg-muted'],
+  ])('marks the final step done for a %s task', (phase, mark, tone) => {
+    const { container } = render(
+      <TaskExecutionPanel task={makeTask({ status: { phase: phase as 'Succeeded', attempts: 1 } })} />,
+    )
+    const circles = container.querySelector('[data-testid="progress-steps"]')!.querySelectorAll('.rounded-full')
+    expect(circles[0].textContent).toBe('✓')
+    expect(circles[1].textContent).toBe('✓')
+    expect(circles[2].textContent).toBe(mark)
+    expect(circles[2].className).toContain(tone)
+    expect(circles[2].className).not.toContain('bg-status-running-bg')
+  })
+
+  it('says usage is unavailable when model requests carry no token counts', () => {
+    render(
+      <TaskExecutionPanel
+        task={makeTask({ status: { phase: 'Succeeded', attempts: 1 } })}
+        events={[
+          { id: 'e1', seq: 1, type: 'ModelRequestCompleted', summary: 'model call', createdAt: '2026-01-01T00:00:00Z', model: 'opencode-model' } as never,
+        ]}
+      />,
+    )
+    const rollup = screen.getByLabelText('GenAI token rollup')
+    expect(rollup).toHaveTextContent('Usage unavailable')
+    expect(rollup).not.toHaveTextContent('0 total')
+    expect(rollup).toHaveTextContent('opencode-model')
   })
 
   it('renders with Running phase', () => {
@@ -142,58 +178,162 @@ describe('TaskExecutionPanel', () => {
     expect(elapsed.textContent).toBe('-')
   })
 
-  it('displays child task summary', () => {
-    render(
-      <TaskExecutionPanel
-        task={makeTask({
-          status: {
-            phase: 'Running',
-            attempts: 1,
-            childTasks: [
-              { name: 'child-1', agent: 'agent-a', phase: 'Running' },
-              { name: 'child-2', agent: 'agent-b', phase: 'Succeeded' },
-              { name: 'child-3', agent: 'agent-a', phase: 'Failed' },
-              { name: 'child-4', agent: 'agent-c', phase: 'Pending' },
-            ],
-          },
-        })}
-      />,
-    )
-    const summary = screen.getByTestId('child-task-summary')
-    expect(summary).toBeInTheDocument()
-    expect(summary.textContent).toContain('4 total')
-    expect(summary.textContent).toContain('1 running')
-    expect(summary.textContent).toContain('1 succeeded')
-    expect(summary.textContent).toContain('1 failed')
-    expect(summary.textContent).toContain('1 pending')
-  })
-
   it('displays GenAI token rollup from execution events', () => {
     render(
       <TaskExecutionPanel
         task={makeTask({ status: { phase: 'Succeeded', attempts: 1 } })}
         events={[
           {
-            id: 'event-1',
+            id: 'event-0',
             namespace: 'default',
             streamType: 'task',
             streamID: 'test-task',
             seq: 1,
-            type: 'ModelRequestCompleted',
+            type: 'ModelUsageUpdated',
+            severity: 'info',
+            inputTokens: 50,
+            outputTokens: 10,
+            content: { harnessV2: { taskAttempt: 1, promptID: 'prompt-1' } },
+            createdAt: new Date().toISOString(),
+          },
+          {
+            id: 'event-1',
+            namespace: 'default',
+            streamType: 'task',
+            streamID: 'test-task',
+            seq: 2,
+            type: 'ModelUsageUpdated',
             severity: 'info',
             provider: 'openai',
             model: 'gpt-4o',
             inputTokens: 100,
             outputTokens: 25,
+            cachedInputTokens: 40,
             stopReason: 'stop',
+            content: { harnessV2: { taskAttempt: 1, promptID: 'prompt-1' } },
+            createdAt: new Date().toISOString(),
+          },
+          {
+            id: 'event-2',
+            namespace: 'default',
+            streamType: 'task',
+            streamID: 'test-task',
+            seq: 3,
+            type: 'ModelUsageUpdated',
+            severity: 'info',
+            model: 'gpt-4.1',
+            inputTokens: 30,
+            outputTokens: 5,
+            cachedInputTokens: 2,
+            content: { harnessV2: { taskAttempt: 2, promptID: 'prompt-2' } },
+            createdAt: new Date().toISOString(),
+          },
+          {
+            id: 'event-3',
+            namespace: 'default',
+            streamType: 'task',
+            streamID: 'test-task',
+            seq: 4,
+            type: 'ModelContextUpdated',
+            severity: 'info',
+            contextWindowUsed: 53,
+            contextWindowSize: 200,
             createdAt: new Date().toISOString(),
           },
         ]}
       />,
     )
     const rollup = screen.getByLabelText('GenAI token rollup')
-    expect(rollup).toHaveTextContent('125 total')
+    expect(rollup).toHaveTextContent('160 total')
+    expect(rollup).not.toHaveTextContent('220 total')
+    expect(rollup).toHaveTextContent('42 cached input')
     expect(rollup).toHaveTextContent('gpt-4o')
     expect(rollup).toHaveTextContent('openai')
+    expect(screen.getByLabelText('GenAI context window')).toHaveTextContent('53 / 200 tokens used')
+    expect(screen.getByLabelText('GenAI context window')).toHaveTextContent('27%')
   })
+
+  it('attributes native AI usage to the request model, without an "unknown model" chip', () => {
+    const native = { namespace: 'default', streamType: 'task', streamID: 'test-task', severity: 'info', createdAt: new Date().toISOString() }
+    render(
+      <TaskExecutionPanel
+        task={makeTask({ status: { phase: 'Succeeded', attempts: 1 } })}
+        events={[
+          // The native worker nests its usage observation in content; the
+          // event itself carries no model or token fields.
+          { ...native, id: 'usage-1', seq: 1, type: 'ModelUsageUpdated', content: { usage: { model: 'gpt-4.1', inputTokens: 100, outputTokens: 20 } } },
+          { ...native, id: 'done-1', seq: 2, type: 'ModelRequestCompleted', provider: 'openai', model: 'gpt-4.1', inputTokens: 100, outputTokens: 20, stopReason: 'tool_calls' },
+          { ...native, id: 'usage-2', seq: 3, type: 'ModelUsageUpdated', content: { usage: { model: 'gpt-4.1', inputTokens: 150, outputTokens: 30 } } },
+          { ...native, id: 'done-2', seq: 4, type: 'ModelRequestCompleted', provider: 'openai', model: 'gpt-4.1', inputTokens: 150, outputTokens: 30, stopReason: 'stop' },
+        ]}
+      />,
+    )
+    const rollup = screen.getByLabelText('GenAI token rollup')
+    expect(rollup).toHaveTextContent('300 total · 250 input · 50 output')
+    expect(rollup).not.toHaveTextContent('unknown model')
+    expect(within(rollup).getByText('gpt-4.1 · openai · stop')).toBeInTheDocument()
+  })
+
+  it('renders exact runtime pool identity and never-replay unknown outcome guidance', () => {
+    render(
+      <TaskExecutionPanel
+        task={makeTask({
+          spec: { type: 'agent', workspace: { intent: 'read' } },
+          status: {
+            phase: 'Failed',
+            attempts: 1,
+            execution: {
+              state: 'OutcomeUnknown',
+              outcome: 'OutcomeUnknown',
+              runtimePoolName: 'codex-read',
+              runtimeInstanceID: 'pod-uid:boot-id',
+              runtimeSessionGeneration: 2,
+              controllerEpoch: 7,
+            },
+          },
+        })}
+      />,
+    )
+    const execution = screen.getByLabelText('Durable execution status')
+    expect(execution).toHaveTextContent('codex-read')
+    expect(execution).toHaveTextContent('OutcomeUnknown')
+    expect(execution).toHaveTextContent('will not replay the prompt automatically')
+  })
+
+  it('renders clean-room delivery and verified publication receipt', () => {
+    render(
+      <TaskExecutionPanel
+        task={makeTask({
+          spec: {
+            type: 'agent',
+            workspace: {
+              intent: 'write',
+              gitRepo: 'https://github.com/source/repo',
+              pushBranch: 'orka/change',
+              createPR: true,
+            },
+          },
+          status: {
+            phase: 'Succeeded',
+            attempts: 1,
+            delivery: {
+              state: 'VerifiedExact',
+              outcome: 'VerifiedExact',
+              branch: 'orka/change',
+              publicationID: 'pub-1',
+              expectedCommitSHA: 'abc123',
+              verifiedRemoteSHA: 'abc123',
+              prReceipt: { id: 'pr-1', number: 42, state: 'open', baseBranch: 'main', headBranch: 'orka/change' },
+            },
+          },
+        })}
+      />,
+    )
+    const delivery = screen.getByLabelText('Workspace delivery status')
+    expect(delivery).toHaveTextContent('write')
+    expect(delivery).toHaveTextContent('VerifiedExact')
+    expect(delivery).toHaveTextContent('Pull request #42')
+    expect(delivery).toHaveTextContent('orka/change → main')
+  })
+
 })

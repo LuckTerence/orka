@@ -100,8 +100,7 @@ func (r *BackendResolver) ResolveLocal(ctx context.Context, namespace string) (*
 			return nil
 		})
 		if incarnationErr != nil {
-			var structured *apierror.Error
-			if errors.As(incarnationErr, &structured) {
+			if structured, ok := errors.AsType[*apierror.Error](incarnationErr); ok {
 				return nil, structured
 			}
 			return nil, apierror.New(http.StatusServiceUnavailable, ReasonBackendUnavailable, "memory authority binding is unavailable")

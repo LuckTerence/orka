@@ -37,7 +37,7 @@ func newMemoryOperationListCmd() *cobra.Command {
 			if cursorValue == "" {
 				cursorValue = continueValue
 			}
-			query := map[string]string{"limit": strconv.Itoa(limit)}
+			query := map[string]string{queryLimit: strconv.Itoa(limit)}
 			if strings.TrimSpace(state) != "" {
 				query["state"] = strings.TrimSpace(state)
 			}
@@ -104,7 +104,7 @@ func newMemoryOperationGetCmd() *cobra.Command {
 			return printStructured(cmd, result)
 		},
 	}
-	addOutputFlag(cmd, outputJSON)
+	addOutputFlag(cmd, outputTable)
 	return cmd
 }
 
@@ -122,7 +122,7 @@ func newMemoryOperationActionCmd(action string) *cobra.Command {
 			if !yes {
 				return fmt.Errorf("--yes is required for memory operation %s", action)
 			}
-			body, err := json.Marshal(map[string]any{"reason": strings.TrimSpace(reason)})
+			body, err := json.Marshal(map[string]any{fieldReason: strings.TrimSpace(reason)})
 			if err != nil {
 				return err
 			}

@@ -8,6 +8,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -209,13 +210,9 @@ func (h *Handlers) ListMemoryProposals(c fiber.Ctx) error {
 	if err := h.authorizeContextTokenAction(c, "listMemoryProposals", h.contextTokenAuthorization.MemoryReadScopes); err != nil {
 		return err
 	}
-	filter, err := parseMemoryProposalFilter(c, namespace)
+	proposals, err := listNamespaceMemoryProposals(c, h.memoryProposalStore, namespace)
 	if err != nil {
 		return err
-	}
-	proposals, err := h.memoryProposalStore.ListMemoryProposals(c.Context(), filter)
-	if err != nil {
-		return memoryStoreError("list memory proposals", "memory proposal", err)
 	}
 	return c.JSON(ListResponse{Items: proposals, Metadata: ListMeta{}})
 }
@@ -236,15 +233,7 @@ func (h *Handlers) CreateMemoryProposal(c fiber.Ctx) error {
 	if err := h.authorizeContextTokenAction(c, "createMemoryProposal", h.contextTokenAuthorization.MemoryWriteScopes); err != nil {
 		return err
 	}
-	proposal := request.toStore(namespace)
-	if strings.TrimSpace(proposal.Title) == "" {
-		return fiber.NewError(fiber.StatusBadRequest, "title is required")
-	}
-
-	if err := h.memoryProposalStore.CreateMemoryProposal(c.Context(), proposal); err != nil {
-		return memoryStoreError("create memory proposal", "memory proposal", err)
-	}
-	return c.Status(fiber.StatusCreated).JSON(proposal)
+	return createNamespaceMemoryProposal(c, h.memoryProposalStore, namespace, request)
 }
 
 // GetMemoryProposal gets a proposal by ID.
@@ -259,11 +248,7 @@ func (h *Handlers) GetMemoryProposal(c fiber.Ctx) error {
 	if err := h.authorizeContextTokenAction(c, "getMemoryProposal", h.contextTokenAuthorization.MemoryReadScopes); err != nil {
 		return err
 	}
-	proposal, err := h.memoryProposalStore.GetMemoryProposal(c.Context(), namespace, c.Params("id"))
-	if err != nil {
-		return memoryStoreError("get memory proposal", "memory proposal", err)
-	}
-	return c.JSON(proposal)
+	return getNamespaceMemoryProposal(c, h.memoryProposalStore, namespace)
 }
 
 // ReviewMemoryProposal records a review decision without applying the proposal automatically.
@@ -283,15 +268,7 @@ func (h *Handlers) ReviewMemoryProposal(c fiber.Ctx) error {
 		return err
 	}
 	review.Namespace = namespace
-	if review.Reviewer == "" {
-		if actor, _ := memoryActor(c); actor != "" {
-			review.Reviewer = actor
-		}
-	}
-	if err := h.memoryProposalStore.ReviewMemoryProposal(c.Context(), review); err != nil {
-		return memoryStoreError("review memory proposal", "memory proposal", err)
-	}
-	return c.SendStatus(fiber.StatusNoContent)
+	return reviewNamespaceMemoryProposal(c, h.memoryProposalStore, review)
 }
 
 // ArchiveMemoryProposal archives a proposal without applying it.
@@ -306,10 +283,7 @@ func (h *Handlers) ArchiveMemoryProposal(c fiber.Ctx) error {
 	if err := h.authorizeContextTokenAction(c, "archiveMemoryProposal", h.contextTokenAuthorization.MemoryWriteScopes); err != nil {
 		return err
 	}
-	if err := h.memoryProposalStore.ArchiveMemoryProposal(c.Context(), namespace, c.Params("id")); err != nil {
-		return memoryStoreError("archive memory proposal", "memory proposal", err)
-	}
-	return c.SendStatus(fiber.StatusNoContent)
+	return archiveNamespaceMemoryProposal(c, h.memoryProposalStore, namespace)
 }
 
 // ApplyMemoryProposal applies an accepted memory proposal into durable memory.
@@ -331,19 +305,38 @@ func (h *Handlers) ApplyMemoryProposal(c fiber.Ctx) error {
 	if err := h.authorizeContextTokenAction(c, "applyMemoryProposal", h.contextTokenAuthorization.MemoryOperateScopes); err != nil {
 		return err
 	}
-	actor, _ := memoryActor(c)
-	if apply.AppliedBy == "" {
-		apply.AppliedBy = actor
-	}
-	result, err := h.memoryService.ApplyMemoryProposal(c.Context(), namespace, apply.ID, apply.AppliedBy,
-		memoryMutationContext(c, "applyMemoryProposal", "memory proposal applied"))
+	appliedBy, err := memoryProposalActor(c)
 	if err != nil {
+		return err
+	}
+	mutationContext := memoryMutationContext(c, "applyMemoryProposal", "memory proposal applied")
+	var existingMemoryDenied error
+	if ui := GetUserInfo(c); ui != nil && ui.AuthType == AuthTypeTokenReview {
+		// The store may resolve either an applied ID or a source-proposal link.
+		// Authorize its final choice within the transaction, including retries.
+		mutationContext.AuthorizeExistingMemory = func(ctx context.Context, namespace, id string) error {
+			if err := authorizeKubernetesResourceAction(ctx, h.clientset, ui,
+				namespace, "get", "core.orka.ai", "memories", id); err != nil {
+				existingMemoryDenied = err
+				return err
+			}
+			return nil
+		}
+	}
+	result, err := h.memoryService.ApplyMemoryProposal(c.Context(), namespace, apply.ID, appliedBy, mutationContext)
+	if err != nil {
+		// The service maps store errors to client-safe shapes; a denied read of
+		// the resolved memory is still reported as the caller's 403.
+		if existingMemoryDenied != nil {
+			return existingMemoryDenied
+		}
 		return memoryServiceError(err)
 	}
 	return sendMemoryMutationResult(c, result)
 }
 
 type memoryProposalCreateRequest struct {
+	ID          string `json:"id,omitempty"`
 	Namespace   string `json:"namespace,omitempty"`
 	TaskName    string `json:"taskName,omitempty"`
 	AgentName   string `json:"agentName,omitempty"`
@@ -357,7 +350,7 @@ type memoryProposalCreateRequest struct {
 
 func (r memoryProposalCreateRequest) toStore(namespace string) *store.MemoryProposal {
 	return &store.MemoryProposal{
-		Namespace: namespace, TaskName: r.TaskName, AgentName: r.AgentName, Type: r.Type,
+		ID: r.ID, Namespace: namespace, TaskName: r.TaskName, AgentName: r.AgentName, Type: r.Type,
 		SkillName: r.SkillName, Title: r.Title, Description: r.Description, Content: r.Content, Patch: r.Patch,
 	}
 }
@@ -445,10 +438,12 @@ func splitCSV(raw string) []string {
 }
 
 func bindMemoryProposalReview(c fiber.Ctx, fallbackNamespace, id string) (store.MemoryProposalReview, error) {
+	if err := rejectClientRecordedIdentity(c.Body(), "reviewer"); err != nil {
+		return store.MemoryProposalReview{}, err
+	}
 	var req struct {
 		Namespace  string `json:"namespace"`
 		Status     string `json:"status"`
-		Reviewer   string `json:"reviewer"`
 		ReviewNote string `json:"reviewNote"`
 	}
 	if err := c.Bind().JSON(&req); err != nil {
@@ -464,15 +459,16 @@ func bindMemoryProposalReview(c fiber.Ctx, fallbackNamespace, id string) (store.
 		Namespace:  req.Namespace,
 		ID:         id,
 		Status:     req.Status,
-		Reviewer:   req.Reviewer,
 		ReviewNote: req.ReviewNote,
 	}, nil
 }
 
 func bindMemoryProposalApply(c fiber.Ctx, fallbackNamespace, id string) (store.MemoryProposalApply, error) {
+	if err := rejectClientRecordedIdentity(c.Body(), "appliedBy"); err != nil {
+		return store.MemoryProposalApply{}, err
+	}
 	var req struct {
 		Namespace string `json:"namespace"`
-		AppliedBy string `json:"appliedBy"`
 	}
 	if strings.TrimSpace(string(c.Body())) != "" {
 		if err := c.Bind().JSON(&req); err != nil {
@@ -485,8 +481,122 @@ func bindMemoryProposalApply(c fiber.Ctx, fallbackNamespace, id string) (store.M
 	return store.MemoryProposalApply{
 		Namespace: req.Namespace,
 		ID:        id,
-		AppliedBy: req.AppliedBy,
 	}, nil
+}
+
+// rejectClientRecordedIdentity refuses a body that names who reviewed or
+// applied a proposal, the way Task creation refuses requestedBy: the server
+// records the signed-in identity instead. Keys match case-insensitively, as
+// JSON decoding does. An empty value names no one, so older clients that
+// always send the key keep working.
+func rejectClientRecordedIdentity(body []byte, field string) error {
+	if len(bytes.TrimSpace(body)) == 0 {
+		return nil
+	}
+	var topLevel map[string]json.RawMessage
+	if err := json.Unmarshal(body, &topLevel); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
+	}
+	for key, raw := range topLevel {
+		if !strings.EqualFold(key, field) {
+			continue
+		}
+		var value string
+		if json.Unmarshal(raw, &value) == nil && strings.TrimSpace(value) == "" {
+			continue
+		}
+		return fiber.NewError(fiber.StatusBadRequest, field+" cannot be set by clients; it is recorded from your identity")
+	}
+	return nil
+}
+
+// The namespace-scoped proposal helpers below are shared by the external API
+// handlers and the internal worker route. Callers resolve and authorize the
+// namespace first; the helpers validate the body, call the store, and write
+// the response. Memory mutations go through the memory service instead.
+
+func listNamespaceMemoryProposals(c fiber.Ctx, proposalStore store.MemoryProposalStore, namespace string) ([]store.MemoryProposal, error) {
+	filter, err := parseMemoryProposalFilter(c, namespace)
+	if err != nil {
+		return nil, err
+	}
+	proposals, err := proposalStore.ListMemoryProposals(c.Context(), filter)
+	if err != nil {
+		return nil, memoryStoreError("list memory proposals", "memory proposal", err)
+	}
+	return proposals, nil
+}
+
+func createNamespaceMemoryProposal(c fiber.Ctx, proposalStore store.MemoryProposalStore, namespace string, request memoryProposalCreateRequest) error {
+	proposal := request.toStore(namespace)
+	if strings.TrimSpace(proposal.Title) == "" {
+		return fiber.NewError(fiber.StatusBadRequest, "title is required")
+	}
+	if err := proposalStore.CreateMemoryProposal(c.Context(), proposal); err != nil {
+		return memoryStoreError("create memory proposal", "memory proposal", err)
+	}
+	return c.Status(fiber.StatusCreated).JSON(proposal)
+}
+
+func getNamespaceMemoryProposal(c fiber.Ctx, proposalStore store.MemoryProposalStore, namespace string) error {
+	proposal, err := proposalStore.GetMemoryProposal(c.Context(), namespace, c.Params("id"))
+	if err != nil {
+		return memoryStoreError("get memory proposal", "memory proposal", err)
+	}
+	return c.JSON(proposal)
+}
+
+// memoryProposalReviewRecord is what a review returns: the stored decision and
+// who made it, without the proposal content the review verb does not grant.
+type memoryProposalReviewRecord struct {
+	ID         string     `json:"id"`
+	Namespace  string     `json:"namespace"`
+	Status     string     `json:"status"`
+	Reviewer   string     `json:"reviewer"`
+	ReviewNote string     `json:"reviewNote,omitempty"`
+	ReviewedAt *time.Time `json:"reviewedAt,omitempty"`
+}
+
+func reviewNamespaceMemoryProposal(c fiber.Ctx, proposalStore store.MemoryProposalStore, review store.MemoryProposalReview) error {
+	reviewer, err := memoryProposalActor(c)
+	if err != nil {
+		return err
+	}
+	review.Reviewer = reviewer
+	if err := proposalStore.ReviewMemoryProposal(c.Context(), review); err != nil {
+		return memoryStoreError("review memory proposal", "memory proposal", err)
+	}
+	// Read the record back so the caller sees what was stored, after the
+	// store's normalization and redaction.
+	proposal, err := proposalStore.GetMemoryProposal(c.Context(), strings.TrimSpace(review.Namespace), strings.TrimSpace(review.ID))
+	if err != nil {
+		return memoryStoreError("get memory proposal", "memory proposal", err)
+	}
+	return c.JSON(memoryProposalReviewRecord{
+		ID:         proposal.ID,
+		Namespace:  proposal.Namespace,
+		Status:     proposal.Status,
+		Reviewer:   proposal.Reviewer,
+		ReviewNote: proposal.ReviewNote,
+		ReviewedAt: proposal.ReviewedAt,
+	})
+}
+
+func archiveNamespaceMemoryProposal(c fiber.Ctx, proposalStore store.MemoryProposalStore, namespace string) error {
+	if err := proposalStore.ArchiveMemoryProposal(c.Context(), namespace, c.Params("id")); err != nil {
+		return memoryStoreError("archive memory proposal", "memory proposal", err)
+	}
+	return c.SendStatus(fiber.StatusNoContent)
+}
+
+// memoryProposalActor returns the signed-in identity that review and apply
+// record. Clients cannot name it, so a request without one is refused rather
+// than stored anonymously.
+func memoryProposalActor(c fiber.Ctx) (string, error) {
+	if actor := approvalDecisionActor(GetUserInfo(c)); actor != "" {
+		return actor, nil
+	}
+	return "", fiber.NewError(fiber.StatusUnauthorized, "missing authenticated identity")
 }
 
 func bindStrictMemoryJSON(c fiber.Ctx, target any) error {
@@ -538,9 +648,9 @@ func memoryMutationContext(c fiber.Ctx, route, reason string) memoryruntime.Muta
 }
 
 func internalMemoryMutationContext(c fiber.Ctx, namespace, route, reason string) memoryruntime.MutationContext {
-	context := memoryMutationContext(c, route, reason)
-	context.LocationBase = "/internal/v1/memory-operations/" + namespace + "/"
-	return context
+	mutationContext := memoryMutationContext(c, route, reason)
+	mutationContext.LocationBase = "/internal/v1/memory-operations/" + namespace + "/"
+	return mutationContext
 }
 
 func sendMemoryMutationResult(c fiber.Ctx, result *memoryruntime.MutationResult) error {
@@ -567,8 +677,7 @@ func memoryServiceError(err error) error {
 	if err == nil {
 		return nil
 	}
-	var structured *apierror.Error
-	if errors.As(err, &structured) {
+	if structured, ok := errors.AsType[*apierror.Error](err); ok {
 		return fmt.Errorf("%w: %w", fiber.NewError(structured.Status, structured.Error()), err)
 	}
 	return memoryStoreError("perform memory operation", "memory", err)

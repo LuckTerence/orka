@@ -1,621 +1,210 @@
 ---
 slug: /substrate
+description: "External Agent Substrate ACP workspaces, data-only checkpoints, and native MCP Tools."
 ---
 
-# Substrate Execution Workspaces
+# Agent Substrate workspaces
 
-Orka can run agent Tasks inside
-[Agent Substrate](https://github.com/agent-substrate/substrate) Actors through
-the experimental `substrate` execution workspace provider.
+ACP workspaces use the separately deployed `orka-workspace-substrate` provider.
+It targets unmodified Agent Substrate `v0.1.0`, with source and protocol pinned to
+commit `fa6d949685a6318940a9a0195c867c864009b820`. The
+[provider installation and protocol pin](https://github.com/orka-agents/orka-workspace/blob/main/providers/substrate/README.md)
+live in the external workspace repository. Orka core retains a separate native
+integration for MCP Tools; enabling it does not enable ACP workspace allocation.
 
-Substrate is not a replacement for Orka's Task API, controller, worker Jobs,
-result submission, or artifact handling. Orka still owns the high-level agent
-task lifecycle. Substrate provides the lower-level warm, suspendable, stateful
-execution environment for Tasks that opt into an execution workspace.
+Substrate owns native Actors, placement, gVisor isolation, and snapshot storage.
+The external provider owns its private worker pools and allocation journals.
+Core owns Task outcomes, RuntimeSessions, prompt leases, credentials, admission,
+and settlement. Reading a dormant Session does not start an Actor.
 
-The Substrate provider is disabled by default. Enable it only in clusters where
-Substrate is already installed and where an Orka-compatible `ActorTemplate` is
-available.
+:::tip[Video demo]
+Watch [Checkpoint and restore an agent workspace](https://www.youtube.com/watch?v=jsdRB-0LLAc).
+:::
 
-## How It Works
+## Install the external ACP provider
 
-The integration uses Orka's existing workspace wrapper flow:
+Install the native backend independently, then the shared workspace CRDs and
+ownership policies and the provider's CRDs, RBAC, registration, and Deployment.
+Supply the provider's installation-owned `substrate-native-control` Secret.
+Control traffic uses authenticated TLS with a CA bundle and either a bearer token
+or client certificate/key files. The provider reloads tokens for each request and
+certificates for each TLS handshake. These credentials never enter workload
+requests, status, templates, or logs.
 
-```text
-Task
-  -> Orka controller validates workspace settings
-  -> Orka controller creates the normal worker Job
-  -> outer worker claims or creates a Substrate Actor
-  -> outer worker resumes the Actor
-  -> outer worker stages the Orka worker binary and handoff token
-  -> Orka workspace daemon inside the Actor starts the inner worker
-  -> inner worker runs the agent runtime and reports results to Orka
-  -> outer worker scrubs staged token files
-  -> outer worker suspends or deletes the Actor
-```
+| External provider flag | Purpose |
+| --- | --- |
+| `--native-api-endpoint` | Native TLS control endpoint, usually `api.ate-system.svc:443`. |
+| `--native-ca-file` | Server trust bundle. |
+| `--native-token-file` | Rotating bearer identity. |
+| `--native-cert-file`, `--native-key-file` | Alternative rotating client identity. |
+| `--actor-dns-suffix` | Direct Actor route suffix, usually `actors.resources.substrate.ate.dev`. |
+| `--native-direct-egress=true` | Acknowledges the native direct-egress prerequisite below. |
 
-This keeps the provider boundary behind `internal/workspace.WorkspaceExecutor`.
-The controller resolves and validates provider configuration, while the worker
-owns actor claim, readiness, command execution, staging, and cleanup.
+Actor, ActorTemplate, Atespace, Worker, and Tag are native API resources. WorkerPool
+is a Kubernetes CRD. Create infrastructure templates through the native API, such
+as `kubectl ate create actor-template -f`, rather than applying an ActorTemplate
+CRD. The profile's `templateRef.namespace` names the native Atespace.
 
-Substrate's public control API is actor lifecycle oriented. It does not provide
-the command execution and file transfer surface that Orka workers need, so Orka
-requires a small workspace daemon inside each compatible Substrate Actor.
-
-## When To Use It
-
-Use `provider: substrate` for agent workloads that benefit from a durable,
-suspendable execution environment:
-
-- session-scoped workspaces that should stay warm between Tasks
-- agent runs that need filesystem state preserved by Substrate snapshots
-- local and CI validation of Orka's Substrate workspace behavior
-
-Use the default Kubernetes worker execution path when a Task does not need a
-durable execution workspace. Use `provider: agent-sandbox` when the cluster is
-configured for Kubernetes SIG agent-sandbox instead of Substrate.
-
-## Requirements
-
-The cluster must provide:
-
-- Substrate CRDs and control plane.
-- A running Substrate router, normally `atenet-router`.
-- A snapshot store accepted by the Substrate installation, such as the local
-  RustFS bucket used by the kind E2E.
-- A Substrate `WorkerPool` for Orka Actors.
-- An Orka-compatible Substrate `ActorTemplate`.
-- Worker nodes that can run Substrate's gVisor based runtime path.
-
-Orka does not install or operate Substrate in production. Install and validate
-Substrate separately, then configure Orka to use it.
-
-## Controller Configuration
-
-Enable the provider on the Orka controller:
-
-```bash
---execution-workspace-default-provider=substrate
---substrate-enabled=true
---substrate-api-endpoint=api.ate-system.svc:443
---substrate-router-url=http://atenet-router.ate-system.svc
---substrate-actor-dns-suffix=actors.resources.substrate.ate.dev
---substrate-default-template=orka-codex
---substrate-default-template-namespace=ate-demo
---substrate-bootstrap-token-secret-name=orka-substrate-bootstrap
---substrate-bootstrap-token-secret-key=token
---substrate-claim-timeout=2m
---substrate-command-timeout=30m
---substrate-cleanup-policy=delete
-```
-
-The same values can be provided through environment variables:
-
-| Flag | Environment variable | Default |
-| --- | --- | --- |
-| `--execution-workspace-default-provider` | `ORKA_EXECUTION_WORKSPACE_DEFAULT_PROVIDER` | `agent-sandbox` |
-| `--substrate-enabled` | `ORKA_SUBSTRATE_ENABLED` | `false` |
-| `--substrate-api-endpoint` | `ORKA_SUBSTRATE_API_ENDPOINT` | `api.ate-system.svc:443` |
-| `--substrate-api-ca-file` | `ORKA_SUBSTRATE_API_CA_FILE` | empty |
-| `--substrate-api-insecure-skip-verify` | `ORKA_SUBSTRATE_API_INSECURE_SKIP_VERIFY` | `false` |
-| `--substrate-router-url` | `ORKA_SUBSTRATE_ROUTER_URL` | `http://atenet-router.ate-system.svc` |
-| `--substrate-actor-dns-suffix` | `ORKA_SUBSTRATE_ACTOR_DNS_SUFFIX` | `actors.resources.substrate.ate.dev` |
-| `--substrate-default-template` | `ORKA_SUBSTRATE_DEFAULT_TEMPLATE` | empty |
-| `--substrate-default-template-namespace` | `ORKA_SUBSTRATE_DEFAULT_TEMPLATE_NAMESPACE` | empty |
-| `--substrate-bootstrap-token-secret-name` | `ORKA_SUBSTRATE_BOOTSTRAP_TOKEN_SECRET_NAME` | empty |
-| `--substrate-bootstrap-token-secret-key` | `ORKA_SUBSTRATE_BOOTSTRAP_TOKEN_SECRET_KEY` | `token` when a secret name is set |
-| `--substrate-claim-timeout` | `ORKA_SUBSTRATE_CLAIM_TIMEOUT` | `2m` |
-| `--substrate-command-timeout` | `ORKA_SUBSTRATE_COMMAND_TIMEOUT` | `30m` |
-| `--substrate-cleanup-policy` | `ORKA_SUBSTRATE_CLEANUP_POLICY` | `delete` |
-
-When Substrate is enabled, the controller requires explicit API trust
-configuration. Use `--substrate-api-ca-file` in production. Reserve
-`--substrate-api-insecure-skip-verify=true` for local smoke tests such as the
-kind E2E.
-
-The controller also requires a bootstrap token Secret reference. Worker Jobs use
-that Secret to authenticate the first handoff-token upload to a fresh or resumed
-workspace daemon. Create a Secret with the configured name and key in every Task
-namespace that will run Substrate-backed workers, and provide the same token to
-the Substrate `ActorTemplate` daemon environment.
-
-If `--execution-workspace-default-provider=substrate` is set, Tasks may omit
-`spec.execution.workspace.provider` and still use Substrate. If the default is
-left as `agent-sandbox`, each Substrate Task must set `provider: substrate`.
-
-## Task API
-
-Substrate is selected through the existing execution workspace field:
+The operator creates a `SubstrateProviderConfig` and immutable
+`SubstrateWorkspaceProfile` in `substrate.workspace.orka.ai/v1alpha1`. For example:
 
 ```yaml
-apiVersion: core.orka.ai/v1alpha1
-kind: Task
+apiVersion: substrate.workspace.orka.ai/v1alpha1
+kind: SubstrateWorkspaceProfile
 metadata:
-  name: substrate-agent-task
-spec:
-  type: agent
-  agentRef:
-    name: codex-agent
-  prompt: "Run make test and summarize the result."
-  sessionRef:
-    name: substrate-demo
-    create: true
-  execution:
-    workspace:
-      enabled: true
-      provider: substrate
-      templateRef:
-        name: orka-codex
-        namespace: ate-demo
-      reusePolicy: session
-      cleanupPolicy: retain
-```
-
-Workspace fields:
-
-- `enabled`: must be `true` to use any durable execution workspace.
-- `provider`: set to `substrate`, or omit it when the controller default is
-  `substrate`.
-- `templateRef.name`: Substrate `ActorTemplate` name. It may be omitted only
-  when the controller has `--substrate-default-template`.
-- `templateRef.namespace`: Substrate `ActorTemplate` namespace. It defaults to
-  the Task namespace unless the controller has a provider-specific default.
-- `reusePolicy`: `none` creates a fresh Actor. `session` reuses the
-  session-scoped Actor and requires `spec.sessionRef.name`.
-- `cleanupPolicy`: `delete` removes the Actor after the Task. `retain` scrubs
-  staged secrets and suspends the Actor.
-- `boot`: asks Substrate to boot the actor from scratch on first resume instead
-  of relying on the provider's default snapshot behavior.
-- `poolRef`: places the Task on an operator-managed `SubstrateActorPool`.
-  Pooled workspaces currently require `cleanupPolicy: delete`; the controller
-  rejects pooled `retain` until workspace reset is available.
-- `snapshot`: reserved for explicit provider snapshot restore/checkpoint
-  settings. Non-empty snapshot settings are currently rejected.
-- `hibernation`: reserved for resident process reuse. `processMode: resident`
-  is currently rejected.
-
-The controller rejects `provider: substrate` when Substrate support is disabled,
-when the provider name is unknown, when a required template is missing, or when
-the referenced `ActorTemplate` is not Orka-compatible.
-
-## Actor Pools
-
-`SubstrateActorPool` is an Orka CRD for operator-owned actor pool capacity. A
-pool points at one Substrate `ActorTemplate`, optionally records the intended
-Substrate `WorkerPool`, and reports sanitized density telemetry.
-
-```yaml
-apiVersion: core.orka.ai/v1alpha1
-kind: SubstrateActorPool
-metadata:
-  name: codex-substrate-pool
-  namespace: default
+  name: substrate-data
 spec:
   templateRef:
-    name: orka-codex
-    namespace: ate-demo
-  workerPoolRef:
-    name: orka-workers
-    namespace: ate-demo
-  targetActors: 4
-  targetWorkers: 2
-  precreateActors: true
+    name: workspace-infrastructure
+    namespace: team
+  suspend:
+    mode: DataOnly
 ```
 
-Pool fields:
+An administrator-managed `ExecutionWorkspaceClass` references that profile and
+the registered provider. Require `acp.runtime.v2` explicitly. Suspension requires
+interactive session reuse, an allowed Suspend action, and bounded expiry.
 
-- `templateRef`: Substrate `ActorTemplate` used for all actors in the pool.
-- `workerPoolRef`: optional Substrate `WorkerPool` the pool targets for
-  capacity and density reporting.
-- `targetActors`: desired stateful actor count, capped at `1000`.
-- `targetWorkers`: intended physical worker budget. `targetActors` may exceed
-  this value to express oversubscription.
-- `precreateActors`: asks the controller to create deterministic warm actors up
-  to `targetActors`; Substrate may suspend actors when workers are full.
-
-Tasks opt into a pool with `spec.execution.workspace.poolRef`:
+Enable core's provider API and ACP dispatch with the required provenance and
+class-use admission webhooks. Core has no Substrate ACP backend or native routing
+flag. Give its ServiceAccount read-only Pod access in the worker namespaces so
+it can independently verify startup and termination. With Helm:
 
 ```yaml
-apiVersion: core.orka.ai/v1alpha1
-kind: Task
-metadata:
-  name: pooled-substrate-agent-task
+controller:
+  executionWorkspace:
+    dispatchEnabled: true
+    workerNamespaces: [ate-workers]
+```
+
+The provider's separate RBAC authorizes its native infrastructure and network
+policy operations. See [workspace configuration](../reference/configuration.md#workspace-providers).
+
+A Task selects a class without native selectors:
+
+```yaml
 spec:
   type: agent
-  agentRef:
-    name: codex-agent
-  prompt: "Run make test and summarize the result."
   execution:
     workspace:
-      enabled: true
-      provider: substrate
-      templateRef:
-        name: orka-codex
-        namespace: ate-demo
-      poolRef:
-        name: codex-substrate-pool
-      boot: true
+      classRef: {name: substrate-coding}
+      reusePolicy: session
 ```
 
-The pool and Task/Tool template references must resolve to the same
-`ActorTemplate`. When namespace isolation is enforced, cross-namespace `poolRef`
-values are rejected.
+Top-level `Task.spec.workspace` remains the repository and publication contract.
 
-## Workspace Status
+## Private workers and network confinement
 
-Task status exposes a provider-neutral workspace lifecycle:
+Configure ateapi with `--egress-gateway-address=` before setting the external
+provider's `--native-direct-egress=true`. This disables the transparent gateway
+so worker NetworkPolicies see the admitted destination IPs. The direct route
+`<actor>.<atespace>.<suffix>:80` must reach atenet-router from both provider and
+core. The provider cannot independently verify the gateway setting.
+
+The infrastructure ActorTemplate must select exactly one operator-owned
+WorkerPool. Each allocation copies its frozen worker image, scheduling, resource
+settings, labels, and annotations into a private single-replica pool. The provider
+creates the admitted egress policy before that pool. Allocation and instance
+labels are present in the Pod template at birth, before any Actor can run. It
+pins an active, empty, single-Actor worker and exact Pod UID before native Resume.
+Later worker replacements never become startup evidence for that request.
+
+Core checks the provider's sealed process evidence and exact worker Pod before
+releasing credentials, then verifies the authenticated supervisor boot. Native
+worker control registration, certificate management, and storage transfer run
+through the native host/control infrastructure. They do not require broad worker
+Pod egress exceptions. Native worker and router ingress remain operator-owned;
+allow only authorized management callers and Orka runtime routes.
+
+Use a CNI that enforces NetworkPolicy and avoid additional policies that widen
+admitted worker egress. Kind's default CNI cannot prove packet enforcement.
+Native Suspend, Resume, and Delete lack caller UID/version preconditions. The
+provider's Kubernetes journal CAS serializes its own operations without adding
+native atomic fencing. Concurrent administrator mutation of provider-owned Actors,
+Tags, templates, or pools is outside that ownership boundary.
+
+## Data-only suspension and cold resume
+
+Derived templates enforce Data/Data/ColdBoot. Full-memory restore stays disabled.
+The admitted runtime mounts `/durable/orka-workspace` and uses
+`ORKA_ACP_DURABLE_WORKSPACE_KEY=shared` for retained workspace data.
+
+After core's authenticated drain, the provider captures and verifies a Data
+snapshot and copies it into a private native Tag. It verifies source identity and
+provenance before and after capture, drains exact workers, foreground-deletes the
+private pool, and observes every recorded Pod UID's absence before deleting the
+source Actor or reporting suspension. The operator's source WorkerPool remains
+untouched. A snapshot alone is not termination evidence.
+
+Cold resume verifies the retained Tag and frozen ActorTemplate and worker
+specification. Only generated allocation and instance labels may rotate; worker
+image, isolation, scheduling, resources, and operator labels remain exact. It
+starts a fresh Actor and worker, repeats sealed bootstrap, and receives fresh
+core credentials. Durable workspace data survives; process memory does not.
+
+Missing journals, foreign placement, changed storage or infrastructure identities,
+and uncertain native outcomes close admission. A lost Resume response is not
+permission to replay boot. Preserve journals and checkpoint catalogs for explicit
+recovery rather than removing ownership markers or finalizers.
+
+## Checkpoints, forks, and recovery {#checkpoints-forks-and-recovery}
+
+The provider advertises `checkpoint.data` and `restore.cold` alongside ACP runtime
+and suspension. A public `ExecutionWorkspaceCheckpoint` carries an opaque data
+reference bound to provider, source class/profile, namespace, checkpoint UID, and
+content digest. It does not expose native Tags or control credentials.
+
+Export must finish before deleting the source workspace. Import requires live
+`use` authorization for the checkpoint and exact compatible target infrastructure.
+A fresh target workspace restores data into a new Actor; it never resumes source
+process memory or credentials. Immutable checkpoint and template references keep
+required provider-owned storage alive until their consumers are gone.
+
+The provider does not advertise pooled ACP capacity, generic exec/files, TLS Actor
+endpoints, MCP Service workloads, or full-memory restore.
+
+## Native MCP Tools in core
+
+MCP Tools retain `spec.mcp.substrateActor` and optional `SubstrateActorPool` placement.
+Enable only that path with `--substrate-mcp-tools-enabled`. The core
+`--substrate-api-*`, router, Actor DNS, and control credential settings apply to
+this MCP integration, not the external ACP provider.
 
 ```yaml
-status:
-  executionWorkspace:
-    provider: substrate
-    templateRef:
-      name: orka-codex
-      namespace: ate-demo
-    phase: Deleted
-    reason: WorkspaceDeleted
-    reusePolicy: session
-    cleanupPolicy: delete
-    reused: false
-    placement:
-      workerNamespace: ate-demo
-      workerPool: orka-workers
-      workerPodName: orka-workers-0
-    density:
-      workerCount: 1
-      actorCount: 2
-      runningActorCount: 1
-      suspendedActorCount: 1
-      actorsPerWorker: "2.00"
-    resumeLatency: 2.3s
-    message: workspace deleted
+controller:
+  substrate:
+    mcpToolsEnabled: true
+    apiCredentials:
+      existingSecret: substrate-mcp-control
+      certKey: tls.crt
+      privateKeyKey: tls.key
+      caKey: ca.crt
 ```
 
-Possible phases are `Pending`, `Ready`, `Released`, `Retained`, `Deleted`, and
-`Failed`.
+For bearer authentication use `apiCredentials.bearerTokenKey` instead of certificate
+and private-key keys. Keep verified TLS and Secret projections for rotation.
+`SubstrateActorPool.spec.templateRef` is immutable and belongs to native MCP Tool
+placement. It does not select a Task's ACP workspace.
 
-The status surface is intentionally sanitized. It must not expose Substrate actor
-IDs, snapshot URIs, worker pod IPs, daemon URLs, staged token paths, request
-tokens, or raw provider credentials.
+## Upgrades and proof limits
 
-`placement`, `density`, and `resumeLatency` are best-effort visibility fields.
-They are safe for status and telemetry, but they should not be used as stable
-provider-native identifiers.
+Drain all old in-tree ACP allocations and retained records through the original
+owner before applying the pruned RuntimePool CRD or starting new core. The startup
+gate rejects legacy workspace labels in every state, including `Failed` and
+`Deleted`, across all namespaces. It never adopts native allocations or strips
+finalizers. See [Upgrading](../operations/upgrading.md#external-workspace-migration).
 
-## ActorTemplate Requirements
+The [external Substrate proof](https://github.com/orka-agents/orka-workspace/blob/main/scripts/external-substrate-e2e.sh)
+uses an actual gVisor worker, verifies confinement labels and policy before native
+Resume, writes a filesystem marker, captures data, observes exact worker/Actor
+cleanup, and restores that marker in a fresh process after source deletion. It
+proves native provider lifecycle and checkpoint behavior. Its standalone lane
+uses fixture Core admission.
 
-An Orka-compatible Substrate `ActorTemplate` must run the Orka workspace daemon
-as the long-lived actor process. The controller validates the following labels
-and annotations:
-
-```yaml
-metadata:
-  labels:
-    orka.ai/execution-workspace: "true"
-    orka.ai/workspace-provider: substrate
-  annotations:
-    orka.ai/workspace-protocol: http-json-v1
-    orka.ai/workspace-daemon-port: "80"
-    orka.ai/workspace-staging-root: /app
-    orka.ai/agent-runtimes: codex
-```
-
-The daemon port must match the daemon container's literal
-`ORKA_WORKSPACE_AGENT_LISTEN_ADDR` value, or the daemon default `:8080` when
-that environment variable is omitted. The pinned Substrate router currently
-forwards actor HTTP traffic to port `80`, so Orka agent harness wrapper images grant the
-workspace daemon `cap_net_bind_service` while still running it as a non-root
-user. The staging root is currently required to be `/app`, because the worker
-handoff stages the inner worker binary and secret scrub paths under that
-directory.
-Use the Orka agent harness wrapper image for the runtime, not the daemon-only image; the
-ActorTemplate container must include `/orka-workspace-agent`, the selected CLI,
-and normal workspace tools such as `git`.
-The controller also validates that the workspace-daemon ActorTemplate container
-defines `ORKA_WORKSPACE_BOOTSTRAP_TOKEN`. Prefer `valueFrom.secretKeyRef` when
-the deployed Substrate version propagates Kubernetes env sources into the actor
-runtime. The pinned Substrate revision used by the kind E2E propagates literal
-env values only, so the CI template uses a generated, ephemeral literal value
-that matches the worker Job Secret.
-
-Example shape:
-
-```yaml
-apiVersion: ate.dev/v1alpha1
-kind: WorkerPool
-metadata:
-  name: orka-workers
-  namespace: ate-demo
-spec:
-  replicas: 1
-  ateomImage: registry.example.com/ateom-gvisor:tag
----
-apiVersion: ate.dev/v1alpha1
-kind: ActorTemplate
-metadata:
-  name: orka-codex
-  namespace: ate-demo
-  labels:
-    orka.ai/execution-workspace: "true"
-    orka.ai/workspace-provider: substrate
-  annotations:
-    orka.ai/agent-runtimes: codex
-    orka.ai/workspace-daemon-port: "80"
-    orka.ai/workspace-protocol: http-json-v1
-    orka.ai/workspace-staging-root: /app
-spec:
-  pauseImage: registry.k8s.io/pause:3.10.2
-  containers:
-    - name: workspace
-      image: registry.example.com/orka/agent-harness-wrapper:tag
-      command:
-        - /orka-workspace-agent
-      env:
-        - name: ORKA_WORKSPACE_AGENT_LISTEN_ADDR
-          value: ":80"
-        - name: ORKA_WORKSPACE_HANDOFF_TOKEN_FILE
-          value: /app/orka-workspace-handoff-token
-        - name: ORKA_WORKSPACE_BOOTSTRAP_TOKEN
-          value: "${ROTATED_BOOTSTRAP_TOKEN}"
-      ports:
-        - containerPort: 80
-  workerPoolRef:
-    name: orka-workers
-    namespace: ate-demo
-  snapshotsConfig:
-    location: gs://ate-snapshots/orka-codex/
-  runsc:
-    amd64:
-      url: gs://gvisor/releases/nightly/2026-05-19/x86_64/runsc
-      sha256Hash: a397be1abc2420d26bce6c70e6e2ff96c73aaaab929756c56f5e2089ea842b63
-    arm64:
-      url: gs://gvisor/releases/nightly/2026-05-19/aarch64/runsc
-      sha256Hash: 1ba2366ae2efceba166046f51a4104f9261c9cb72c6db8f5b3fe2dc57dea86b9
-```
-
-Use images and `runsc` artifacts that match the target environment. The example
-above mirrors the local E2E shape; production installations should pin and
-mirror artifacts according to their own supply-chain policy.
-
-## MCP Actor-Backed Tools
-
-Tools can also be backed by a durable Substrate actor that serves MCP over HTTP.
-The Tool controller creates or reuses the actor, waits for the MCP endpoint to
-be reachable through the Substrate router, and publishes the resolved endpoint
-and actor metadata in Tool status.
-
-```yaml
-apiVersion: core.orka.ai/v1alpha1
-kind: Tool
-metadata:
-  name: repo-inspector
-  namespace: default
-spec:
-  description: "Inspect repository metadata through an MCP server"
-  parameters:
-    type: object
-    properties:
-      message:
-        type: string
-    required:
-      - message
-  mcp:
-    path: /mcp
-    substrateActor:
-      templateRef:
-        name: orka-mcp
-        namespace: ate-demo
-      poolRef:
-        name: mcp-substrate-pool
-      boot: true
-```
-
-`mcp.path` defaults to `/mcp`. `mcp.substrateActor.templateRef.name` is
-required, and `poolRef` is optional. If a pool is set, the pool template must
-match the MCP actor template. `boot: true` boots the actor from scratch only on
-the first resume; forced reconciles should not restart an already booted MCP
-actor.
-
-MCP tools may omit `spec.http` entirely. If the actor endpoint also needs
-transport auth, set `spec.http.authSecretRef`, omit `spec.http.url`, and use
-header injection. Orka calls the resolved actor endpoint from Tool status. Body
-auth injection is invalid for MCP tools because call arguments are forwarded to
-the MCP server as tool input.
-
-## Security Model
-
-Substrate Actors can preserve memory and filesystem state, so staged credential
-handling is strict:
-
-- The outer worker stages only a short-lived handoff token for the inner worker.
-- The first handoff-token upload is authenticated with
-  `ORKA_WORKSPACE_BOOTSTRAP_TOKEN`, which must match the worker Job bootstrap
-  Secret and must not be the token being uploaded.
-- The daemon reads the handoff token from the configured file path.
-- The daemon removes the bootstrap token from its process environment before
-  launching task commands.
-- The outer worker calls the daemon scrub endpoint before retaining or deleting
-  an Actor.
-- `cleanupPolicy: retain` scrubs staged secrets before suspending the Actor.
-- `cleanupPolicy: delete` scrubs staged secrets, suspends the Actor, then
-  deletes it.
-- Task status and logs must not contain raw tokens, credentials, snapshot URIs,
-  or provider-native routing details.
-
-Do not place API keys, long-lived credentials, or source-control tokens directly
-in an `ActorTemplate`. Use Kubernetes Secrets and Orka's existing runtime secret
-mechanisms for Task execution. The bootstrap token is control-plane credential
-material; keep the worker-side value in a Secret, rotate it like other cluster
-credentials, and ensure the ActorTemplate daemon receives the same value through
-the most restrictive env mechanism supported by the deployed Substrate version.
-
-## Local Kind Validation
-
-The repository includes a secret-free kind E2E for Substrate:
-
-```bash
-PATH="$(go env GOPATH)/bin:$PATH" \
-SUBSTRATE_E2E_EXTENDED=1 \
-bash scripts/agent-substrate-e2e.sh
-```
-
-Required local tools:
-
-- Docker
-- Go
-- git
-- curl
-- `kind`
-- `kubectl`
-- `ko`
-- `jq`
-
-The script:
-
-1. Creates an isolated kind cluster and local registry.
-2. Clones the configured Substrate revision.
-3. Installs Substrate into kind.
-4. Initializes the local RustFS snapshot bucket.
-5. Builds Orka controller, workspace daemon, and worker images.
-6. Creates an Orka-compatible Substrate `WorkerPool` and `ActorTemplate`.
-7. Exercises direct Substrate actor create, resume, router, daemon exec,
-   suspend, and delete.
-8. Deploys Orka with Substrate enabled.
-9. Creates Orka `SubstrateActorPool` resources for agent and MCP actors.
-10. Runs Orka Tasks through default and pooled Substrate workspaces.
-11. Executes an MCP Tool backed by a pooled Substrate actor and verifies forced
-    reconciles do not reboot the MCP actor.
-12. Validates Task result submission, workspace placement/density telemetry,
-    cleanup status, and missing-template failure.
-
-The pinned Substrate revision can fail `runsc delete` after an Orka Task has
-already produced its result in GitHub-hosted kind. The E2E treats that as a
-known upstream cleanup failure only when `status.resultRef.available=true` and
-`status.executionWorkspace.reason=WorkspaceCleanupFailed`; direct Substrate
-actor suspend/delete is still validated separately.
-
-Useful overrides:
-
-```bash
-KIND_CLUSTER=orka-agent-substrate-e2e
-KIND_REGISTRY_NAME=orka-agent-substrate-registry
-KIND_REGISTRY_PORT=5001
-SUBSTRATE_REPO=https://github.com/agent-substrate/substrate.git
-SUBSTRATE_REF=main
-SUBSTRATE_E2E_EXTENDED=1
-KEEP_CLUSTER=1
-SUBSTRATE_BOOTSTRAP_TOKEN_SECRET_NAME=orka-substrate-bootstrap
-SUBSTRATE_BOOTSTRAP_TOKEN_SECRET_KEY=token
-```
-
-Set `KEEP_CLUSTER=1` when you want to inspect the cluster after a failure.
-
-## GitHub Actions
-
-`.github/workflows/agent-substrate-e2e.yml` runs the same script in CI. The
-workflow is secret-free and is intended to catch regressions in:
-
-- Orka controller validation for Substrate workspaces
-- worker Job environment injection
-- SubstrateActorPool reconciliation and density reporting
-- Substrate actor lifecycle handling
-- pooled Task placement
-- MCP Tool execution through a Substrate actor
-- MCP actor boot-once reuse across forced reconciles
-- workspace daemon command execution
-- workspace placement, density, and resume latency status
-- secret scrub and cleanup behavior
-- task status updates for `Deleted`, `Retained`, and validation failures
-
-Validate workflow changes locally with:
-
-```bash
-bash -n scripts/agent-substrate-e2e.sh
-go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/agent-substrate-e2e.yml
-```
-
-## Troubleshooting
-
-Start with Orka resources:
-
-```bash
-kubectl get task -A
-kubectl -n default get task <task-name> -o yaml
-kubectl -n default get substrateactorpool
-kubectl -n default get tool
-kubectl -n orka-system logs deployment/orka-controller-manager --tail=200
-kubectl -n default get jobs,pods
-kubectl -n default logs job/<worker-job-name> --all-containers=true
-```
-
-Then inspect Substrate:
-
-```bash
-kubectl -n ate-system get pods
-kubectl -n ate-demo get workerpool,actortemplate
-kubectl -n ate-demo get actortemplate <template-name> -o yaml
-kubectl -n ate-system logs deployment/atenet-router --tail=200
-kubectl -n ate-system logs deployment/api --tail=200
-```
-
-When the Substrate CLI plugin is available, actor and worker state is also
-useful:
-
-```bash
-kubectl ate get actors
-kubectl ate get workers
-```
-
-Common failures:
-
-- `execution workspace provider "substrate" requires substrate to be enabled`:
-  set `--substrate-enabled=true` on the controller.
-- `substrate workspace bootstrap token secret name is required`: set
-  `--substrate-bootstrap-token-secret-name` and create that Secret in the Task
-  namespace and `ActorTemplate` namespace.
-- `execution workspace templateRef.name is required`: set
-  `spec.execution.workspace.templateRef.name` or configure
-  `--substrate-default-template`.
-- `ActorTemplate ... not found`: create the template in the referenced
-  namespace or fix `templateRef.namespace`.
-- `ActorTemplate ... missing label/annotation`: add the Orka compatibility
-  metadata described above.
-- `ActorTemplate ... is not Ready`: inspect Substrate `WorkerPool`, snapshot
-  config, image pulls, and `runsc` configuration.
-- `substrate actor poolRef ... not found`: create the referenced
-  `SubstrateActorPool` or fix `spec.execution.workspace.poolRef`.
-- `poolRef does not support cleanupPolicy "retain"`: omit `cleanupPolicy` or
-  set it to `delete` for pooled workspaces.
-- Task reaches `Failed` with `WorkspaceReadinessFailed`: inspect actor state,
-  router logs, workspace daemon logs, and DNS suffix configuration.
-- Task reaches `Failed` with `WorkspaceCleanupFailed` after
-  `resultRef.available=true`: the command completed and result submission
-  succeeded, but Substrate failed while checkpointing or deleting the actor.
-  Inspect `atelet` and `ateom-gvisor` logs for `runsc delete` errors.
-- MCP Tool remains unavailable: inspect `status.error`, verify
-  `mcp.substrateActor.templateRef`, check that the actor template is `Ready`,
-  and confirm the MCP server responds on `mcp.path` through the Substrate router.
-- Cleanup stalls: verify the actor can reach `Suspended`; Substrate deletes only
-  suspended Actors.
-
-The E2E script prints failure diagnostics for controller logs, worker Job logs,
-Task YAML, Kubernetes events, and Substrate actor/worker state.
-
-## Limitations
-
-Substrate support is experimental and disabled by default. Production users
-should validate their Substrate installation, runtime artifacts, snapshot store,
-networking, and security posture independently before routing important work
-through this provider.
-
-Current boundaries:
-
-- Orka does not install Substrate.
-- Orka does not manage Substrate `WorkerPool` capacity.
-- Orka does not expose provider-native Substrate identifiers in Task status.
-- Orka requires the workspace daemon in compatible ActorTemplates.
-- gVisor/runsc support is a Substrate installation requirement for the current
-  runtime path.
-- `cleanupPolicy: retain` preserves Actor state after secret scrub and suspend;
-  operators are responsible for lifecycle and cost management of retained
-  Actors.
+The [native Core Task proof](https://github.com/orka-agents/orka-workspace/blob/v0.1.0-alpha.2/hack/external-substrate-e2e/README.md#actual-core-and-deployed-provider-task-proof)
+also passed with deployed Core and provider controllers. It verifies real
+fail-closed Task admission, sealed bootstrap, authenticated Serving on port 80,
+RuntimeSession execution, and a persisted prompt result. Exact Actor, worker,
+private pool, Core pool, and credential retirement are required. The agent is
+deterministic and makes no external model requests. Neither native lane proves
+packet enforcement with kind's default CNI; full-memory restore remains gated.

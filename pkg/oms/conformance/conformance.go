@@ -508,7 +508,8 @@ func Prepare(ctx context.Context, target Target) (checkpoint Checkpoint, result 
 		result.Message = "conditional replace did not materialize the complete generation 2 state"
 		return checkpoint, result
 	}
-	expectedSnapshotRecords := []protocol.MemoryRecord{*liveRecord}
+	expectedSnapshotRecords := make([]protocol.MemoryRecord, 0, 2)
+	expectedSnapshotRecords = append(expectedSnapshotRecords, *liveRecord)
 
 	searchFixture, err := fixtures.mutation(
 		binding,

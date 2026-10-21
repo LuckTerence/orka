@@ -13,13 +13,63 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-const sqliteUnknownMetricLabel = "unknown"
+const (
+	sqliteUnknownMetricLabel         = "unknown"
+	sqliteExecutionEventSeqBatchSize = 256
+)
 
 var _ store.ExecutionEventStore = (*Store)(nil)
+var _ store.DeduplicatingExecutionEventStore = (*Store)(nil)
+var _ store.AtomicExecutionEventPlanStore = (*Store)(nil)
 
 // AppendExecutionEvent appends an execution event and allocates the next sequence
 // number transactionally for its (namespace, stream_type, stream_id) stream.
 func (s *Store) AppendExecutionEvent(ctx context.Context, event *store.ExecutionEvent) (*store.ExecutionEvent, error) {
+	appended, _, err := s.appendExecutionEvent(ctx, event, "", nil)
+	return appended, err
+}
+
+// AppendExecutionEventIfAbsent atomically appends an execution event when its
+// stream-scoped deduplication key is absent. A repeated key returns the existing
+// event without allocating another sequence.
+func (s *Store) AppendExecutionEventIfAbsent(
+	ctx context.Context,
+	event *store.ExecutionEvent,
+	dedupeKey string,
+) (*store.ExecutionEvent, bool, error) {
+	dedupeKey, err := store.NormalizeExecutionEventDedupeKey(dedupeKey)
+	if err != nil {
+		return nil, false, err
+	}
+	return s.appendExecutionEvent(ctx, event, dedupeKey, nil)
+}
+
+// AppendExecutionEventWithPlanIfAbsent atomically appends an execution event
+// and updates its task plan projection. Duplicate event keys leave the current
+// plan unchanged.
+func (s *Store) AppendExecutionEventWithPlanIfAbsent(
+	ctx context.Context,
+	event *store.ExecutionEvent,
+	dedupeKey string,
+	plan *store.PlanState,
+) (*store.ExecutionEvent, bool, error) {
+	dedupeKey, err := store.NormalizeExecutionEventDedupeKey(dedupeKey)
+	if err != nil {
+		return nil, false, err
+	}
+	if plan == nil {
+		return nil, false, store.ValidationErrorf("plan state is required")
+	}
+	planCopy := *plan
+	return s.appendExecutionEvent(ctx, event, dedupeKey, &planCopy)
+}
+
+func (s *Store) appendExecutionEvent(
+	ctx context.Context,
+	event *store.ExecutionEvent,
+	dedupeKey string,
+	plan *store.PlanState,
+) (*store.ExecutionEvent, bool, error) {
 	started := time.Now()
 	metricStreamType, metricEventType := sqliteMetricLabelsForExecutionEvent(event)
 	success := false
@@ -27,26 +77,40 @@ func (s *Store) AppendExecutionEvent(ctx context.Context, event *store.Execution
 		metrics.RecordExecutionEventAppend(metricStreamType, metricEventType, success, time.Since(started).Seconds())
 	}()
 	if event == nil {
-		return nil, store.ValidationErrorf("execution event is required")
+		return nil, false, store.ValidationErrorf("execution event is required")
 	}
 	copy := cloneSQLiteExecutionEvent(*event)
 	if err := normalizeSQLiteExecutionEvent(&copy); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if copy.CreatedAt.IsZero() {
 		copy.CreatedAt = time.Now().UTC()
 	} else {
 		copy.CreatedAt = copy.CreatedAt.UTC()
 	}
+	if plan != nil {
+		if strings.TrimSpace(plan.Namespace) != copy.Namespace || strings.TrimSpace(plan.TaskName) != copy.TaskName {
+			return nil, false, store.ValidationErrorf("plan identity must match execution event task")
+		}
+		plan.Namespace = copy.Namespace
+		plan.TaskName = copy.TaskName
+	}
+	planUpdatedAt := time.Now().UTC()
 
 	contentJSON := nullableStringFromRaw(copy.Content)
 	truncationJSON, err := marshalExecutionEventTruncation(copy.Truncation)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
-	s.executionEventMu.Lock()
-	defer s.executionEventMu.Unlock()
+	insideTaskTransaction := s.taskDataTx(ctx) != nil
+	if !insideTaskTransaction {
+		s.executionEventMu.Lock()
+		defer s.executionEventMu.Unlock()
+	}
+	// An enclosing Task transaction already owns SQLite's writer. Taking the
+	// append mutex here could deadlock with an ordinary append waiting for that
+	// writer while holding the mutex. The writer alone serializes sequence IDs.
 
 	const maxAttempts = 8
 	retryBackoffs := [...]time.Duration{
@@ -60,18 +124,22 @@ func (s *Store) AppendExecutionEvent(ctx context.Context, event *store.Execution
 	}
 	var lastErr error
 	for attempt := range maxAttempts {
-		appended, err := s.appendExecutionEventOnce(ctx, copy, contentJSON, truncationJSON)
+		appended, isNew, err := s.appendExecutionEventOnce(
+			ctx, copy, dedupeKey, contentJSON, truncationJSON, plan, planUpdatedAt,
+		)
 		if err == nil {
-			redacted, truncated := store.ExecutionEventPayloadSanitizationSignals(appended)
-			metrics.RecordExecutionEventPayloadSanitization(metricStreamType, metricEventType, redacted, truncated)
+			if isNew {
+				redacted, truncated := store.ExecutionEventPayloadSanitizationSignals(appended)
+				metrics.RecordExecutionEventPayloadSanitization(metricStreamType, metricEventType, redacted, truncated)
+			}
 			success = true
-			return appended, nil
+			return appended, isNew, nil
 		}
 		if ctx.Err() != nil {
-			return nil, ctx.Err()
+			return nil, false, ctx.Err()
 		}
-		if !isSQLiteRetryableError(err) && !isSQLiteConstraintError(err) {
-			return nil, err
+		if insideTaskTransaction || (!isSQLiteRetryableError(err) && !isSQLiteConstraintError(err)) {
+			return nil, false, err
 		}
 		lastErr = err
 		if attempt == maxAttempts-1 {
@@ -81,22 +149,33 @@ func (s *Store) AppendExecutionEvent(ctx context.Context, event *store.Execution
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return nil, ctx.Err()
+			return nil, false, ctx.Err()
 		case <-timer.C:
 		}
 	}
-	return nil, lastErr
+	return nil, false, lastErr
 }
 
-func (s *Store) appendExecutionEventOnce(ctx context.Context, event store.ExecutionEvent, contentJSON, truncationJSON any) (*store.ExecutionEvent, error) {
+func (s *Store) appendExecutionEventOnce(
+	ctx context.Context,
+	event store.ExecutionEvent,
+	dedupeKey string,
+	contentJSON any,
+	truncationJSON any,
+	plan *store.PlanState,
+	planUpdatedAt time.Time,
+) (*store.ExecutionEvent, bool, error) {
+	if tx := s.taskDataTx(ctx); tx != nil {
+		return appendSQLiteExecutionEvent(ctx, tx, event, dedupeKey, contentJSON, truncationJSON, plan, planUpdatedAt)
+	}
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer conn.Close() //nolint:errcheck
 
 	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	committed := false
 	defer func() {
@@ -104,6 +183,36 @@ func (s *Store) appendExecutionEventOnce(ctx context.Context, event store.Execut
 			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
 		}
 	}()
+	appended, isNew, err := appendSQLiteExecutionEvent(ctx, conn, event, dedupeKey, contentJSON, truncationJSON, plan, planUpdatedAt)
+	if err != nil {
+		return nil, false, err
+	}
+	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+		return nil, false, err
+	}
+	committed = true
+	return appended, isNew, nil
+}
+
+func appendSQLiteExecutionEvent(
+	ctx context.Context,
+	conn taskDataExecutor,
+	event store.ExecutionEvent,
+	dedupeKey string,
+	contentJSON any,
+	truncationJSON any,
+	plan *store.PlanState,
+	planUpdatedAt time.Time,
+) (*store.ExecutionEvent, bool, error) {
+	if dedupeKey != "" {
+		existing, found, err := existingSQLiteExecutionEventByDedupeKey(ctx, conn, event, dedupeKey)
+		if err != nil {
+			return nil, false, err
+		}
+		if found {
+			return existing, false, nil
+		}
+	}
 
 	var latestSeq int64
 	if err := conn.QueryRowContext(ctx,
@@ -112,43 +221,70 @@ func (s *Store) appendExecutionEventOnce(ctx context.Context, event store.Execut
 		 WHERE namespace = ? AND stream_type = ? AND stream_id = ?`,
 		event.Namespace, event.StreamType, event.StreamID,
 	).Scan(&latestSeq); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	event.Seq = latestSeq + 1
 	event.ID = executionEventID(event.Namespace, event.StreamType, event.StreamID, event.Seq)
 
 	if existingType, approvalID, conflict, err := existingSQLiteTerminalApprovalEvent(ctx, conn, event); err != nil {
-		return nil, err
+		return nil, false, err
 	} else if conflict {
-		return nil, store.TerminalApprovalConflict(existingType, approvalID)
+		return nil, false, store.TerminalApprovalConflict(existingType, approvalID)
 	}
 
 	sessionSeq, err := nextSQLiteSessionExecutionEventSeq(ctx, conn, event.Namespace, event.SessionName)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
 	if _, err := conn.ExecContext(ctx,
 		`INSERT INTO execution_events
-		 (id, namespace, stream_type, stream_id, seq, session_seq, type, severity, task_name, session_name,
+		 (id, namespace, stream_type, stream_id, seq, session_seq, dedupe_key, type, severity, task_name, session_name,
 		  agent_name, tool_name, tool_call_id, summary, content_json, content_text, truncation_json, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		event.ID, event.Namespace, event.StreamType, event.StreamID, event.Seq, sessionSeq, event.Type, event.Severity,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		event.ID, event.Namespace, event.StreamType, event.StreamID, event.Seq, sessionSeq, dedupeKey, event.Type, event.Severity,
 		event.TaskName, event.SessionName, event.AgentName, event.ToolName, event.ToolCallID,
 		event.Summary, contentJSON, event.ContentText, truncationJSON, event.CreatedAt,
 	); err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-		return nil, err
+	if plan != nil {
+		if err := upsertSQLitePlan(ctx, conn, plan.Namespace, plan.TaskName, plan, planUpdatedAt); err != nil {
+			return nil, false, err
+		}
 	}
-	committed = true
-	return &event, nil
+	if err := projectUsageEvent(ctx, conn, event); err != nil {
+		return nil, false, err
+	}
+	return &event, true, nil
+}
+
+func existingSQLiteExecutionEventByDedupeKey(
+	ctx context.Context,
+	conn taskDataExecutor,
+	event store.ExecutionEvent,
+	dedupeKey string,
+) (*store.ExecutionEvent, bool, error) {
+	row := conn.QueryRowContext(ctx,
+		`SELECT id, namespace, stream_type, stream_id, seq, type, severity, task_name, session_name,
+		 agent_name, tool_name, tool_call_id, summary, content_json, content_text, truncation_json, created_at
+		 FROM execution_events
+		 WHERE namespace = ? AND stream_type = ? AND stream_id = ? AND dedupe_key = ?`,
+		event.Namespace, event.StreamType, event.StreamID, dedupeKey,
+	)
+	existing, err := scanExecutionEvent(row)
+	if err == sql.ErrNoRows {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	return &existing, true, nil
 }
 
 func existingSQLiteTerminalApprovalEvent(
 	ctx context.Context,
-	conn *sql.Conn,
+	conn taskDataExecutor,
 	event store.ExecutionEvent,
 ) (existingType, approvalID string, conflict bool, err error) {
 	if !store.IsTerminalApprovalExecutionEventType(event.Type) {
@@ -318,7 +454,7 @@ func (s *Store) ListExecutionEvents(ctx context.Context, filter store.ExecutionE
 		WHERE ` + strings.Join(where, " AND ") + `
 		ORDER BY namespace ASC, stream_type ASC, stream_id ASC, seq ASC
 		LIMIT ?`
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.taskDataExecutor(ctx).QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -421,17 +557,80 @@ func (s *Store) GetLatestExecutionEventSeq(ctx context.Context, namespace, strea
 	return seq, err
 }
 
+// GetLatestExecutionEventSeqs reads stream heads through the existing sequence
+// index, without scanning historical events or issuing one query per stream.
+func (s *Store) GetLatestExecutionEventSeqs(ctx context.Context, namespace, streamType string, streamIDs []string) (map[string]int64, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	filter := store.ExecutionEventFilter{Namespace: namespace, StreamType: streamType}.Normalized()
+	if err := filter.Validate(); err != nil {
+		return nil, err
+	}
+	sequences := make(map[string]int64, len(streamIDs))
+	requested := make([]string, 0, len(streamIDs))
+	for _, streamID := range streamIDs {
+		streamID = strings.TrimSpace(streamID)
+		if _, exists := sequences[streamID]; !exists {
+			sequences[streamID] = 0
+			requested = append(requested, streamID)
+		}
+	}
+	for start := 0; start < len(requested); start += sqliteExecutionEventSeqBatchSize {
+		end := min(start+sqliteExecutionEventSeqBatchSize, len(requested))
+		if err := s.readLatestExecutionEventSeqBatch(ctx, filter.Namespace, filter.StreamType, requested[start:end], sequences); err != nil {
+			return nil, err
+		}
+	}
+	return sequences, nil
+}
+
+func (s *Store) readLatestExecutionEventSeqBatch(ctx context.Context, namespace, streamType string, streamIDs []string, sequences map[string]int64) error {
+	values := make([]string, len(streamIDs))
+	args := make([]any, 0, len(streamIDs)+2)
+	for i, streamID := range streamIDs {
+		values[i] = "(?)"
+		args = append(args, streamID)
+	}
+	args = append(args, namespace, streamType)
+	query := `WITH requested(stream_id) AS (VALUES ` + strings.Join(values, ",") + `)
+		SELECT requested.stream_id, COALESCE((
+			SELECT seq FROM execution_events
+			WHERE namespace = ? AND stream_type = ? AND stream_id = requested.stream_id
+			ORDER BY seq DESC LIMIT 1
+		), 0) FROM requested`
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return err
+	}
+	// Close each bounded batch before returning to recovery, which can append
+	// through this store's single database connection.
+	defer rows.Close() //nolint:errcheck
+	for rows.Next() {
+		var streamID string
+		var seq int64
+		if err := rows.Scan(&streamID, &seq); err != nil {
+			return err
+		}
+		sequences[streamID] = seq
+	}
+	return rows.Err()
+}
+
 // DeleteExecutionEvents removes all execution events for one stream.
 func (s *Store) DeleteExecutionEvents(ctx context.Context, namespace, streamType, streamID string) error {
 	filter := store.ExecutionEventFilter{Namespace: namespace, StreamType: streamType, StreamID: streamID}.Normalized()
 	if err := filter.Validate(); err != nil {
 		return err
 	}
-	_, err := s.db.ExecContext(ctx,
+	taskName := ""
+	if filter.StreamType == store.ExecutionEventStreamTypeTask {
+		taskName = filter.StreamID
+	}
+	return s.deleteTaskData(ctx, filter.Namespace, taskName,
 		`DELETE FROM execution_events WHERE namespace = ? AND stream_type = ? AND stream_id = ?`,
 		filter.Namespace, filter.StreamType, filter.StreamID,
 	)
-	return err
 }
 
 type executionEventScanner interface {

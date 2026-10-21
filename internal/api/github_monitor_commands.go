@@ -27,10 +27,15 @@ import (
 )
 
 const (
+	githubActionFix      = "fix"
+	githubActionTriage   = "triage"
+	githubActionResearch = "research"
+)
+
+const (
 	githubAPIBaseURLEnv           = "ORKA_GITHUB_API_BASE_URL"
 	commandIntentStop             = finishReasonStop
 	commandIntentResume           = "resume"
-	commandIntentApprovePlan      = "approve_plan"
 	commandIntentDecompose        = "decompose"
 	commandIntentPlan             = "plan"
 	commandIntentFixCI            = "fix_ci"
@@ -153,64 +158,17 @@ func repositoryMonitorWebhookMatchingLabel(policyLabels, itemLabels []string) st
 }
 
 func repositoryMonitorCommandIntentForLabel(monitor *corev1alpha1.RepositoryMonitor, target githubLabelTarget, label string) (string, bool) {
-	label = strings.ToLower(strings.TrimSpace(label))
-	if label == "" {
+	if monitor == nil || target.IsPR {
 		return "", false
 	}
-	labels := monitor.Spec.Triggers.GitHub.Labels
-	type commandLabel struct{ intent, label string }
-	var configured []commandLabel
-	if target.IsPR {
-		configured = []commandLabel{
-			{intent: "review", label: labels.PullRequests.Review},
-			{intent: "fix", label: labels.PullRequests.Fix},
-			{intent: commandIntentFixCI, label: labels.PullRequests.FixCI},
-			{intent: commandIntentUpdateBranch, label: labels.PullRequests.UpdateBranch},
-			{intent: "automerge", label: labels.PullRequests.Automerge},
-			{intent: commandIntentStop, label: labels.PullRequests.Stop},
-			{intent: commandIntentResume, label: labels.PullRequests.Resume},
-		}
-	} else {
-		configured = []commandLabel{
-			{intent: "triage", label: labels.Issues.Triage},
-			{intent: "research", label: labels.Issues.Research},
-			{intent: "plan", label: labels.Issues.Plan},
-			{intent: commandIntentApprovePlan, label: labels.Issues.ApprovePlan},
-			{intent: "implement", label: labels.Issues.Implement},
-			{intent: "decompose", label: labels.Issues.Decompose},
-			{intent: commandIntentStop, label: labels.Issues.Stop},
-			{intent: commandIntentResume, label: labels.Issues.Resume},
-		}
+	want := strings.TrimSpace(monitor.Spec.Triggers.GitHub.Labels.Issues.Implement)
+	if want == "" {
+		want = "orka:implement"
 	}
-	matchedIntent := ""
-	for _, entry := range configured {
-		configuredLabel := strings.TrimSpace(entry.label)
-		if configuredLabel == "" {
-			configuredLabel = repositoryMonitorDefaultCommandLabel(entry.intent)
-		}
-		if strings.EqualFold(configuredLabel, label) {
-			if matchedIntent != "" {
-				return "", false
-			}
-			matchedIntent = entry.intent
-		}
+	if strings.EqualFold(strings.TrimSpace(label), want) {
+		return githubActionImplement, true
 	}
-	return matchedIntent, matchedIntent != ""
-}
-
-func repositoryMonitorDefaultCommandLabel(intent string) string {
-	switch intent {
-	case commandIntentApprovePlan:
-		return "orka:approve-plan"
-	case commandIntentFixCI:
-		return "orka:fix-ci"
-	case commandIntentUpdateBranch:
-		return "orka:update-branch"
-	case commandIntentDecompose:
-		return "orka:to-issues"
-	default:
-		return "orka:" + strings.ReplaceAll(intent, "_", "-")
-	}
+	return "", false
 }
 
 func (h *Handlers) recordRepositoryMonitorCommandEvent(c fiber.Ctx, monitor *corev1alpha1.RepositoryMonitor, payload githubLabelWebhookPayload, target githubLabelTarget, intent, delivery string) (*store.CommandEvent, bool, error) {
@@ -427,7 +385,7 @@ func (h *Handlers) queueRepositoryMonitorCommandRun(c fiber.Ctx, monitor *corev1
 
 func repositoryMonitorCommandGuardLabel(monitor *corev1alpha1.RepositoryMonitor, labels []string) string {
 	guards := append([]string{}, monitor.Spec.Policy.ProtectedLabels...)
-	guards = append(guards, monitor.Spec.Policy.PauseLabels...)
+	guards = append(guards, repositoryMonitorAPIPauseLabels(monitor)...)
 	for _, label := range labels {
 		for _, guard := range guards {
 			if strings.EqualFold(strings.TrimSpace(label), strings.TrimSpace(guard)) && strings.TrimSpace(guard) != "" {
@@ -514,22 +472,23 @@ func githubBuiltInRepositoryPermission(permission string) bool {
 }
 
 func (h *Handlers) repositoryMonitorGitHubToken(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor) (string, error) {
-	if monitor.Spec.GitSecretRef == nil || strings.TrimSpace(monitor.Spec.GitSecretRef.Name) == "" {
-		return "", fmt.Errorf("spec.gitSecretRef is required for GitHub actor permission checks")
+	if monitor.Spec.ForgeCredentialRef == nil || strings.TrimSpace(monitor.Spec.ForgeCredentialRef.Name) == "" {
+		return "", fmt.Errorf("spec.forgeCredentialRef is required for controller-owned GitHub operations")
 	}
+	secretName := strings.TrimSpace(monitor.Spec.ForgeCredentialRef.Name)
 	var secret corev1.Secret
-	if err := h.client.Get(ctx, types.NamespacedName{Name: monitor.Spec.GitSecretRef.Name, Namespace: monitor.Namespace}, &secret); err != nil {
+	if err := h.client.Get(ctx, types.NamespacedName{Name: secretName, Namespace: monitor.Namespace}, &secret); err != nil {
 		if apierrors.IsNotFound(err) {
-			return "", fmt.Errorf("spec.gitSecretRef %q not found in namespace %q", monitor.Spec.GitSecretRef.Name, monitor.Namespace)
+			return "", fmt.Errorf("spec.forgeCredentialRef %q not found in namespace %q", secretName, monitor.Namespace)
 		}
-		return "", fmt.Errorf("failed to get spec.gitSecretRef %q: %w", monitor.Spec.GitSecretRef.Name, err)
+		return "", fmt.Errorf("failed to get spec.forgeCredentialRef %q: %w", secretName, err)
 	}
 	for _, key := range []string{"token", "password", workerenv.GitHubToken} {
 		if value := strings.TrimSpace(string(secret.Data[key])); value != "" {
 			return value, nil
 		}
 	}
-	return "", fmt.Errorf("spec.gitSecretRef %q must contain a token, password, or %s key", monitor.Spec.GitSecretRef.Name, workerenv.GitHubToken)
+	return "", fmt.Errorf("spec.forgeCredentialRef %q must contain a token, password, or %s key", secretName, workerenv.GitHubToken)
 }
 
 func repositoryMonitorPermissionAllowedForIntent(monitor *corev1alpha1.RepositoryMonitor, permission, intent string) bool {
@@ -557,7 +516,7 @@ func repositoryMonitorControlCommandIntent(intent string) bool {
 
 func repositoryMonitorReadOnlyCommandIntent(intent string) bool {
 	switch strings.TrimSpace(intent) {
-	case "triage", "research", commandIntentPlan, "review":
+	case githubActionTriage, githubActionResearch, commandIntentPlan, githubActionReview:
 		return true
 	default:
 		return false
@@ -614,7 +573,7 @@ func githubIssueSnapshotDigest(monitor *corev1alpha1.RepositoryMonitor, target g
 	ignored := map[string]struct{}{}
 	if monitor != nil {
 		configured := monitor.Spec.Triggers.GitHub.Labels.Issues
-		for _, label := range []string{configured.Triage, configured.Research, configured.Plan, configured.ApprovePlan, configured.Implement, configured.Decompose, configured.Stop, configured.Resume} {
+		for _, label := range []string{configured.Implement} {
 			if label = strings.ToLower(strings.TrimSpace(label)); label != "" {
 				ignored[label] = struct{}{}
 			}
@@ -731,7 +690,7 @@ func (h *Handlers) upsertRepositoryMonitorCommandWorkAction(ctx context.Context,
 			return h.persistRepositoryMonitorCoalescedWorkAction(ctx, monitor, command, desiredAction, dedupe, candidate)
 		}
 	}
-	metadata, _ := json.Marshal(map[string]any{"source": command.Source, "label": command.Label, "deliveryID": command.DeliveryID})
+	metadata, _ := json.Marshal(map[string]any{"source": command.Source, apiFieldLabel: command.Label, "deliveryID": command.DeliveryID})
 	metrics.RecordRepositoryMonitorWorkAction(desiredAction, status)
 	if err := h.repositoryMonitorStore.CreateWorkAction(ctx, &store.WorkAction{
 		ID:                   id,
@@ -789,7 +748,7 @@ func (h *Handlers) repositoryMonitorActiveWorkActionByDedupe(ctx context.Context
 func (h *Handlers) persistRepositoryMonitorCoalescedWorkAction(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, command *store.CommandEvent, desiredAction, dedupe string, candidate *store.WorkAction) error {
 	id := store.RepositoryMonitorWorkActionID(command.ID, desiredAction)
 	now := time.Now()
-	metadata, _ := json.Marshal(map[string]any{"source": command.Source, "label": command.Label, "deliveryID": command.DeliveryID, "coalescedWith": candidate.ID})
+	metadata, _ := json.Marshal(map[string]any{"source": command.Source, apiFieldLabel: command.Label, "deliveryID": command.DeliveryID, "coalescedWith": candidate.ID})
 	action := &store.WorkAction{ID: id, MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, CommandEventID: command.ID, MonitorGeneration: monitor.Generation, TargetKind: command.Kind, TargetNumber: command.Number, TargetSHA: command.HeadSHA, TargetSnapshotDigest: command.IssueSnapshotDigest, Intent: command.Intent, DesiredAction: desiredAction, DependsOnActionID: candidate.ID, DedupeKey: dedupe, IdempotencyKey: command.IdempotencyKey, Status: githubCommandStatusCompleted, Phase: "coalesced", MetadataJSON: string(metadata), CreatedAt: command.CreatedAt, CompletedAt: &now}
 	if err := h.repositoryMonitorStore.CreateWorkAction(ctx, action); err != nil {
 		existing, getErr := h.repositoryMonitorStore.GetWorkAction(ctx, monitor.Namespace, id)

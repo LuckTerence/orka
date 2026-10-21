@@ -1,0 +1,706 @@
+package supervisor
+
+import (
+	"bytes"
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log"
+	"log/slog"
+	"net"
+	"net/http"
+	"strings"
+	"sync"
+	"time"
+
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/orka-agents/orka/internal/acp"
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+)
+
+const (
+	jsonRPCVersion = "2.0"
+)
+
+const (
+	supervisorMCPServerName   = "orka"
+	mcpProxyPathPrefix        = "/_orka/mcp/"
+	mcpProtocolVersion        = "2025-06-18"
+	defaultMCPMaxConnections  = 16
+	defaultMCPMaxSessionCalls = 2
+)
+
+type mcpProxy struct {
+	broker   MCPBroker
+	listener net.Listener
+	server   *http.Server
+	slots    chan struct{}
+
+	mu       sync.RWMutex
+	sessions map[string]*mcpProxySession
+	closed   bool
+}
+
+type mcpProxySession struct {
+	proxy         *mcpProxy
+	route         string
+	credential    []byte
+	url           string
+	fence         harnessv2.Fence
+	configuration harnessv2.MCPPolicyConfiguration
+
+	mu            sync.Mutex
+	state         harnessv2.RuntimeSessionState
+	authorization *harnessv2.PromptMCPAuthorization
+	lease         harnessv2.PromptLease
+	gateContext   context.Context
+	gateCancel    context.CancelCauseFunc
+	revokedGate   context.Context
+	leaseTimer    *time.Timer
+	leaseVersion  uint64
+	closed        bool
+	calls         chan struct{}
+}
+
+type mcpJSONRPCRequest struct {
+	JSONRPC string          `json:"jsonrpc"`
+	ID      json.RawMessage `json:"id,omitempty"`
+	Method  string          `json:"method"`
+	Params  json.RawMessage `json:"params,omitempty"`
+}
+
+type mcpJSONRPCResponse struct {
+	JSONRPC string           `json:"jsonrpc"`
+	ID      json.RawMessage  `json:"id,omitempty"`
+	Result  any              `json:"result,omitempty"`
+	Error   *mcpJSONRPCError `json:"error,omitempty"`
+}
+
+type mcpJSONRPCError struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+}
+
+type mcpToolsCallParams struct {
+	Name      string          `json:"name"`
+	Arguments json.RawMessage `json:"arguments,omitempty"`
+	// MCP clients send progress tokens and extensions in _meta. The enclosing
+	// request limit bounds it, and it never contributes broker authority.
+	Meta json.RawMessage `json:"_meta,omitempty"`
+}
+
+func newMCPProxy(broker MCPBroker) (*mcpProxy, error) {
+	if broker == nil {
+		return nil, fmt.Errorf("controller MCP broker is required")
+	}
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		return nil, fmt.Errorf("listen on MCP loopback: %w", err)
+	}
+	proxy := &mcpProxy{
+		broker: broker, listener: listener, sessions: make(map[string]*mcpProxySession),
+		slots: make(chan struct{}, defaultMCPMaxConnections),
+	}
+	proxy.server = &http.Server{
+		Handler: http.HandlerFunc(proxy.serveHTTP), ErrorLog: log.New(io.Discard, "", 0),
+		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second,
+		IdleTimeout: 30 * time.Second, MaxHeaderBytes: 32 << 10,
+	}
+	go func() { _ = proxy.server.Serve(listener) }()
+	return proxy, nil
+}
+
+func (p *mcpProxy) newSession(
+	fence harnessv2.Fence,
+	configuration harnessv2.MCPPolicyConfiguration,
+) (*mcpProxySession, acp.MCPServer, error) {
+	if err := fence.Validate(true); err != nil {
+		return nil, acp.MCPServer{}, fmt.Errorf("MCP session fence: %w", err)
+	}
+	credential, err := randomMCPSecret(32)
+	if err != nil {
+		return nil, acp.MCPServer{}, err
+	}
+	for range 8 {
+		route, routeErr := randomMCPSecret(24)
+		if routeErr != nil {
+			return nil, acp.MCPServer{}, routeErr
+		}
+		p.mu.Lock()
+		if p.closed {
+			p.mu.Unlock()
+			return nil, acp.MCPServer{}, fmt.Errorf("MCP proxy is closed")
+		}
+		if _, exists := p.sessions[route]; exists {
+			p.mu.Unlock()
+			continue
+		}
+		endpoint := providerProxyScheme + "://" + p.listener.Addr().String() + mcpProxyPathPrefix + route
+		session := &mcpProxySession{
+			proxy: p, route: route, credential: []byte(credential), url: endpoint, fence: fence,
+			configuration: cloneMCPPolicyConfiguration(configuration),
+			state:         harnessv2.RuntimeSessionStateIdle,
+			calls:         make(chan struct{}, defaultMCPMaxSessionCalls),
+		}
+		p.sessions[route] = session
+		p.mu.Unlock()
+		return session, acp.MCPServer{
+			Type: providerProxyScheme, Name: supervisorMCPServerName, URL: endpoint,
+			Headers: []acp.HTTPHeader{{Name: "Authorization", Value: "Bearer " + credential}},
+		}, nil
+	}
+	return nil, acp.MCPServer{}, fmt.Errorf("allocate unique MCP proxy route")
+}
+
+func randomMCPSecret(size int) (string, error) {
+	if size < 16 {
+		return "", fmt.Errorf("MCP proxy secret size is too small")
+	}
+	data := make([]byte, size)
+	if _, err := rand.Read(data); err != nil {
+		return "", fmt.Errorf("generate MCP proxy secret: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(data), nil
+}
+
+func (s *mcpProxySession) activate(ctx context.Context, auth harnessv2.PromptMCPAuthorization, lease harnessv2.PromptLease, now time.Time) error {
+	metadata := harnessv2.MutationMetadata{
+		Fence: s.fence, TaskUID: auth.TaskUID, TaskAttempt: auth.TaskAttempt, PromptID: auth.PromptID,
+		OperationID: "mcp-activate", RequestDigestSchemaVersion: harnessv2.RequestDigestSchemaVersion,
+		RequestDigest: testlessRequestDigest(), ExpiresAt: auth.ExpiresAt,
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// Admission can wait behind capability locks after the handler samples time.
+	if lockedNow := time.Now(); now.Before(lockedNow) {
+		now = lockedNow
+	}
+	if err := auth.ValidateForAt(metadata, lease, now); err != nil {
+		return err
+	}
+	if !s.configuration.Matches(auth.Configuration()) {
+		return fmt.Errorf("prompt MCP policy does not match the RuntimeSession configuration")
+	}
+	if s.closed || s.authorization != nil || s.state != harnessv2.RuntimeSessionStateIdle {
+		return fmt.Errorf("MCP proxy session is not idle")
+	}
+	cloned := clonePromptMCPAuthorization(auth)
+	s.authorization = &cloned
+	s.lease = lease
+	s.state = harnessv2.RuntimeSessionStateIdle
+	// Keep only the admitted prompt's trace identity. The gate retains its own
+	// lifetime and never carries request values or baggage into broker calls.
+	parent := trace.ContextWithSpanContext(context.Background(), trace.SpanContextFromContext(ctx))
+	s.gateContext, s.gateCancel = context.WithCancelCause(parent)
+	s.revokedGate = nil
+	s.resetLeaseTimerLocked(now)
+	return nil
+}
+
+// testlessRequestDigest supplies a structurally valid placeholder to reuse the
+// exact PromptMCPAuthorization identity validator without authorizing an HTTP
+// mutation. Broker calls always carry their own canonical request digest.
+func testlessRequestDigest() harnessv2.RequestDigest {
+	return harnessv2.RequestDigest("sha256:" + strings.Repeat("0", 64))
+}
+
+func (s *mcpProxySession) markRunning(promptID harnessv2.PromptID, now time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if lockedNow := time.Now(); now.Before(lockedNow) {
+		now = lockedNow
+	}
+	if s.closed || s.authorization == nil || s.authorization.PromptID != promptID ||
+		s.gateCancel == nil || !s.authorization.AuthorizedAt(harnessv2.RuntimeSessionStatePromptRunning, s.lease, now) {
+		return fmt.Errorf("MCP prompt authority is not active")
+	}
+	s.state = harnessv2.RuntimeSessionStatePromptRunning
+	return nil
+}
+
+func (s *mcpProxySession) renew(auth harnessv2.PromptMCPAuthorization, lease harnessv2.PromptLease, now time.Time) error {
+	metadata := harnessv2.MutationMetadata{
+		Fence: s.fence, TaskUID: auth.TaskUID, TaskAttempt: auth.TaskAttempt, PromptID: auth.PromptID,
+		OperationID: "mcp-renew", RequestDigestSchemaVersion: harnessv2.RequestDigestSchemaVersion,
+		RequestDigest: testlessRequestDigest(), ExpiresAt: auth.ExpiresAt,
+	}
+	if err := auth.ValidateForAt(metadata, lease, now); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// Commit and schedule expiry against the clock observed under the lock.
+	// A backward clock step must not rewind a later caller timestamp.
+	if lockedNow := time.Now().UTC(); now.Before(lockedNow) {
+		now = lockedNow
+	}
+	if s.closed || s.authorization == nil || s.gateCancel == nil || s.state != harnessv2.RuntimeSessionStatePromptRunning ||
+		s.authorization.PromptID != auth.PromptID || lease.Generation != s.lease.Generation+1 ||
+		!now.Before(auth.ExpiresAt) || !now.Before(s.authorization.ExpiresAt) || !now.Before(s.lease.ExpiresAt) {
+		return fmt.Errorf("MCP prompt lease is no longer renewable")
+	}
+	if s.authorization.ToolPolicyDigest != auth.ToolPolicyDigest ||
+		s.authorization.ApprovalPolicyDigest != auth.ApprovalPolicyDigest ||
+		s.authorization.MCPConfigurationDigest != auth.MCPConfigurationDigest ||
+		s.authorization.ToolPolicy.DescriptorDigest != auth.ToolPolicy.DescriptorDigest {
+		return fmt.Errorf("MCP prompt policy changed during lease renewal")
+	}
+	cloned := clonePromptMCPAuthorization(auth)
+	s.authorization = &cloned
+	s.lease = lease
+	s.resetLeaseTimerLocked(now)
+	return nil
+}
+
+func (s *mcpProxySession) resetLeaseTimerLocked(now time.Time) {
+	if s.leaseTimer != nil {
+		s.leaseTimer.Stop()
+	}
+	s.leaseVersion++
+	version := s.leaseVersion
+	promptID := s.authorization.PromptID
+	duration := s.authorization.ExpiresAt.Sub(now)
+	if leaseDuration := s.lease.ExpiresAt.Sub(now); leaseDuration < duration {
+		duration = leaseDuration
+	}
+	if duration < 0 {
+		duration = 0
+	}
+	s.leaseTimer = time.AfterFunc(duration, func() { s.expire(promptID, version) })
+}
+
+func (s *mcpProxySession) expire(promptID harnessv2.PromptID, version uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || s.authorization == nil || s.authorization.PromptID != promptID || s.leaseVersion != version {
+		return
+	}
+	// Relative timers can fire before an absolute wire deadline following a
+	// backward wall-clock step. Recheck both bounds and rearm the earlier one.
+	now := time.Now()
+	if now.Before(s.authorization.ExpiresAt) && now.Before(s.lease.ExpiresAt) {
+		s.resetLeaseTimerLocked(now)
+		return
+	}
+	slog.Warn("ACP MCP proxy prompt authorization expired without renewal; revoking tool access",
+		"promptID", promptID, "leaseVersion", version)
+	s.revokeLocked(harnessv2.RuntimeSessionStateCancelling)
+}
+
+func (s *mcpProxySession) deactivate(promptID harnessv2.PromptID, next harnessv2.RuntimeSessionState) {
+	s.deactivateWithCause(promptID, next, nil)
+}
+
+func (s *mcpProxySession) deactivateWithCause(promptID harnessv2.PromptID, next harnessv2.RuntimeSessionState, cause *promptGateCancellation) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.authorization == nil {
+		if !s.closed {
+			s.state = next
+		}
+		return
+	}
+	if s.authorization.PromptID != promptID {
+		return
+	}
+	if cause != nil && s.gateCancel != nil {
+		s.revokedGate = s.gateContext
+		s.gateCancel(cause)
+	}
+	s.revokeLocked(next)
+}
+
+func (s *mcpProxySession) revoke(next harnessv2.RuntimeSessionState) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.revokeLocked(next)
+}
+
+func (s *mcpProxySession) revokeLocked(next harnessv2.RuntimeSessionState) {
+	if s.leaseTimer != nil {
+		s.leaseTimer.Stop()
+		s.leaseTimer = nil
+	}
+	if s.gateCancel != nil {
+		s.gateCancel(nil)
+		s.gateCancel = nil
+	}
+	s.gateContext = nil
+	s.authorization = nil
+	s.lease = harnessv2.PromptLease{}
+	s.leaseVersion++
+	s.state = next
+}
+
+func (s *mcpProxySession) authorizePermissionTool(provider string, promptID harnessv2.PromptID, name string, now time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if lockedNow := time.Now(); now.Before(lockedNow) {
+		now = lockedNow
+	}
+	if s.closed || s.authorization == nil || s.authorization.PromptID != promptID ||
+		!s.authorization.AuthorizedAt(s.state, s.lease, now) {
+		return fmt.Errorf("prompt tool authority is not active")
+	}
+	policy := s.authorization.ToolPolicy
+	_, allowed := policy.Descriptor(name)
+	if policy.AllowedToolNames == nil && len(policy.DisallowedToolNames) == 0 && policy.AllowBash {
+		allowed = allowed || acp.IsBuiltInRuntimeNativeTool(provider, name)
+	}
+	if !allowed {
+		return fmt.Errorf("permission does not identify an allowed tool")
+	}
+	return nil
+}
+
+func (s *mcpProxySession) authorizeCall(toolName string, now time.Time) (
+	context.Context,
+	harnessv2.PromptMCPAuthorization,
+	harnessv2.PromptLease,
+	error,
+) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if lockedNow := time.Now(); now.Before(lockedNow) {
+		now = lockedNow
+	}
+	if s.closed || s.authorization == nil || s.gateContext == nil || s.gateCancel == nil ||
+		s.state != harnessv2.RuntimeSessionStatePromptRunning ||
+		!s.authorization.AuthorizedAt(s.state, s.lease, now) {
+		return s.revokedGate, harnessv2.PromptMCPAuthorization{}, harnessv2.PromptLease{}, fmt.Errorf("prompt-scoped MCP authority is inactive")
+	}
+	descriptor, ok := s.authorization.ToolPolicy.Descriptor(toolName)
+	if !ok || !descriptor.Source.Brokered() {
+		return nil, harnessv2.PromptMCPAuthorization{}, harnessv2.PromptLease{}, fmt.Errorf("MCP tool is not allowed")
+	}
+	return s.gateContext, clonePromptMCPAuthorization(*s.authorization), s.lease, nil
+}
+
+func (s *mcpProxySession) close() {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return
+	}
+	s.closed = true
+	s.revokeLocked(harnessv2.RuntimeSessionStateDeleted)
+	s.mu.Unlock()
+	s.proxy.mu.Lock()
+	delete(s.proxy.sessions, s.route)
+	s.proxy.mu.Unlock()
+}
+
+func (p *mcpProxy) serveHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost || !isLoopbackRemote(r.RemoteAddr) {
+		http.Error(w, "MCP endpoint is loopback-only", http.StatusForbidden)
+		return
+	}
+	route, ok := splitMCPProxyRoute(r.URL.Path)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	p.mu.RLock()
+	session := p.sessions[route]
+	p.mu.RUnlock()
+	if session == nil || !session.credentialMatches(r.Header.Get("Authorization")) {
+		http.Error(w, "MCP session authentication failed", http.StatusUnauthorized)
+		return
+	}
+	if !tryAcquireMCPSlot(p.slots) {
+		http.Error(w, "MCP proxy is at capacity", http.StatusTooManyRequests)
+		return
+	}
+	defer releaseMCPSlot(p.slots)
+	body := http.MaxBytesReader(w, r.Body, int64(harnessv2.MaxMCPArgumentsBytes+(64<<10)))
+	defer body.Close() //nolint:errcheck
+	decoder := json.NewDecoder(body)
+	decoder.DisallowUnknownFields()
+	var request mcpJSONRPCRequest
+	if err := decoder.Decode(&request); err != nil || request.JSONRPC != jsonRPCVersion || strings.TrimSpace(request.Method) == "" {
+		writeMCPRPCError(w, request.ID, -32600, "invalid MCP JSON-RPC request")
+		return
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		writeMCPRPCError(w, request.ID, -32600, "invalid MCP JSON-RPC request")
+		return
+	}
+	switch request.Method {
+	case "initialize":
+		writeMCPRPCResult(w, request.ID, map[string]any{
+			"protocolVersion": mcpProtocolVersion,
+			"capabilities":    map[string]any{"tools": map[string]any{"listChanged": false}},
+			"serverInfo":      map[string]any{protocolNameField: "orka-prompt-broker", "version": "v2"},
+		})
+	case "notifications/initialized":
+		w.WriteHeader(http.StatusAccepted)
+	case "ping":
+		writeMCPRPCResult(w, request.ID, map[string]any{})
+	case "tools/list":
+		writeMCPRPCResult(w, request.ID, map[string]any{"tools": session.listTools(time.Now().UTC())})
+	case "tools/call":
+		session.handleToolCall(w, r, request)
+	default:
+		writeMCPRPCError(w, request.ID, -32601, "MCP method is not supported")
+	}
+}
+
+func (s *mcpProxySession) handleToolCall(w http.ResponseWriter, r *http.Request, rpc mcpJSONRPCRequest) {
+	var params mcpToolsCallParams
+	decoder := json.NewDecoder(bytes.NewReader(rpc.Params))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&params); err != nil {
+		writeMCPRPCError(w, rpc.ID, -32602, "invalid MCP tool call parameters")
+		return
+	}
+	if meta := bytes.TrimSpace(params.Meta); len(meta) != 0 && meta[0] != '{' {
+		writeMCPRPCError(w, rpc.ID, -32602, "invalid MCP tool call parameters")
+		return
+	}
+	if len(params.Arguments) == 0 {
+		params.Arguments = json.RawMessage(`{}`)
+	}
+	callID, err := canonicalMCPCallID(rpc.ID)
+	if err != nil {
+		writeMCPRPCError(w, rpc.ID, -32602, "MCP tool call requires a bounded request ID")
+		return
+	}
+	// Reject this tool request with its own JSON-RPC ID. A transport-level
+	// rejection can close a client's shared MCP stream and strand other calls.
+	// The global HTTP guard still bounds request parsing and control messages.
+	if !tryAcquireMCPSlot(s.calls) {
+		writeMCPRPCError(w, rpc.ID, -32003, "MCP session is at capacity")
+		return
+	}
+	defer releaseMCPSlot(s.calls)
+	now := time.Now().UTC()
+	gate, authorization, lease, err := s.authorizeCall(params.Name, now)
+	if err != nil {
+		waitForPromptGateCancellation(r.Context(), gate)
+		writeMCPRPCError(w, rpc.ID, -32001, "MCP tool call is not authorized")
+		return
+	}
+	call := harnessv2.MCPToolCall{CallID: callID, ToolName: params.Name, Arguments: params.Arguments}
+	expiresAt := now.Add(30 * time.Second)
+	if authorization.ExpiresAt.Before(expiresAt) {
+		expiresAt = authorization.ExpiresAt
+	}
+	if lease.ExpiresAt.Before(expiresAt) {
+		expiresAt = lease.ExpiresAt
+	}
+	metadata := harnessv2.MutationMetadata{
+		Fence: s.fence, TaskUID: authorization.TaskUID, TaskAttempt: authorization.TaskAttempt,
+		PromptID: authorization.PromptID, OperationID: mcpOperationID(authorization, callID),
+		RequestDigestSchemaVersion: harnessv2.RequestDigestSchemaVersion, ExpiresAt: expiresAt,
+	}
+	request := harnessv2.MCPBrokerCallRequest{
+		Protocol: harnessv2.ProtocolVersion, SessionState: harnessv2.RuntimeSessionStatePromptRunning,
+		Metadata: metadata, Lease: lease, Authorization: authorization, Call: call,
+	}
+	// Provider requests cannot choose the parent of a controller-side tool call.
+	// An empty trusted parent also clears any ambient request span.
+	ctx := trace.ContextWithSpanContext(r.Context(), trace.SpanContextFromContext(gate))
+	var cancel context.CancelFunc
+	if authorization.ApprovalPolicy.Requires(params.Name) {
+		ctx, cancel = context.WithTimeout(ctx, harnessv2.MCPApprovalCallTimeout)
+	} else {
+		ctx, cancel = context.WithCancel(ctx)
+	}
+	stop := context.AfterFunc(gate, cancel)
+	defer func() {
+		stop()
+		cancel()
+	}()
+	response, err := s.proxy.broker.Call(ctx, request)
+	if err != nil {
+		// Only a locally cancelled call waits for courtesy cancellation. A
+		// broker failure or a definitive response must keep its own meaning,
+		// even if gate revocation races its delivery.
+		if errors.Is(err, context.Canceled) {
+			waitForPromptGateCancellation(r.Context(), gate)
+		}
+		writeMCPRPCError(w, rpc.ID, -32002, "MCP broker call failed")
+		return
+	}
+	if response.CallID != callID || response.Validate() != nil {
+		writeMCPRPCError(w, rpc.ID, -32002, "MCP broker returned an invalid response")
+		return
+	}
+	result := map[string]any{
+		"content": []map[string]any{{"type": "text", "text": string(response.Result)}},
+		"isError": response.IsError,
+	}
+	var structured map[string]any
+	if json.Unmarshal(response.Result, &structured) == nil && structured != nil {
+		result["structuredContent"] = structured
+	}
+	if response.Replayed {
+		result["_meta"] = map[string]any{"orka.replayed": true}
+	}
+	writeMCPRPCResult(w, rpc.ID, result)
+}
+
+func (s *mcpProxySession) listTools(_ time.Time) []map[string]any {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || s.state == harnessv2.RuntimeSessionStateDeleted {
+		return []map[string]any{}
+	}
+	result := make([]map[string]any, 0, len(s.configuration.ToolPolicy.Tools))
+	for _, descriptor := range s.configuration.ToolPolicy.Tools {
+		if !descriptor.Source.Brokered() {
+			continue
+		}
+		var schema any
+		if err := json.Unmarshal(descriptor.InputSchema, &schema); err != nil {
+			continue
+		}
+		result = append(result, map[string]any{
+			protocolNameField: descriptor.Name, "description": descriptor.Description, "inputSchema": schema,
+		})
+	}
+	return result
+}
+
+func (s *mcpProxySession) credentialMatches(header string) bool {
+	value := strings.TrimSpace(header)
+	if len(value) >= len("Bearer ") && strings.EqualFold(value[:len("Bearer ")], "Bearer ") {
+		value = strings.TrimSpace(value[len("Bearer "):])
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || len(value) != len(s.credential) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(value), s.credential) == 1
+}
+
+func cloneMCPSlice[T any](input []T) []T {
+	if input == nil {
+		return nil
+	}
+	output := make([]T, len(input))
+	copy(output, input)
+	return output
+}
+
+func cloneMCPPolicyConfiguration(input harnessv2.MCPPolicyConfiguration) harnessv2.MCPPolicyConfiguration {
+	output := input
+	output.ToolPolicy.AllowedToolNames = cloneMCPSlice(input.ToolPolicy.AllowedToolNames)
+	output.ToolPolicy.DisallowedToolNames = cloneMCPSlice(input.ToolPolicy.DisallowedToolNames)
+	output.ToolPolicy.Tools = cloneMCPSlice(input.ToolPolicy.Tools)
+	for index := range output.ToolPolicy.Tools {
+		output.ToolPolicy.Tools[index].InputSchema = append(json.RawMessage(nil), input.ToolPolicy.Tools[index].InputSchema...)
+	}
+	output.ApprovalPolicy.RequiredTools = cloneMCPSlice(input.ApprovalPolicy.RequiredTools)
+	return output
+}
+
+func clonePromptMCPAuthorization(input harnessv2.PromptMCPAuthorization) harnessv2.PromptMCPAuthorization {
+	output := input
+	configuration := cloneMCPPolicyConfiguration(input.Configuration())
+	output.ToolPolicy = configuration.ToolPolicy
+	output.ApprovalPolicy = configuration.ApprovalPolicy
+	return output
+}
+
+func canonicalMCPCallID(raw json.RawMessage) (string, error) {
+	if len(raw) == 0 || len(raw) > 512 {
+		return "", fmt.Errorf("MCP request ID is required")
+	}
+	var text string
+	if json.Unmarshal(raw, &text) == nil && strings.TrimSpace(text) != "" {
+		if len(text) <= 256 && !strings.ContainsAny(text, " \t\r\n") {
+			return text, nil
+		}
+	}
+	canonical, err := harnessv2.CanonicalJSON(raw)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(canonical)
+	return "rpc-" + hex.EncodeToString(sum[:16]), nil
+}
+
+func mcpOperationID(auth harnessv2.PromptMCPAuthorization, callID string) harnessv2.OperationID {
+	sum := sha256.Sum256(fmt.Appendf(nil, "%s:%d:%s:%d:%s:%s", auth.RuntimeSessionUID, auth.SessionGeneration, auth.TaskUID, auth.TaskAttempt, auth.PromptID, callID))
+	return harnessv2.OperationID("mcp-" + hex.EncodeToString(sum[:]))
+}
+
+func splitMCPProxyRoute(path string) (string, bool) {
+	if !strings.HasPrefix(path, mcpProxyPathPrefix) {
+		return "", false
+	}
+	route := strings.TrimPrefix(path, mcpProxyPathPrefix)
+	if route == "" || strings.Contains(route, "/") {
+		return "", false
+	}
+	return route, true
+}
+
+func isLoopbackRemote(remoteAddr string) bool {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func tryAcquireMCPSlot(slots chan struct{}) bool {
+	select {
+	case slots <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func releaseMCPSlot(slots chan struct{}) { <-slots }
+
+func writeMCPRPCResult(w http.ResponseWriter, id json.RawMessage, result any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(mcpJSONRPCResponse{JSONRPC: jsonRPCVersion, ID: id, Result: result})
+}
+
+func writeMCPRPCError(w http.ResponseWriter, id json.RawMessage, code int, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(mcpJSONRPCResponse{JSONRPC: jsonRPCVersion, ID: id, Error: &mcpJSONRPCError{Code: code, Message: message}})
+}
+
+func (p *mcpProxy) close(ctx context.Context) error {
+	if p == nil {
+		return nil
+	}
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return nil
+	}
+	p.closed = true
+	sessions := make([]*mcpProxySession, 0, len(p.sessions))
+	for _, session := range p.sessions {
+		sessions = append(sessions, session)
+	}
+	p.mu.Unlock()
+	for _, session := range sessions {
+		session.close()
+	}
+	if err := p.server.Shutdown(ctx); err != nil {
+		return errors.Join(err, p.server.Close())
+	}
+	return nil
+}

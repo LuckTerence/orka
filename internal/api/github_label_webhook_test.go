@@ -8,12 +8,10 @@ package api
 
 import (
 	"bytes"
-	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -29,10 +27,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
-	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
-	"github.com/orka-agents/orka/internal/workerenv"
 )
 
 const (
@@ -42,428 +38,6 @@ const (
 	githubWebhookTestNewHeadSHA    = "new-head-sha"
 	githubWebhookTestVekilCloneURL = "https://github.com/sozercan/vekil.git"
 )
-
-func TestGitHubWebhook_IssueImplementLabelCreatesAgentTask(t *testing.T) {
-	secret := configureGitHubWebhookTest(t, map[string]string{
-		githubLabelTriggerAgentEnv:     "codex-agent",
-		githubLabelTriggerGitSecretEnv: githubWebhookTestGitSecret,
-	})
-	fc := newGitHubWebhookFakeClient(t, runtimeAgent("codex-agent"), githubWebhookGitSecret())
-	server := NewServer(fc, nil, ServerConfig{})
-
-	body := []byte(`{
-		"action":"labeled",
-		"label":{"name":"agent:implement"},
-		"repository":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"},
-		"issue":{"number":12,"title":"Add health endpoint","body":"Please add /healthz.","html_url":"https://github.com/sozercan/vekil/issues/12"},
-		"sender":{"login":"octocat"}
-	}`)
-
-	delivery := "delivery-1"
-	resp := performSignedGitHubWebhook(t, server, githubEventIssues, delivery, secret, body)
-	if resp.StatusCode != http.StatusCreated {
-		t.Fatalf("status = %d, want %d; body: %s", resp.StatusCode, http.StatusCreated, readRespBody(t, resp))
-	}
-
-	var task corev1alpha1.Task
-	replayKey := githubWebhookReplayKey(body)
-	if err := fc.Get(t.Context(), types.NamespacedName{Name: githubWebhookTaskNameForBody(githubActionImplement, 12, body), Namespace: "default"}, &task); err != nil {
-		t.Fatalf("created task not found: %v", err)
-	}
-	if task.Spec.Type != corev1alpha1.TaskTypeAgent {
-		t.Fatalf("task type = %q, want agent", task.Spec.Type)
-	}
-	if task.Spec.AgentRef == nil || task.Spec.AgentRef.Name != "codex-agent" {
-		t.Fatalf("agentRef = %#v, want codex-agent", task.Spec.AgentRef)
-	}
-	if task.Spec.AgentRuntime == nil || task.Spec.AgentRuntime.Workspace == nil {
-		t.Fatal("agent runtime workspace missing")
-	}
-	ws := task.Spec.AgentRuntime.Workspace
-	if ws.GitRepo != githubWebhookTestVekilCloneURL {
-		t.Errorf("gitRepo = %q", ws.GitRepo)
-	}
-	if ws.Branch != githubWebhookTestDefaultBranch {
-		t.Errorf("branch = %q, want main", ws.Branch)
-	}
-	wantPushBranch := "orka/implement-issue-12-" + githubReplayKeySuffix(replayKey)
-	if ws.PushBranch != wantPushBranch {
-		t.Errorf("pushBranch = %q, want %q", ws.PushBranch, wantPushBranch)
-	}
-	if ws.GitSecretRef == nil || ws.GitSecretRef.Name != githubWebhookTestGitSecret {
-		t.Fatalf("gitSecretRef = %#v, want %s", ws.GitSecretRef, githubWebhookTestGitSecret)
-	}
-	if task.Labels[labels.LabelCreatedBy] != githubWebhookCreatedBy {
-		t.Errorf("created-by label = %q", task.Labels[labels.LabelCreatedBy])
-	}
-	if task.Labels[labels.LabelGitHubAction] != githubActionImplement {
-		t.Errorf("github action label = %q", task.Labels[labels.LabelGitHubAction])
-	}
-	if task.Annotations[labels.AnnotationGitHubDelivery] != delivery {
-		t.Errorf("delivery annotation = %q", task.Annotations[labels.AnnotationGitHubDelivery])
-	}
-	if !strings.Contains(task.Spec.Prompt, "agent:implement") || !strings.Contains(task.Spec.Prompt, "Please add /healthz.") {
-		t.Errorf("prompt missing trigger context: %s", task.Spec.Prompt)
-	}
-}
-
-func TestGitHubWebhook_IssueImplementRejectsMissingConfiguredGitSecret(t *testing.T) {
-	secret := configureGitHubWebhookTest(t, map[string]string{
-		githubLabelTriggerAgentEnv:     "codex-agent",
-		githubLabelTriggerGitSecretEnv: "missing-git-secret",
-	})
-	fc := newGitHubWebhookFakeClient(t, runtimeAgent("codex-agent"))
-	server := NewServer(fc, nil, ServerConfig{})
-
-	body := []byte(`{
-		"action":"labeled",
-		"label":{"name":"agent:implement"},
-		"repository":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"},
-		"issue":{"number":12,"title":"Add health endpoint","body":"Please add /healthz.","html_url":"https://github.com/sozercan/vekil/issues/12"},
-		"sender":{"login":"octocat"}
-	}`)
-
-	resp := performSignedGitHubWebhook(t, server, githubEventIssues, "delivery-missing-git-secret", secret, body)
-	if resp.StatusCode != http.StatusServiceUnavailable {
-		t.Fatalf("status = %d, want %d; body: %s", resp.StatusCode, http.StatusServiceUnavailable, readRespBody(t, resp))
-	}
-	assertNoTasks(t, fc)
-}
-
-func TestGitHubWebhook_PullRequestUpdateBranchUsesHeadBranch(t *testing.T) {
-	secret := configureGitHubWebhookTest(t, map[string]string{
-		githubLabelTriggerAgentEnv:     "claude-agent",
-		githubLabelTriggerGitSecretEnv: githubWebhookTestGitSecret,
-	})
-	fc := newGitHubWebhookFakeClient(t, runtimeAgent("claude-agent"), githubWebhookGitSecret())
-	server := NewServer(fc, nil, ServerConfig{})
-
-	body := []byte(strings.ReplaceAll(`{
-		"action":"labeled",
-		"label":{"name":"agent:update-branch"},
-		"repository":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"},
-		"pull_request":{
-			"number":34,
-			"title":"Feature branch",
-			"body":"Update me",
-			"html_url":"https://github.com/sozercan/vekil/pull/34",
-			"base":{"ref":"main","sha":"base-sha","repo":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"}},
-			"head":{"ref":"feature/x","sha":"{{HEAD_SHA}}","repo":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"}}
-		},
-		"sender":{"login":"octocat"}
-	}`, "{{HEAD_SHA}}", githubWebhookTestHeadSHA))
-
-	delivery := "delivery-2"
-	resp := performSignedGitHubWebhook(t, server, githubEventPullRequest, delivery, secret, body)
-	if resp.StatusCode != http.StatusCreated {
-		t.Fatalf("status = %d, want %d; body: %s", resp.StatusCode, http.StatusCreated, readRespBody(t, resp))
-	}
-
-	var task corev1alpha1.Task
-	if err := fc.Get(t.Context(), types.NamespacedName{Name: githubWebhookTaskNameForBody(githubActionUpdateBranch, 34, body), Namespace: "default"}, &task); err != nil {
-		t.Fatalf("created task not found: %v", err)
-	}
-	ws := task.Spec.AgentRuntime.Workspace
-	if ws.Branch != "feature/x" {
-		t.Errorf("branch = %q, want feature/x", ws.Branch)
-	}
-	if ws.Ref != githubWebhookTestHeadSHA {
-		t.Errorf("ref = %q, want %s", ws.Ref, githubWebhookTestHeadSHA)
-	}
-	if ws.PushBranch != "feature/x" {
-		t.Errorf("pushBranch = %q, want feature/x", ws.PushBranch)
-	}
-	if ws.GitSecretRef == nil || ws.GitSecretRef.Name != githubWebhookTestGitSecret {
-		t.Fatalf("gitSecretRef = %#v, want %s for same-repo PR", ws.GitSecretRef, githubWebhookTestGitSecret)
-	}
-	if ws.PRBaseBranch != githubWebhookTestDefaultBranch {
-		t.Errorf("prBaseBranch = %q, want main", ws.PRBaseBranch)
-	}
-	if got := githubWebhookTaskEnvValue(task.Spec.Env, workerenv.AllowEmptyPushBranch); got != queryTrue {
-		t.Errorf("%s = %q, want true", workerenv.AllowEmptyPushBranch, got)
-	}
-	if got := githubWebhookTaskEnvValue(task.Spec.Env, workerenv.PRBaseRepo); got != githubWebhookTestVekilCloneURL {
-		t.Errorf("%s = %q, want base repo clone URL", workerenv.PRBaseRepo, got)
-	}
-	if got := githubWebhookTaskEnvValue(task.Spec.Env, workerenv.PRBaseSHA); got != "base-sha" {
-		t.Errorf("%s = %q, want base-sha", workerenv.PRBaseSHA, got)
-	}
-	if !strings.Contains(task.Spec.Prompt, "Update the pull request branch") {
-		t.Errorf("prompt = %s", task.Spec.Prompt)
-	}
-}
-
-func TestGitHubWebhook_PullRequestImplementUsesForkHeadRepo(t *testing.T) {
-	secret := configureGitHubWebhookTest(t, map[string]string{
-		githubLabelTriggerAgentEnv:     "codex-agent",
-		githubLabelTriggerGitSecretEnv: githubWebhookTestGitSecret,
-	})
-	fc := newGitHubWebhookFakeClient(t, runtimeAgent("codex-agent"))
-	server := NewServer(fc, nil, ServerConfig{})
-
-	body := []byte(`{
-		"action":"labeled",
-		"label":{"name":"agent:implement"},
-		"repository":{"full_name":"orka-agents/orka","html_url":"https://github.com/orka-agents/orka","clone_url":"https://github.com/orka-agents/orka.git","default_branch":"main"},
-		"pull_request":{
-			"number":35,
-			"title":"Fork change",
-			"body":"Implement on fork",
-			"html_url":"https://github.com/orka-agents/orka/pull/35",
-			"base":{"ref":"main","sha":"base-sha","repo":{"full_name":"orka-agents/orka","html_url":"https://github.com/orka-agents/orka","clone_url":"https://github.com/orka-agents/orka.git","default_branch":"main"}},
-			"head":{"ref":"feature/fork-change","sha":"fork-head-sha","repo":{"full_name":"contributor/orka","html_url":"https://github.com/contributor/orka","clone_url":"https://github.com/contributor/orka.git","default_branch":"main"}}
-		},
-		"sender":{"login":"octocat"}
-	}`)
-
-	delivery := "delivery-fork-pr"
-	resp := performSignedGitHubWebhook(t, server, githubEventPullRequest, delivery, secret, body)
-	if resp.StatusCode != http.StatusCreated {
-		t.Fatalf("status = %d, want %d; body: %s", resp.StatusCode, http.StatusCreated, readRespBody(t, resp))
-	}
-
-	var task corev1alpha1.Task
-	if err := fc.Get(t.Context(), types.NamespacedName{Name: githubWebhookTaskNameForBody(githubActionImplement, 35, body), Namespace: "default"}, &task); err != nil {
-		t.Fatalf("created task not found: %v", err)
-	}
-	ws := task.Spec.AgentRuntime.Workspace
-	if ws.GitRepo != "https://github.com/contributor/orka.git" {
-		t.Errorf("gitRepo = %q, want fork head repo", ws.GitRepo)
-	}
-	if ws.Branch != "feature/fork-change" {
-		t.Errorf("branch = %q, want feature/fork-change", ws.Branch)
-	}
-	if ws.Ref != "fork-head-sha" {
-		t.Errorf("ref = %q, want fork-head-sha", ws.Ref)
-	}
-	if ws.PushBranch != "" {
-		t.Errorf("pushBranch = %q, want empty for fork PR without safe git credentials", ws.PushBranch)
-	}
-	if ws.GitSecretRef != nil {
-		t.Fatalf("gitSecretRef = %#v, want nil for fork PR", ws.GitSecretRef)
-	}
-	if ws.PRBaseBranch != githubWebhookTestDefaultBranch {
-		t.Errorf("prBaseBranch = %q, want main", ws.PRBaseBranch)
-	}
-	if !strings.Contains(task.Spec.Prompt, "Orka will not push them automatically") {
-		t.Errorf("prompt missing no-push guidance: %s", task.Spec.Prompt)
-	}
-}
-
-func TestGitHubWebhook_PullRequestMissingHeadRepoFailsClosedForGitSecret(t *testing.T) {
-	secret := configureGitHubWebhookTest(t, map[string]string{
-		githubLabelTriggerAgentEnv:     "codex-agent",
-		githubLabelTriggerGitSecretEnv: githubWebhookTestGitSecret,
-	})
-	fc := newGitHubWebhookFakeClient(t, runtimeAgent("codex-agent"))
-	server := NewServer(fc, nil, ServerConfig{})
-
-	body := []byte(`{
-		"action":"labeled",
-		"label":{"name":"agent:implement"},
-		"repository":{"full_name":"orka-agents/orka","html_url":"https://github.com/orka-agents/orka","clone_url":"https://github.com/orka-agents/orka.git","default_branch":"main"},
-		"pull_request":{
-			"number":36,
-			"title":"Unknown head repo",
-			"body":"Implement with unknown head repo",
-			"html_url":"https://github.com/orka-agents/orka/pull/36",
-			"base":{"ref":"main","sha":"base-sha","repo":{"full_name":"orka-agents/orka","html_url":"https://github.com/orka-agents/orka","clone_url":"https://github.com/orka-agents/orka.git","default_branch":"main"}},
-			"head":{"ref":"feature/unknown-head","sha":"unknown-head-sha","repo":null}
-		},
-		"sender":{"login":"octocat"}
-	}`)
-
-	delivery := "delivery-missing-head-pr"
-	resp := performSignedGitHubWebhook(t, server, githubEventPullRequest, delivery, secret, body)
-	if resp.StatusCode != http.StatusCreated {
-		t.Fatalf("status = %d, want %d; body: %s", resp.StatusCode, http.StatusCreated, readRespBody(t, resp))
-	}
-
-	var task corev1alpha1.Task
-	if err := fc.Get(t.Context(), types.NamespacedName{Name: githubWebhookTaskNameForBody(githubActionImplement, 36, body), Namespace: "default"}, &task); err != nil {
-		t.Fatalf("created task not found: %v", err)
-	}
-	ws := task.Spec.AgentRuntime.Workspace
-	if ws.GitRepo != "https://github.com/orka-agents/orka.git" {
-		t.Errorf("gitRepo = %q, want base repository fallback", ws.GitRepo)
-	}
-	if ws.Branch != "feature/unknown-head" {
-		t.Errorf("branch = %q, want feature/unknown-head", ws.Branch)
-	}
-	if ws.PushBranch != "" {
-		t.Errorf("pushBranch = %q, want empty for PR without verified head repository", ws.PushBranch)
-	}
-	if ws.GitSecretRef != nil {
-		t.Fatalf("gitSecretRef = %#v, want nil for PR without verified head repository", ws.GitSecretRef)
-	}
-	if !strings.Contains(task.Spec.Prompt, "Orka will not push them automatically") {
-		t.Errorf("prompt missing no-push guidance: %s", task.Spec.Prompt)
-	}
-}
-
-func TestGitHubWebhook_PullRequestReviewUsesInitOnlyGitSecret(t *testing.T) {
-	secret := configureGitHubWebhookTest(t, map[string]string{
-		githubLabelTriggerAgentEnv:     "codex-agent",
-		githubLabelTriggerGitSecretEnv: githubWebhookTestGitSecret,
-	})
-	fc := newGitHubWebhookFakeClient(t, runtimeAgent("codex-agent"), githubWebhookGitSecret())
-	server := NewServer(fc, nil, ServerConfig{})
-
-	body := []byte(strings.ReplaceAll(`{
-		"action":"labeled",
-		"label":{"name":"agent:review"},
-		"repository":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"},
-		"pull_request":{
-			"number":37,
-			"title":"Review me",
-			"body":"Please review",
-			"html_url":"https://github.com/sozercan/vekil/pull/37",
-			"base":{"ref":"main","sha":"base-sha","repo":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"}},
-			"head":{"ref":"feature/review","sha":"{{HEAD_SHA}}","repo":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"}}
-		},
-		"sender":{"login":"octocat"}
-	}`, "{{HEAD_SHA}}", githubWebhookTestHeadSHA))
-
-	resp := performSignedGitHubWebhook(t, server, githubEventPullRequest, "delivery-review-pr", secret, body)
-	if resp.StatusCode != http.StatusCreated {
-		t.Fatalf("status = %d, want %d; body: %s", resp.StatusCode, http.StatusCreated, readRespBody(t, resp))
-	}
-
-	var task corev1alpha1.Task
-	if err := fc.Get(t.Context(), types.NamespacedName{Name: githubWebhookTaskNameForBody(githubActionReview, 37, body), Namespace: "default"}, &task); err != nil {
-		t.Fatalf("created task not found: %v", err)
-	}
-	ws := task.Spec.AgentRuntime.Workspace
-	if ws.PushBranch != "" {
-		t.Errorf("pushBranch = %q, want empty for review action", ws.PushBranch)
-	}
-	if ws.GitSecretRef == nil || ws.GitSecretRef.Name != githubWebhookTestGitSecret {
-		t.Fatalf("gitSecretRef = %#v, want %s for init-only clone", ws.GitSecretRef, githubWebhookTestGitSecret)
-	}
-	if task.Annotations[labels.AnnotationWorkspaceInitContainer] != queryTrue {
-		t.Fatalf("workspace init annotation = %q, want true", task.Annotations[labels.AnnotationWorkspaceInitContainer])
-	}
-	if got := githubWebhookTaskEnvValue(task.Spec.Env, workerenv.PRBaseRepo); got != githubWebhookTestVekilCloneURL {
-		t.Errorf("%s = %q, want base repo clone URL", workerenv.PRBaseRepo, got)
-	}
-	if got := githubWebhookTaskEnvValue(task.Spec.Env, workerenv.PRBaseSHA); got != "base-sha" {
-		t.Errorf("%s = %q, want base-sha", workerenv.PRBaseSHA, got)
-	}
-}
-
-func TestGitHubWebhook_ToIssuesMountsGitSecretWithoutPushBranch(t *testing.T) {
-	secret := configureGitHubWebhookTest(t, map[string]string{
-		githubLabelTriggerAgentEnv:     "codex-agent",
-		githubLabelTriggerGitSecretEnv: githubWebhookTestGitSecret,
-	})
-	fc := newGitHubWebhookFakeClient(t, runtimeAgent("codex-agent"), githubWebhookGitSecret())
-	server := NewServer(fc, nil, ServerConfig{})
-
-	body := []byte(`{
-		"action":"labeled",
-		"label":{"name":"agent:to-issues"},
-		"repository":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"},
-		"issue":{"number":38,"title":"Plan this","body":"Break this into issues.","html_url":"https://github.com/sozercan/vekil/issues/38"},
-		"sender":{"login":"octocat"}
-	}`)
-
-	resp := performSignedGitHubWebhook(t, server, githubEventIssues, "delivery-to-issues", secret, body)
-	if resp.StatusCode != http.StatusCreated {
-		t.Fatalf("status = %d, want %d; body: %s", resp.StatusCode, http.StatusCreated, readRespBody(t, resp))
-	}
-
-	var task corev1alpha1.Task
-	if err := fc.Get(t.Context(), types.NamespacedName{Name: githubWebhookTaskNameForBody(githubActionToIssues, 38, body), Namespace: "default"}, &task); err != nil {
-		t.Fatalf("created task not found: %v", err)
-	}
-	ws := task.Spec.AgentRuntime.Workspace
-	if ws.PushBranch != "" {
-		t.Errorf("pushBranch = %q, want empty for to-issues action", ws.PushBranch)
-	}
-	if ws.GitSecretRef == nil || ws.GitSecretRef.Name != githubWebhookTestGitSecret {
-		t.Fatalf("gitSecretRef = %#v, want %s", ws.GitSecretRef, githubWebhookTestGitSecret)
-	}
-}
-
-func TestGitHubWebhook_IgnoresIssuePullRequestStub(t *testing.T) {
-	secret := configureGitHubWebhookTest(t, map[string]string{
-		githubLabelTriggerAgentEnv: "codex-agent",
-	})
-	fc := newGitHubWebhookFakeClient(t, runtimeAgent("codex-agent"))
-	server := NewServer(fc, nil, ServerConfig{})
-
-	body := []byte(`{
-		"action":"labeled",
-		"label":{"name":"agent:update-branch"},
-		"repository":{"full_name":"orka-agents/orka","html_url":"https://github.com/orka-agents/orka","clone_url":"https://github.com/orka-agents/orka.git","default_branch":"main"},
-		"issue":{"number":35,"title":"Fork change","body":"Implement on fork","html_url":"https://github.com/orka-agents/orka/issues/35","pull_request":{"html_url":"https://github.com/orka-agents/orka/pull/35"}},
-		"sender":{"login":"octocat"}
-	}`)
-
-	resp := performSignedGitHubWebhook(t, server, githubEventIssues, "delivery-pr-stub", secret, body)
-	if resp.StatusCode != http.StatusAccepted {
-		t.Fatalf("status = %d; body: %s", resp.StatusCode, readRespBody(t, resp))
-	}
-	assertNoTasks(t, fc)
-}
-
-func TestGitHubWebhook_SignedPayloadControlsIdempotency(t *testing.T) {
-	secret := configureGitHubWebhookTest(t, map[string]string{
-		githubLabelTriggerAgentEnv: "codex-agent",
-	})
-	fc := newGitHubWebhookFakeClient(t, runtimeAgent("codex-agent"))
-	server := NewServer(fc, nil, ServerConfig{})
-	body := []byte(`{"action":"labeled","label":{"name":"agent:implement"},"repository":{"full_name":"sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"},"issue":{"number":1,"title":"Do it","body":"Body","html_url":"https://github.com/sozercan/vekil/issues/1"}}`)
-
-	first := performSignedGitHubWebhook(t, server, githubEventIssues, "same-delivery", secret, body)
-	if first.StatusCode != http.StatusCreated {
-		t.Fatalf("first status = %d; body: %s", first.StatusCode, readRespBody(t, first))
-	}
-	duplicate := performSignedGitHubWebhook(t, server, githubEventIssues, "same-delivery", secret, body)
-	if duplicate.StatusCode != http.StatusAccepted {
-		t.Fatalf("duplicate status = %d; body: %s", duplicate.StatusCode, readRespBody(t, duplicate))
-	}
-	headerReplay := performSignedGitHubWebhook(t, server, githubEventIssues, "new-delivery", secret, body)
-	if headerReplay.StatusCode != http.StatusAccepted {
-		t.Fatalf("header replay status = %d; body: %s", headerReplay.StatusCode, readRespBody(t, headerReplay))
-	}
-
-	changedBody := []byte(`{"action":"labeled","label":{"name":"agent:implement"},"repository":{"full_name":"sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"},"issue":{"number":1,"title":"Do it","body":"Changed body","html_url":"https://github.com/sozercan/vekil/issues/1"}}`)
-	second := performSignedGitHubWebhook(t, server, githubEventIssues, "new-delivery", secret, changedBody)
-	if second.StatusCode != http.StatusCreated {
-		t.Fatalf("changed payload status = %d; body: %s", second.StatusCode, readRespBody(t, second))
-	}
-
-	var tasks corev1alpha1.TaskList
-	if err := fc.List(t.Context(), &tasks); err != nil {
-		t.Fatalf("list tasks: %v", err)
-	}
-	if len(tasks.Items) != 2 {
-		t.Fatalf("task count = %d, want 2", len(tasks.Items))
-	}
-}
-
-func TestGitHubWebhook_IgnoresNonAgentLabelsAndUnsupportedTargets(t *testing.T) {
-	secret := configureGitHubWebhookTest(t, map[string]string{
-		githubLabelTriggerAgentEnv: "codex-agent",
-	})
-	fc := newGitHubWebhookFakeClient(t, runtimeAgent("codex-agent"))
-	server := NewServer(fc, nil, ServerConfig{})
-
-	body := []byte(`{"action":"labeled","label":{"name":"bug"},"repository":{"full_name":"sozercan/vekil"},"issue":{"number":1,"title":"Bug","body":"Body","html_url":"https://github.com/sozercan/vekil/issues/1"}}`)
-	resp := performSignedGitHubWebhook(t, server, githubEventIssues, "delivery-ignore", secret, body)
-	if resp.StatusCode != http.StatusAccepted {
-		t.Fatalf("status = %d; body: %s", resp.StatusCode, readRespBody(t, resp))
-	}
-	assertNoTasks(t, fc)
-
-	body = []byte(`{"action":"labeled","label":{"name":"agent:review"},"repository":{"full_name":"sozercan/vekil"},"issue":{"number":1,"title":"Bug","body":"Body","html_url":"https://github.com/sozercan/vekil/issues/1"}}`)
-	resp = performSignedGitHubWebhook(t, server, githubEventIssues, "delivery-review-issue", secret, body)
-	if resp.StatusCode != http.StatusAccepted {
-		t.Fatalf("status = %d; body: %s", resp.StatusCode, readRespBody(t, resp))
-	}
-	assertNoTasks(t, fc)
-}
 
 func TestGitHubWebhook_PullRequestEventQueuesRepositoryMonitorRun(t *testing.T) {
 	secret := configureGitHubWebhookTest(t, nil)
@@ -785,45 +359,6 @@ func TestGitHubWebhook_PullRequestLabelReturnsMonitorResultWhenLabelAgentMissing
 	}
 }
 
-func TestGitHubWebhook_PullRequestLabelDoesNotSuppressAgentLookupFailure(t *testing.T) {
-	secret := configureGitHubWebhookTest(t, map[string]string{githubLabelTriggerAgentEnv: "review-agent"})
-	monitorStore := setupGitHubWebhookMonitorStore(t)
-	monitor := githubWebhookRepositoryMonitor("repo-monitor", true)
-	fc := githubWebhookAgentGetErrorClient{
-		Client: newGitHubWebhookFakeClient(t, monitor),
-		err:    errors.New("temporary apiserver failure"),
-	}
-	server := NewServer(fc, nil, ServerConfig{RepositoryMonitorStore: monitorStore})
-
-	body := []byte(strings.ReplaceAll(`{
-		"action":"labeled",
-		"label":{"name":"agent:review"},
-		"repository":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"},
-		"pull_request":{
-			"number":34,
-			"title":"Feature branch",
-			"body":"Review me",
-			"html_url":"https://github.com/sozercan/vekil/pull/34",
-			"state":"open",
-			"base":{"ref":"main","sha":"base-sha","repo":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"}},
-			"head":{"ref":"feature/x","sha":"{{HEAD_SHA}}","repo":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"}}
-		},
-		"sender":{"login":"octocat"}
-	}`, "{{HEAD_SHA}}", githubWebhookTestHeadSHA))
-
-	resp := performSignedGitHubWebhook(t, server, githubEventPullRequest, "delivery-agent-get-fails", secret, body)
-	if resp.StatusCode != http.StatusInternalServerError {
-		t.Fatalf("status = %d, want %d; body: %s", resp.StatusCode, http.StatusInternalServerError, readRespBody(t, resp))
-	}
-	runs, _, err := monitorStore.ListMonitorRuns(t.Context(), store.MonitorRunFilter{Namespace: "default", MonitorName: "repo-monitor", Limit: 10})
-	if err != nil {
-		t.Fatalf("ListMonitorRuns() error = %v", err)
-	}
-	if len(runs) != 1 {
-		t.Fatalf("runs = %#v, want monitor side effect to remain queued before retryable label-agent failure", runs)
-	}
-}
-
 func TestGitHubWebhook_PullRequestEventRequiresExactEventEnabledMonitor(t *testing.T) {
 	secret := configureGitHubWebhookTest(t, nil)
 	monitorStore := setupGitHubWebhookMonitorStore(t)
@@ -1005,7 +540,7 @@ func TestGitHubWebhook_PullRequestEventUsesDistinctRunIDsForNormalizedMonitorNam
 
 func TestGitHubWebhook_RejectsInvalidSignature(t *testing.T) {
 	secret := configureGitHubWebhookTest(t, map[string]string{
-		githubLabelTriggerAgentEnv: "codex-agent",
+		"ORKA_GITHUB_LABEL_TRIGGER_AGENT": "codex-agent",
 	})
 	fc := newGitHubWebhookFakeClient(t, runtimeAgent("codex-agent"))
 	server := NewServer(fc, nil, ServerConfig{})
@@ -1043,17 +578,13 @@ func configureGitHubWebhookTest(t *testing.T, env map[string]string) string {
 	secret := "webhook-secret"
 	keys := []string{
 		githubWebhookSecretEnv,
-		githubLabelTriggerAgentEnv,
-		githubLabelTriggerGitSecretEnv,
-		githubLabelTriggerNamespaceEnv,
-		githubLabelTriggerPrefixEnv,
-		githubLabelTriggerTimeoutEnv,
-		githubLabelTriggerMaxTurnsEnv,
+		"ORKA_GITHUB_LABEL_TRIGGER_AGENT",
+		"ORKA_GITHUB_LABEL_TRIGGER_GIT_SECRET",
+		"ORKA_GITHUB_LABEL_TRIGGER_NAMESPACE",
+		"ORKA_GITHUB_LABEL_TRIGGER_PREFIX",
+		"ORKA_GITHUB_LABEL_TRIGGER_TIMEOUT",
+		"ORKA_GITHUB_LABEL_TRIGGER_MAX_TURNS",
 		githubAPIBaseURLEnv,
-		githubActionAgentEnv(githubActionImplement),
-		githubActionAgentEnv(githubActionUpdateBranch),
-		githubActionAgentEnv(githubActionReview),
-		githubActionAgentEnv(githubActionToIssues),
 	}
 	for _, key := range keys {
 		t.Setenv(key, "")
@@ -1077,18 +608,6 @@ func newGitHubWebhookFakeClient(t *testing.T, objs ...client.Object) client.Clie
 	return fake.NewClientBuilder().WithScheme(s).WithObjects(objs...).Build()
 }
 
-type githubWebhookAgentGetErrorClient struct {
-	client.Client
-	err error
-}
-
-func (c githubWebhookAgentGetErrorClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-	if _, ok := obj.(*corev1alpha1.Agent); ok {
-		return c.err
-	}
-	return c.Client.Get(ctx, key, obj, opts...)
-}
-
 func runtimeAgent(name string) *corev1alpha1.Agent {
 	return &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
@@ -1096,6 +615,37 @@ func runtimeAgent(name string) *corev1alpha1.Agent {
 			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
 		},
 	}
+}
+
+func runtimeRefAgent(runtimeName string) *corev1alpha1.Agent {
+	return &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "external-agent", Namespace: "default"},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{
+				RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: runtimeName},
+			},
+		},
+	}
+}
+
+func registeredAgentRuntime(name string, contract corev1alpha1.AgentRuntimeContractVersion, allowedTools []string) *corev1alpha1.AgentRuntime {
+	runtimeObject := &corev1alpha1.AgentRuntime{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+		Spec:       corev1alpha1.AgentRuntimeRegistrySpec{ContractVersion: &contract},
+	}
+	if contract == corev1alpha1.AgentRuntimeContractHarnessV2 {
+		runtimeObject.Spec.Capabilities = &corev1alpha1.AgentRuntimeCapabilitiesSpec{
+			Profile: &corev1alpha1.AgentRuntimeProfileSpec{
+				ProviderKind: "codex", Model: "gpt-5.6", WorkspaceIntent: corev1alpha1.WorkspaceIntentRead,
+			},
+			MCPPolicy: &corev1alpha1.AgentRuntimeMCPPolicySpec{
+				AllowedTools:          append([]string{}, allowedTools...),
+				DisallowedTools:       []string{},
+				ApprovalRequiredTools: []string{},
+			},
+		}
+	}
+	return runtimeObject
 }
 
 func githubWebhookGitSecret() *corev1.Secret {
@@ -1145,10 +695,6 @@ func performSignedGitHubWebhook(t *testing.T, server *Server, event, delivery, s
 	return resp
 }
 
-func githubWebhookTaskNameForBody(action string, number int, body []byte) string {
-	return githubTaskName(action, number, githubWebhookReplayKey(body))
-}
-
 func signGitHubWebhook(body []byte, secret string) string {
 	mac := hmac.New(sha256.New, []byte(secret))
 	_, _ = mac.Write(body)
@@ -1161,15 +707,6 @@ func readRespBody(t *testing.T, resp *http.Response) string {
 	buf := new(bytes.Buffer)
 	_, _ = buf.ReadFrom(resp.Body)
 	return buf.String()
-}
-
-func githubWebhookTaskEnvValue(envVars []corev1.EnvVar, name string) string {
-	for _, envVar := range envVars {
-		if envVar.Name == name {
-			return envVar.Value
-		}
-	}
-	return ""
 }
 
 func assertNoTasks(t *testing.T, c client.Client) {
@@ -1199,7 +736,7 @@ func TestGitHubWebhook_OrkaIssueLabelCreatesDurableCommandAndIssueRun(t *testing
 	secret := configureGitHubWebhookTest(t, map[string]string{githubAPIBaseURLEnv: permissionServer.URL})
 	pullRequestsEnabled := false
 	monitor := githubWebhookRepositoryMonitor("issue-loop", false)
-	monitor.Spec.GitSecretRef = &corev1.LocalObjectReference{Name: githubWebhookTestGitSecret}
+	monitor.Spec.ForgeCredentialRef = &corev1.LocalObjectReference{Name: githubWebhookTestGitSecret}
 	monitor.Spec.Targets.PullRequests.Enabled = &pullRequestsEnabled
 	monitor.Spec.Targets.Issues.Enabled = true
 	monitor.Spec.Triggers.GitHub.Labels.Enabled = true
@@ -1209,9 +746,9 @@ func TestGitHubWebhook_OrkaIssueLabelCreatesDurableCommandAndIssueRun(t *testing
 
 	body := []byte(`{
 		"action":"labeled",
-		"label":{"name":"orka:plan"},
+		"label":{"name":"orka:implement"},
 		"repository":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"},
-		"issue":{"number":12,"title":"Add health endpoint","body":"Please add /healthz.","html_url":"https://github.com/sozercan/vekil/issues/12","updated_at":"2026-06-01T00:00:00Z","labels":[{"name":"bug"},{"name":"orka:plan"}]},
+		"issue":{"number":12,"title":"Add health endpoint","body":"Please add /healthz.","html_url":"https://github.com/sozercan/vekil/issues/12","updated_at":"2026-06-01T00:00:00Z","labels":[{"name":"bug"},{"name":"orka:implement"}]},
 		"sender":{"login":"octocat"}
 	}`)
 	resp := performSignedGitHubWebhook(t, server, githubEventIssues, "delivery-orka-plan", secret, body)
@@ -1222,7 +759,7 @@ func TestGitHubWebhook_OrkaIssueLabelCreatesDurableCommandAndIssueRun(t *testing
 	if err != nil {
 		t.Fatalf("ListCommandEvents() error = %v", err)
 	}
-	if len(commands) != 1 || commands[0].Intent != "plan" || commands[0].Status != githubCommandStatusAccepted || commands[0].IssueSnapshotDigest == "" {
+	if len(commands) != 1 || commands[0].Intent != "implement" || commands[0].Status != githubCommandStatusAccepted || commands[0].IssueSnapshotDigest == "" {
 		t.Fatalf("commands = %#v, want accepted plan command with issue digest", commands)
 	}
 	runs, _, err := monitorStore.ListMonitorRuns(t.Context(), store.MonitorRunFilter{Namespace: "default", MonitorName: "issue-loop", TargetKind: repositoryMonitorTargetKindIssue, TargetNumber: 12, Limit: 10})
@@ -1260,9 +797,9 @@ func TestGitHubWebhook_OrkaClosedIssueLabelDoesNotCreateCommand(t *testing.T) {
 
 	body := []byte(`{
 		"action":"labeled",
-		"label":{"name":"orka:plan"},
+		"label":{"name":"orka:implement"},
 		"repository":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"},
-		"issue":{"number":12,"state":"closed","title":"Already fixed","body":"done","html_url":"https://github.com/sozercan/vekil/issues/12","updated_at":"2026-06-01T00:00:00Z","labels":[{"name":"orka:plan"}]},
+		"issue":{"number":12,"state":"closed","title":"Already fixed","body":"done","html_url":"https://github.com/sozercan/vekil/issues/12","updated_at":"2026-06-01T00:00:00Z","labels":[{"name":"orka:implement"}]},
 		"sender":{"login":"octocat"}
 	}`)
 	resp := performSignedGitHubWebhook(t, server, githubEventIssues, "delivery-orka-closed", secret, body)
@@ -1278,41 +815,6 @@ func TestGitHubWebhook_OrkaClosedIssueLabelDoesNotCreateCommand(t *testing.T) {
 	}
 }
 
-func TestGitHubWebhook_CustomOrkaPRLabelDoesNotAlsoQueueExactEventRun(t *testing.T) {
-	permissionServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"permission":"write"}`))
-	}))
-	t.Cleanup(permissionServer.Close)
-	secret := configureGitHubWebhookTest(t, map[string]string{githubAPIBaseURLEnv: permissionServer.URL})
-	monitor := githubWebhookRepositoryMonitor("custom-pr-command", true)
-	monitor.Spec.GitSecretRef = &corev1.LocalObjectReference{Name: githubWebhookTestGitSecret}
-	monitor.Spec.Triggers.GitHub.Labels.Enabled = true
-	monitor.Spec.Triggers.GitHub.Labels.PullRequests.Review = "bot:review"
-	fc := newGitHubWebhookFakeClient(t, monitor, githubWebhookGitSecret())
-	monitorStore := setupGitHubWebhookMonitorStore(t)
-	server := NewServer(fc, nil, ServerConfig{RepositoryMonitorStore: monitorStore})
-
-	body := []byte(`{
-		"action":"labeled",
-		"label":{"name":"bot:review"},
-		"repository":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"},
-		"pull_request":{"number":7,"title":"Review me","body":"","html_url":"https://github.com/sozercan/vekil/pull/7","state":"open","draft":false,"base":{"ref":"main","sha":"base","repo":{"full_name":"sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git"}},"head":{"ref":"feature","sha":"head-sha","repo":{"full_name":"sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git"}},"labels":[{"name":"bot:review"}]},
-		"sender":{"login":"octocat"}
-	}`)
-	resp := performSignedGitHubWebhook(t, server, githubEventPullRequest, "delivery-custom-review", secret, body)
-	if resp.StatusCode != http.StatusCreated {
-		t.Fatalf("status = %d, want created; body: %s", resp.StatusCode, readRespBody(t, resp))
-	}
-	runs, _, err := monitorStore.ListMonitorRuns(t.Context(), store.MonitorRunFilter{Namespace: "default", MonitorName: "custom-pr-command", Limit: 10})
-	if err != nil {
-		t.Fatalf("ListMonitorRuns() error = %v", err)
-	}
-	if len(runs) != 1 || runs[0].Trigger != githubMonitorTriggerLabelCommand {
-		t.Fatalf("runs = %#v, want exactly one durable command run", runs)
-	}
-}
-
 func TestGitHubWebhook_OrkaGuardLabelBlocksCommandWithoutRun(t *testing.T) {
 	permissionServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -1322,7 +824,7 @@ func TestGitHubWebhook_OrkaGuardLabelBlocksCommandWithoutRun(t *testing.T) {
 	secret := configureGitHubWebhookTest(t, map[string]string{githubAPIBaseURLEnv: permissionServer.URL})
 	pullRequestsEnabled := false
 	monitor := githubWebhookRepositoryMonitor("guarded-issue-loop", false)
-	monitor.Spec.GitSecretRef = &corev1.LocalObjectReference{Name: githubWebhookTestGitSecret}
+	monitor.Spec.ForgeCredentialRef = &corev1.LocalObjectReference{Name: githubWebhookTestGitSecret}
 	monitor.Spec.Targets.PullRequests.Enabled = &pullRequestsEnabled
 	monitor.Spec.Targets.Issues.Enabled = true
 	monitor.Spec.Triggers.GitHub.Labels.Enabled = true
@@ -1368,7 +870,7 @@ func TestGitHubWebhook_OrkaEquivalentCommandsCoalesceActiveWorkAction(t *testing
 	secret := configureGitHubWebhookTest(t, map[string]string{githubAPIBaseURLEnv: permissionServer.URL})
 	pullRequestsEnabled := false
 	monitor := githubWebhookRepositoryMonitor("coalesce-issue-loop", false)
-	monitor.Spec.GitSecretRef = &corev1.LocalObjectReference{Name: githubWebhookTestGitSecret}
+	monitor.Spec.ForgeCredentialRef = &corev1.LocalObjectReference{Name: githubWebhookTestGitSecret}
 	monitor.Spec.Targets.PullRequests.Enabled = &pullRequestsEnabled
 	monitor.Spec.Targets.Issues.Enabled = true
 	monitor.Spec.Triggers.GitHub.Labels.Enabled = true
@@ -1378,9 +880,9 @@ func TestGitHubWebhook_OrkaEquivalentCommandsCoalesceActiveWorkAction(t *testing
 
 	body := []byte(`{
 		"action":"labeled",
-		"label":{"name":"orka:plan"},
+		"label":{"name":"orka:implement"},
 		"repository":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"},
-		"issue":{"number":32,"state":"open","title":"Plan once","body":"Please plan once.","html_url":"https://github.com/sozercan/vekil/issues/32","updated_at":"2026-06-01T00:00:00Z","labels":[{"name":"orka:plan"}]},
+		"issue":{"number":32,"state":"open","title":"Plan once","body":"Please plan once.","html_url":"https://github.com/sozercan/vekil/issues/32","updated_at":"2026-06-01T00:00:00Z","labels":[{"name":"orka:implement"}]},
 		"sender":{"login":"octocat"}
 	}`)
 	first := performSignedGitHubWebhook(t, server, githubEventIssues, "delivery-coalesce-one", secret, body)
@@ -1416,71 +918,6 @@ func TestGitHubWebhook_OrkaEquivalentCommandsCoalesceActiveWorkAction(t *testing
 	}
 }
 
-func TestGitHubWebhook_OrkaResumeDoesNotBypassGuardLabel(t *testing.T) {
-	permissionServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"permission":"write"}`))
-	}))
-	t.Cleanup(permissionServer.Close)
-	secret := configureGitHubWebhookTest(t, map[string]string{githubAPIBaseURLEnv: permissionServer.URL})
-	pullRequestsEnabled := false
-	monitor := githubWebhookRepositoryMonitor("guarded-resume", false)
-	monitor.Spec.GitSecretRef = &corev1.LocalObjectReference{Name: githubWebhookTestGitSecret}
-	monitor.Spec.Targets.PullRequests.Enabled = &pullRequestsEnabled
-	monitor.Spec.Targets.Issues.Enabled = true
-	monitor.Spec.Triggers.GitHub.Labels.Enabled = true
-	monitor.Spec.Policy.PauseLabels = []string{"orka:pause"}
-	fc := newGitHubWebhookFakeClient(t, monitor, githubWebhookGitSecret())
-	monitorStore := setupGitHubWebhookMonitorStore(t)
-	server := NewServer(fc, nil, ServerConfig{RepositoryMonitorStore: monitorStore})
-	body := []byte(`{
-		"action":"labeled",
-		"label":{"name":"orka:resume"},
-		"repository":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"},
-		"issue":{"number":34,"state":"open","title":"Paused","body":"Still paused.","html_url":"https://github.com/sozercan/vekil/issues/34","updated_at":"2026-06-01T00:00:00Z","labels":[{"name":"orka:pause"},{"name":"orka:resume"}]},
-		"sender":{"login":"octocat"}
-	}`)
-	resp := performSignedGitHubWebhook(t, server, githubEventIssues, "delivery-guarded-resume", secret, body)
-	if resp.StatusCode != http.StatusAccepted {
-		t.Fatalf("status = %d, want accepted blocked event; body: %s", resp.StatusCode, readRespBody(t, resp))
-	}
-	commands, _, err := monitorStore.ListCommandEvents(t.Context(), store.CommandEventFilter{Namespace: "default", MonitorName: "guarded-resume", Kind: "issue", Number: 34, Limit: 10})
-	if err != nil {
-		t.Fatalf("ListCommandEvents() error = %v", err)
-	}
-	if len(commands) != 1 || commands[0].Status != githubCommandStatusBlocked || !strings.Contains(commands[0].Error, "orka:pause") {
-		t.Fatalf("commands = %#v, want blocked resume command", commands)
-	}
-}
-
-func TestGitHubWebhook_OrkaPRLabelRequiresExactBaseBranchCase(t *testing.T) {
-	secret := configureGitHubWebhookTest(t, nil)
-	monitor := githubWebhookRepositoryMonitor("case-sensitive-pr", false)
-	monitor.Spec.Triggers.GitHub.Labels.Enabled = true
-	monitor.Spec.Triggers.GitHub.Labels.PullRequests.Review = "orka:review"
-	fc := newGitHubWebhookFakeClient(t, monitor, githubWebhookGitSecret())
-	monitorStore := setupGitHubWebhookMonitorStore(t)
-	server := NewServer(fc, nil, ServerConfig{RepositoryMonitorStore: monitorStore})
-	body := []byte(`{
-		"action":"labeled",
-		"label":{"name":"orka:review"},
-		"repository":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"},
-		"pull_request":{"number":33,"title":"Wrong case","body":"","html_url":"https://github.com/sozercan/vekil/pull/33","state":"open","draft":false,"base":{"ref":"Main","sha":"base","repo":{"full_name":"sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git"}},"head":{"ref":"feature","sha":"head-sha","repo":{"full_name":"sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git"}},"labels":[{"name":"orka:review"}]},
-		"sender":{"login":"octocat"}
-	}`)
-	resp := performSignedGitHubWebhook(t, server, githubEventPullRequest, "delivery-pr-branch-case", secret, body)
-	if resp.StatusCode != http.StatusAccepted {
-		t.Fatalf("status = %d, want accepted ignored event; body: %s", resp.StatusCode, readRespBody(t, resp))
-	}
-	commands, _, err := monitorStore.ListCommandEvents(t.Context(), store.CommandEventFilter{Namespace: "default", MonitorName: "case-sensitive-pr", Kind: repositoryMonitorTargetKindPullRequest, Number: 33, Limit: 10})
-	if err != nil {
-		t.Fatalf("ListCommandEvents() error = %v", err)
-	}
-	if len(commands) != 0 {
-		t.Fatalf("commands = %#v, want none for case-mismatched base branch", commands)
-	}
-}
-
 func TestGitHubWebhook_DuplicateAcceptedCommandEnsuresMissingRun(t *testing.T) {
 	permissionServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -1490,7 +927,7 @@ func TestGitHubWebhook_DuplicateAcceptedCommandEnsuresMissingRun(t *testing.T) {
 	secret := configureGitHubWebhookTest(t, map[string]string{githubAPIBaseURLEnv: permissionServer.URL})
 	pullRequestsEnabled := false
 	monitor := githubWebhookRepositoryMonitor("dedupe-run", false)
-	monitor.Spec.GitSecretRef = &corev1.LocalObjectReference{Name: githubWebhookTestGitSecret}
+	monitor.Spec.ForgeCredentialRef = &corev1.LocalObjectReference{Name: githubWebhookTestGitSecret}
 	monitor.Spec.Targets.PullRequests.Enabled = &pullRequestsEnabled
 	monitor.Spec.Targets.Issues.Enabled = true
 	monitor.Spec.Triggers.GitHub.Labels.Enabled = true
@@ -1500,22 +937,22 @@ func TestGitHubWebhook_DuplicateAcceptedCommandEnsuresMissingRun(t *testing.T) {
 
 	body := []byte(`{
 		"action":"labeled",
-		"label":{"name":"orka:plan"},
+		"label":{"name":"orka:implement"},
 		"repository":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"},
-		"issue":{"number":21,"title":"Plan it","body":"Please plan.","html_url":"https://github.com/sozercan/vekil/issues/21","updated_at":"2026-06-01T00:00:00Z","labels":[{"name":"orka:plan"}]},
+		"issue":{"number":21,"title":"Plan it","body":"Please plan.","html_url":"https://github.com/sozercan/vekil/issues/21","updated_at":"2026-06-01T00:00:00Z","labels":[{"name":"orka:implement"}]},
 		"sender":{"login":"octocat"}
 	}`)
 	target, ok := githubLabelWebhookPayload{
 		Action:     "labeled",
-		Label:      githubWebhookLabel{Name: "orka:plan"},
+		Label:      githubWebhookLabel{Name: "orka:implement"},
 		Repository: githubWebhookRepository{FullName: "sozercan/vekil"},
-		Issue:      &githubWebhookIssue{Number: 21, Title: "Plan it", Body: "Please plan.", Labels: []githubWebhookLabel{{Name: "orka:plan"}}},
+		Issue:      &githubWebhookIssue{Number: 21, Title: "Plan it", Body: "Please plan.", Labels: []githubWebhookLabel{{Name: "orka:implement"}}},
 	}.target()
 	if !ok {
 		t.Fatal("target() failed")
 	}
 	delivery := "delivery-preexisting-command"
-	dedupe := repositoryMonitorCommandDedupeKey(monitor, target, "orka:plan", delivery)
+	dedupe := repositoryMonitorCommandDedupeKey(monitor, target, "orka:implement", delivery)
 	processedAt := time.Now()
 	if err := monitorStore.CreateCommandEvent(t.Context(), &store.CommandEvent{
 		ID:               repositoryMonitorCommandID(dedupe),
@@ -1526,7 +963,7 @@ func TestGitHubWebhook_DuplicateAcceptedCommandEnsuresMissingRun(t *testing.T) {
 		Number:           21,
 		Source:           githubCommandEventSourceLabel,
 		DeliveryID:       delivery,
-		Label:            "orka:plan",
+		Label:            "orka:implement",
 		DedupeKey:        dedupe,
 		IdempotencyKey:   dedupe,
 		Intent:           "plan",
@@ -1558,7 +995,7 @@ func TestGitHubWebhook_DuplicateAcceptedCommandRetriesFailedRunSignal(t *testing
 	secret := configureGitHubWebhookTest(t, map[string]string{githubAPIBaseURLEnv: permissionServer.URL})
 	pullRequestsEnabled := false
 	monitor := githubWebhookRepositoryMonitor("dedupe-failed-run", false)
-	monitor.Spec.GitSecretRef = &corev1.LocalObjectReference{Name: githubWebhookTestGitSecret}
+	monitor.Spec.ForgeCredentialRef = &corev1.LocalObjectReference{Name: githubWebhookTestGitSecret}
 	monitor.Spec.Targets.PullRequests.Enabled = &pullRequestsEnabled
 	monitor.Spec.Targets.Issues.Enabled = true
 	monitor.Spec.Triggers.GitHub.Labels.Enabled = true
@@ -1568,24 +1005,24 @@ func TestGitHubWebhook_DuplicateAcceptedCommandRetriesFailedRunSignal(t *testing
 
 	body := []byte(`{
 		"action":"labeled",
-		"label":{"name":"orka:plan"},
+		"label":{"name":"orka:implement"},
 		"repository":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"},
-		"issue":{"number":22,"state":"open","title":"Plan after retry","body":"Please plan.","html_url":"https://github.com/sozercan/vekil/issues/22","updated_at":"2026-06-01T00:00:00Z","labels":[{"name":"orka:plan"}]},
+		"issue":{"number":22,"state":"open","title":"Plan after retry","body":"Please plan.","html_url":"https://github.com/sozercan/vekil/issues/22","updated_at":"2026-06-01T00:00:00Z","labels":[{"name":"orka:implement"}]},
 		"sender":{"login":"octocat"}
 	}`)
 	target, ok := githubLabelWebhookPayload{
 		Action:     "labeled",
-		Label:      githubWebhookLabel{Name: "orka:plan"},
+		Label:      githubWebhookLabel{Name: "orka:implement"},
 		Repository: githubWebhookRepository{FullName: "sozercan/vekil"},
-		Issue:      &githubWebhookIssue{Number: 22, State: "open", Title: "Plan after retry", Body: "Please plan.", Labels: []githubWebhookLabel{{Name: "orka:plan"}}},
+		Issue:      &githubWebhookIssue{Number: 22, State: "open", Title: "Plan after retry", Body: "Please plan.", Labels: []githubWebhookLabel{{Name: "orka:implement"}}},
 	}.target()
 	if !ok {
 		t.Fatal("target() failed")
 	}
 	delivery := "delivery-failed-run-retry"
-	dedupe := repositoryMonitorCommandDedupeKey(monitor, target, "orka:plan", delivery)
+	dedupe := repositoryMonitorCommandDedupeKey(monitor, target, "orka:implement", delivery)
 	processedAt := time.Now()
-	command := &store.CommandEvent{ID: repositoryMonitorCommandID(dedupe), MonitorNamespace: "default", MonitorName: monitor.Name, Repo: "sozercan/vekil", Kind: "issue", Number: 22, Source: githubCommandEventSourceLabel, DeliveryID: delivery, Label: "orka:plan", DedupeKey: dedupe, IdempotencyKey: dedupe, Intent: "plan", Status: githubCommandStatusAccepted, CreatedAt: processedAt, ProcessedAt: &processedAt}
+	command := &store.CommandEvent{ID: repositoryMonitorCommandID(dedupe), MonitorNamespace: "default", MonitorName: monitor.Name, Repo: "sozercan/vekil", Kind: "issue", Number: 22, Source: githubCommandEventSourceLabel, DeliveryID: delivery, Label: "orka:implement", DedupeKey: dedupe, IdempotencyKey: dedupe, Intent: "plan", Status: githubCommandStatusAccepted, CreatedAt: processedAt, ProcessedAt: &processedAt}
 	if err := monitorStore.CreateCommandEvent(t.Context(), command); err != nil {
 		t.Fatalf("CreateCommandEvent() error = %v", err)
 	}

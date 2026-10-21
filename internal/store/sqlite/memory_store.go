@@ -278,7 +278,7 @@ func (s *Store) UpdateLegacyMemoryWithAudit(
 	if current.Trust == store.MemoryTrustReviewed || current.Trust == store.MemoryTrustTrusted {
 		if err := insertMemoryAudit(ctx, tx, store.MemoryAuditRecord{
 			Namespace: current.Namespace, NamespaceUID: namespaceUID, Actor: actor,
-			Action: "memory.trust", Reason: reason,
+			Action: memoryAuditActionTrust, Reason: reason,
 			PreviousState: string(current.Trust), NewState: string(store.MemoryTrustUntrusted),
 			MemoryID: current.ID, RequestID: requestID, CreatedAt: now,
 		}); err != nil {
@@ -457,7 +457,7 @@ func (s *Store) SetLegacyMemoryTrustWithAudit(
 	digest := sha256.Sum256([]byte(current.Content))
 	if err := insertMemoryAudit(ctx, tx, store.MemoryAuditRecord{
 		Namespace: current.Namespace, NamespaceUID: namespaceUID, Actor: actor,
-		Action: "memory.trust", Reason: reason,
+		Action: memoryAuditActionTrust, Reason: reason,
 		PreviousState: string(current.Trust), NewState: string(trust),
 		MemoryID: current.ID, ContentDigest: "sha256:" + hex.EncodeToString(digest[:]),
 		RequestID: requestID, CreatedAt: now,
@@ -600,12 +600,53 @@ func (s *Store) SearchTranscript(ctx context.Context, filter store.TranscriptSea
 	}
 
 	var query strings.Builder
+	var args []any
+	if len(filter.HistoryBounds) > 0 {
+		encodedBounds, err := json.Marshal(filter.HistoryBounds)
+		if err != nil {
+			return nil, fmt.Errorf("encode transcript history bounds: %w", err)
+		}
+		// Rank the complete logical history before applying content, role, or
+		// result limits. Multiple references to one session intersect, so a
+		// broader reference cannot override a more restrictive one.
+		query.WriteString(`WITH history_bounds AS (
+			SELECT key AS bound_id,
+				json_extract(value, '$.sessionName') AS session_name,
+				json_extract(value, '$.maxMessages') AS max_messages,
+				json_extract(value, '$.throughMessageId') AS through_message_id
+			FROM json_each(?)
+		), bounded_history AS (
+			SELECT bound.bound_id, history.id,
+				ROW_NUMBER() OVER (
+					PARTITION BY bound.bound_id ORDER BY history.sort_order DESC, history.id DESC
+				) AS history_position
+			FROM history_bounds AS bound
+			JOIN session_messages AS history
+				ON history.namespace = ? AND history.session_name = bound.session_name
+			WHERE bound.through_message_id = '' OR history.sort_order <= (
+				SELECT cutoff.sort_order FROM session_messages AS cutoff
+				WHERE cutoff.namespace = history.namespace AND cutoff.session_name = history.session_name
+					AND cutoff.message_id = bound.through_message_id
+			)
+		) `)
+		args = append(args, string(encodedBounds), filter.Namespace)
+	}
 	query.WriteString(`SELECT message.id, message.message_id, message.session_name, message.role,
 		COALESCE(message.name, ''), message.content, message.created_at
 		FROM session_messages AS message
 		JOIN sessions AS session ON session.namespace = message.namespace AND session.name = message.session_name
 		WHERE message.namespace = ? AND session.session_type <> ? AND message.content <> ''`)
-	args := []any{filter.Namespace, store.SessionTypeGateway}
+	args = append(args, filter.Namespace, store.SessionTypeGateway)
+	if len(filter.HistoryBounds) > 0 {
+		query.WriteString(` AND NOT EXISTS (
+			SELECT 1 FROM history_bounds AS bound
+			WHERE bound.session_name = message.session_name AND NOT EXISTS (
+				SELECT 1 FROM bounded_history AS permitted
+				WHERE permitted.bound_id = bound.bound_id AND permitted.id = message.id
+					AND (bound.max_messages <= 0 OR permitted.history_position <= bound.max_messages)
+			)
+		)`)
+	}
 
 	searchTerm := strings.TrimSpace(filter.Query)
 	searchTerms := transcriptSearchTerms(searchTerm)
@@ -616,6 +657,15 @@ func (s *Store) SearchTranscript(ctx context.Context, filter store.TranscriptSea
 	if filter.SessionName != "" {
 		query.WriteString(` AND message.session_name = ?`)
 		args = append(args, filter.SessionName)
+	}
+	sessionNames := compactStrings(filter.SessionNames)
+	if len(sessionNames) > 0 {
+		encodedSessionNames, err := json.Marshal(sessionNames)
+		if err != nil {
+			return nil, fmt.Errorf("encode transcript session filter: %w", err)
+		}
+		query.WriteString(` AND message.session_name IN (SELECT value FROM json_each(?))`)
+		args = append(args, string(encodedSessionNames))
 	}
 	if filter.ExcludeSessionName != "" {
 		query.WriteString(` AND message.session_name <> ?`)
@@ -634,7 +684,7 @@ func (s *Store) SearchTranscript(ctx context.Context, filter store.TranscriptSea
 	query.WriteString(` ORDER BY message.created_at DESC, message.id DESC LIMIT ?`)
 	args = append(args, boundedLimit(filter.Limit, defaultTranscriptLimit, maxTranscriptLimit))
 
-	rows, err := s.db.QueryContext(ctx, query.String(), args...)
+	rows, err := s.taskDataExecutor(ctx).QueryContext(ctx, query.String(), args...)
 	if err != nil {
 		return nil, err
 	}
@@ -954,6 +1004,9 @@ func (s *Store) applyMemoryProposalOnce(
 		if proposal.AppliedMemoryID == "" {
 			return nil, fmt.Errorf("applied proposal is missing applied memory id")
 		}
+		if err := authorizeExistingProposalMemory(ctx, apply, proposal.Namespace, proposal.AppliedMemoryID); err != nil {
+			return nil, err
+		}
 		memory, err := scanMemory(tx.QueryRowContext(ctx, selectMemorySQL()+` WHERE namespace = ? AND id = ?`, proposal.Namespace, proposal.AppliedMemoryID))
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("applied proposal references missing memory")
@@ -991,6 +1044,9 @@ func (s *Store) applyMemoryProposalOnce(
 
 	existing, err := scanMemory(tx.QueryRowContext(ctx, selectMemorySQL()+` WHERE namespace = ? AND source_proposal_id = ?`, apply.Namespace, apply.ID))
 	if err == nil {
+		if err := authorizeExistingProposalMemory(ctx, apply, existing.Namespace, existing.ID); err != nil {
+			return nil, err
+		}
 		if err := validateProposalMemoryRecovery(proposal, existing); err != nil {
 			return nil, err
 		}
@@ -1063,6 +1119,9 @@ func (s *Store) applyMemoryProposalOnce(
 		}
 		existing, lookupErr := scanMemory(tx.QueryRowContext(ctx, selectMemorySQL()+` WHERE namespace = ? AND source_proposal_id = ?`, apply.Namespace, apply.ID))
 		if lookupErr != nil {
+			return nil, err
+		}
+		if err := authorizeExistingProposalMemory(ctx, apply, existing.Namespace, existing.ID); err != nil {
 			return nil, err
 		}
 		if err := validateProposalMemoryRecovery(proposal, existing); err != nil {
@@ -1148,6 +1207,13 @@ func validateAppliedProposalMemoryRecovery(proposal *store.MemoryProposal, memor
 	return validateProposalMemoryRecovery(proposal, memory)
 }
 
+func authorizeExistingProposalMemory(ctx context.Context, apply store.MemoryProposalApply, namespace, id string) error {
+	if apply.AuthorizeExistingMemory == nil {
+		return nil
+	}
+	return apply.AuthorizeExistingMemory(ctx, namespace, id)
+}
+
 func markMemoryProposalApplied(
 	ctx context.Context,
 	tx *sql.Tx,
@@ -1220,8 +1286,7 @@ func isSQLiteConstraintError(err error) bool {
 }
 
 func sqliteErrorCode(err error) (int, bool) {
-	var sqliteErr *moderncsqlite.Error
-	if errors.As(err, &sqliteErr) {
+	if sqliteErr, ok := errors.AsType[*moderncsqlite.Error](err); ok {
 		return sqliteErr.Code(), true
 	}
 	return 0, false

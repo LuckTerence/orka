@@ -72,6 +72,23 @@ const (
 	AnnotationRetryCount                    = "orka.ai/retry-count"
 	AnnotationOriginalPrompt                = "orka.ai/original-prompt"
 	AnnotationParentTaskName                = "orka.ai/parent-task-name"
+	AnnotationParentTaskUID                 = "orka.ai/parent-task-uid"
+	// AnnotationCancelRequested records a verified parent's cancel_task
+	// request; its value is the Task's terminal message. Only controller
+	// identities may set it, and the Task controller completes the
+	// cancellation through its normal terminal path.
+	AnnotationCancelRequested = "orka.ai/cancel-requested"
+	// AnnotationRequestedBySource records that spec.requestedBy was stamped
+	// by the API server from a verified identity. Only controller identities
+	// may set it; child Tasks inherit trust through their coordination parent.
+	AnnotationRequestedBySource = "orka.ai/requested-by-source"
+	// AnnotationRequestedByStamp is an HMAC over the Task UID and requester
+	// that the API server seals right after creating a Task it stamped.
+	// Only controller identities may write it, and admission is not
+	// retroactive, so the source annotation alone proves nothing: a Task
+	// planted while admission was disabled carries no valid stamp.
+	AnnotationRequestedByStamp              = "orka.ai/requested-by-stamp"
+	AnnotationDelegationEffectID            = "orka.ai/delegation-effect-id"
 	AnnotationForkSourceTask                = "orka.ai/fork-source-task"
 	AnnotationForkSourceSeq                 = "orka.ai/fork-source-seq"
 	AnnotationForkContextTruncated          = "orka.ai/fork-context-truncated"
@@ -88,8 +105,10 @@ const (
 	AnnotationMonitorItemKind               = "orka.ai/monitor-item-kind"
 	AnnotationMonitorItemNumber             = "orka.ai/monitor-item-number"
 	AnnotationMonitorHeadSHA                = "orka.ai/monitor-head-sha"
+	AnnotationRepositoryValidationImage     = "orka.ai/repository-validation-image"
 	AnnotationAgentReadOnly                 = "orka.ai/agent-read-only"
 	AnnotationAgentRuntimeAuthOnly          = "orka.ai/agent-runtime-auth-only"
+	AnnotationSecurityReviewAttempt         = "orka.ai/security-review-attempt"
 	AnnotationWorkspaceInitContainer        = "orka.ai/workspace-init-container"
 	AnnotationDisableCoordinationToolInject = "orka.ai/disable-coordination-tool-injection"
 	AnnotationApprovalDecidedAt             = "orka.ai/approval-decided-at"
@@ -101,6 +120,18 @@ const (
 	AnnotationTraceState                    = "orka.ai/tracestate"
 	AnnotationTraceBaggage                  = "orka.ai/baggage"
 )
+
+const AnnotationRepositoryValidationCommandDigest = "orka.ai/repository-validation-command-digest"
+
+const LabelWorkspaceAttachment = "workspace.orka.ai/attachment-for"
+
+// ACPSuspendQuotaLeaseNamePrefix reserves class-owned suspension quota Leases
+// for controller-only writes enforced by admission.
+const ACPSuspendQuotaLeaseNamePrefix = "acp-suspend-quota-"
+
+// ACPWorkspaceRetentionFenceLeaseNamePrefix reserves idle-expiry admission
+// fences for controller-only writes enforced by admission.
+const ACPWorkspaceRetentionFenceLeaseNamePrefix = "acp-retention-fence-"
 
 // SelectorValue returns a Kubernetes label-safe value derived from the input.
 // Short, already-valid values are preserved as-is; longer values keep a readable
@@ -210,3 +241,7 @@ func isValidLabelValue(value string) bool {
 func isAlphaNum(r rune) bool {
 	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')
 }
+
+// RequestedBySourceAPI is the AnnotationRequestedBySource value for Tasks whose
+// requester was verified by the API server.
+const RequestedBySourceAPI = "api"

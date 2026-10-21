@@ -18,7 +18,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/workerenv"
+	"github.com/orka-agents/orka/workers/common"
 )
 
 const (
@@ -111,19 +113,22 @@ func (t *RecallMemoryTool) Execute(ctx context.Context, args json.RawMessage) (s
 	if a.Limit != nil {
 		targetLimit = *a.Limit
 	}
-	cfg, err := loadInternalControllerConfig()
+	cfg, toolCtx, err := memoryToolExecutionConfig(ctx)
 	if err != nil {
 		return "", err
 	}
+	if toolCtx != nil {
+		return recallBrokeredMemory(ctx, cfg, toolCtx, a, targetLimit)
+	}
 	request := map[string]any{
-		"query":           a.Query,
-		"tags":            []string(a.Tags),
-		"taskName":        firstNonEmpty(a.TaskName, a.TaskNameCamel),
-		"agentName":       firstNonEmpty(a.AgentName, a.AgentNameCamel),
-		"sources":         compactMemoryToolStrings([]string{a.Source}),
-		"trust":           []string{"reviewed", "trusted"},
-		"includeDisabled": a.IncludeDisabled || a.IncludeDisabledCamel,
-		"mode":            "keyword",
+		"query":             a.Query,
+		"tags":              []string(a.Tags),
+		taskNameCamelField:  firstNonEmpty(a.TaskName, a.TaskNameCamel),
+		agentNameCamelField: firstNonEmpty(a.AgentName, a.AgentNameCamel),
+		"sources":           compactMemoryToolStrings([]string{a.Source}),
+		"trust":             []string{"reviewed", "trusted"},
+		"includeDisabled":   a.IncludeDisabled || a.IncludeDisabledCamel,
+		"mode":              "keyword",
 	}
 	endpoint := cfg.url("/internal/v1/memories/"+url.PathEscape(cfg.Namespace)+"/search", nil)
 	memories := make([]json.RawMessage, 0, targetLimit)
@@ -203,6 +208,39 @@ func (t *RecallMemoryTool) Execute(ctx context.Context, args json.RawMessage) (s
 		return "", fmt.Errorf("failed to encode recalled memories: %w", err)
 	}
 	return string(encoded), nil
+}
+
+// recallBrokeredMemory reads through the broker's MemoryReader, which routes
+// through the namespace's durable memory authority with the same trust floor
+// as the worker search.
+func recallBrokeredMemory(
+	ctx context.Context,
+	cfg internalControllerConfig,
+	toolCtx *ToolContext,
+	a recallMemoryArgs,
+	limit int,
+) (string, error) {
+	if toolCtx.MemoryReader == nil {
+		return "", fmt.Errorf("brokered memory reader is not configured")
+	}
+	memories, err := toolCtx.MemoryReader.ListMemories(ctx, store.MemoryFilter{
+		Namespace:       cfg.Namespace,
+		Query:           strings.TrimSpace(a.Query),
+		Tags:            append([]string(nil), a.Tags...),
+		TaskName:        firstNonEmpty(a.TaskName, a.TaskNameCamel),
+		AgentName:       firstNonEmpty(a.AgentName, a.AgentNameCamel),
+		Source:          strings.TrimSpace(a.Source),
+		Trust:           []store.MemoryTrust{store.MemoryTrustReviewed, store.MemoryTrustTrusted},
+		Limit:           limit,
+		IncludeDisabled: a.IncludeDisabled || a.IncludeDisabledCamel,
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to recall memory: %w", err)
+	}
+	if memories == nil {
+		memories = []store.Memory{}
+	}
+	return marshalMemoryToolResult(memories)
 }
 
 func compactMemoryToolStrings(values []string) []string {
@@ -305,7 +343,7 @@ func (t *ProposeMemoryTool) Execute(ctx context.Context, args json.RawMessage) (
 		return "", fmt.Errorf("title is required")
 	}
 
-	cfg, err := loadInternalControllerConfig()
+	cfg, toolCtx, err := memoryToolExecutionConfig(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -316,7 +354,7 @@ func (t *ProposeMemoryTool) Execute(ctx context.Context, args json.RawMessage) (
 	}
 	agentName := firstNonEmpty(a.AgentName, a.AgentNameCamel, cfg.AgentName)
 
-	payload, err := json.Marshal(proposeMemoryPayload{
+	payload := proposeMemoryPayload{
 		Namespace:   cfg.Namespace,
 		TaskName:    cfg.TaskName,
 		AgentName:   agentName,
@@ -326,19 +364,8 @@ func (t *ProposeMemoryTool) Execute(ctx context.Context, args json.RawMessage) (
 		Description: strings.TrimSpace(a.Description),
 		Content:     strings.TrimSpace(a.Content),
 		Patch:       strings.TrimSpace(a.Patch),
-	})
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal memory proposal: %w", err)
 	}
-	transactionToken, err := loadTaskTransactionToken()
-	if err != nil {
-		return "", fmt.Errorf("failed to load task transaction token: %w", err)
-	}
-
-	endpoint := cfg.url("/internal/v1/memory-proposals/"+url.PathEscape(cfg.Namespace), nil)
-	body, err := doInternalControllerRequestWithTransactionToken(
-		ctx, cfg, http.MethodPost, endpoint, payload, transactionToken,
-	)
+	body, err := submitMemoryProposal(ctx, cfg, toolCtx, payload)
 	if err != nil {
 		return "", fmt.Errorf("failed to propose memory: %w", err)
 	}
@@ -416,7 +443,7 @@ func (t *RememberMemoryTool) Execute(ctx context.Context, args json.RawMessage) 
 		return "", fmt.Errorf("content is required")
 	}
 
-	cfg, err := loadInternalControllerConfig()
+	cfg, toolCtx, err := memoryToolExecutionConfig(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -428,7 +455,7 @@ func (t *RememberMemoryTool) Execute(ctx context.Context, args json.RawMessage) 
 	agentName := firstNonEmpty(a.AgentName, a.AgentNameCamel, cfg.AgentName)
 	description := appendRememberTags(strings.TrimSpace(a.Description), a.Tags)
 
-	payload, err := json.Marshal(proposeMemoryPayload{
+	payload := proposeMemoryPayload{
 		Namespace:   cfg.Namespace,
 		TaskName:    cfg.TaskName,
 		AgentName:   agentName,
@@ -436,19 +463,8 @@ func (t *RememberMemoryTool) Execute(ctx context.Context, args json.RawMessage) 
 		Title:       title,
 		Description: description,
 		Content:     content,
-	})
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal memory proposal: %w", err)
 	}
-	transactionToken, err := loadTaskTransactionToken()
-	if err != nil {
-		return "", fmt.Errorf("failed to load task transaction token: %w", err)
-	}
-
-	endpoint := cfg.url("/internal/v1/memory-proposals/"+url.PathEscape(cfg.Namespace), nil)
-	body, err := doInternalControllerRequestWithTransactionToken(
-		ctx, cfg, http.MethodPost, endpoint, payload, transactionToken,
-	)
+	body, err := submitMemoryProposal(ctx, cfg, toolCtx, payload)
 	if err != nil {
 		return "", fmt.Errorf("failed to remember: %w", err)
 	}
@@ -568,7 +584,7 @@ func (t *SearchTranscriptTool) Execute(ctx context.Context, args json.RawMessage
 		return "", fmt.Errorf("max_snippet_length must be non-negative")
 	}
 
-	cfg, err := loadInternalControllerConfig()
+	cfg, toolCtx, err := memoryToolExecutionConfig(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -576,6 +592,28 @@ func (t *SearchTranscriptTool) Execute(ctx context.Context, args json.RawMessage
 	excludeSessionName := firstNonEmpty(a.ExcludeSessionName, a.ExcludeSessionNameCamel)
 	if excludeSessionName == "" {
 		excludeSessionName = cfg.TaskName
+	}
+
+	if toolCtx != nil {
+		if toolCtx.TranscriptSearcher == nil {
+			return "", fmt.Errorf("brokered transcript searcher is not configured")
+		}
+		results, searchErr := toolCtx.TranscriptSearcher.SearchTranscript(ctx, store.TranscriptSearchFilter{
+			Namespace:          cfg.Namespace,
+			Query:              query,
+			SessionName:        firstNonEmpty(a.SessionName, a.SessionNameCamel),
+			ExcludeSessionName: excludeSessionName,
+			Roles:              append([]string(nil), a.Roles...),
+			Limit:              a.Limit,
+			MaxSnippetLength:   maxSnippetLength,
+		})
+		if searchErr != nil {
+			return "", fmt.Errorf("failed to search transcript: %w", searchErr)
+		}
+		if results == nil {
+			results = []store.TranscriptSearchResult{}
+		}
+		return marshalMemoryToolResult(results)
 	}
 
 	values := url.Values{}
@@ -637,6 +675,64 @@ func (l *memoryToolStringList) UnmarshalJSON(data []byte) error {
 	}
 	*l = out
 	return nil
+}
+
+func memoryToolExecutionConfig(ctx context.Context) (internalControllerConfig, *ToolContext, error) {
+	toolCtx := GetToolContext(ctx)
+	if toolCtx == nil || !toolCtx.Brokered {
+		cfg, err := loadInternalControllerConfig()
+		return cfg, nil, err
+	}
+	cfg := internalControllerConfig{
+		Namespace: strings.TrimSpace(toolCtx.Namespace),
+		TaskName:  strings.TrimSpace(toolCtx.TaskID),
+		AgentName: strings.TrimSpace(toolCtx.AgentName),
+	}
+	if cfg.Namespace == "" || cfg.TaskName == "" {
+		return cfg, toolCtx, fmt.Errorf("brokered memory tools require request-scoped namespace and task name")
+	}
+	return cfg, toolCtx, nil
+}
+
+func submitMemoryProposal(
+	ctx context.Context,
+	cfg internalControllerConfig,
+	toolCtx *ToolContext,
+	payload proposeMemoryPayload,
+) (string, error) {
+	if toolCtx != nil {
+		if toolCtx.MemoryProposalWriter == nil {
+			return "", fmt.Errorf("brokered memory proposal writer is not configured")
+		}
+		proposal := &store.MemoryProposal{
+			Namespace: payload.Namespace, TaskName: payload.TaskName, AgentName: payload.AgentName,
+			Type: payload.Type, SkillName: payload.SkillName, Title: payload.Title,
+			Description: payload.Description, Content: payload.Content, Patch: payload.Patch,
+		}
+		if err := toolCtx.MemoryProposalWriter.CreateMemoryProposal(ctx, proposal); err != nil {
+			return "", err
+		}
+		return marshalMemoryToolResult(proposal)
+	}
+
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal memory proposal: %w", err)
+	}
+	transactionToken, err := loadTaskTransactionToken()
+	if err != nil {
+		return "", fmt.Errorf("failed to load task transaction token: %w", err)
+	}
+	endpoint := cfg.url("/internal/v1/memory-proposals/"+url.PathEscape(cfg.Namespace), nil)
+	return doInternalControllerRequestWithTransactionToken(ctx, cfg, http.MethodPost, endpoint, encoded, transactionToken)
+}
+
+func marshalMemoryToolResult(value any) (string, error) {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal memory tool result: %w", err)
+	}
+	return string(encoded), nil
 }
 
 type internalControllerConfig struct {
@@ -748,13 +844,9 @@ func addQueryValue(values url.Values, key, value string) {
 	}
 }
 
+// firstNonEmpty returns the first non-blank value, trimmed.
 func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if value = strings.TrimSpace(value); value != "" {
-			return value
-		}
-	}
-	return ""
+	return strings.TrimSpace(common.FirstNonBlank(values...))
 }
 
 var _ Tool = (*RecallMemoryTool)(nil)

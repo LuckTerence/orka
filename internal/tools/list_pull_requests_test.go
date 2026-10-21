@@ -361,6 +361,7 @@ func TestListPullRequestsTool_WithRepoURL(t *testing.T) {
 	defer server.Close()
 
 	task, secret := githubRepoTaskWithSecret(testMyOrgRepoURL)
+	task.Spec.Workspace.ForgeCredentialRef = nil
 	tool := &ListPullRequestsTool{k8sClient: newFakeClient(task, secret), apiBaseURL: server.URL}
 	ctx := contextWithTaskScope()
 
@@ -468,13 +469,11 @@ func TestListPullRequestsTool_WithTaskName(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: testCoderTaskName, Namespace: defaultNamespace},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
-			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
-				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo: testSozercanAynaRepoURL,
-					Branch:  testBranch,
-					GitSecretRef: &corev1.LocalObjectReference{
-						Name: testGitCredsSecretName,
-					},
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				GitRepo: testSozercanAynaRepoURL,
+				Branch:  testBranch,
+				ReadCredentialRef: &corev1alpha1.WorkspaceCredentialReference{
+					Name: testGitCredsSecretName,
 				},
 			},
 		},
@@ -584,5 +583,23 @@ func TestListPullRequestsTool_PerPageCap(t *testing.T) {
 	_, err := tool.Execute(context.Background(), args)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// TestListPullRequestsTool_BoundsLargeErrorBodies covers a non-2xx response
+// with a large body: the error carries a bounded note, not the whole response.
+func TestListPullRequestsTool_BoundsLargeErrorBodies(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = fmt.Fprint(w, strings.Repeat("x", 64<<10))
+	}))
+	defer server.Close()
+	tool := &ListPullRequestsTool{apiBaseURL: server.URL}
+	t.Setenv("ORKA_GIT_REPO", "https://github.com/o/r")
+	t.Setenv("GITHUB_TOKEN", testGitHubToken)
+	args, _ := json.Marshal(ListPullRequestsArgs{})
+	_, err := tool.Execute(context.Background(), args)
+	if err == nil || !strings.Contains(err.Error(), "502") || len(err.Error()) > 2*maxGitHubErrorNoteBytes {
+		t.Fatalf("err length = %d, want a bounded 502 error", len(fmt.Sprint(err)))
 	}
 }

@@ -14,10 +14,8 @@ import (
 	"strings"
 	"time"
 
-	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/llm"
 	"github.com/orka-agents/orka/internal/tools"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // goalStateSentinel is the literal tag the coordinator MUST include in its
@@ -30,6 +28,7 @@ import (
 const goalStateSentinel = "<ORKA_GOAL_STATE_REACHED>"
 
 var errStreamUnavailable = errors.New("stream unavailable before output")
+var errCompletionRefused = errors.New("LLM returned refused completion outcome")
 
 // truncateForLog returns s clipped to max runes, appending "…" if clipped.
 // Used so log lines stay scannable when the model dumps a long progress
@@ -53,7 +52,7 @@ func hasGoalStateSentinelPrefix(s string) bool {
 // timeout (typically 10 minutes for Copilot/Anthropic). The error string is
 // the only reliable signal — upstream returns 400 without a typed error code.
 func isStreamingRequiredErr(err error) bool {
-	if err == nil {
+	if err == nil || llm.IsUsagePersistenceError(err) {
 		return false
 	}
 	msg := strings.ToLower(err.Error())
@@ -67,33 +66,53 @@ func isStreamingRequiredErr(err error) bool {
 // The aggregation is intentionally simple: concatenate text content and append
 // each tool call exactly once. A terminal chunk with an explicit stop reason
 // is required so truncated streams cannot be mistaken for completion.
-func completeViaStream(ctx context.Context, provider llm.Provider, req *llm.CompletionRequest) (*llm.CompletionResponse, error) {
+func completeViaStream(ctx context.Context, provider llm.Provider, req *llm.CompletionRequest, options ...toolLoopOptions) (*llm.CompletionResponse, error) {
 	streamCh, err := provider.Stream(ctx, req)
 	if err != nil {
+		if llm.IsUsagePersistenceError(err) {
+			return nil, fmt.Errorf("open stream: %w", err)
+		}
 		return nil, fmt.Errorf("%w: open: %w", errStreamUnavailable, err)
 	}
 
 	resp := &llm.CompletionResponse{}
+	if req.ResponsesInput {
+		resp.OutputItems = []llm.AssistantOutputItem{}
+	}
+	textItemOpen := false
 	terminalSeen := false
 	for chunk := range streamCh {
 		if chunk.Error != nil {
-			if resp.Content == "" && len(resp.ToolCalls) == 0 {
+			if !llm.IsUsagePersistenceError(chunk.Error) && resp.Content == "" && len(resp.ToolCalls) == 0 {
 				return nil, fmt.Errorf("%w: chunk: %w", errStreamUnavailable, chunk.Error)
 			}
 			return nil, fmt.Errorf("stream chunk: %w", chunk.Error)
 		}
 		if chunk.Content != "" {
 			resp.Content += chunk.Content
+			if req.ResponsesInput {
+				if !textItemOpen {
+					resp.OutputItems = append(resp.OutputItems, llm.AssistantOutputItem{})
+				}
+				resp.OutputItems[len(resp.OutputItems)-1].Content += chunk.Content
+				textItemOpen = true
+			}
 		}
 		if chunk.ToolCall != nil {
 			resp.ToolCalls = append(resp.ToolCalls, *chunk.ToolCall)
+			if req.ResponsesInput {
+				call := *chunk.ToolCall
+				resp.OutputItems = append(resp.OutputItems, llm.AssistantOutputItem{ToolCall: &call})
+				textItemOpen = false
+			}
 		}
-		if chunk.InputTokens > 0 {
-			resp.InputTokens = chunk.InputTokens
+		if chunk.OutputItemDone {
+			if req.ResponsesInput && textItemOpen {
+				resp.OutputItems[len(resp.OutputItems)-1].Status = chunk.OutputItemStatus
+			}
+			textItemOpen = false
 		}
-		if chunk.OutputTokens > 0 {
-			resp.OutputTokens = chunk.OutputTokens
-		}
+		retainStreamUsage(resp, chunk)
 		if chunk.Model != "" {
 			resp.Model = chunk.Model
 		}
@@ -109,17 +128,40 @@ func completeViaStream(ctx context.Context, provider llm.Provider, req *llm.Comp
 	if !terminalSeen {
 		return nil, fmt.Errorf("stream closed without a terminal chunk")
 	}
-	if err := validateToolLoopCompletion(resp); err != nil {
+	if err := validateToolLoopCompletion(resp, options...); err != nil {
 		return nil, err
 	}
 	return resp, nil
 }
 
-func validateToolLoopCompletion(resp *llm.CompletionResponse) error {
+func validateToolLoopCompletion(resp *llm.CompletionResponse, options ...toolLoopOptions) error {
 	outcome := llm.NormalizeCompletionOutcome(resp)
 	switch outcome {
 	case llm.CompletionOutcomeCompleted, llm.CompletionOutcomeToolCalls:
 		return nil
+	case llm.CompletionOutcomeRefused:
+		return fmt.Errorf("%w with stop reason %q", errCompletionRefused, strings.TrimSpace(resp.StopReason))
+	case llm.CompletionOutcomeIncomplete:
+		// A text response truncated by the caller's max_tokens budget is a
+		// valid terminal outcome for the compatibility APIs: Anthropic and
+		// OpenAI clients expect the partial text with stop_reason "max_tokens"
+		// / finish_reason "length" (and typically raise the budget and retry).
+		// Every other incomplete reason (pause_turn, response.incomplete, a
+		// bare "incomplete", or no reason at all), an empty truncated body
+		// (unless the Responses transport explicitly permits it),
+		// and a truncated tool call (its arguments are unusable and must not
+		// be executed) keep failing.
+		if isTokenBudgetTruncatedText(resp, options...) {
+			return nil
+		}
+		reason := strings.TrimSpace(resp.StopReason)
+		if reason == "" {
+			return fmt.Errorf("LLM returned %s completion outcome without a stop reason", outcome)
+		}
+		if len(resp.ToolCalls) > 0 {
+			return fmt.Errorf("LLM returned %s completion outcome with truncated tool calls (stop reason %q)", outcome, reason)
+		}
+		return fmt.Errorf("LLM returned %s completion outcome with stop reason %q", outcome, reason)
 	default:
 		reason := ""
 		if resp != nil {
@@ -129,6 +171,23 @@ func validateToolLoopCompletion(resp *llm.CompletionResponse) error {
 			return fmt.Errorf("LLM returned %s completion outcome without a stop reason", outcome)
 		}
 		return fmt.Errorf("LLM returned %s completion outcome with stop reason %q", outcome, reason)
+	}
+}
+
+// isTokenBudgetTruncatedText reports whether resp is a text-only response cut
+// off by the caller's output token budget ("max_tokens" / "length"). Such a
+// response is returned to the client as-is: the loop must not discard the
+// partial text and keep calling the model.
+func isTokenBudgetTruncatedText(resp *llm.CompletionResponse, options ...toolLoopOptions) bool {
+	allowEmpty := len(options) > 0 && options[0].allowEmptyTokenBudget
+	if resp == nil || len(resp.ToolCalls) > 0 || (!allowEmpty && strings.TrimSpace(resp.Content) == "") {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(resp.StopReason)) {
+	case oaiParamMaxTokens, oaiStopReasonLength:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -284,23 +343,34 @@ CREATE_AGENT INVARIANTS (a rejected Agent config wastes a child task and is
 your bug — read this section before calling create_agent):
 - runtime.type and model.provider are MUTUALLY EXCLUSIVE on the same Agent.
   - For coders/reviewers that need a workspace (git, shell): set
-    runtime.type=codex|claude|copilot|opencode, set runtime.secretRef, OMIT model.provider.
-    OpenCode requires model.name to be the endpoint-specific model ID.
-    For codex, claude, and copilot, model.name is optional because the runtime can select a default.
+    runtime.type=codex|claude|copilot|opencode and OMIT model.provider.
+    OpenCode is a built-in ACP RuntimePool profile. It requires model.name in literal
+    provider/model form (for example openai/gpt-5.4) plus positive, reviewed
+    model.contextWindow and model.maxTokens limits, with contextWindow greater than
+    maxTokens. Agent systemPrompt supplies role instructions; soul supplies persistent
+    persona defaults. OMIT runtime.secretRef/secretRef because credentials come from
+    the controller proxy.
+    For credential-backed compatibility runtimes, set runtime.secretRef when required.
+    For codex, claude, and copilot, model.name is REQUIRED: the ACP runtime session has
+    no default model, and admission rejects a built-in runtime Agent without it.
   - For pure LLM analysis personas (no git, no shell): set model.provider
     + model.name, OMIT runtime.
-- Coder/reviewer Agents you create in chat MUST set resources so the worker pod
-  is large enough for real test suites:
+- Built-in ACP RuntimePool Agents (runtime.type=codex|claude|copilot|opencode)
+  MUST OMIT custom Agent resources. Their resource classes are controller-owned;
+  Agent-level requests/limits are rejected until a reviewed RuntimePool resource
+  class is selected.
+- For non-ACP execution paths that support custom Agent resources, size the worker
+  for the workload. A useful starting point for memory-heavy work is:
     resources.requests.memory: "512Mi"
     resources.limits.memory:   "2Gi"   (4Gi for medium repos, 8Gi for large)
-  Without this, "go test ./..." / "npm test" / "pytest" routinely OOMKill the
-  worker and the Task fails with "container OOMKilled".
-- runtime.secretRef naming convention (use list_agents first to see what the
-  cluster actually has; create your own only if none exist):
+  Increase those non-ACP limits when "go test ./..." / "npm test" / "pytest"
+  OOMKills the worker.
+- runtime.secretRef naming convention for credential-backed compatibility runtimes
+  (OpenCode must omit it; use list_agents first to see what the cluster actually has):
     codex   → codex-runtime-{copilot|openai}
     claude  → claude-agent-credentials
     copilot → copilot-runtime
-- gitSecretRef is OPTIONAL on create_agent_task — omit it to trigger
+- readCredentialRef is OPTIONAL on create_agent_task — omit it to trigger
   auto-discovery (Orka looks for git-credentials, github-credentials,
   copilot-token, github-token, git-token in that order).
 
@@ -318,15 +388,15 @@ WORKFLOW:
 4. WAIT: Call wait_for_task repeatedly until the task completes, then fetch_task_output.
 5. VALIDATE: Determine the validation image and command from repository evidence, then run validation with create_container_task before review. Prefer immutable validation: if the implementation result includes headSHA, set workspace.ref to it; otherwise set workspace.branch to the push branch. Set workspace.gitRepo and git credentials, and do not set workspace.pushBranch for read-only validation. If the validation environment is not clear, first run a read-only discovery container task with the default worker image to inspect CI workflows, language/toolchain files, Dockerfiles/devcontainers, Makefiles, and docs. For Go repositories: BEFORE picking a Go image, run ONE discovery container task with image="alpine/git" command=["sh","-c"] args=["cd /workspace && head -10 go.mod"] to read the toolchain/go directive verbatim; then choose golang:<exact toolchain major.minor>. NEVER guess the Go version — picking golang:1.23 when go.mod says toolchain go1.25 wastes the entire validation iteration ('go.mod requires go >= 1.25'). The worker filesystem is read-only outside /tmp, /home/worker, /workspace, so the default Go module cache (/go/pkg/mod) and build cache (/root/.cache/go-build) are NOT writable — every go command must use writable GOCACHE and GOMODCACHE under /tmp. Wrap the WHOLE command chain with 'export GOCACHE=/tmp/gocache GOMODCACHE=/tmp/gomodcache && ...' (or repeat the inline prefix on EVERY chained go subcommand). The pattern 'GOCACHE=/tmp/gocache go test ./... && go build ./...' is WRONG — inline env vars apply only to the first command, and 'go build' reverts to /go/pkg and crashes with 'could not create module cache: mkdir /go/pkg: read-only file system'. For ALL container tasks: command MUST be ["sh","-c"] (or the image's actual entrypoint) — NEVER ["bash","-lc"]. Login shells reset PATH from /etc/profile and break the golang:*, node:*, python:* official images that put their tool on PATH via Dockerfile ENV ('bash: line 1: go: command not found'). Report the selected image, command, and evidence. If validation config cannot be determined confidently, report VALIDATION_CONFIG_BLOCKED. If validation fails, delegate a focused repair to the coder and repeat validation before review. Use at most 6 validation repair tasks; if validation still fails, report VALIDATION_BLOCKED.
 6. REVIEW: Create one or more SEPARATE reviewer tasks via create_agent_task (NEVER
-   create_ai_task — code review requires git access to fetch the branch, run 'git diff',
-   and run the project's tests; the ai worker has no git workspace and may have no
+   create_ai_task — code review requires a materialized repository workspace and the
+   project's tests; the ai worker has no repository workspace and may have no
    upstream LLM credentials in this cluster, so create_ai_task reviewers fail with
    'API key for ... not found' even when the Agent shape is otherwise valid). The
    reviewer Agent MUST be runtime-backed (runtime.type=codex|claude|copilot|opencode), NOT an
    LLM-only analysis Agent. Use the REVIEW PROMPT template below.
    CRITICAL: Set workspace.branch to the implementation push branch. OMIT workspace.pushBranch
-   entirely — reviewers are READ-ONLY. The Codex/Claude/Copilot/OpenCode worker stages and pushes any
-   uncommitted diff after the agent finishes; reviewers write no code, so a set pushBranch
+   entirely — reviewers are READ-ONLY. Orka's clean-room Publisher stages and pushes only
+   independently verified workspace deltas; reviewers write no code, so a set pushBranch
    triggers 'failed to finalize result: ORKA_PUSH_BRANCH=... but no workspace diff was produced'
    and the review Task fails even when the review itself was correct.
 7. WAIT + EVALUATE: wait_for_task for all reviewers, then fetch_task_output.
@@ -511,7 +581,7 @@ CRITICAL RULES:
 - Delegate deliberately — do enough research to scope the task, then let agents do the deep dive
 - ALWAYS validate and review after implementation — never skip either step
 - When a child Task fails, ALWAYS fetch_task_output AND check Status.Message for these signals:
-  - "OOMKilled" or "memory limit ... exceeded" → recreate the Agent: call create_agent again (a fresh name) with resources.limits.memory doubled, then use the returned name on a NEW task. Do NOT retry the same Agent; the new Task will OOM the same way.
+  - "OOMKilled" or "memory limit ... exceeded" → first identify the execution path. For a built-in ACP RuntimePool Agent, DO NOT add custom Agent resources; resource classes are controller-owned. Reuse an Agent backed by a suitable reviewed RuntimePool resource class, or report the blocker if none is available. For a non-ACP path that supports custom Agent resources, recreate the Agent with a fresh name and doubled resources.limits.memory, then use the returned name on a NEW task. Do NOT retry the same undersized Agent.
   - "failed to get agent" / "Agent.core.orka.ai ... not found" → the agentRef you passed is not an existing Agent. See AGENT_REF SOURCING. Call create_agent (name + correct shape) and use the returned name on a NEW create_agent_task / create_ai_task. Do NOT retry the failed Task — the missing-Agent error is permanent for that Task object.
   - "container exited with code" → fetch_task_output for the actual error. If fetch_task_output returns a real error string, fix it in the next coder Task (build/test failure) or recreate the Agent (runtime config wrong). If fetch_task_output returns EMPTY / "task has no result yet" while Status.Message says "container exited with code 1", the worker pod crashed BEFORE writing its result configmap — most commonly because git push was rejected (the pushBranch already exists on the remote and the coder's fresh main-based checkout cannot fast-forward). Recovery: create a NEW create_agent_task with a DIFFERENT, suffixed pushBranch (e.g. append "-retry-<short-suffix>" or generate a fresh "orka/<topic>-<8-hex>"). Do NOT declare VALIDATION_BLOCKED on the first occurrence — empty output from a runtime container is much more often a workspace/git problem than a credentials problem; runtime credentials, when broken, produce auth-specific error strings via fetch_task_output, not silent crashes.
   - "failed to push some refs" / "[rejected] (fetch first)" / "non-fast-forward" → the pushBranch you chose already exists on the remote with commits the coder didn't see. Generate a FRESH unique pushBranch (NEW 8-char hex suffix per the WORKSPACE BRANCH RULES — placeholder shape "orka/<topic>-<NEWLY-GENERATED-hex>", do NOT reuse the suffix from the rejected branch or any suffix you've seen in this prompt) and retry the task. Do NOT retry the same branch name — it will reject the same way.
@@ -522,8 +592,8 @@ CRITICAL RULES:
   - "go: command not found" with a golang:* image → you used ["bash","-lc"] which resets PATH. Re-issue the container task with command=["sh","-c"] (the official images put go on PATH via Dockerfile ENV, which a non-login sh -c preserves).
   - "go.mod requires go >= X.Y" → your validation image's Go is too old. Re-issue the container task with image="golang:<X.Y or newer>". For future tasks against the same repo, always read go.mod first (one-line discovery container task) and pick the image from the toolchain directive.
   - "could not create module cache" / "mkdir /go/pkg: read-only file system" / "mkdir /root/.cache: read-only file system" → the worker FS is read-only outside /tmp, /home/worker, /workspace. Default Go caches (/go/pkg/mod, /root/.cache/go-build) are NOT writable. Re-issue the container task wrapping the WHOLE chain: 'export GOCACHE=/tmp/gocache GOMODCACHE=/tmp/gomodcache && go test ./... && go build ./... && go vet ./...'. Inline 'GOCACHE=/tmp/gocache GOMODCACHE=/tmp/gomodcache go test && go build' does NOT propagate the env to chained subcommands — the prefix only applies to 'go test', then 'go build' reverts to /go/pkg and crashes the same way. Same pattern for any language with default caches outside writable paths (e.g. npm: 'export npm_config_cache=/tmp/npm-cache'; pip: 'export PIP_CACHE_DIR=/tmp/pip-cache').
-  - "API key for ... not found" / "anthropic api key" / "openai api key" on an ai task → the ai worker tried to call the upstream provider SDK directly but the worker pod has no upstream credentials. This cluster routes through Orka providers; ai workers may have no direct API keys for upstream providers. Recovery: switch the task from create_ai_task to create_agent_task with a runtime-backed Agent (codex/claude/copilot/opencode — the runtime carries its own credentials). For reviewer/QA personas this is ALWAYS the right shape; the runtime workspace also gives the reviewer the git access it needs to fetch the branch. Do NOT retry the same ai task with a different LLM-only Agent — the credential gap is in the worker pod, not the Agent shape.
-  - "git secret ... not found" → omit gitSecretRef on create_agent_task so Orka auto-discovers from the candidate list.
+  - "API key for ... not found" / "anthropic api key" / "openai api key" on an ai task → the ai worker tried to call the upstream provider SDK directly but the worker pod has no upstream credentials. This cluster routes through Orka providers; ai workers may have no direct API keys for upstream providers. Recovery: switch the task from create_ai_task to create_agent_task with a runtime-backed Agent (codex/claude/copilot/opencode — built-in profiles use the controller provider proxy). For reviewer/QA personas this is ALWAYS the right shape; the runtime receives the materialized repository workspace while Git credentials remain outside the ACP process. Do NOT retry the same ai task with a different LLM-only Agent — the credential gap is in the worker pod, not the Agent shape.
+  - "git secret ... not found" → omit readCredentialRef on create_agent_task so Orka auto-discovers from the candidate list.
 - A failed Agent shape is YOUR bug — fix the Agent before retrying. The same broken Agent will fail every Task you assign to it.
 - Validation/review→fix cycle continues until validation passes and every reviewer says LGTM or APPROVED, with MAX 6 validation repair tasks and MAX 8 review repair tasks. If still failing after the relevant repair limit, report VALIDATION_BLOCKED or REVIEW_BLOCKED with remaining issues and stop
 - If wait_for_task says still running, call wait_for_task again immediately
@@ -557,30 +627,17 @@ var coordinatorProxyTools = []string{
 	"cancel_task",
 	"list_agents",
 	"list_tasks",
+	"list_connections",
 }
 
-// injectOrkaTools appends Orka's built-in tools, coordinator tools, and namespace Tool CRDs
-// to the completion request. Client-provided tools (if any) are preserved.
-func injectOrkaTools(ctx context.Context, k8sClient client.Client, req *llm.CompletionRequest, namespace string) {
+// injectOrkaTools appends the built-in and coordinator tools that the registry can execute.
+// Kubernetes Tool resources are not supported by the compatibility tool loop.
+func injectOrkaTools(req *llm.CompletionRequest) {
 	builtinTools := tools.DefaultRegistry.ToLLMTools(builtinProxyTools)
 	req.Tools = append(req.Tools, builtinTools...)
 
 	coordinatorTools := tools.DefaultRegistry.ToLLMTools(coordinatorProxyTools)
 	req.Tools = append(req.Tools, coordinatorTools...)
-
-	// Load Tool CRDs from namespace for custom HTTP tools
-	var toolList corev1alpha1.ToolList
-	if err := k8sClient.List(ctx, &toolList, client.InNamespace(namespace)); err == nil {
-		for _, t := range toolList.Items {
-			if t.Spec.Parameters != nil {
-				req.Tools = append(req.Tools, llm.Tool{
-					Name:        t.Name,
-					Description: t.Spec.Description,
-					Parameters:  t.Spec.Parameters.Raw,
-				})
-			}
-		}
-	}
 }
 
 // executeToolCall executes a single tool call via the default registry with a timeout.
@@ -600,9 +657,9 @@ func executeToolCall(ctx context.Context, tc llm.ToolCall, timeout time.Duration
 		toolCtx = tools.WithToolContext(toolCtx, &toolCtxCopy)
 	}
 
-	result, err := tools.DefaultRegistry.Execute(toolCtx, tc.Name, tc.Arguments)
+	result, err := registryForExternalToolCall(toolCtxOpt, tc.Name).Execute(toolCtx, tc.Name, tc.Arguments)
 	if err != nil {
-		errResult, _ := json.Marshal(map[string]any{"success": false, "error": err.Error()})
+		errResult, _ := json.Marshal(map[string]any{"success": false, apiFieldError: err.Error()})
 		return string(errResult)
 	}
 	return result
@@ -612,12 +669,21 @@ func executeExposedToolCall(ctx context.Context, tc llm.ToolCall, timeout time.D
 	name := strings.TrimSpace(tc.Name)
 	if _, ok := exposedToolNames[name]; !ok {
 		errResult, _ := json.Marshal(map[string]any{
-			"success": false,
-			"error":   fmt.Sprintf("tool %q is not available in this request", tc.Name),
+			"success":     false,
+			apiFieldError: fmt.Sprintf("tool %q is not available in this request", tc.Name),
 		})
 		return string(errResult)
 	}
 	return executeToolCall(ctx, tc, timeout, toolCtxOpt)
+}
+
+// toolLoopOptions selects transport-specific terminal outcome requirements.
+// Existing compatibility clients retain their iteration-limit fallback; Responses
+// must not label a failed final provider call as a completed response.
+type toolLoopOptions struct {
+	requireFinalCompletion bool
+	// Responses permits output:[] when the output token budget is exhausted.
+	allowEmptyTokenBudget bool
 }
 
 // runNonStreamingToolLoop runs the agentic tool loop using non-streaming Complete() calls.
@@ -630,10 +696,58 @@ func runNonStreamingToolLoop(
 	model string,
 	config ChatConfig,
 	toolCtx *tools.ToolContext,
+	options ...toolLoopOptions,
 ) (*llm.CompletionResponse, error) {
-	return runToolLoopWithObserver(ctx, provider, req, model, config, toolCtx, nil)
+	return runToolLoopWithObserver(ctx, provider, req, model, config, toolCtx, nil, options...)
 }
 
+// addResponsesToolLoopUsage returns a request-visible usage snapshot without
+// changing the provider's per-call response. Persisted accounting owns probes
+// and failed attempts; this total includes only successful completion rounds.
+func addResponsesToolLoopUsage(total, resp *llm.CompletionResponse) *llm.CompletionResponse {
+	result := *resp
+	if resp.CachedInputTokens != nil {
+		result.CachedInputTokens = new(*resp.CachedInputTokens)
+	}
+	if resp.CacheWriteInputTokens != nil {
+		result.CacheWriteInputTokens = new(*resp.CacheWriteInputTokens)
+	}
+	if total == nil {
+		// A single completion retains its original usage representation.
+		return &result
+	}
+	result.InputTokens += total.InputTokens
+	result.OutputTokens += total.OutputTokens
+	result.UsageReported = result.UsageReported || total.UsageReported
+	// Normalize each round before adding its cache breakdown, since providers
+	// may use different input/cache conventions. Aggregates are cache-inclusive.
+	for _, usage := range []*llm.CompletionResponse{total, resp} {
+		if usage.InputExcludesCache {
+			if usage.CachedInputTokens != nil {
+				result.InputTokens += int(*usage.CachedInputTokens)
+			}
+			if usage.CacheWriteInputTokens != nil {
+				result.InputTokens += int(*usage.CacheWriteInputTokens)
+			}
+		}
+	}
+	if total.CachedInputTokens != nil {
+		if result.CachedInputTokens == nil {
+			result.CachedInputTokens = new(int64)
+		}
+		*result.CachedInputTokens += *total.CachedInputTokens
+	}
+	if total.CacheWriteInputTokens != nil {
+		if result.CacheWriteInputTokens == nil {
+			result.CacheWriteInputTokens = new(int64)
+		}
+		*result.CacheWriteInputTokens += *total.CacheWriteInputTokens
+	}
+	result.InputExcludesCache = false
+	return &result
+}
+
+//nolint:gocyclo // Tool calls, observer events, and stop conditions form one turn loop.
 func runToolLoopWithObserver(
 	ctx context.Context,
 	provider llm.Provider,
@@ -642,12 +756,15 @@ func runToolLoopWithObserver(
 	config ChatConfig,
 	toolCtx *tools.ToolContext,
 	observer *toolLoopObserver,
+	options ...toolLoopOptions,
 ) (*llm.CompletionResponse, error) {
+	requireFinalCompletion := len(options) > 0 && options[0].requireFinalCompletion
 	repetitionTracker := make(map[string]int)
 	exposedToolNames := completionToolNameSet(req.Tools)
 	messages := make([]llm.Message, len(req.Messages))
 	copy(messages, req.Messages)
 	prematureEndRetries := 0
+	var responsesUsage *llm.CompletionResponse
 
 	for iteration := 0; ; iteration++ {
 		// Check context cancellation
@@ -655,7 +772,7 @@ func runToolLoopWithObserver(
 		case <-ctx.Done():
 			resp := &llm.CompletionResponse{
 				Content:    "Request timed out during tool execution.",
-				StopReason: "end_turn",
+				StopReason: oaiStopReasonEndTurn,
 			}
 			observer.finalContent(resp.Content)
 			return resp, nil
@@ -665,26 +782,37 @@ func runToolLoopWithObserver(
 		// Check iteration limit — do one final call without tools
 		if iteration >= config.MaxIterations {
 			messages = append(messages, llm.Message{
-				Role:    "user",
+				Role:    chatRoleUser,
 				Content: "[System: You have reached the maximum number of iterations. Please provide a final summary of what you accomplished.]",
 			})
-			resp, err := provider.Complete(ctx, &llm.CompletionRequest{
-				Model:        model,
-				Messages:     messages,
-				SystemPrompt: req.SystemPrompt,
-				MaxTokens:    req.MaxTokens,
-				Temperature:  req.Temperature,
-			})
+			finalReq := *req
+			finalReq.Model = model
+			finalReq.Messages = messages
+			finalReq.Tools = nil
+			resp, err := provider.Complete(ctx, &finalReq)
+			if err != nil && isStreamingRequiredErr(err) {
+				resp, err = completeViaStream(ctx, provider, &finalReq, options...)
+			}
 			if err != nil {
+				if requireFinalCompletion || llm.IsUsagePersistenceError(err) {
+					return nil, fmt.Errorf("final LLM completion after iteration limit failed: %w", err)
+				}
 				resp := &llm.CompletionResponse{
 					Content:    "Reached iteration limit.",
-					StopReason: "end_turn",
+					StopReason: oaiStopReasonEndTurn,
 				}
 				observer.finalContent(resp.Content)
 				return resp, nil
 			}
-			if err := validateToolLoopCompletion(resp); err != nil {
+			if err := validateToolLoopCompletion(resp, options...); err != nil {
 				return nil, err
+			}
+			if requireFinalCompletion && len(resp.ToolCalls) != 0 {
+				return nil, fmt.Errorf("tools-free final completion returned tool calls")
+			}
+			if req.ResponsesInput {
+				responsesUsage = addResponsesToolLoopUsage(responsesUsage, resp)
+				resp = responsesUsage
 			}
 			observer.finalContent(resp.Content)
 			return resp, nil
@@ -697,14 +825,10 @@ func runToolLoopWithObserver(
 		}
 
 		// Call LLM with tools
-		compReq := &llm.CompletionRequest{
-			Model:        model,
-			Messages:     messages,
-			SystemPrompt: req.SystemPrompt,
-			Tools:        req.Tools,
-			MaxTokens:    req.MaxTokens,
-			Temperature:  req.Temperature,
-		}
+		compReqCopy := *req
+		compReq := &compReqCopy
+		compReq.Model = model
+		compReq.Messages = messages
 
 		resp, err := provider.Complete(ctx, compReq)
 		if err != nil && isStreamingRequiredErr(err) {
@@ -713,7 +837,7 @@ func runToolLoopWithObserver(
 			// aggregate the chunks into a synthesized CompletionResponse so
 			// our tool loop can continue as if Complete had worked.
 			anthropicLog.Info("upstream refused non-streaming, retrying via Stream and aggregating")
-			resp, err = completeViaStream(ctx, provider, compReq)
+			resp, err = completeViaStream(ctx, provider, compReq, options...)
 		}
 		if err != nil && llm.IsContextTooLongErr(err) {
 			tokenEstimate := 0
@@ -724,14 +848,40 @@ func runToolLoopWithObserver(
 			compReq.Messages = messages
 			resp, err = provider.Complete(ctx, compReq)
 			if err != nil && isStreamingRequiredErr(err) {
-				resp, err = completeViaStream(ctx, provider, compReq)
+				resp, err = completeViaStream(ctx, provider, compReq, options...)
 			}
 		}
 		if err != nil {
 			return nil, fmt.Errorf("LLM completion failed: %w", err)
 		}
-		if err := validateToolLoopCompletion(resp); err != nil {
+		if err := validateToolLoopCompletion(resp, options...); err != nil {
 			return nil, err
+		}
+		if req.ResponsesInput {
+			// Enforce the Responses function contract after any provider
+			// translation, including the Chat Completions fallback.
+			seenCalls := make(map[string]bool, len(resp.ToolCalls))
+			for _, call := range resp.ToolCalls {
+				if !validResponsesFunction(call) || seenCalls[call.ID] {
+					return nil, fmt.Errorf("provider returned an invalid function call")
+				}
+				seenCalls[call.ID] = true
+			}
+			responsesUsage = addResponsesToolLoopUsage(responsesUsage, resp)
+			resp = responsesUsage
+		}
+
+		// A text response cut off by the output token budget is terminal:
+		// return the partial text with its max_tokens/length stop reason
+		// instead of treating it as a premature end of turn, which would
+		// discard the text and issue more model calls.
+		if isTokenBudgetTruncatedText(resp, options...) {
+			anthropicLog.Info("response truncated by output token budget — returning partial text",
+				"iteration", iteration,
+				"stop_reason", resp.StopReason,
+			)
+			observer.finalContent(resp.Content)
+			return resp, nil
 		}
 
 		// No tool calls → potentially final response. Guard against premature
@@ -764,11 +914,12 @@ func runToolLoopWithObserver(
 			)
 			observer.prematureEndRetry()
 			messages = append(messages, llm.Message{
-				Role:    "assistant",
-				Content: resp.Content,
+				Role:        chatRoleAssistant,
+				Content:     resp.Content,
+				OutputItems: resp.OutputItems,
 			})
 			messages = append(messages, llm.Message{
-				Role: "user",
+				Role: chatRoleUser,
 				Content: fmt.Sprintf(
 					"[System: You emitted text but did not include the literal %q sentinel that marks GOAL STATE A or GOAL STATE B. The workflow is not done — child Tasks you created are still in flight or pending follow-up. Per the TURN-ENDING INVARIANT, your next response MUST contain a tool_use (not text). Look at the POSTCONDITION TABLE and call the correct next tool. Do NOT emit any text until you are ready to write your final report that begins with %q on its own line.]",
 					goalStateSentinel, goalStateSentinel,
@@ -785,9 +936,10 @@ func runToolLoopWithObserver(
 
 		// Append assistant message with tool calls
 		messages = append(messages, llm.Message{
-			Role:      "assistant",
-			Content:   resp.Content,
-			ToolCalls: resp.ToolCalls,
+			Role:        chatRoleAssistant,
+			Content:     resp.Content,
+			ToolCalls:   resp.ToolCalls,
+			OutputItems: resp.OutputItems,
 		})
 
 		// Execute each tool and append results
@@ -805,7 +957,7 @@ func runToolLoopWithObserver(
 			observer.toolResult(tc, result)
 
 			messages = append(messages, llm.Message{
-				Role:       "tool",
+				Role:       chatRoleTool,
 				ToolCallID: tc.ID,
 				Name:       tc.Name,
 				Content:    result,
@@ -815,7 +967,7 @@ func runToolLoopWithObserver(
 		// Append repetition warning if triggered
 		if repetitionWarning != "" {
 			messages = append(messages, llm.Message{
-				Role:    "user",
+				Role:    chatRoleUser,
 				Content: repetitionWarning,
 			})
 		}
@@ -826,7 +978,7 @@ func runToolLoopWithObserver(
 			for {
 				select {
 				case <-ctx.Done():
-					resp := &llm.CompletionResponse{Content: "Request timed out.", StopReason: "end_turn"}
+					resp := &llm.CompletionResponse{Content: "Request timed out.", StopReason: oaiStopReasonEndTurn}
 					observer.finalContent(resp.Content)
 					return resp, nil
 				default:
@@ -838,7 +990,7 @@ func runToolLoopWithObserver(
 				for _, tc := range resp.ToolCalls {
 					result := executeExposedToolCall(ctx, tc, config.ToolTimeout, toolCtx, exposedToolNames)
 					messages = append(messages, llm.Message{
-						Role: "tool", ToolCallID: tc.ID, Name: tc.Name, Content: result,
+						Role: chatRoleTool, ToolCallID: tc.ID, Name: tc.Name, Content: result,
 					})
 					if !isTaskStillRunning(result) {
 						allStillRunning = false

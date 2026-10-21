@@ -150,10 +150,6 @@ func secureReadFile(requested string, maxBytes int64) ([]byte, secureFileMetadat
 	return data, metadata, err
 }
 
-func secureRemoveAll(requested string) error {
-	return secureRemoveAllContext(context.Background(), requested)
-}
-
 func secureRemoveAllContext(ctx context.Context, requested string) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -175,10 +171,6 @@ func secureRemoveAllContext(ctx context.Context, requested string) error {
 	defer unix.Close(parentFD) //nolint:errcheck
 	entries := 0
 	return secureRemoveAtDepth(ctx, parentFD, name, 0, &entries)
-}
-
-func secureResetDirectory(requested string, setOwner bool, uid, gid uint32, protected []string) error {
-	return secureResetDirectoryContext(context.Background(), requested, setOwner, uid, gid, protected)
 }
 
 func secureResetDirectoryContext(
@@ -220,9 +212,9 @@ func resetRootMetadata(fd int, path string, setOwner bool, uid, gid uint32) erro
 	mode := uint32(0o755)
 	setCommandOwner := setOwner
 	switch filepath.Clean(path) {
-	case "/app":
+	case applicationRoot:
 		setCommandOwner = false
-	case "/tmp", "/dev/shm":
+	case temporaryRoot, sharedMemoryRoot:
 		mode = 0o1777
 		setCommandOwner = false
 	}
@@ -576,7 +568,7 @@ func securePathParts(value string) (string, []string, string, error) {
 		return "", nil, "", fmt.Errorf("path is required")
 	}
 	if !filepath.IsAbs(value) {
-		value = filepath.Join("/app", value)
+		value = filepath.Join(applicationRoot, value)
 	}
 	clean := filepath.Clean(value)
 	for _, candidate := range allowedRoots {
@@ -616,7 +608,7 @@ func securePathParts(value string) (string, []string, string, error) {
 func logicalAllowedRoot(value string) (string, error) {
 	value = strings.TrimSpace(value)
 	if !filepath.IsAbs(value) {
-		value = filepath.Join("/app", value)
+		value = filepath.Join(applicationRoot, value)
 	}
 	clean := filepath.Clean(value)
 	for _, candidate := range allowedRoots {

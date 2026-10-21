@@ -208,7 +208,7 @@ func TestInternalMemoryProposalActionsRequireTaskScopedTxnScopes(t *testing.T) {
 	require.Equal(t, http.StatusForbidden,
 		testInternalMemoryRequest(t, app, http.MethodPost, reviewTarget, `{"status":"accepted"}`).StatusCode)
 	user.ContextToken = internalMemoryTaskToken(ContextTokenScopeMemoryOperate)
-	require.Equal(t, http.StatusNoContent,
+	require.Equal(t, http.StatusOK,
 		testInternalMemoryRequest(t, app, http.MethodPost, reviewTarget, `{"status":"accepted"}`).StatusCode)
 
 	archiveTarget := "/internal/v1/memory-proposals/default/" + archiveProposal.ID + "/archive"
@@ -279,95 +279,41 @@ func TestInternalMemorySearchAndOperationReadsRequireTaskScopedTxnScopes(t *test
 	}
 }
 
-func TestHarnessWrapperCrossNamespaceMemoryAccessRequiresBoundRuntimeRefTaskToken(t *testing.T) {
+// Runtime callers use their capability-bound protocol: a control-plane
+// ServiceAccount gets no cross-namespace exception on internal memory routes,
+// even with an otherwise valid task-scoped transaction token.
+func TestInternalMemoryRejectsControlPlaneServiceAccountCrossNamespace(t *testing.T) {
 	const (
 		controlNamespace = "orka-system"
 		targetNamespace  = "team-runtime"
 		runtimeTaskName  = "runtime-task"
 		runtimeTaskUID   = "runtime-task-uid"
-		runtimeTurnID    = "turn-1"
 	)
-	t.Setenv("POD_NAMESPACE", controlNamespace)
-	t.Setenv(harnessWrapperServiceAccountEnv, "agent-harness-wrapper")
-
 	h, app, _, user := setupTestInternalMemoryHandlers(t)
 	app.Get("/internal/v1/memories/:namespace", h.ListMemories)
 	runtimeTask := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: targetNamespace, Name: runtimeTaskName, UID: types.UID(runtimeTaskUID),
-			Annotations: map[string]string{
-				harnessWrapperTurnIDAnnotation:  runtimeTurnID,
-				harnessWrapperRuntimeAnnotation: "runtime-session-1",
-				harnessWrapperStartedAnnotation: queryTrue,
-			},
-		},
-		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
-		Status: corev1alpha1.TaskStatus{
-			Phase: corev1alpha1.TaskPhaseRunning,
-			HarnessRuntime: &corev1alpha1.HarnessRuntimeStatus{
-				RuntimeRefName: "remote-runtime",
-			},
-		},
+		ObjectMeta: metav1.ObjectMeta{Namespace: targetNamespace, Name: runtimeTaskName, UID: types.UID(runtimeTaskUID)},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
 	}
 	require.NoError(t, h.k8sClient.Create(context.Background(), runtimeTask))
-	nonRuntimeTask := runtimeTask.DeepCopy()
-	nonRuntimeTask.Name = "job-backed-task"
-	nonRuntimeTask.UID = types.UID("job-backed-task-uid")
-	nonRuntimeTask.ResourceVersion = ""
-	nonRuntimeTask.Status.HarnessRuntime = nil
-	nonRuntimeTask.Status.JobName = "job-backed-task-job"
-	require.NoError(t, h.k8sClient.Create(context.Background(), nonRuntimeTask))
 
-	user.AuthType = AuthTypeTokenReview
 	user.Username = "system:serviceaccount:" + controlNamespace + ":agent-harness-wrapper"
 	user.Namespace = controlNamespace
 	user.Extra = nil
-	target := "/internal/v1/memories/" + targetNamespace
-	taskToken := func(namespace, name, uid string) *ContextToken {
-		return &ContextToken{
-			Scopes: []string{ContextTokenScopeMemoryRead},
-			TransactionContext: map[string]any{
-				"namespace": namespace,
-				"taskName":  name,
-				"taskUID":   uid,
-			},
-		}
+	user.ContextToken = &ContextToken{
+		Scopes: []string{ContextTokenScopeMemoryRead},
+		TransactionContext: map[string]any{
+			"namespace": targetNamespace, "taskName": runtimeTaskName, "taskUID": runtimeTaskUID,
+		},
 	}
-
-	user.ContextToken = nil
 	require.Equal(t, http.StatusForbidden,
-		testInternalMemoryRequest(t, app, http.MethodGet, target, "").StatusCode)
-
-	wrongScopeToken := taskToken(targetNamespace, runtimeTaskName, runtimeTaskUID)
-	wrongScopeToken.Scopes = []string{ContextTokenScopeMemoryWrite}
-	for name, token := range map[string]*ContextToken{
-		"wrong scope":     wrongScopeToken,
-		"wrong namespace": taskToken("other-team", runtimeTaskName, runtimeTaskUID),
-		"wrong task name": taskToken(targetNamespace, "other-task", runtimeTaskUID),
-		"wrong task uid":  taskToken(targetNamespace, runtimeTaskName, "other-uid"),
-		"non-runtime task": taskToken(
-			targetNamespace, nonRuntimeTask.Name, string(nonRuntimeTask.UID),
-		),
-	} {
-		t.Run(name, func(t *testing.T) {
-			user.ContextToken = token
-			require.Equal(t, http.StatusForbidden,
-				testInternalMemoryRequest(t, app, http.MethodGet, target, "").StatusCode)
-		})
-	}
-
-	user.ContextToken = taskToken(targetNamespace, runtimeTaskName, runtimeTaskUID)
-	require.Equal(t, http.StatusOK,
-		testInternalMemoryRequest(t, app, http.MethodGet, target, "").StatusCode)
-
-	user.Username = "system:serviceaccount:" + controlNamespace + ":other-service-account"
-	require.Equal(t, http.StatusForbidden,
-		testInternalMemoryRequest(t, app, http.MethodGet, target, "").StatusCode)
+		testInternalMemoryRequest(t, app, http.MethodGet, "/internal/v1/memories/"+targetNamespace, "").StatusCode)
 
 	user.Username = "system:serviceaccount:" + targetNamespace + ":agent-harness-wrapper"
 	user.Namespace = targetNamespace
 	require.Equal(t, http.StatusForbidden,
-		testInternalMemoryRequest(t, app, http.MethodGet, target, "").StatusCode)
+		testInternalMemoryRequest(t, app, http.MethodGet, "/internal/v1/memories/"+targetNamespace, "").StatusCode)
 }
 
 func TestInternalMemoryAuthorizationOffPreservesVerifiedWorkloadCompatibility(t *testing.T) {

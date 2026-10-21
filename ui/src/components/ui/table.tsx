@@ -2,11 +2,25 @@ import * as React from "react"
 
 import { cn } from "@/lib/utils"
 
-function Table({ className, ...props }: React.ComponentProps<"table">) {
+function Table({
+  className,
+  scrollRegionLabel,
+  ...props
+}: React.ComponentProps<"table"> & {
+  /**
+   * Names the sideways-scrolling container and makes it a focusable region,
+   * so a wide table can be scrolled from the keyboard. Unset, the container
+   * adds no tab stop.
+   */
+  scrollRegionLabel?: string
+}) {
   return (
     <div
       data-slot="table-container"
       className="relative w-full overflow-x-auto"
+      {...(scrollRegionLabel
+        ? { role: "region", "aria-label": scrollRegionLabel, tabIndex: 0 }
+        : {})}
     >
       <table
         data-slot="table"
@@ -32,19 +46,6 @@ function TableBody({ className, ...props }: React.ComponentProps<"tbody">) {
     <tbody
       data-slot="table-body"
       className={cn("[&_tr:last-child]:border-0", className)}
-      {...props}
-    />
-  )
-}
-
-function TableFooter({ className, ...props }: React.ComponentProps<"tfoot">) {
-  return (
-    <tfoot
-      data-slot="table-footer"
-      className={cn(
-        "bg-muted/50 border-t font-medium [&>tr]:last:border-b-0",
-        className
-      )}
       {...props}
     />
   )
@@ -89,26 +90,11 @@ function TableCell({ className, ...props }: React.ComponentProps<"td">) {
   )
 }
 
-function TableCaption({
-  className,
-  ...props
-}: React.ComponentProps<"caption">) {
-  return (
-    <caption
-      data-slot="table-caption"
-      className={cn("text-muted-foreground mt-4 text-sm", className)}
-      {...props}
-    />
-  )
-}
-
 export {
   Table,
   TableHeader,
   TableBody,
-  TableFooter,
   TableHead,
   TableRow,
   TableCell,
-  TableCaption,
 }

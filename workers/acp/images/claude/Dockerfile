@@ -1,0 +1,150 @@
+# syntax=docker/dockerfile:1.7.1@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
+
+# The tag documents the human-readable version; the manifest-list digest makes
+# every supported platform immutable.
+FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.27.2-bookworm@sha256:5cf287a799e6b94384bad13d16b14904c531f51ba65792237e122ce42b392f61 AS upstream-artifacts
+ARG TARGETARCH
+COPY workers/acp/images/artifact-tool.go /tmp/artifact-tool.go
+COPY NOTICE.md /artifacts/orka-NOTICE.md
+RUN go build -buildvcs=false -trimpath -ldflags='-s -w' -o /usr/local/bin/artifact-tool /tmp/artifact-tool.go
+RUN set -eu; \
+    mkdir -p /artifacts; \
+    artifact-tool download \
+      "https://codeload.github.com/agentclientprotocol/claude-agent-acp/tar.gz/4e1fc1e8df2b9af3b1b2d6880ba90c5862283ba8" \
+      "533a654f100d54b86ce457fc128e7b1f3e85e3478474e536968bca6999953242" \
+      /artifacts/claude-agent-acp-source.tgz 16777216; \
+    artifact-tool download \
+      "https://registry.npmjs.org/@agentclientprotocol/claude-agent-acp/-/claude-agent-acp-0.89.1.tgz" \
+      "0df9fa22a5e1ccc39bfba37c0c58f272febed6884fb51a2df970840796ea2acb" \
+      /artifacts/claude-agent-acp-release.tgz 16777216; \
+    artifact-tool download \
+      "https://registry.npmjs.org/@anthropic-ai/claude-agent-sdk/-/claude-agent-sdk-0.3.293.tgz" \
+      "395bfbda4294c6334fa18be3706a46ff31851b4f4a6f74ba11ac96c9d97ced9f" \
+      /artifacts/claude-agent-sdk.tgz 16777216; \
+    case "$TARGETARCH" in \
+      amd64) \
+        native_url="https://registry.npmjs.org/@anthropic-ai/claude-agent-sdk-linux-x64/-/claude-agent-sdk-linux-x64-0.3.293.tgz"; \
+        native_sha="bdcb3a8e653e96aace67adb5ce6a50d20753c62093ec45396882fdb327535a76" ;; \
+      arm64) \
+        native_url="https://registry.npmjs.org/@anthropic-ai/claude-agent-sdk-linux-arm64/-/claude-agent-sdk-linux-arm64-0.3.293.tgz"; \
+        native_sha="7a896de19be15b52b0b0ede2befe58c11ff2321064c3333ccac3f84eadafc36c" ;; \
+      *) echo "unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
+    esac; \
+    artifact-tool download \
+      "$native_url" "$native_sha" /artifacts/claude-native.tgz 125829120; \
+    artifact-tool download \
+      "https://raw.githubusercontent.com/orka-agents/orka/d03acb995b6014a6e855181c50b922b65ea8e7ff/LICENSE" \
+      "7df20dcdf9197e9945c14858d41c60f11b52b93e5b69e2b63416b874d598d322" \
+      /artifacts/orka-LICENSE 65536
+
+FROM --platform=$BUILDPLATFORM docker.io/library/node:22.22.0-bookworm-slim@sha256:dd9d21971ec4395903fa6143c2b9267d048ae01ca6d3ea96f16cb30df6187d94 AS adapter-builder
+ENV NPM_CONFIG_AUDIT=false \
+    NPM_CONFIG_FUND=false \
+    NPM_CONFIG_UPDATE_NOTIFIER=false
+COPY --from=upstream-artifacts /usr/local/bin/artifact-tool /usr/local/bin/artifact-tool
+COPY --from=upstream-artifacts /artifacts/claude-agent-acp-source.tgz /tmp/source.tgz
+COPY --from=upstream-artifacts /artifacts/claude-agent-acp-release.tgz /tmp/release.tgz
+RUN set -eu; \
+    mkdir -p /src /published; \
+    tar -xzf /tmp/source.tgz -C /src --strip-components=1; \
+    tar -xzf /tmp/release.tgz -C /published
+WORKDIR /src
+RUN npm ci --ignore-scripts --no-audit --no-fund --registry=https://registry.npmjs.org/
+RUN npm run build && rm -rf /src/dist/tests
+RUN artifact-tool compare /src/dist /published/package/dist
+
+FROM --platform=$TARGETPLATFORM docker.io/library/node:22.22.0-trixie-slim@sha256:465a8c8f0f4103861bcbcf3e512608394b7155eccb1955425f4ea3f672ddc53e AS claude-layout
+ARG TARGETARCH
+ENV NPM_CONFIG_AUDIT=false \
+    NPM_CONFIG_FUND=false \
+    NPM_CONFIG_UPDATE_NOTIFIER=false
+WORKDIR /opt/claude-agent-acp
+COPY --from=adapter-builder /src/package.json /src/package-lock.json ./
+RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund --registry=https://registry.npmjs.org/
+COPY --from=adapter-builder /src/dist ./dist
+COPY --from=adapter-builder /src/README.md /src/LICENSE ./
+COPY --from=upstream-artifacts /artifacts/claude-agent-sdk.tgz /tmp/claude-agent-sdk.tgz
+COPY --from=upstream-artifacts /artifacts/claude-native.tgz /tmp/claude-native.tgz
+RUN set -eu; \
+    case "$TARGETARCH" in \
+      amd64) native_package=claude-agent-sdk-linux-x64 ;; \
+      arm64) native_package=claude-agent-sdk-linux-arm64 ;; \
+      *) echo "unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
+    esac; \
+    rm -rf node_modules/@anthropic-ai/claude-agent-sdk; \
+    mkdir -p node_modules/@anthropic-ai/claude-agent-sdk; \
+    tar -xzf /tmp/claude-agent-sdk.tgz \
+      -C node_modules/@anthropic-ai/claude-agent-sdk --strip-components=1; \
+    rm -rf "node_modules/@anthropic-ai/$native_package"; \
+    mkdir -p "node_modules/@anthropic-ai/$native_package"; \
+    tar -xzf /tmp/claude-native.tgz \
+      -C "node_modules/@anthropic-ai/$native_package" --strip-components=1; \
+    node -e 'const p=require(`./node_modules/@anthropic-ai/${process.argv[1]}/package.json`); if(p.version!=="0.3.293") throw new Error(`unexpected Claude native package ${p.name}@${p.version}`)' "$native_package"; \
+    test -x "node_modules/@anthropic-ai/$native_package/claude"; \
+    mkdir -p /opt/claude/bin; \
+    cp "node_modules/@anthropic-ai/$native_package/LICENSE.md" /opt/claude/LICENSE.md; \
+    ln -s "/opt/claude-agent-acp/node_modules/@anthropic-ai/$native_package/claude" \
+      /opt/claude/bin/claude
+
+FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.27.2-bookworm@sha256:5cf287a799e6b94384bad13d16b14904c531f51ba65792237e122ce42b392f61 AS supervisor-builder
+ARG TARGETOS
+ARG TARGETARCH
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked go mod download
+COPY . .
+RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
+    set -eu; \
+    test "$TARGETOS" = linux; \
+    case "$TARGETARCH" in amd64|arm64) ;; *) exit 1 ;; esac; \
+    CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" \
+      go build -buildvcs=false -trimpath -ldflags='-s -w' \
+      -o /out/orka-acp-runtime ./cmd/orka-acp-runtime; \
+    CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" \
+      go build -buildvcs=false -trimpath -ldflags='-s -w' \
+      -o /out/orka-acp-exec-helper ./cmd/orka-acp-exec-helper
+
+FROM --platform=$TARGETPLATFORM docker.io/library/node:22.22.0-trixie-slim@sha256:465a8c8f0f4103861bcbcf3e512608394b7155eccb1955425f4ea3f672ddc53e
+LABEL org.opencontainers.image.title="Orka ACP Claude runtime" \
+      org.opencontainers.image.description="Orka harness v2 ACP supervisor with Claude Agent ACP 0.89.1 and Claude Agent SDK 0.3.293 / Claude Code 2.1.293" \
+      org.opencontainers.image.source="https://github.com/orka-agents/orka" \
+      org.opencontainers.image.licenses="MIT AND Apache-2.0 AND LicenseRef-Anthropic-Legal-Agreements" \
+      ai.orka.acp.provider="claude" \
+      ai.orka.acp.adapter.version="0.89.1" \
+      ai.orka.acp.adapter.revision="4e1fc1e8df2b9af3b1b2d6880ba90c5862283ba8" \
+      ai.orka.acp.adapter.digest="sha256:0df9fa22a5e1ccc39bfba37c0c58f272febed6884fb51a2df970840796ea2acb" \
+      ai.orka.acp.provider.version="0.3.293" \
+      ai.orka.acp.provider.cli.version="2.1.293" \
+      ai.orka.acp.provider.digest.amd64="sha256:bdcb3a8e653e96aace67adb5ce6a50d20753c62093ec45396882fdb327535a76" \
+      ai.orka.acp.provider.digest.arm64="sha256:7a896de19be15b52b0b0ede2befe58c11ff2321064c3333ccac3f84eadafc36c"
+ENV HOME=/root \
+    NODE_ENV=production \
+    ORKA_ACP_PROVIDER=claude \
+    PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+RUN set -eu; \
+    ln -s /usr/local/bin/node /usr/bin/node; \
+    rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack \
+      /opt/yarn-v1.22.22; \
+    rm -f /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack \
+      /usr/local/bin/pnpm /usr/local/bin/pnpx /usr/local/bin/yarn /usr/local/bin/yarnpkg; \
+    mkdir -p /sessions /usr/share/licenses/orka /usr/share/licenses/claude-agent-acp \
+      /usr/share/licenses/claude-agent-sdk /usr/share/licenses/claude-code; \
+    chmod 0711 /sessions
+COPY --from=supervisor-builder /out/orka-acp-runtime /usr/local/bin/orka-acp-runtime
+COPY --from=supervisor-builder /out/orka-acp-exec-helper /usr/local/bin/orka-acp-exec-helper
+COPY --from=claude-layout /opt/claude-agent-acp /opt/claude-agent-acp
+COPY --from=claude-layout /opt/claude /opt/claude
+COPY --from=claude-layout /opt/claude-agent-acp/LICENSE /usr/share/licenses/claude-agent-acp/LICENSE
+COPY --from=claude-layout /opt/claude-agent-acp/node_modules/@anthropic-ai/claude-agent-sdk/LICENSE.md /usr/share/licenses/claude-agent-sdk/LICENSE.md
+COPY --from=claude-layout /opt/claude/LICENSE.md /usr/share/licenses/claude-code/LICENSE.md
+COPY --from=upstream-artifacts /artifacts/orka-LICENSE /usr/share/licenses/orka/LICENSE
+COPY --from=upstream-artifacts /artifacts/orka-NOTICE.md /usr/share/licenses/orka/NOTICE.md
+WORKDIR /
+# The supervisor must start as root to assign each child a unique UID/GID and
+# prove process cleanup. Kubernetes drops all capabilities and adds back only
+# the explicit identity/process-management set.
+# trivy:ignore:DS-0002
+USER 0:0
+EXPOSE 8080
+STOPSIGNAL SIGTERM
+ENTRYPOINT ["/usr/local/bin/orka-acp-runtime"]

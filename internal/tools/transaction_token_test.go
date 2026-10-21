@@ -467,6 +467,36 @@ func TestPrepareChildTransactionTokenDisabledForNonTransactionalParent(t *testin
 	}
 }
 
+func TestPrepareChildTransactionTokenFailsClosedForCrossNamespaceChild(t *testing.T) {
+	t.Setenv(workerenv.ContextTokenTTSEndpoint, "https://transactions.example.test/token")
+	t.Setenv(workerenv.ContextTokenTTSTokenSource, contexttoken.TTSTokenSourceIncoming)
+	t.Setenv(workerenv.ContextTokenSubjectTokenFile, writeTestSubjectToken(t))
+	t.Setenv(workerenv.ContextTokenChildScope, childTransactionScope)
+
+	parent := parentTask()
+	child := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Namespace: parent.Namespace + "-other"},
+		Spec: corev1alpha1.TaskSpec{
+			Transaction: parent.Spec.Transaction.DeepCopy(),
+		},
+	}
+	fc := newFakeClient()
+	prep, err := prepareChildTransactionToken(context.Background(), fc, parent, child)
+	if err == nil || !strings.Contains(err.Error(), "cross-namespace delegation is not supported") {
+		t.Fatalf("prepareChildTransactionToken() error = %v, want cross-namespace fail-closed rejection", err)
+	}
+	if prep != nil {
+		t.Fatalf("cross-namespace rejection returned a preparation: %#v", prep)
+	}
+	secrets := &corev1.SecretList{}
+	if err := fc.List(context.Background(), secrets); err != nil {
+		t.Fatal(err)
+	}
+	if len(secrets.Items) != 0 {
+		t.Fatalf("cross-namespace rejection must not create token Secrets, got %d", len(secrets.Items))
+	}
+}
+
 func TestChildTransactionTokenSecretNameExtremeParentNames(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -520,14 +550,13 @@ func TestChildTransactionTokenSecretNameExtremeParentNames(t *testing.T) {
 	}
 }
 
-func TestCrossNamespaceChildTransactionTokenPlaceholderAdoption(t *testing.T) {
+func TestChildTransactionTokenPlaceholderAdoptionPersistsRenewalAuthority(t *testing.T) {
 	t.Setenv(workerenv.ContextTokenTTSEndpoint, "https://transactions.example.test/token")
 	t.Setenv(workerenv.ContextTokenTTSTokenSource, contexttoken.TTSTokenSourceIncoming)
 	t.Setenv(workerenv.ContextTokenSubjectTokenFile, writeTestSubjectToken(t))
 	t.Setenv(workerenv.ContextTokenChildScope, childTransactionScope)
 	parent := parentTask()
-	parent.Namespace = "parents"
-	child := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "child", Namespace: "children", UID: apitypes.UID("cross-child-uid")}, Spec: corev1alpha1.TaskSpec{
+	child := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "child", Namespace: parent.Namespace, UID: apitypes.UID("adopted-child-uid")}, Spec: corev1alpha1.TaskSpec{
 		Type: corev1alpha1.TaskTypeAgent, AgentRef: &corev1alpha1.AgentReference{Name: "worker"}, Transaction: parent.Spec.Transaction.DeepCopy(),
 	}}
 	fc := newFakeClient()
@@ -559,7 +588,7 @@ func TestChildTransactionTokenPlaceholderReplacementRaceFailsClosed(t *testing.T
 	t.Setenv(workerenv.ContextTokenSubjectTokenFile, writeTestSubjectToken(t))
 	t.Setenv(workerenv.ContextTokenChildScope, childTransactionScope)
 	parent := parentTask()
-	child := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "child", Namespace: "children", UID: apitypes.UID("race-child-uid")}, Spec: corev1alpha1.TaskSpec{Transaction: parent.Spec.Transaction.DeepCopy()}}
+	child := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "child", Namespace: parent.Namespace, UID: apitypes.UID("race-child-uid")}, Spec: corev1alpha1.TaskSpec{Transaction: parent.Spec.Transaction.DeepCopy()}}
 	fc := newFakeClient()
 	prep, err := prepareChildTransactionToken(context.Background(), fc, parent, child)
 	if err != nil {

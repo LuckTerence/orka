@@ -1,0 +1,57 @@
+# Common cluster access is limited to namespace mode claims, exact worker-role
+# binding, and read-only startup inventory. Workload mutation stays namespaced.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: orka
+    app.kubernetes.io/managed-by: kustomize
+  name: static-controller-cluster-role
+rules:
+- apiGroups:
+  - ""
+  resourceNames:
+  - system
+  resources:
+  - namespaces
+  verbs:
+  - get
+- apiGroups:
+  - rbac.authorization.k8s.io
+  resourceNames:
+  - ai-worker-role
+  - vendor-worker-role
+  - container-worker-role
+  resources:
+  - clusterroles
+  verbs:
+  - bind
+# Startup checks for retained legacy allocations are cluster-wide and read-only.
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - runtimepools
+  verbs:
+  - list
+- apiGroups:
+  - workspace.orka.ai
+  resources:
+  - executionworkspaces
+  verbs:
+  - list
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/name: orka
+    app.kubernetes.io/managed-by: kustomize
+  name: static-controller-cluster-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: static-controller-cluster-role
+subjects:
+- kind: ServiceAccount
+  name: controller-manager
+  namespace: system

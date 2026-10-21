@@ -33,12 +33,14 @@ func (h *InternalHandlers) ensureMemoryProposalStore() error {
 	return nil
 }
 
+// internalNamespace resolves the namespace of an internal memory route and
+// binds the request to the active Task whose current worker Pod made it.
 func (h *InternalHandlers) internalNamespace(c fiber.Ctx) (string, error) {
 	namespace := c.Params("namespace")
 	if namespace == "" {
 		return "", fiber.NewError(fiber.StatusBadRequest, "namespace is required")
 	}
-	if err := h.internalCallerAuthorizer().verifyMemoryNamespace(c, namespace); err != nil {
+	if _, err := h.internalCallerAuthorizer().verifyMemoryCaller(c, namespace); err != nil {
 		return "", err
 	}
 	return namespace, nil
@@ -225,13 +227,9 @@ func (h *InternalHandlers) ListMemoryProposals(c fiber.Ctx) error {
 	if err := h.authorizeInternalMemoryTask(c, namespace, "listMemoryProposals", h.memoryReadScopes()); err != nil {
 		return err
 	}
-	filter, err := parseMemoryProposalFilter(c, namespace)
+	proposals, err := listNamespaceMemoryProposals(c, h.memoryProposalStore, namespace)
 	if err != nil {
 		return err
-	}
-	proposals, err := h.memoryProposalStore.ListMemoryProposals(c.Context(), filter)
-	if err != nil {
-		return memoryStoreError("list memory proposals", "memory proposal", err)
 	}
 	return c.JSON(proposals)
 }
@@ -255,14 +253,7 @@ func (h *InternalHandlers) CreateMemoryProposal(c fiber.Ctx) error {
 	if request.Namespace != "" && request.Namespace != namespace {
 		return fiber.NewError(fiber.StatusBadRequest, "memory proposal namespace mismatch")
 	}
-	proposal := request.toStore(namespace)
-	if strings.TrimSpace(proposal.Title) == "" {
-		return fiber.NewError(fiber.StatusBadRequest, "title is required")
-	}
-	if err := h.memoryProposalStore.CreateMemoryProposal(c.Context(), proposal); err != nil {
-		return memoryStoreError("create memory proposal", "memory proposal", err)
-	}
-	return c.Status(fiber.StatusCreated).JSON(proposal)
+	return createNamespaceMemoryProposal(c, h.memoryProposalStore, namespace, request)
 }
 
 // GetMemoryProposal gets a memory proposal by ID from the namespace in the internal route.
@@ -277,11 +268,7 @@ func (h *InternalHandlers) GetMemoryProposal(c fiber.Ctx) error {
 	if err := h.authorizeInternalMemoryTask(c, namespace, "getMemoryProposal", h.memoryReadScopes()); err != nil {
 		return err
 	}
-	proposal, err := h.memoryProposalStore.GetMemoryProposal(c.Context(), namespace, c.Params("id"))
-	if err != nil {
-		return memoryStoreError("get memory proposal", "memory proposal", err)
-	}
-	return c.JSON(proposal)
+	return getNamespaceMemoryProposal(c, h.memoryProposalStore, namespace)
 }
 
 // ReviewMemoryProposal records a review decision without applying the proposal automatically.
@@ -303,15 +290,7 @@ func (h *InternalHandlers) ReviewMemoryProposal(c fiber.Ctx) error {
 	if review.Namespace != namespace {
 		return fiber.NewError(fiber.StatusBadRequest, "memory proposal namespace mismatch")
 	}
-	if review.Reviewer == "" {
-		if actor, _ := memoryActor(c); actor != "" {
-			review.Reviewer = actor
-		}
-	}
-	if err := h.memoryProposalStore.ReviewMemoryProposal(c.Context(), review); err != nil {
-		return memoryStoreError("review memory proposal", "memory proposal", err)
-	}
-	return c.SendStatus(fiber.StatusNoContent)
+	return reviewNamespaceMemoryProposal(c, h.memoryProposalStore, review)
 }
 
 // ArchiveMemoryProposal archives a proposal in the namespace in the internal route without applying it.
@@ -326,10 +305,7 @@ func (h *InternalHandlers) ArchiveMemoryProposal(c fiber.Ctx) error {
 	if err := h.authorizeInternalMemoryTask(c, namespace, "archiveMemoryProposal", h.memoryWriteScopes()); err != nil {
 		return err
 	}
-	if err := h.memoryProposalStore.ArchiveMemoryProposal(c.Context(), namespace, c.Params("id")); err != nil {
-		return memoryStoreError("archive memory proposal", "memory proposal", err)
-	}
-	return c.SendStatus(fiber.StatusNoContent)
+	return archiveNamespaceMemoryProposal(c, h.memoryProposalStore, namespace)
 }
 
 // ApplyMemoryProposal applies an accepted memory proposal into durable memory in the namespace in the internal route.
@@ -352,11 +328,11 @@ func (h *InternalHandlers) ApplyMemoryProposal(c fiber.Ctx) error {
 	if apply.Namespace != namespace {
 		return fiber.NewError(fiber.StatusBadRequest, "memory proposal namespace mismatch")
 	}
-	actor, _ := memoryActor(c)
-	if apply.AppliedBy == "" {
-		apply.AppliedBy = actor
+	appliedBy, err := memoryProposalActor(c)
+	if err != nil {
+		return err
 	}
-	result, err := h.memoryService.ApplyMemoryProposal(c.Context(), namespace, apply.ID, apply.AppliedBy,
+	result, err := h.memoryService.ApplyMemoryProposal(c.Context(), namespace, apply.ID, appliedBy,
 		internalMemoryMutationContext(c, namespace, "internalApplyMemoryProposal", "memory proposal applied by worker"))
 	if err != nil {
 		return memoryServiceError(err)
@@ -397,7 +373,7 @@ func (h *InternalHandlers) authorizeInternalMemoryTask(
 	if !ok || tokenNamespace != namespace {
 		return authorizationFailure(token, "namespace does not match the task-scoped Txn-Token")
 	}
-	taskName, ok := contextString(token.TransactionContext, "taskName")
+	taskName, ok := contextString(token.TransactionContext, apiFieldTaskName)
 	if !ok {
 		if taskRef, hasTask := contextString(token.TransactionContext, "task"); hasTask {
 			if after, ok0 := strings.CutPrefix(taskRef, namespace+"/"); ok0 {
@@ -430,7 +406,7 @@ func (h *InternalHandlers) authorizeInternalMemoryTask(
 		isTerminalInternalTaskPhase(task.Status.Phase) {
 		return authorizationFailure(token, "task identity is not active")
 	}
-	tokenTaskUID, ok := contextString(token.TransactionContext, "taskUID")
+	tokenTaskUID, ok := contextString(token.TransactionContext, contextTaskUIDKey)
 	if !ok || tokenTaskUID != string(task.UID) {
 		return authorizationFailure(token, "task UID does not match the active task")
 	}

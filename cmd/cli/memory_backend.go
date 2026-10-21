@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
 
 const memoryBackendStatusCommand = "status"
@@ -68,7 +70,7 @@ func newMemoryBackendPurgeCmd() *cobra.Command {
 				"purgeExpiredIdempotency":  purgeExpiredIdempotency,
 				"purgeTombstones":          purgeTombstones,
 				"purgeAudit":               purgeAudit,
-				"reason":                   strings.TrimSpace(reason),
+				fieldReason:                strings.TrimSpace(reason),
 			})
 			if err != nil {
 				return err
@@ -97,7 +99,7 @@ func newMemoryBackendPurgeCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&purgeAudit, "audit", false, "Purge eligible non-authoritative audit rows")
 	cmd.Flags().StringVar(&reason, "reason", "", "Required audit reason")
 	cmd.Flags().BoolVar(&yes, "yes", false, "Confirm the retention purge")
-	addOutputFlag(cmd, outputJSON)
+	addOutputFlag(cmd, outputTable)
 	return cmd
 }
 
@@ -125,7 +127,7 @@ func newMemoryBackendCheckpointCmd() *cobra.Command {
 			body, err := json.Marshal(map[string]any{
 				"manifestDigest":           strings.TrimSpace(manifestDigest),
 				"maximumOperationSequence": maximumOperationSequence,
-				"reason":                   strings.TrimSpace(reason),
+				fieldReason:                strings.TrimSpace(reason),
 			})
 			if err != nil {
 				return err
@@ -148,7 +150,7 @@ func newMemoryBackendCheckpointCmd() *cobra.Command {
 	)
 	cmd.Flags().StringVar(&reason, "reason", "", "Required audit reason")
 	cmd.Flags().BoolVar(&yes, "yes", false, "Confirm the checkpoint receipt")
-	addOutputFlag(cmd, outputJSON)
+	addOutputFlag(cmd, outputTable)
 	return cmd
 }
 
@@ -190,7 +192,7 @@ func newMemoryBackendGetCmd(status bool) *cobra.Command {
 			return printStructured(cmd, result)
 		},
 	}
-	addOutputFlag(cmd, outputJSON)
+	addOutputFlag(cmd, outputTable)
 	return cmd
 }
 
@@ -229,7 +231,7 @@ func newMemoryBackendCreateCmd() *cobra.Command {
 					"apiVersion": "core.orka.ai/v1alpha1",
 					"kind":       "MemoryBackend",
 					"metadata": map[string]any{
-						"name":      "default",
+						cliNameKey:  corev1alpha1.MemoryBackendDefaultName,
 						"namespace": client.Namespace,
 					},
 					"spec": map[string]any{
@@ -265,7 +267,7 @@ func newMemoryBackendCreateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&storeName, "store", "", "Pre-created provider store name")
 	cmd.Flags().StringVar(&reason, "reason", "", "Required audit reason")
 	cmd.Flags().BoolVar(&yes, "yes", false, "Confirm backend creation")
-	addOutputFlag(cmd, outputJSON)
+	addOutputFlag(cmd, outputTable)
 	return cmd
 }
 
@@ -316,7 +318,7 @@ func newMemoryBackendUpdateCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&file, "file", "f", "", "Path to MemoryBackend JSON/YAML")
 	cmd.Flags().StringVar(&reason, "reason", "", "Required audit reason")
 	cmd.Flags().BoolVar(&yes, "yes", false, "Confirm backend update")
-	addOutputFlag(cmd, outputJSON)
+	addOutputFlag(cmd, outputTable)
 	return cmd
 }
 
@@ -334,7 +336,7 @@ func newMemoryBackendDeleteCmd() *cobra.Command {
 			if !yes {
 				return fmt.Errorf("--yes is required for memory backend deletion")
 			}
-			body, _ := json.Marshal(map[string]string{"reason": strings.TrimSpace(reason)})
+			body, _ := json.Marshal(map[string]string{fieldReason: strings.TrimSpace(reason)})
 			_, err := newClientFromCmd(cmd).DoJSON(
 				cmd.Context(),
 				http.MethodDelete,
@@ -368,7 +370,7 @@ func newMemoryBackendActionCmd(action string) *cobra.Command {
 			if !dryRun && !yes {
 				return fmt.Errorf("--yes is required for memory backend %s", action)
 			}
-			body, err := json.Marshal(map[string]any{"reason": strings.TrimSpace(reason), "dryRun": dryRun})
+			body, err := json.Marshal(map[string]any{fieldReason: strings.TrimSpace(reason), "dryRun": dryRun})
 			if err != nil {
 				return err
 			}
@@ -383,6 +385,6 @@ func newMemoryBackendActionCmd(action string) *cobra.Command {
 	cmd.Flags().StringVar(&reason, "reason", "", "Required audit reason")
 	cmd.Flags().BoolVar(&yes, "yes", false, "Confirm the operation")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Preview the operation without changing state")
-	addOutputFlag(cmd, outputJSON)
+	addOutputFlag(cmd, outputTable)
 	return cmd
 }

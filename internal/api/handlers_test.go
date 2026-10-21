@@ -18,6 +18,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/stretchr/testify/require"
@@ -36,8 +37,11 @@ import (
 
 	gatewayv1alpha1 "github.com/orka-agents/orka/api/gateway/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/connectors"
+	"github.com/orka-agents/orka/internal/executionmode"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
+	storekube "github.com/orka-agents/orka/internal/store/kube"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 	"github.com/orka-agents/orka/internal/transactiontoken"
 )
@@ -46,6 +50,75 @@ const (
 	testWatchNamespace         = "prod"
 	testContextTokenScopeClaim = "scope"
 )
+
+func TestHandlers_ProviderReadsRequireKubernetesRBACForTokenReviewUser(t *testing.T) {
+	// TokenReview-authenticated reads run with the controller's credentials,
+	// so the Provider list and get handlers must pass a SubjectAccessReview
+	// for the caller before the orka-client Role grant means anything.
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+
+	provider := &corev1alpha1.Provider{
+		ObjectMeta: metav1.ObjectMeta{Name: "openai", Namespace: "default"},
+		Spec:       corev1alpha1.ProviderSpec{Type: "openai", DefaultModel: "gpt-4o"},
+	}
+	tests := []struct {
+		name       string
+		method     string
+		path       string
+		wantVerb   string
+		wantName   string
+		allowed    bool
+		wantStatus int
+	}{
+		{"list denied", http.MethodGet, "/providers?namespace=default", "list", "", false, http.StatusForbidden},
+		{"list allowed", http.MethodGet, "/providers?namespace=default", "list", "", true, http.StatusOK},
+		{"get denied", http.MethodGet, "/providers/openai?namespace=default", "get", "openai", false, http.StatusForbidden},
+		{"get allowed", http.MethodGet, "/providers/openai?namespace=default", "get", "openai", true, http.StatusOK},
+		// Authorization runs before the read, so a denied caller cannot
+		// enumerate names through a 403-vs-404 difference.
+		{"get denied unknown name", http.MethodGet, "/providers/missing?namespace=default", "get", "missing", false, http.StatusForbidden},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(provider.DeepCopy()).Build()
+			kubeClient := kubefake.NewSimpleClientset()
+			reviewed := false
+			kubeClient.PrependReactor("create", "subjectaccessreviews", func(action k8stesting.Action) (bool, runtime.Object, error) {
+				review := action.(k8stesting.CreateAction).GetObject().(*authorizationv1.SubjectAccessReview)
+				require.Equal(t, "system:serviceaccount:default:limited", review.Spec.User)
+				require.NotNil(t, review.Spec.ResourceAttributes)
+				require.Equal(t, "default", review.Spec.ResourceAttributes.Namespace)
+				require.Equal(t, tt.wantVerb, review.Spec.ResourceAttributes.Verb)
+				require.Equal(t, corev1alpha1.GroupVersion.Group, review.Spec.ResourceAttributes.Group)
+				require.Equal(t, "providers", review.Spec.ResourceAttributes.Resource)
+				require.Equal(t, tt.wantName, review.Spec.ResourceAttributes.Name)
+				reviewed = true
+				review.Status.Allowed = tt.allowed
+				return true, review, nil
+			})
+
+			handlers := NewHandlers(HandlersConfig{Client: fakeClient, KubeClient: kubeClient})
+			app := fiber.New()
+			app.Use(func(c fiber.Ctx) error {
+				c.Locals(UserInfoContextKey, &UserInfo{
+					Username: "system:serviceaccount:default:limited",
+					Groups:   []string{"system:serviceaccounts", "system:serviceaccounts:default"},
+					AuthType: AuthTypeTokenReview,
+				})
+				return c.Next()
+			})
+			app.Get("/providers", handlers.ListProviders)
+			app.Get("/providers/:name", handlers.GetProvider)
+
+			resp, err := app.Test(httptest.NewRequest(tt.method, tt.path, nil))
+			require.NoError(t, err)
+			defer resp.Body.Close() //nolint:errcheck
+			require.Equal(t, tt.wantStatus, resp.StatusCode)
+			require.True(t, reviewed, "expected a SubjectAccessReview")
+		})
+	}
+}
 
 func TestHandlers_CreateTaskRequiresKubernetesRBACForTokenReviewUser(t *testing.T) {
 	scheme := runtime.NewScheme()
@@ -130,7 +203,16 @@ func setupTestHandlers() (*Handlers, *fiber.App) {
 	_ = corev1alpha1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 
-	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	// The API server assigns UIDs; the fake client does not, and the
+	// requester stamp binds the UID.
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithInterceptorFuncs(interceptor.Funcs{
+		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			if obj.GetUID() == "" {
+				obj.SetUID(types.UID("uid-" + obj.GetName()))
+			}
+			return c.Create(ctx, obj, opts...)
+		},
+	}).Build()
 	db, _ := sqlite.NewDB(":memory:")
 	ss := sqlite.NewStore(db, ":memory:")
 	handlers := NewHandlers(HandlersConfig{Client: fakeClient, SessionStore: ss, ResultStore: ss})
@@ -277,6 +359,35 @@ func setupTestHandlersWithAuthzStore(
 	return app, ss
 }
 
+func setupTestCreateTaskHandlerWithAuthzReaders(
+	t *testing.T,
+	ctxTokenConfig ContextTokenConfig,
+	mode string,
+	cachedClient client.Client,
+	apiReader client.Reader,
+) *fiber.App {
+	t.Helper()
+	db, err := sqlite.NewDB(":memory:")
+	require.NoError(t, err)
+	ss := sqlite.NewStore(db, ":memory:")
+	authz, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationConfigOptions{Mode: mode})
+	require.NoError(t, err)
+	// Enforced direct transactional agent tasks provision a task-scoped token.
+	handlers := NewHandlers(HandlersConfig{
+		Client:                    cachedClient,
+		APIReader:                 apiReader,
+		SessionStore:              ss,
+		ResultStore:               ss,
+		ContextTokenAuthorization: authz,
+		ContextTokenTTS:           testDirectTaskIncomingTTSConfig(),
+	})
+
+	app := fiber.New()
+	app.Use(NewAuthMiddleware(cachedClient, AuthConfig{ContextTokens: ctxTokenConfig}))
+	app.Post("/tasks", handlers.CreateTask)
+	return app
+}
+
 func setupTestHandlersWithObjects(objs ...runtime.Object) (*Handlers, *fiber.App) {
 	scheme := runtime.NewScheme()
 	_ = corev1alpha1.AddToScheme(scheme)
@@ -320,6 +431,119 @@ func TestHandlers_Readyz(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("StatusCode = %d, want %d", resp.StatusCode, http.StatusOK)
 	}
+}
+
+func TestHandlers_Readyz_UsesUncachedNamedNamespaceRead(t *testing.T) {
+	tests := []struct {
+		name       string
+		apiObjects []client.Object
+		wantStatus int
+	}{
+		{
+			name: "namespace exists",
+			apiObjects: []client.Object{&corev1.Namespace{
+				ObjectMeta: metav1.ObjectMeta{Name: testWatchNamespace},
+			}},
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "namespace read fails",
+			wantStatus: http.StatusServiceUnavailable,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			require.NoError(t, corev1.AddToScheme(scheme))
+
+			cachedReads := 0
+			cachedClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: testWatchNamespace}}).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+						cachedReads++
+						return c.Get(ctx, key, obj, opts...)
+					},
+					List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+						cachedReads++
+						return c.List(ctx, list, opts...)
+					},
+				}).
+				Build()
+
+			apiGets := 0
+			apiLists := 0
+			apiReader := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(tt.apiObjects...).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+						apiGets++
+						require.Equal(t, client.ObjectKey{Name: testWatchNamespace}, key)
+						require.IsType(t, &corev1.Namespace{}, obj)
+						return c.Get(ctx, key, obj, opts...)
+					},
+					List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+						apiLists++
+						return c.List(ctx, list, opts...)
+					},
+				}).
+				Build()
+
+			handlers := NewHandlers(HandlersConfig{
+				Client:         cachedClient,
+				APIReader:      apiReader,
+				WatchNamespace: testWatchNamespace,
+			})
+			app := fiber.New()
+			app.Get("/readyz", handlers.Readyz)
+
+			resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/readyz", nil))
+			require.NoError(t, err)
+			require.Equal(t, tt.wantStatus, resp.StatusCode)
+			require.Zero(t, cachedReads)
+			require.Equal(t, 1, apiGets)
+			require.Zero(t, apiLists)
+		})
+	}
+}
+
+func TestHandlers_CreateTaskRejectsNonPositiveTimeout(t *testing.T) {
+	handlers, app := setupTestHandlers()
+	app.Post("/tasks", handlers.CreateTask)
+
+	for _, timeout := range []string{"0", "0s", "-5m"} {
+		body := CreateTaskRequest{
+			Name: "zero-timeout", Namespace: "default", Type: corev1alpha1.TaskTypeContainer,
+			Image: "busybox", Command: []string{"true"}, Timeout: timeout,
+		}
+		bodyBytes, _ := json.Marshal(body)
+		req := httptest.NewRequest(http.MethodPost, "/tasks", bytes.NewReader(bodyBytes))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+		require.Equal(t, http.StatusBadRequest, resp.StatusCode, timeout)
+	}
+	// The Kubernetes-style body carries the timeout in spec.timeout.
+	for _, timeout := range []time.Duration{0, -5 * time.Minute} {
+		body := CreateTaskRequest{
+			Name: "zero-timeout", Namespace: "default",
+			Spec: &corev1alpha1.TaskSpec{
+				Type: corev1alpha1.TaskTypeContainer, Image: "busybox", Command: []string{"true"},
+				Timeout: &metav1.Duration{Duration: timeout},
+			},
+		}
+		bodyBytes, _ := json.Marshal(body)
+		req := httptest.NewRequest(http.MethodPost, "/tasks", bytes.NewReader(bodyBytes))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+		require.Equal(t, http.StatusBadRequest, resp.StatusCode, "spec.timeout %s", timeout)
+	}
+	err := handlers.client.Get(context.Background(), types.NamespacedName{Name: "zero-timeout", Namespace: "default"}, &corev1alpha1.Task{})
+	require.True(t, apierrors.IsNotFound(err), "no Task may be created with a non-positive timeout")
 }
 
 func TestHandlers_CreateTask_Valid(t *testing.T) {
@@ -425,7 +649,12 @@ func TestHandlers_CreateTask_DefaultNamespace(t *testing.T) {
 	}
 }
 
+// testAPIRequesterStampKey is the stamp key the API tests seal under.
+var testAPIRequesterStampKey = []byte("fedcba9876543210fedcba9876543210")
+
 func TestHandlers_CreateTask_StampsRequestedByFromOIDC(t *testing.T) {
+	SetRequesterStampKey(testAPIRequesterStampKey)
+	t.Cleanup(func() { SetRequesterStampKey(nil) })
 	provider := newTestOIDCProvider(t)
 	handlers, app := setupTestHandlers()
 	app.Use(NewAuthMiddleware(handlers.client, AuthConfig{OIDC: provider.config()}))
@@ -474,6 +703,10 @@ func TestHandlers_CreateTask_StampsRequestedByFromOIDC(t *testing.T) {
 	}
 	if created.Spec.RequestedBy.Username != "alex" {
 		t.Fatalf("requestedBy.username = %q, want %q", created.Spec.RequestedBy.Username, "alex")
+	}
+	if created.Annotations[labels.AnnotationRequestedBySource] != labels.RequestedBySourceAPI ||
+		!connectors.RequesterStampValid(testAPIRequesterStampKey, created) {
+		t.Fatalf("the created task must carry a stamp sealed for its UID: %v", created.Annotations)
 	}
 	if created.Spec.RequestedBy.Email != "alex@example.test" {
 		t.Fatalf("requestedBy.email = %q, want %q", created.Spec.RequestedBy.Email, "alex@example.test")
@@ -580,16 +813,14 @@ func TestHandlers_CreateTask_ContextTokenAuthorizationEnforceAllowsMatchingToken
 		},
 	})
 	body := CreateTaskRequest{
-		Name:      "authorized-context-token-task",
-		Namespace: "default",
-		Type:      corev1alpha1.TaskTypeAgent,
-		AgentRef:  &corev1alpha1.AgentReference{Name: "reviewer"},
-		AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
-			Workspace: &corev1alpha1.WorkspaceConfig{
-				GitRepo: "https://github.com/orka-agents/orka.git",
-				Branch:  "feature-branch",
-			},
-			AllowedTools: []string{"file_read"},
+		Name:         "authorized-context-token-task",
+		Namespace:    "default",
+		Type:         corev1alpha1.TaskTypeAgent,
+		AgentRef:     &corev1alpha1.AgentReference{Name: "reviewer"},
+		AgentRuntime: &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{"file_read"}},
+		Workspace: &corev1alpha1.WorkspaceConfig{
+			GitRepo: "https://github.com/orka-agents/orka.git",
+			Branch:  "feature-branch",
 		},
 	}
 	bodyBytes, _ := json.Marshal(body)
@@ -884,6 +1115,158 @@ func TestHandlers_CreateTask_ContextTokenAuthorizationAuditAllowsFailures(t *tes
 	}
 }
 
+func TestHandlers_CreateTask_ContextTokenAuthorizationUsesAuthoritativeExternalRuntimePolicy(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+
+	tests := []struct {
+		name               string
+		mode               string
+		cachedAllowedTools []string
+		apiAllowedTools    []string
+		requestAllowed     []string
+		tokenAllowed       []string
+		nilAPIReader       bool
+		failAPIReader      bool
+		wantStatus         int
+	}{
+		{
+			name:               "rejects cached match after authoritative policy expansion",
+			mode:               ContextTokenAuthorizationModeEnforce,
+			cachedAllowedTools: []string{"Read"},
+			apiAllowedTools:    []string{"Read", "Write"},
+			requestAllowed:     []string{"Read"},
+			tokenAllowed:       []string{"Read"},
+			wantStatus:         http.StatusForbidden,
+		},
+		{
+			name:               "allows exact authoritative policy",
+			mode:               ContextTokenAuthorizationModeEnforce,
+			cachedAllowedTools: []string{"Read"},
+			apiAllowedTools:    []string{"Read", "Write"},
+			requestAllowed:     []string{"Write", "Read", "Read"},
+			tokenAllowed:       []string{"Read", "Write"},
+			wantStatus:         http.StatusCreated,
+		},
+		{
+			name:               "allows explicit empty deny all policy",
+			mode:               ContextTokenAuthorizationModeEnforce,
+			cachedAllowedTools: []string{},
+			apiAllowedTools:    []string{},
+			requestAllowed:     []string{},
+			tokenAllowed:       []string{},
+			wantStatus:         http.StatusCreated,
+		},
+		{
+			name:               "rejects omitted external allowed tools",
+			mode:               ContextTokenAuthorizationModeEnforce,
+			cachedAllowedTools: []string{},
+			apiAllowedTools:    []string{},
+			requestAllowed:     nil,
+			tokenAllowed:       []string{},
+			wantStatus:         http.StatusForbidden,
+		},
+		{
+			name:               "uses cached client when API reader is absent",
+			mode:               ContextTokenAuthorizationModeEnforce,
+			cachedAllowedTools: []string{"Read"},
+			requestAllowed:     []string{"Read"},
+			tokenAllowed:       []string{"Read"},
+			nilAPIReader:       true,
+			wantStatus:         http.StatusCreated,
+		},
+		{
+			name:               "does not fall back after authoritative read error",
+			mode:               ContextTokenAuthorizationModeEnforce,
+			cachedAllowedTools: []string{"Read"},
+			requestAllowed:     []string{"Read"},
+			tokenAllowed:       []string{"Read"},
+			failAPIReader:      true,
+			wantStatus:         http.StatusInternalServerError,
+		},
+		{
+			name:               "audit mode records mismatch without blocking",
+			mode:               ContextTokenAuthorizationModeAudit,
+			cachedAllowedTools: []string{"Read"},
+			apiAllowedTools:    []string{"Read", "Write"},
+			requestAllowed:     []string{"Read"},
+			tokenAllowed:       []string{"Read"},
+			wantStatus:         http.StatusCreated,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cachedAgent, cachedRuntime := testExternalRuntimeAuthorizationObjects(tt.cachedAllowedTools)
+			cachedClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(cachedAgent, cachedRuntime).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+						if task, ok := obj.(*corev1alpha1.Task); ok && task.UID == "" {
+							task.UID = types.UID("uid-" + task.Name)
+						}
+						return c.Create(ctx, obj, opts...)
+					},
+				}).Build()
+
+			var apiReader client.Reader
+			switch {
+			case tt.nilAPIReader:
+			case tt.failAPIReader:
+				apiReader = fake.NewClientBuilder().
+					WithScheme(scheme).
+					WithInterceptorFuncs(interceptor.Funcs{
+						Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+							return errors.New("authoritative API unavailable")
+						},
+					}).
+					Build()
+			default:
+				apiAgent, apiRuntime := testExternalRuntimeAuthorizationObjects(tt.apiAllowedTools)
+				apiReader = fake.NewClientBuilder().WithScheme(scheme).WithObjects(apiAgent, apiRuntime).Build()
+			}
+
+			app := setupTestCreateTaskHandlerWithAuthzReaders(t, ctxTokenConfig, tt.mode, cachedClient, apiReader)
+			token := issueTestContextToken(t, provider, nil, map[string]any{
+				"scope": ContextTokenScopeTaskCreate,
+				"tctx": map[string]any{
+					"namespace":    "default",
+					"taskType":     "agent",
+					"agent":        "agentkit",
+					"allowedTools": tt.tokenAllowed,
+				},
+			})
+			body := CreateTaskRequest{
+				Name:         strings.ReplaceAll(tt.name, " ", "-"),
+				Namespace:    "default",
+				Type:         corev1alpha1.TaskTypeAgent,
+				AgentRef:     &corev1alpha1.AgentReference{Name: "agentkit"},
+				AgentRuntime: &corev1alpha1.AgentRuntimeSpec{AllowedTools: tt.requestAllowed},
+			}
+			bodyBytes, err := json.Marshal(body)
+			require.NoError(t, err)
+			req := httptest.NewRequest(http.MethodPost, "/tasks", bytes.NewReader(bodyBytes))
+			req.Header.Set(TransactionTokenHeaderName, token)
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := app.Test(req)
+			require.NoError(t, err)
+			respBody, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+			require.Equalf(t, tt.wantStatus, resp.StatusCode, "response body: %s", respBody)
+
+			created := &corev1alpha1.Task{}
+			err = cachedClient.Get(context.Background(), client.ObjectKey{Name: body.Name, Namespace: body.Namespace}, created)
+			if tt.wantStatus == http.StatusCreated {
+				require.NoError(t, err)
+			} else {
+				require.True(t, apierrors.IsNotFound(err), "task must not be created after authorization failure: %v", err)
+			}
+		})
+	}
+}
+
 func TestHandlers_CreateTask_ContextTokenAuthorizationRejectsProviderModelResolvedFromAgentProviderCRD(t *testing.T) {
 	provider := newTestOIDCProvider(t)
 	ctxTokenConfig := testContextTokenConfig(t, provider, "")
@@ -930,6 +1313,41 @@ func TestHandlers_CreateTask_ContextTokenAuthorizationRejectsProviderModelResolv
 		Type:      corev1alpha1.TaskTypeAgent,
 		AgentRef:  &corev1alpha1.AgentReference{Name: "reviewer"},
 		Prompt:    "review this change",
+	})
+
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+}
+
+func TestHandlers_CreateTask_ContextTokenAuthorizationUsesOpenCodeAgentIdentityOverAIOverrides(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	agent := testAgentFromJSON(t, `{
+		"metadata": {"name": "opencode-agent", "namespace": "default"},
+		"spec": {
+			"model": {"name": "openai/gpt-5.4", "contextWindow": 32768, "maxTokens": 4096},
+			"runtime": {"type": "opencode"}
+		}
+	}`)
+	app := setupTestHandlersWithAuthz(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce, agent)
+	token := issueTestContextToken(t, provider, nil, map[string]any{
+		"scope": ContextTokenScopeTaskCreate,
+		"tctx": map[string]any{
+			"namespace":        "default",
+			"allowedProviders": []string{string(corev1alpha1.ProviderTypeAnthropic)},
+			"allowedModels":    []string{"claude-sonnet-4"},
+		},
+	})
+
+	resp := postCreateTaskWithContextToken(t, app, token, CreateTaskRequest{
+		Name:      "opencode-ai-override-denied",
+		Namespace: "default",
+		Type:      corev1alpha1.TaskTypeAgent,
+		AgentRef:  &corev1alpha1.AgentReference{Name: "opencode-agent"},
+		Prompt:    "review this change",
+		AI: &corev1alpha1.AISpec{
+			Provider: string(corev1alpha1.ProviderTypeAnthropic),
+			Model:    "claude-sonnet-4",
+		},
 	})
 
 	require.Equal(t, http.StatusForbidden, resp.StatusCode)
@@ -1353,10 +1771,8 @@ func TestHandlers_GetTask_ContextTokenAuthorizationEnforcesLoadedTaskRepoContext
 		Spec: corev1alpha1.TaskSpec{
 			Type:     corev1alpha1.TaskTypeAgent,
 			AgentRef: &corev1alpha1.AgentReference{Name: "reviewer"},
-			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
-				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo: "https://github.com/acme/allowed.git",
-				},
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				GitRepo: "https://github.com/acme/allowed.git",
 			},
 		},
 	}
@@ -1384,10 +1800,8 @@ func TestHandlers_ListTasks_ContextTokenAuthorizationFiltersLoadedTaskContext(t 
 		Spec: corev1alpha1.TaskSpec{
 			Type:     corev1alpha1.TaskTypeAgent,
 			AgentRef: &corev1alpha1.AgentReference{Name: "reviewer"},
-			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
-				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo: "https://github.com/acme/allowed.git",
-				},
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				GitRepo: "https://github.com/acme/allowed.git",
 			},
 		},
 	}
@@ -1396,10 +1810,8 @@ func TestHandlers_ListTasks_ContextTokenAuthorizationFiltersLoadedTaskContext(t 
 		Spec: corev1alpha1.TaskSpec{
 			Type:     corev1alpha1.TaskTypeAgent,
 			AgentRef: &corev1alpha1.AgentReference{Name: "reviewer"},
-			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
-				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo: "https://github.com/acme/other.git",
-				},
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				GitRepo: "https://github.com/acme/other.git",
 			},
 		},
 	}
@@ -1436,10 +1848,8 @@ func TestHandlers_GetTaskChildren_ContextTokenAuthorizationFiltersLoadedTaskCont
 		Spec: corev1alpha1.TaskSpec{
 			Type:     corev1alpha1.TaskTypeAgent,
 			AgentRef: &corev1alpha1.AgentReference{Name: "reviewer"},
-			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
-				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo: "https://github.com/acme/allowed.git",
-				},
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				GitRepo: "https://github.com/acme/allowed.git",
 			},
 		},
 	}
@@ -1454,10 +1864,8 @@ func TestHandlers_GetTaskChildren_ContextTokenAuthorizationFiltersLoadedTaskCont
 		Spec: corev1alpha1.TaskSpec{
 			Type:     corev1alpha1.TaskTypeAgent,
 			AgentRef: &corev1alpha1.AgentReference{Name: "reviewer"},
-			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
-				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo: "https://github.com/acme/allowed.git",
-				},
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				GitRepo: "https://github.com/acme/allowed.git",
 			},
 		},
 	}
@@ -1472,10 +1880,8 @@ func TestHandlers_GetTaskChildren_ContextTokenAuthorizationFiltersLoadedTaskCont
 		Spec: corev1alpha1.TaskSpec{
 			Type:     corev1alpha1.TaskTypeAgent,
 			AgentRef: &corev1alpha1.AgentReference{Name: "reviewer"},
-			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
-				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo: "https://github.com/acme/other.git",
-				},
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				GitRepo: "https://github.com/acme/other.git",
 			},
 		},
 	}
@@ -1514,10 +1920,8 @@ func TestHandlers_DeleteTask_ContextTokenAuthorizationEnforcesLoadedTaskRepoCont
 		Spec: corev1alpha1.TaskSpec{
 			Type:     corev1alpha1.TaskTypeAgent,
 			AgentRef: &corev1alpha1.AgentReference{Name: "reviewer"},
-			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
-				Workspace: &corev1alpha1.WorkspaceConfig{
-					GitRepo: "https://github.com/acme/allowed.git",
-				},
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				GitRepo: "https://github.com/acme/allowed.git",
 			},
 		},
 	}
@@ -2012,6 +2416,35 @@ func TestHandlers_CreateTask_RejectsClientSuppliedTransaction(t *testing.T) {
 	}
 }
 
+func TestHandlers_CreateTask_RejectsReservedLabels(t *testing.T) {
+	for _, labelName := range []string{labels.LabelParentTask, labels.LabelCoordinator} {
+		t.Run(labelName, func(t *testing.T) {
+			handlers, app := setupTestHandlers()
+			app.Post("/tasks", handlers.CreateTask)
+
+			body := CreateTaskRequest{
+				Name:      "reserved-label-task",
+				Namespace: "default",
+				Metadata: MetadataRequest{Labels: map[string]string{
+					labelName: "reserved-value",
+				}},
+				Type:  corev1alpha1.TaskTypeContainer,
+				Image: "busybox",
+			}
+			bodyBytes, _ := json.Marshal(body)
+			req := httptest.NewRequest(http.MethodPost, "/tasks", bytes.NewReader(bodyBytes))
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := app.Test(req)
+			if err != nil {
+				t.Fatalf("Test request failed: %v", err)
+			}
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusBadRequest)
+			}
+		})
+	}
+}
+
 func TestHandlers_CreateTask_RejectsReservedAnnotations(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -2238,6 +2671,49 @@ func TestHandlers_ListTasks(t *testing.T) {
 	}
 }
 
+func TestHandlers_TaskResponsesOmitManagedFields(t *testing.T) {
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "managed-task",
+			Namespace: "default",
+			Labels:    map[string]string{"team": "core"},
+			ManagedFields: []metav1.ManagedFieldsEntry{{
+				Manager:    "orka-controller",
+				Operation:  metav1.ManagedFieldsOperationUpdate,
+				APIVersion: corev1alpha1.GroupVersion.String(),
+				FieldsType: "FieldsV1",
+				FieldsV1:   metav1.NewFieldsV1(`{"f:status":{"f:phase":{}}}`),
+			}},
+		},
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+	}
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithReturnManagedFields().WithRuntimeObjects(task).Build()
+	stored := &corev1alpha1.Task{}
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "managed-task", Namespace: "default"}, stored))
+	require.NotEmpty(t, stored.ManagedFields, "the fixture must carry managedFields for the assertion to mean anything")
+
+	handlers := NewHandlers(HandlersConfig{Client: fakeClient})
+	app := fiber.New()
+	app.Get("/tasks", handlers.ListTasks)
+	app.Get("/tasks/:id", handlers.GetTask)
+
+	for _, path := range []string{"/tasks", "/tasks/managed-task"} {
+		t.Run(path, func(t *testing.T) {
+			resp, err := app.Test(httptest.NewRequest(http.MethodGet, path, nil))
+			require.NoError(t, err)
+			require.Equal(t, http.StatusOK, resp.StatusCode)
+			body, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+			require.NotContains(t, string(body), "managedFields")
+			// The rest of the metadata is still served.
+			require.Contains(t, string(body), `"team":"core"`)
+		})
+	}
+}
+
 func TestHandlers_ListTasks_WithPagination(t *testing.T) {
 	handlers, app := setupTestHandlers()
 	app.Get("/tasks", handlers.ListTasks)
@@ -2377,30 +2853,47 @@ func TestHandlers_DeleteTask_NotFound(t *testing.T) {
 }
 
 func TestHandlers_GetTaskLogs_NoJob(t *testing.T) {
-	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-task",
-			Namespace: "default",
-		},
-		Spec: corev1alpha1.TaskSpec{
-			Type: corev1alpha1.TaskTypeContainer,
-		},
-		Status: corev1alpha1.TaskStatus{
-			JobName: "", // No job
-		},
-	}
+	for _, tt := range []struct {
+		name     string
+		schedule string
+		phase    corev1alpha1.TaskPhase
+		want     string
+	}{
+		{name: "pending task", phase: corev1alpha1.TaskPhasePending, want: "task is pending, no logs available yet"},
+		{name: "scheduled parent", schedule: "0 * * * *", phase: corev1alpha1.TaskPhaseScheduled, want: "each scheduled run is a child task with its own logs"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-task",
+					Namespace: "default",
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:     corev1alpha1.TaskTypeContainer,
+					Schedule: tt.schedule,
+				},
+				Status: corev1alpha1.TaskStatus{
+					Phase:   tt.phase,
+					JobName: "", // No job
+				},
+			}
 
-	handlers, app := setupTestHandlersWithObjects(task)
-	app.Get("/tasks/:id/logs", handlers.GetTaskLogs)
+			handlers, app := setupTestHandlersWithObjects(task)
+			app.Get("/tasks/:id/logs", handlers.GetTaskLogs)
 
-	req := httptest.NewRequest(http.MethodGet, "/tasks/test-task/logs", nil)
-	resp, err := app.Test(req)
-	if err != nil {
-		t.Fatalf("Test request failed: %v", err)
-	}
+			req := httptest.NewRequest(http.MethodGet, "/tasks/test-task/logs", nil)
+			resp, err := app.Test(req)
+			if err != nil {
+				t.Fatalf("Test request failed: %v", err)
+			}
 
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("StatusCode = %d, want %d", resp.StatusCode, http.StatusNotFound)
+			if resp.StatusCode != http.StatusNotFound {
+				t.Errorf("StatusCode = %d, want %d", resp.StatusCode, http.StatusNotFound)
+			}
+			if body := readRespBody(t, resp); !strings.Contains(body, tt.want) {
+				t.Errorf("body = %q, want it to contain %q", body, tt.want)
+			}
+		})
 	}
 }
 
@@ -2690,6 +3183,24 @@ type metadataOnlySessionStore struct {
 	getCalls   int
 }
 
+type sessionAccessRecordingStore struct {
+	store.SessionStore
+	typeReader  transcriptSessionTypeReader
+	listCalls   int
+	readCalls   int
+	deleteCalls int
+}
+
+func (s *sessionAccessRecordingStore) ListSessions(ctx context.Context, namespace string) ([]store.SessionMetadata, error) {
+	s.listCalls++
+	return s.SessionStore.ListSessions(ctx, namespace)
+}
+
+func (s *sessionAccessRecordingStore) ListSessionsPage(ctx context.Context, namespace string, after *store.SessionPageCursor, limit int, excludeType string) ([]store.SessionMetadata, bool, error) {
+	s.listCalls++
+	return s.SessionStore.ListSessionsPage(ctx, namespace, after, limit, excludeType)
+}
+
 func (s *metadataOnlySessionStore) GetSession(ctx context.Context, namespace, name string) (*store.SessionRecord, error) {
 	s.getCalls++
 	return s.SessionStore.GetSession(ctx, namespace, name)
@@ -2699,12 +3210,36 @@ func (s *metadataOnlySessionStore) GetSessionType(ctx context.Context, namespace
 	return s.typeReader.GetSessionType(ctx, namespace, name)
 }
 
+func (s *sessionAccessRecordingStore) GetSession(ctx context.Context, namespace, name string) (*store.SessionRecord, error) {
+	s.readCalls++
+	return s.SessionStore.GetSession(ctx, namespace, name)
+}
+
+func (s *sessionAccessRecordingStore) GetSessionType(ctx context.Context, namespace, name string) (string, error) {
+	s.readCalls++
+	return s.typeReader.GetSessionType(ctx, namespace, name)
+}
+
+func (s *sessionAccessRecordingStore) DeleteSession(ctx context.Context, namespace, name string) error {
+	s.deleteCalls++
+	return s.SessionStore.DeleteSession(ctx, namespace, name)
+}
+
 func setupTestHandlersWithSessionManager() (*Handlers, *fiber.App, *sqlite.Store) {
 	scheme := runtime.NewScheme()
 	_ = corev1alpha1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 
-	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	// The API server assigns UIDs; the fake client does not, and the
+	// requester stamp binds the UID.
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithInterceptorFuncs(interceptor.Funcs{
+		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			if obj.GetUID() == "" {
+				obj.SetUID(types.UID("uid-" + obj.GetName()))
+			}
+			return c.Create(ctx, obj, opts...)
+		},
+	}).Build()
 	db, _ := sqlite.NewDB(":memory:")
 	ss := sqlite.NewStore(db, ":memory:")
 	handlers := NewHandlers(HandlersConfig{Client: fakeClient, SessionStore: ss, ResultStore: ss})
@@ -2772,6 +3307,92 @@ func TestHandlers_ListSessions_HidesGatewaySessions(t *testing.T) {
 	require.Equal(t, "ordinary-session", item["name"])
 }
 
+func TestHandlers_ListSessions_HonorsLimitAndContinue(t *testing.T) {
+	handlers, app, ss := setupTestHandlersWithSessionManager()
+	ctx := context.Background()
+	// Created oldest first, so the list returns them in reverse.
+	created := time.Date(2026, 10, 15, 9, 0, 0, 0, time.UTC)
+	for i, name := range []string{"session-c", "session-b", "session-a"} {
+		at := created.Add(time.Duration(i) * time.Minute)
+		require.NoError(t, ss.CreateSession(ctx, &store.SessionRecord{
+			Namespace: "default", Name: name, SessionType: "task", CreatedAt: at, UpdatedAt: at,
+		}))
+	}
+
+	app.Get("/sessions", handlers.ListSessions)
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/sessions?namespace=default&limit=2", nil))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var page1 ListResponse
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&page1))
+	items, ok := page1.Items.([]any)
+	require.True(t, ok)
+	require.Len(t, items, 2)
+	require.Equal(t, "session-a", items[0].(map[string]any)["name"])
+	require.Equal(t, "session-b", items[1].(map[string]any)["name"])
+	require.NotEmpty(t, page1.Metadata.Continue)
+
+	resp, err = app.Test(httptest.NewRequest(http.MethodGet, "/sessions?namespace=default&limit=2&continue="+page1.Metadata.Continue, nil))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var page2 ListResponse
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&page2))
+	items, ok = page2.Items.([]any)
+	require.True(t, ok)
+	require.Len(t, items, 1)
+	item, ok := items[0].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "session-c", item["name"])
+	require.Empty(t, page2.Metadata.Continue)
+
+	resp, err = app.Test(httptest.NewRequest(http.MethodGet, "/sessions?namespace=default&limit=bogus", nil))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+
+	resp, err = app.Test(httptest.NewRequest(http.MethodGet, "/sessions?namespace=default&continue=session-b", nil))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+}
+
+func TestHandlers_ListSessions_CursorEqualToCacheSentinelResumes(t *testing.T) {
+	handlers, app, ss := setupTestHandlersWithSessionManager()
+	ctx := context.Background()
+	// Equal creation times sort by name: "continue-not-supported" <
+	// "session-z". A page that ends on the sentinel-named session must still
+	// resume after it.
+	for _, name := range []string{"continue-not-supported", "session-z"} {
+		require.NoError(t, ss.CreateSession(ctx, &store.SessionRecord{
+			Namespace: "default", Name: name, SessionType: "task",
+		}))
+	}
+	app.Get("/sessions", handlers.ListSessions)
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/sessions?namespace=default&limit=1", nil))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var page1 ListResponse
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&page1))
+	items, ok := page1.Items.([]any)
+	require.True(t, ok)
+	require.Len(t, items, 1)
+	require.Equal(t, "continue-not-supported", items[0].(map[string]any)["name"])
+	require.NotEmpty(t, page1.Metadata.Continue)
+
+	resp, err = app.Test(httptest.NewRequest(http.MethodGet, "/sessions?namespace=default&limit=1&continue="+page1.Metadata.Continue, nil))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var page2 ListResponse
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&page2))
+	items, ok = page2.Items.([]any)
+	require.True(t, ok)
+	require.Len(t, items, 1)
+	item, ok := items[0].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "session-z", item["name"])
+	require.Empty(t, page2.Metadata.Continue)
+}
+
 func TestHandlers_ListSessions_Empty(t *testing.T) {
 	handlers, app, _ := setupTestHandlersWithSessionManager()
 	app.Get("/sessions", handlers.ListSessions)
@@ -2837,6 +3458,91 @@ func TestHandlers_ListSessions_WatchNamespace(t *testing.T) {
 
 // --- GetSession tests ---
 
+func TestHandlers_SessionEndpointsRequireKubernetesRBACForTokenReviewUser(t *testing.T) {
+	const (
+		protectedSessionName = "protected-session"
+		sessionsPath         = "/sessions"
+		protectedSessionPath = sessionsPath + "/" + protectedSessionName
+	)
+	tests := []struct {
+		name         string
+		method       string
+		path         string
+		verb         string
+		resourceName string
+		allowed      bool
+		wantStatus   int
+	}{
+		{name: "list denied", method: http.MethodGet, path: sessionsPath, verb: gatewayVerbList, wantStatus: http.StatusForbidden},
+		{name: "list allowed", method: http.MethodGet, path: sessionsPath, verb: gatewayVerbList, allowed: true, wantStatus: http.StatusOK},
+		{name: "get denied", method: http.MethodGet, path: protectedSessionPath, verb: gatewayVerbGet, resourceName: protectedSessionName, wantStatus: http.StatusForbidden},
+		{name: "get allowed", method: http.MethodGet, path: protectedSessionPath, verb: gatewayVerbGet, resourceName: protectedSessionName, allowed: true, wantStatus: http.StatusOK},
+		{name: "events denied", method: http.MethodGet, path: protectedSessionPath + "/events", verb: gatewayVerbGet, resourceName: protectedSessionName, wantStatus: http.StatusForbidden},
+		{name: "stream denied", method: http.MethodGet, path: protectedSessionPath + "/stream", verb: gatewayVerbGet, resourceName: protectedSessionName, wantStatus: http.StatusForbidden},
+		{name: "delete denied", method: http.MethodDelete, path: protectedSessionPath, verb: "delete", resourceName: protectedSessionName, wantStatus: http.StatusForbidden},
+		{name: "delete allowed", method: http.MethodDelete, path: protectedSessionPath, verb: "delete", resourceName: protectedSessionName, allowed: true, wantStatus: http.StatusNoContent},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			require.NoError(t, corev1alpha1.AddToScheme(scheme))
+			fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+			db, err := sqlite.NewDB(":memory:")
+			require.NoError(t, err)
+			ss := sqlite.NewStore(db, ":memory:")
+			t.Cleanup(func() { require.NoError(t, db.Close()) })
+			require.NoError(t, ss.CreateSession(context.Background(), &store.SessionRecord{
+				Namespace: "default", Name: protectedSessionName, SessionType: "task",
+			}))
+			require.NoError(t, ss.AppendMessages(context.Background(), "default", protectedSessionName, []store.SessionMessage{{
+				Role: testRoleUser, Content: "private prompt",
+			}}))
+			recordingStore := &sessionAccessRecordingStore{SessionStore: ss, typeReader: ss}
+			kubeClient := kubefake.NewSimpleClientset()
+			kubeClient.PrependReactor("create", "subjectaccessreviews", func(action k8stesting.Action) (bool, runtime.Object, error) {
+				createAction := action.(k8stesting.CreateAction)
+				review := createAction.GetObject().(*authorizationv1.SubjectAccessReview)
+				require.Equal(t, "system:serviceaccount:default:limited", review.Spec.User)
+				require.Equal(t, []string{"system:serviceaccounts", "system:serviceaccounts:default"}, review.Spec.Groups)
+				require.NotNil(t, review.Spec.ResourceAttributes)
+				require.Equal(t, "default", review.Spec.ResourceAttributes.Namespace)
+				require.Equal(t, test.verb, review.Spec.ResourceAttributes.Verb)
+				require.Equal(t, corev1alpha1.GroupVersion.Group, review.Spec.ResourceAttributes.Group)
+				require.Equal(t, "sessions", review.Spec.ResourceAttributes.Resource)
+				require.Equal(t, test.resourceName, review.Spec.ResourceAttributes.Name)
+				review.Status.Allowed = test.allowed
+				return true, review, nil
+			})
+
+			handlers := NewHandlers(HandlersConfig{
+				Client: fakeClient, KubeClient: kubeClient, SessionStore: recordingStore, ResultStore: ss,
+			})
+			app := fiber.New()
+			app.Use(tokenReviewUserMiddleware(limitedTokenReviewUser("default")))
+			app.Get("/sessions", handlers.ListSessions)
+			app.Get("/sessions/:id", handlers.GetSession)
+			app.Get("/sessions/:id/events", handlers.ListSessionEvents)
+			app.Get("/sessions/:id/stream", handlers.StreamSessionEvents)
+			app.Delete("/sessions/:id", handlers.DeleteSession)
+
+			resp, err := app.Test(httptest.NewRequest(test.method, test.path, nil))
+			require.NoError(t, err)
+			require.Equal(t, test.wantStatus, resp.StatusCode)
+			if !test.allowed {
+				require.Zero(t, recordingStore.listCalls, "denied request must not list Session state")
+				require.Zero(t, recordingStore.readCalls, "denied request must not read Session state")
+				require.Zero(t, recordingStore.deleteCalls, "denied request must not delete Session state")
+			}
+			_, getErr := ss.GetSession(context.Background(), "default", protectedSessionName)
+			if test.method == http.MethodDelete && test.allowed {
+				require.ErrorIs(t, getErr, store.ErrNotFound)
+			} else {
+				require.NoError(t, getErr)
+			}
+		})
+	}
+}
+
 func TestHandlers_GetSession_Success(t *testing.T) {
 	handlers, app, ss := setupTestHandlersWithSessionManager()
 	ctx := context.Background()
@@ -2869,6 +3575,71 @@ func TestHandlers_GetSession_Success(t *testing.T) {
 	if result["messageCount"] != float64(3) {
 		t.Errorf("messageCount = %v, want 3", result["messageCount"])
 	}
+}
+
+func TestHandlers_GetSessionProjectsSafeExecutionControl(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+
+	const sessionName = "lineage-session"
+	control := &corev1alpha1.RuntimeSessionControl{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            storekube.RuntimeSessionControlObjectName(sessionName),
+			Namespace:       "default",
+			ResourceVersion: "42",
+		},
+		Spec: corev1alpha1.RuntimeSessionControlSpec{
+			SessionName:          sessionName,
+			SessionUID:           "session-uid",
+			RuntimePoolRef:       "opencode-read",
+			RuntimeProfileDigest: "sha256:" + strings.Repeat("a", 64),
+		},
+		Status: corev1alpha1.RuntimeSessionControlStatus{
+			Generation:              3,
+			Lifecycle:               corev1alpha1.RuntimeSessionControlLifecycle("Finalizing"),
+			Availability:            corev1alpha1.RuntimeSessionControlAvailability("ReconciliationBlocked"),
+			MutationLeaseGeneration: 8,
+			BlockedReason:           "publication outcome unknown",
+			RelatedPublicationID:    "publication-1",
+			Lineage: &corev1alpha1.RuntimeSessionLineageStatus{
+				NamespaceUID:    "namespace-uid",
+				SessionUID:      "session-uid",
+				ContractVersion: corev1alpha1.AgentRuntimeContractHarnessV2,
+				Generation:      1,
+				RuntimeIdentity: "opencode",
+				ConfigDigest:    "sha256:" + strings.Repeat("b", 64),
+				EstablishedAt:   metav1.NewTime(time.Date(2026, time.August, 6, 0, 0, 0, 0, time.UTC)),
+			},
+		},
+	}
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(control).Build()
+	db, err := sqlite.NewDB(":memory:")
+	require.NoError(t, err)
+	ss := sqlite.NewStore(db, ":memory:")
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	require.NoError(t, ss.CreateSession(context.Background(), &store.SessionRecord{
+		Namespace: "default", Name: sessionName, SessionType: "task",
+	}))
+
+	handlers := NewHandlers(HandlersConfig{Client: fakeClient, APIReader: fakeClient, SessionStore: ss})
+	app := fiber.New()
+	app.Get("/sessions/:id", handlers.GetSession)
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/sessions/"+sessionName, nil))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var result map[string]any
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
+	projected := result["executionControl"].(map[string]any)
+	require.Equal(t, "session-uid", projected["sessionUID"])
+	require.Equal(t, "ReconciliationBlocked", projected["availability"])
+	require.Equal(t, "publication outcome unknown", projected["blockedReason"])
+	lineage := projected["lineage"].(map[string]any)
+	require.Equal(t, "orka.harness.v2", lineage["contractVersion"])
+	require.Equal(t, "opencode", lineage["runtimeIdentity"])
+	require.NotContains(t, projected, "mutationLease")
+	require.NotContains(t, projected, "controllerEpoch")
 }
 
 func TestHandlers_GetSession_HidesGatewaySession(t *testing.T) {
@@ -3643,6 +4414,97 @@ func TestHandlers_CreateAgent_Success(t *testing.T) {
 	resp, err := app.Test(req)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusCreated, resp.StatusCode)
+}
+
+func TestHandlers_AgentWritesRejectNegativeTTL(t *testing.T) {
+	handlers, app := setupTestHandlers()
+	app.Post("/agents", handlers.CreateAgent)
+	app.Put("/agents/:name", handlers.UpdateAgent)
+	spec := corev1alpha1.AgentSpec{
+		Model:            &corev1alpha1.ModelConfig{Provider: "anthropic", Name: "claude-3-5-sonnet"},
+		TTLAfterLastTask: &metav1.Duration{Duration: -time.Hour},
+	}
+
+	for _, request := range []struct {
+		method, path string
+		body         any
+	}{
+		{http.MethodPost, "/agents", CreateAgentRequest{Name: "ttl-agent", Namespace: "default", Spec: spec}},
+		{http.MethodPut, "/agents/ttl-agent?namespace=default", UpdateAgentRequest{Spec: spec}},
+	} {
+		bodyBytes, _ := json.Marshal(request.body)
+		req := httptest.NewRequest(request.method, request.path, bytes.NewReader(bodyBytes))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+		require.Equal(t, http.StatusBadRequest, resp.StatusCode, request.method)
+		data, _ := io.ReadAll(resp.Body)
+		require.Contains(t, string(data), "spec.ttlAfterLastTask must not be negative")
+	}
+}
+
+func TestHandlers_CreateAgent_DefaultsBuiltInContractFromExecutionMode(t *testing.T) {
+	tests := []struct {
+		name       string
+		mode       executionmode.Mode
+		explicit   corev1alpha1.AgentRuntimeContractVersion
+		want       corev1alpha1.AgentRuntimeContractVersion
+		wantStatus int
+	}{
+		{
+			name:       "harness v2",
+			mode:       executionmode.HarnessV2,
+			want:       corev1alpha1.AgentRuntimeContractHarnessV2,
+			wantStatus: http.StatusCreated,
+		},
+		{
+			name:       "reject explicit v1 contract",
+			mode:       executionmode.HarnessV2,
+			explicit:   corev1alpha1.AgentRuntimeContractVersion("orka.harness.v1"),
+			wantStatus: http.StatusBadRequest,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			require.NoError(t, corev1alpha1.AddToScheme(scheme))
+			fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+			handlers := NewHandlers(HandlersConfig{Client: fakeClient, ExecutionMode: test.mode})
+			app := fiber.New()
+			app.Post("/agents", handlers.CreateAgent)
+
+			var explicit *corev1alpha1.AgentRuntimeContractVersion
+			if test.explicit != "" {
+				value := test.explicit
+				explicit = &value
+			}
+			bodyBytes, err := json.Marshal(CreateAgentRequest{
+				Name:      "runtime-agent",
+				Namespace: "default",
+				Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
+					Type:            corev1alpha1.AgentRuntimeCodex,
+					ContractVersion: explicit,
+				}},
+			})
+			require.NoError(t, err)
+
+			req := httptest.NewRequest(http.MethodPost, "/agents", bytes.NewReader(bodyBytes))
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := app.Test(req)
+			require.NoError(t, err)
+			require.Equal(t, test.wantStatus, resp.StatusCode)
+
+			created := &corev1alpha1.Agent{}
+			err = fakeClient.Get(context.Background(), types.NamespacedName{Name: "runtime-agent", Namespace: "default"}, created)
+			if test.wantStatus != http.StatusCreated {
+				require.True(t, apierrors.IsNotFound(err), "rejected Agent should not be created")
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, test.want, created.BuiltInContractVersion())
+		})
+	}
 }
 
 func TestHandlers_CreateAgent_MetadataStyle(t *testing.T) {
@@ -4426,7 +5288,7 @@ func TestHandlers_GetTask_WithPlanEnrichment(t *testing.T) {
 			Type: corev1alpha1.TaskTypeAI,
 		},
 		Status: corev1alpha1.TaskStatus{
-			Iteration: 3,
+			Iteration: 0,
 		},
 	}
 
@@ -4445,7 +5307,7 @@ func TestHandlers_GetTask_WithPlanEnrichment(t *testing.T) {
 		ProgressPct:  90,
 		GoalComplete: false,
 		PlanDocument: "# Plan\n- step 1 done",
-		Iteration:    3,
+		Iteration:    0,
 	}))
 
 	app := fiber.New()
@@ -4645,6 +5507,95 @@ func TestHandlers_GetTaskLogs_WithClientsetNoPods(t *testing.T) {
 	require.Equal(t, http.StatusNotFound, resp.StatusCode)
 }
 
+func TestParseTaskLogTailLines(t *testing.T) {
+	tests := []struct {
+		raw     string
+		want    int64
+		wantErr bool
+	}{
+		{raw: "", want: defaultTaskLogTailLines},
+		{raw: " 200 ", want: 200},
+		{raw: "1", want: 1},
+		{raw: "10000", want: maxTaskLogTailLines},
+		{raw: "10001", want: maxTaskLogTailLines},
+		{raw: "99999999999999999999", want: maxTaskLogTailLines},
+		{raw: "0", wantErr: true},
+		{raw: "-5", wantErr: true},
+		{raw: "-99999999999999999999", wantErr: true},
+		{raw: "all", wantErr: true},
+		{raw: "1.5", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.raw, func(t *testing.T) {
+			got, err := parseTaskLogTailLines(tt.raw)
+			if tt.wantErr {
+				var fiberErr *fiber.Error
+				require.ErrorAs(t, err, &fiberErr)
+				require.Equal(t, fiber.StatusBadRequest, fiberErr.Code)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestHandlers_GetTaskLogs_TailLines(t *testing.T) {
+	tests := []struct {
+		name       string
+		query      string
+		wantStatus int
+		wantTail   int64
+	}{
+		{name: "default", query: "", wantStatus: http.StatusOK, wantTail: defaultTaskLogTailLines},
+		{name: "requested", query: "?tailLines=200", wantStatus: http.StatusOK, wantTail: 200},
+		{name: "clamped", query: "?tailLines=50000", wantStatus: http.StatusOK, wantTail: maxTaskLogTailLines},
+		{name: "invalid", query: "?tailLines=0", wantStatus: http.StatusBadRequest},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Name: "log-task", Namespace: "default"},
+				Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+				Status:     corev1alpha1.TaskStatus{JobName: "log-job"},
+			}
+			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+				Name: "log-job-abcde", Namespace: "default", Labels: map[string]string{"job-name": "log-job"},
+			}}
+			scheme := runtime.NewScheme()
+			_ = corev1alpha1.AddToScheme(scheme)
+			_ = corev1.AddToScheme(scheme)
+			fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(task).Build()
+			fakeCS := kubefake.NewSimpleClientset(pod) //nolint:staticcheck
+			h := NewHandlers(HandlersConfig{Client: fakeClient, KubeClient: fakeCS})
+
+			app := fiber.New()
+			app.Get("/tasks/:id/logs", h.GetTaskLogs)
+			resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/tasks/log-task/logs"+tt.query, nil))
+			require.NoError(t, err)
+			require.Equal(t, tt.wantStatus, resp.StatusCode)
+
+			var gotOpts []*corev1.PodLogOptions
+			for _, action := range fakeCS.Actions() {
+				if action.GetSubresource() != "log" {
+					continue
+				}
+				opts, ok := action.(k8stesting.GenericAction).GetValue().(*corev1.PodLogOptions)
+				require.True(t, ok, "log action carries %T", action)
+				gotOpts = append(gotOpts, opts)
+			}
+			if tt.wantStatus != http.StatusOK {
+				require.Empty(t, gotOpts, "an invalid tailLines must not reach the pod log API")
+				return
+			}
+			require.Len(t, gotOpts, 1)
+			require.NotNil(t, gotOpts[0].TailLines)
+			require.Equal(t, tt.wantTail, *gotOpts[0].TailLines)
+			require.Equal(t, "worker", gotOpts[0].Container)
+		})
+	}
+}
+
 // --- Tests: DeleteTask with watch namespace ---
 
 func TestHandlers_DeleteTask_WatchNamespaceScoped(t *testing.T) {
@@ -4726,8 +5677,7 @@ func TestHandlers_ApplyMemoryProposal_ContextTokenAuthorization(t *testing.T) {
 			}))
 
 			token := issueTestContextToken(t, provider, nil, map[string]any{"scope": tt.scope})
-			body, _ := json.Marshal(map[string]any{"appliedBy": "api-user"})
-			req := httptest.NewRequest(http.MethodPost, "/memory-proposals/"+proposal.ID+"/apply?namespace=default", bytes.NewReader(body))
+			req := httptest.NewRequest(http.MethodPost, "/memory-proposals/"+proposal.ID+"/apply?namespace=default", strings.NewReader(`{}`))
 			req.Header.Set(TransactionTokenHeaderName, token)
 			req.Header.Set("Content-Type", "application/json")
 			resp, err := app.Test(req)
@@ -4744,6 +5694,10 @@ func TestHandlers_ApplyMemoryProposal(t *testing.T) {
 	h := NewHandlers(HandlersConfig{MemoryStore: ss, MemoryProposalStore: ss})
 
 	app := fiber.New()
+	app.Use(func(c fiber.Ctx) error {
+		c.Locals(UserInfoContextKey, &UserInfo{Username: "api-user"})
+		return c.Next()
+	})
 	app.Post("/api/v1/memory-proposals/:id/apply", h.ApplyMemoryProposal)
 
 	proposal := &store.MemoryProposal{
@@ -4761,8 +5715,7 @@ func TestHandlers_ApplyMemoryProposal(t *testing.T) {
 		Reviewer:  "reviewer",
 	}))
 
-	body, _ := json.Marshal(map[string]any{"appliedBy": "api-user"})
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/memory-proposals/"+proposal.ID+"/apply?namespace=default", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/memory-proposals/"+proposal.ID+"/apply?namespace=default", strings.NewReader(`{}`))
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := app.Test(req)
 	require.NoError(t, err)
@@ -4788,6 +5741,10 @@ func TestHandlers_ApplyMemoryProposalConflict(t *testing.T) {
 	h := NewHandlers(HandlersConfig{MemoryProposalStore: conflictApplyMemoryProposalStore{}})
 
 	app := fiber.New()
+	app.Use(func(c fiber.Ctx) error {
+		c.Locals(UserInfoContextKey, &UserInfo{Username: "api-user"})
+		return c.Next()
+	})
 	app.Post("/api/v1/memory-proposals/:id/apply", h.ApplyMemoryProposal)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/memory-proposals/mprop-conflict/apply?namespace=default", nil)
@@ -4832,6 +5789,10 @@ func TestHandlers_ApplyMemoryProposalRejectedOrArchived(t *testing.T) {
 			h := NewHandlers(HandlersConfig{MemoryStore: ss, MemoryProposalStore: ss})
 
 			app := fiber.New()
+			app.Use(func(c fiber.Ctx) error {
+				c.Locals(UserInfoContextKey, &UserInfo{Username: "api-user"})
+				return c.Next()
+			})
 			app.Post("/api/v1/memory-proposals/:id/apply", h.ApplyMemoryProposal)
 
 			ctx := context.Background()

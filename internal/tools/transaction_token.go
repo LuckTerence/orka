@@ -48,7 +48,6 @@ type childTransactionTokenPreparation struct {
 }
 
 type childTransactionTokenSettings struct {
-	tts              contexttoken.TTSConfig
 	subjectToken     string
 	subjectTokenType string
 	scope            string
@@ -56,20 +55,26 @@ type childTransactionTokenSettings struct {
 
 // prepareChildTransactionToken validates the delegated scope and prepares an
 // empty ownerless workload placeholder referenced by the child Task. The
-// placeholder is bound to the exact parent identity so it works across
-// namespaces without allowing an unrelated Secret to be adopted or deleted.
+// placeholder is bound to the exact parent identity so an unrelated Secret is
+// never adopted or deleted.
 func prepareChildTransactionToken(
 	ctx context.Context,
 	k8sClient client.Client,
 	parentTask, childTask *corev1alpha1.Task,
 ) (*childTransactionTokenPreparation, error) {
-	settings, enabled, err := childTransactionTokenSettingsForParent(ctx, parentTask)
-	if err != nil {
+	settings, enabled, err := childTransactionTokenSettingsForParent(parentTask)
+	if err != nil || !enabled {
 		return nil, err
 	}
-	if !enabled {
-		return nil, nil
-	}
+	return prepareChildTransactionTokenWithSettings(ctx, k8sClient, parentTask, childTask, settings)
+}
+
+func prepareChildTransactionTokenWithSettings(
+	ctx context.Context,
+	k8sClient client.Client,
+	parentTask, childTask *corev1alpha1.Task,
+	settings childTransactionTokenSettings,
+) (*childTransactionTokenPreparation, error) {
 	if parentTask == nil || parentTask.UID == "" || strings.TrimSpace(parentTask.Name) == "" ||
 		strings.TrimSpace(parentTask.Namespace) == "" {
 		return nil, fmt.Errorf("parent task identity is required for child transaction token exchange")
@@ -81,6 +86,9 @@ func prepareChildTransactionToken(
 		return nil, err
 	}
 
+	if err := requireSameNamespaceChildTokenExchange(parentTask, childTask); err != nil {
+		return nil, err
+	}
 	secretName, err := childTransactionTokenSecretName("orka-task-token")
 	if err != nil {
 		return nil, err
@@ -197,38 +205,10 @@ func completeChildTransactionToken(
 	return nil
 }
 
-func childTransactionTokenSettingsForParent(
-	ctx context.Context,
-	parentTask *corev1alpha1.Task,
-) (childTransactionTokenSettings, bool, error) {
+func childTransactionTokenSettingsForParent(parentTask *corev1alpha1.Task) (childTransactionTokenSettings, bool, error) {
 	if parentTask == nil || parentTask.Spec.Transaction == nil {
 		return childTransactionTokenSettings{}, false, nil
 	}
-	if tc := GetToolContext(ctx); tc != nil && tc.TransactionTokenTTS != nil {
-		config := *tc.TransactionTokenTTS
-		if !config.Enabled() {
-			return childTransactionTokenSettings{}, false, nil
-		}
-		subjectToken := strings.TrimSpace(tc.TransactionTokenSubject)
-		if subjectToken == "" {
-			return childTransactionTokenSettings{}, false, errors.New("controller-brokered child transaction token subject authority is unavailable")
-		}
-		subjectTokenType := strings.TrimSpace(tc.TransactionTokenSubjectType)
-		if subjectTokenType == "" {
-			subjectTokenType = contexttoken.SubjectTokenTypeForSource(config.TokenSource)
-		}
-		if err := transactiontoken.ValidateSubjectTokenType(subjectTokenType); err != nil {
-			return childTransactionTokenSettings{}, false, err
-		}
-		scope := strings.TrimSpace(tc.TransactionTokenChildScope)
-		if scope == "" {
-			return childTransactionTokenSettings{}, false, errors.New("controller-brokered child transaction token scope is unavailable")
-		}
-		return childTransactionTokenSettings{
-			tts: config, subjectToken: subjectToken, subjectTokenType: subjectTokenType, scope: scope,
-		}, true, nil
-	}
-
 	config, enabled, err := childTransactionTokenExchangeConfig()
 	if err != nil || !enabled {
 		return childTransactionTokenSettings{}, enabled, err
@@ -249,7 +229,7 @@ func childTransactionTokenSettingsForParent(
 		return childTransactionTokenSettings{}, false, fmt.Errorf("%s is required when %s is set for child task tokens", workerenv.ContextTokenChildScope, workerenv.ContextTokenTTSEndpoint)
 	}
 	return childTransactionTokenSettings{
-		tts: config, subjectToken: subjectToken, subjectTokenType: subjectTokenType, scope: scope,
+		subjectToken: subjectToken, subjectTokenType: subjectTokenType, scope: scope,
 	}, true, nil
 }
 
@@ -272,8 +252,8 @@ func childTransactionTokenExchangeConfig() (contexttoken.TTSConfig, bool, error)
 	return ttsConfig, ttsConfig.Enabled(), nil
 }
 
-func shouldPrepareChildTransactionToken(ctx context.Context, parentTask *corev1alpha1.Task) (bool, error) {
-	_, enabled, err := childTransactionTokenSettingsForParent(ctx, parentTask)
+func shouldPrepareChildTransactionToken(parentTask *corev1alpha1.Task) (bool, error) {
+	_, enabled, err := childTransactionTokenSettingsForParent(parentTask)
 	return enabled, err
 }
 
@@ -306,7 +286,7 @@ func taskOwnerReference(task *corev1alpha1.Task) []metav1.OwnerReference {
 	}
 	return []metav1.OwnerReference{{
 		APIVersion: corev1alpha1.GroupVersion.String(),
-		Kind:       "Task",
+		Kind:       taskKindString,
 		Name:       task.Name,
 		UID:        task.UID,
 	}}
@@ -314,6 +294,19 @@ func taskOwnerReference(task *corev1alpha1.Task) []metav1.OwnerReference {
 
 func childOwnerReference(childTask *corev1alpha1.Task) []metav1.OwnerReference {
 	return taskOwnerReference(childTask)
+}
+
+// requireSameNamespaceChildTokenExchange fails child transaction token
+// exchange closed for cross-namespace delegation, before any placeholder or
+// renewal authority is created.
+func requireSameNamespaceChildTokenExchange(parentTask, childTask *corev1alpha1.Task) error {
+	if parentTask == nil || childTask == nil || parentTask.Namespace == childTask.Namespace {
+		return nil
+	}
+	return fmt.Errorf(
+		"child transaction token exchange requires the child Task namespace %q to match the parent namespace %q; cross-namespace delegation is not supported while child token exchange is enabled",
+		childTask.Namespace, parentTask.Namespace,
+	)
 }
 
 func stampChildTransactionScope(childTask *corev1alpha1.Task, scope string) {
@@ -328,14 +321,14 @@ func stampChildTransactionScope(childTask *corev1alpha1.Task, scope string) {
 
 func childTransactionTokenPlaceholderMetadata(parentTask *corev1alpha1.Task) (map[string]string, map[string]string) {
 	return map[string]string{
-			labels.LabelPurpose:    transactiontoken.PlaceholderSecretPurpose,
-			labels.LabelParentTask: labels.SelectorValue(parentTask.Name),
-			labels.LabelTaskUID:    labels.SelectorValue(string(parentTask.UID)),
-		}, map[string]string{
-			labels.AnnotationParentTaskName:            parentTask.Name,
-			transactiontoken.ParentUIDAnnotation:       string(parentTask.UID),
-			transactiontoken.ParentNamespaceAnnotation: parentTask.Namespace,
-		}
+		labels.LabelPurpose:    transactiontoken.PlaceholderSecretPurpose,
+		labels.LabelParentTask: labels.SelectorValue(parentTask.Name),
+		labels.LabelTaskUID:    labels.SelectorValue(string(parentTask.UID)),
+	}, map[string]string{
+		labels.AnnotationParentTaskName:            parentTask.Name,
+		transactiontoken.ParentUIDAnnotation:       string(parentTask.UID),
+		transactiontoken.ParentNamespaceAnnotation: parentTask.Namespace,
+	}
 }
 
 func validChildTransactionTokenPlaceholder(secret *corev1.Secret, preparation *childTransactionTokenPreparation) bool {
@@ -359,11 +352,11 @@ func childTransactionTokenRequestDetails(
 		operation = "createContainerTask"
 	}
 	details := map[string]any{
-		"operation":  operation,
-		"namespace":  childTask.Namespace,
-		"taskName":   childTask.Name,
-		"taskUID":    string(childTask.UID),
-		"parentTask": preparation.parentName,
+		"operation":        operation,
+		"namespace":        childTask.Namespace,
+		taskNameCamelField: childTask.Name,
+		"taskUID":          string(childTask.UID),
+		"parentTask":       preparation.parentName,
 	}
 	if childTask.Spec.Transaction != nil {
 		if transactionID := strings.TrimSpace(childTask.Spec.Transaction.ID); transactionID != "" {
@@ -402,8 +395,8 @@ func validateChildTransactionScope(parentTask *corev1alpha1.Task, childScope str
 }
 
 func childTransactionTokenReader(ctx context.Context, fallback client.Reader) client.Reader {
-	if toolContext := GetToolContext(ctx); toolContext != nil && toolContext.APIReader != nil {
-		return toolContext.APIReader
+	if toolContext := GetToolContext(ctx); toolContext != nil && toolContext.PolicyReader != nil {
+		return toolContext.PolicyReader
 	}
 	return fallback
 }

@@ -16,8 +16,11 @@ const (
 	ExecutionEventTypeModelRequestStarted           = "ModelRequestStarted"
 	ExecutionEventTypeModelRequestCompleted         = "ModelRequestCompleted"
 	ExecutionEventTypeModelRequestFailed            = "ModelRequestFailed"
+	ExecutionEventTypeModelUsageUpdated             = "ModelUsageUpdated"
+	ExecutionEventTypeModelContextUpdated           = "ModelContextUpdated"
 	ExecutionEventTypeModelMessage                  = "ModelMessage"
 	ExecutionEventTypeContextTruncated              = "ContextTruncated"
+	ExecutionEventTypeNativeSessionCaptureSkipped   = "NativeSessionCaptureSkipped"
 	ExecutionEventTypeToolCallStarted               = "ToolCallStarted"
 	ExecutionEventTypeToolCallCompleted             = "ToolCallCompleted"
 	ExecutionEventTypeToolCallFailed                = "ToolCallFailed"
@@ -40,6 +43,8 @@ const (
 	ExecutionEventTypeApprovalDeclined              = "ApprovalDeclined"
 	ExecutionEventTypeApprovalExpired               = "ApprovalExpired"
 	ExecutionEventTypeApprovalCancelled             = "ApprovalCancelled"
+	ExecutionEventTypeApprovalExecutionUpdated      = "ApprovalExecutionUpdated"
+	ExecutionEventTypePlanUpdated                   = "PlanUpdated"
 )
 
 const (
@@ -70,8 +75,11 @@ var executionEventTypes = []string{
 	ExecutionEventTypeModelRequestStarted,
 	ExecutionEventTypeModelRequestCompleted,
 	ExecutionEventTypeModelRequestFailed,
+	ExecutionEventTypeModelUsageUpdated,
+	ExecutionEventTypeModelContextUpdated,
 	ExecutionEventTypeModelMessage,
 	ExecutionEventTypeContextTruncated,
+	ExecutionEventTypeNativeSessionCaptureSkipped,
 	ExecutionEventTypeToolCallStarted,
 	ExecutionEventTypeToolCallCompleted,
 	ExecutionEventTypeToolCallFailed,
@@ -94,6 +102,8 @@ var executionEventTypes = []string{
 	ExecutionEventTypeApprovalDeclined,
 	ExecutionEventTypeApprovalExpired,
 	ExecutionEventTypeApprovalCancelled,
+	ExecutionEventTypeApprovalExecutionUpdated,
+	ExecutionEventTypePlanUpdated,
 }
 
 var validExecutionEventTypes = stringSet(executionEventTypes)
@@ -123,11 +133,6 @@ func stringSet(values []string) map[string]struct{} {
 	return set
 }
 
-// ExecutionEventTypes returns the stable Wave 0 execution event taxonomy.
-func ExecutionEventTypes() []string {
-	return append([]string(nil), executionEventTypes...)
-}
-
 // TerminalTaskEventTypes returns task-level terminal events that complete a task
 // execution stream.
 func TerminalTaskEventTypes() []string {
@@ -140,18 +145,34 @@ func IsTerminalTaskEventType(value string) bool {
 	return ok
 }
 
-// TerminalApprovalEventTypes returns approval terminal events that close an approval request.
-func TerminalApprovalEventTypes() []string {
-	return append([]string(nil), terminalApprovalEventTypes...)
-}
-
 // IsTerminalApprovalEventType reports whether value is an approval terminal event.
 func IsTerminalApprovalEventType(value string) bool {
 	_, ok := terminalApprovalEventTypeSet[strings.TrimSpace(value)]
 	return ok
 }
 
-// IsValidExecutionEventType reports whether value is one of the Wave 0 event types.
+// ExecutionEventTypes returns every known execution event type in
+// declaration order, for help text and completion.
+func ExecutionEventTypes() []string {
+	return append([]string(nil), executionEventTypes...)
+}
+
+// CanonicalExecutionEventType maps a case-insensitive spelling of a known
+// event type to its canonical name. Unknown values return "".
+func CanonicalExecutionEventType(value string) string {
+	value = strings.TrimSpace(value)
+	if IsValidExecutionEventType(value) {
+		return value
+	}
+	for _, known := range executionEventTypes {
+		if strings.EqualFold(known, value) {
+			return known
+		}
+	}
+	return ""
+}
+
+// IsValidExecutionEventType reports whether value is a known execution event type.
 func IsValidExecutionEventType(value string) bool {
 	_, ok := validExecutionEventTypes[strings.TrimSpace(value)]
 	return ok

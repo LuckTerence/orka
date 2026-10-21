@@ -602,8 +602,8 @@ func (s *Service) CreateMemory(
 		TenantID: authority.Binding.TenantID, StoreUUID: authority.Binding.StoreUUID,
 		Generation: expectedGeneration, DesiredGeneration: desiredGeneration, GovernanceRevision: 1,
 		MaterializationState: store.MemoryMaterializationPending,
-		Trust:                store.MemoryTrustUntrusted, SessionName: metadata["sessionName"], AgentName: metadata["agentName"],
-		TaskName: metadata["taskName"], ParentTask: metadata["parentTask"], Source: metadata["source"], Tags: tags,
+		Trust:                store.MemoryTrustUntrusted, SessionName: metadata[metadataSessionName], AgentName: metadata[metadataAgentName],
+		TaskName: metadata[metadataTaskName], ParentTask: metadata[metadataParentTask], Source: metadata[metadataSource], Tags: tags,
 		ContentDigest: envelope.ContentDigest, ContentAvailable: false, PendingOperationID: operationID,
 		CreatedAt: now, UpdatedAt: now,
 	}
@@ -716,12 +716,12 @@ func (s *Service) UpdateMemory(
 	updatedEntry.DesiredGeneration = desired
 	updatedEntry.PendingOperationID = operationID
 	updatedEntry.Tags = tags
-	updatedEntry.SessionName = metadata["sessionName"]
-	updatedEntry.AgentName = metadata["agentName"]
-	updatedEntry.TaskName = metadata["taskName"]
-	updatedEntry.ParentTask = metadata["parentTask"]
-	updatedEntry.Source = metadata["source"]
-	updatedEntry.SourceProposalID = metadata["sourceProposalId"]
+	updatedEntry.SessionName = metadata[metadataSessionName]
+	updatedEntry.AgentName = metadata[metadataAgentName]
+	updatedEntry.TaskName = metadata[metadataTaskName]
+	updatedEntry.ParentTask = metadata[metadataParentTask]
+	updatedEntry.Source = metadata[metadataSource]
+	updatedEntry.SourceProposalID = metadata[metadataSourceProposalID]
 	updatedEntry.ContentDigest = envelope.ContentDigest
 	updatedEntry.UpdatedAt = now
 	admission, err := s.Governed.AdmitRemoteMemoryReplace(ctx, store.RemoteMemoryReplaceAdmission{
@@ -971,9 +971,9 @@ func (s *Service) createLegacy(ctx context.Context, namespace string, request Cr
 	}
 	metadata := memoryMetadata(request)
 	memory := &store.Memory{
-		ID: strings.TrimSpace(request.ID), Namespace: namespace, SessionName: metadata["sessionName"],
-		AgentName: metadata["agentName"], TaskName: metadata["taskName"], ParentTask: metadata["parentTask"],
-		Source: metadata["source"], Content: content, Tags: tags,
+		ID: strings.TrimSpace(request.ID), Namespace: namespace, SessionName: metadata[metadataSessionName],
+		AgentName: metadata[metadataAgentName], TaskName: metadata[metadataTaskName], ParentTask: metadata[metadataParentTask],
+		Source: metadata[metadataSource], Content: content, Tags: tags,
 		Trust: store.MemoryTrustUntrusted,
 	}
 	if err := s.Legacy.CreateMemory(ctx, memory); err != nil {
@@ -1026,12 +1026,12 @@ func (s *Service) updateLegacy(
 	}
 	memory.Content, memory.Tags = content, tags
 	metadata := memoryMetadataFromStore(*memory)
-	memory.SessionName = metadata["sessionName"]
-	memory.AgentName = metadata["agentName"]
-	memory.TaskName = metadata["taskName"]
-	memory.ParentTask = metadata["parentTask"]
-	memory.Source = metadata["source"]
-	memory.SourceProposalID = metadata["sourceProposalId"]
+	memory.SessionName = metadata[metadataSessionName]
+	memory.AgentName = metadata[metadataAgentName]
+	memory.TaskName = metadata[metadataTaskName]
+	memory.ParentTask = metadata[metadataParentTask]
+	memory.Source = metadata[metadataSource]
+	memory.SourceProposalID = metadata[metadataSourceProposalID]
 	if authority != nil && strings.TrimSpace(authority.NamespaceUID) != "" {
 		governedLegacy, ok := s.Legacy.(legacyMemoryUpdateGovernanceStore)
 		if !ok {
@@ -1567,30 +1567,40 @@ func replacementMemoryMetadata(
 		return metadata
 	}
 	changed := entry.ContentDigest != protocol.ContentDigest(content) || !slices.Equal(entry.Tags, tags) ||
-		entry.SessionName != metadata["sessionName"] || entry.AgentName != metadata["agentName"] ||
-		entry.TaskName != metadata["taskName"] || entry.ParentTask != metadata["parentTask"] ||
-		normalizeSource(entry.Source) != metadata["source"] || entry.SourceProposalID != metadata["sourceProposalId"]
+		entry.SessionName != metadata[metadataSessionName] || entry.AgentName != metadata[metadataAgentName] ||
+		entry.TaskName != metadata[metadataTaskName] || entry.ParentTask != metadata[metadataParentTask] ||
+		normalizeSource(entry.Source) != metadata[metadataSource] || entry.SourceProposalID != metadata[metadataSourceProposalID]
 	if changed {
-		delete(metadata, "sourceProposalId")
-		if metadata["source"] == memorySourceProposal {
-			metadata["source"] = memorySourceManual
+		delete(metadata, metadataSourceProposalID)
+		if metadata[metadataSource] == memorySourceProposal {
+			metadata[metadataSource] = memorySourceManual
 		}
 	}
 	return metadata
 }
 
+// Provider metadata keys for memory provenance.
+const (
+	metadataSessionName      = "sessionName"
+	metadataAgentName        = "agentName"
+	metadataTaskName         = "taskName"
+	metadataParentTask       = "parentTask"
+	metadataSource           = "source"
+	metadataSourceProposalID = "sourceProposalId"
+)
+
 func memoryMetadata(request CreateRequest) map[string]string {
 	return compactMetadata(map[string]string{
-		"sessionName": request.SessionName, "agentName": request.AgentName, "taskName": request.TaskName,
-		"parentTask": request.ParentTask, "source": normalizeSource(request.Source),
+		metadataSessionName: request.SessionName, metadataAgentName: request.AgentName, metadataTaskName: request.TaskName,
+		metadataParentTask: request.ParentTask, metadataSource: normalizeSource(request.Source),
 	})
 }
 
 func memoryMetadataFromStore(memory store.Memory) map[string]string {
 	return compactMetadata(map[string]string{
-		"sessionName": memory.SessionName, "agentName": memory.AgentName, "taskName": memory.TaskName,
-		"parentTask": memory.ParentTask, "source": normalizeSource(memory.Source),
-		"sourceProposalId": memory.SourceProposalID,
+		metadataSessionName: memory.SessionName, metadataAgentName: memory.AgentName, metadataTaskName: memory.TaskName,
+		metadataParentTask: memory.ParentTask, metadataSource: normalizeSource(memory.Source),
+		metadataSourceProposalID: memory.SourceProposalID,
 	})
 }
 
@@ -2604,8 +2614,8 @@ func keywordCatalogEntryMatches(entry *store.RemoteMemoryCatalogEntry, query str
 		return true
 	}
 	localMetadata := compactMetadata(map[string]string{
-		"sessionName": entry.SessionName, "agentName": entry.AgentName, "taskName": entry.TaskName,
-		"parentTask": entry.ParentTask, "source": entry.Source, "sourceProposalId": entry.SourceProposalID,
+		metadataSessionName: entry.SessionName, metadataAgentName: entry.AgentName, metadataTaskName: entry.TaskName,
+		metadataParentTask: entry.ParentTask, metadataSource: entry.Source, metadataSourceProposalID: entry.SourceProposalID,
 	})
 	for key, value := range localMetadata {
 		if contains(key) || contains(value) {
@@ -3003,7 +3013,10 @@ func (s *Service) ApplyMemoryProposal(
 		if s.Proposals == nil {
 			return nil, apierror.New(http.StatusNotImplemented, ReasonBackendUnavailable, "memory proposal store is not configured")
 		}
-		apply := store.MemoryProposalApply{Namespace: namespace, ID: proposalID, AppliedBy: appliedBy}
+		apply := store.MemoryProposalApply{
+			Namespace: namespace, ID: proposalID, AppliedBy: appliedBy,
+			AuthorizeExistingMemory: mutationContext.AuthorizeExistingMemory,
+		}
 		var memory *store.Memory
 		var applyErr error
 		if s.Governed != nil && strings.TrimSpace(localAuthority.NamespaceUID) != "" {
@@ -3078,8 +3091,8 @@ func (s *Service) ApplyMemoryProposal(
 	}
 	operationID := "mop-" + uuid.NewString()
 	metadata := compactMetadata(map[string]string{
-		"agentName": proposal.AgentName, "taskName": proposal.TaskName,
-		"source": memorySourceProposal, "sourceProposalId": proposal.ID,
+		metadataAgentName: proposal.AgentName, metadataTaskName: proposal.TaskName,
+		metadataSource: memorySourceProposal, metadataSourceProposalID: proposal.ID,
 	})
 	envelope := protocol.MutationEnvelope{
 		ProtocolVersion: protocol.Version, OperationID: operationID, Binding: binding,
@@ -3101,8 +3114,8 @@ func (s *Service) ApplyMemoryProposal(
 		TenantID: authority.Binding.TenantID, StoreUUID: authority.Binding.StoreUUID,
 		Generation: expectedGeneration, DesiredGeneration: desiredGeneration, GovernanceRevision: 1,
 		MaterializationState: store.MemoryMaterializationPending, Trust: store.MemoryTrustReviewed,
-		AgentName: metadata["agentName"], TaskName: metadata["taskName"], Source: metadata["source"],
-		SourceProposalID: metadata["sourceProposalId"], Tags: tags, ContentDigest: envelope.ContentDigest,
+		AgentName: metadata[metadataAgentName], TaskName: metadata[metadataTaskName], Source: metadata[metadataSource],
+		SourceProposalID: metadata[metadataSourceProposalID], Tags: tags, ContentDigest: envelope.ContentDigest,
 		PendingOperationID: operationID, CreatedAt: now, UpdatedAt: now,
 	}
 	admission, err := s.Governed.AdmitRemoteMemoryProposalApply(ctx, store.RemoteMemoryProposalApplyAdmission{

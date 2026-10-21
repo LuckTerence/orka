@@ -7,6 +7,8 @@ MIT License - see LICENSE file for details.
 package v1alpha1
 
 import (
+	"encoding/json"
+
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -126,7 +128,20 @@ type TaskTransaction struct {
 // TaskSpec defines the desired state of Task
 // +kubebuilder:validation:XValidation:rule="has(self.requestedBy) == has(oldSelf.requestedBy) && (!has(self.requestedBy) || self.requestedBy == oldSelf.requestedBy)",message="requestedBy is immutable"
 // +kubebuilder:validation:XValidation:rule="has(self.transaction) == has(oldSelf.transaction) && (!has(self.transaction) || self.transaction == oldSelf.transaction)",message="transaction is immutable"
+// +kubebuilder:validation:XValidation:rule="self.type == oldSelf.type",message="type is immutable"
+// +kubebuilder:validation:XValidation:rule="(has(self.workspace) && has(self.workspace.intent) ? self.workspace.intent : (self.type == 'agent' ? 'read' : self.type)) == (has(oldSelf.workspace) && has(oldSelf.workspace.intent) ? oldSelf.workspace.intent : (oldSelf.type == 'agent' ? 'read' : oldSelf.type))",message="effective workspace intent is immutable"
+// +kubebuilder:validation:XValidation:rule="self.type != 'agent' || (has(self.prompt) == has(oldSelf.prompt) && (!has(self.prompt) || self.prompt == oldSelf.prompt))",message="agent prompt is immutable"
+// +kubebuilder:validation:XValidation:rule="self.type != 'agent' || (has(self.agentRef) == has(oldSelf.agentRef) && (!has(self.agentRef) || self.agentRef == oldSelf.agentRef))",message="agentRef is immutable for agent Tasks"
+// +kubebuilder:validation:XValidation:rule="self.type != 'agent' || (has(self.agentRuntime) == has(oldSelf.agentRuntime) && (!has(self.agentRuntime) || self.agentRuntime == oldSelf.agentRuntime))",message="agentRuntime is immutable for agent Tasks"
+// +kubebuilder:validation:XValidation:rule="has(self.sessionRef) == has(oldSelf.sessionRef) && (!has(self.sessionRef) || self.sessionRef == oldSelf.sessionRef)",message="sessionRef is immutable"
+// +kubebuilder:validation:XValidation:rule="self.type != 'agent' || (has(self.workspace) == has(oldSelf.workspace) && (!has(self.workspace) || self.workspace == oldSelf.workspace))",message="workspace is immutable for agent Tasks"
+// +kubebuilder:validation:XValidation:rule="self.type != 'agent' || (has(self.timeout) == has(oldSelf.timeout) && (!has(self.timeout) || self.timeout == oldSelf.timeout))",message="timeout is immutable for agent Tasks"
 // +kubebuilder:validation:XValidation:rule="!has(self.execution) || !has(self.execution.workspace) || self.execution.workspace.reusePolicy != 'session' || has(self.sessionRef)",message="session workspace reuse requires spec.sessionRef"
+// +kubebuilder:validation:XValidation:rule="self.type != 'container' || !has(self.workspace) || !has(self.workspace.expectedRemoteSHA)",message="container Tasks do not support workspace.expectedRemoteSHA"
+// +kubebuilder:validation:XValidation:rule="self.type != 'container' || !has(self.workspace) || (!has(self.workspace.createPR) || !self.workspace.createPR)",message="container Tasks do not support workspace.createPR"
+// +kubebuilder:validation:XValidation:rule="self.type != 'container' || !has(self.workspace) || (!has(self.workspace.maxChangedFiles) && (!has(self.workspace.allowedPaths) || self.workspace.allowedPaths.size() == 0) && (!has(self.workspace.denyRepositoryControlPaths) || !self.workspace.denyRepositoryControlPaths) && (!has(self.workspace.rejectBinaryFiles) || !self.workspace.rejectBinaryFiles) && (!has(self.workspace.rejectSecretLikeContent) || !self.workspace.rejectSecretLikeContent))",message="container Tasks do not support clean-room workspace publication policies"
+// +kubebuilder:validation:XValidation:rule="self.type != 'container' || !has(self.workspace) || !has(self.workspace.pushBranch) || self.workspace.pushBranch.size() == 0 || !has(self.image) || self.image.size() == 0",message="custom-image container Tasks do not support workspace.pushBranch publication"
+// +kubebuilder:validation:XValidation:rule="!has(self.execution) || !has(self.execution.workspace) || self.type == 'agent'",message="execution.workspace is only supported for agent Tasks"
 type TaskSpec struct {
 	// Type specifies the task type: "container" or "ai"
 	// +kubebuilder:validation:Required
@@ -171,7 +186,8 @@ type TaskSpec struct {
 	// +optional
 	SecretRef *SecretReference `json:"secretRef,omitempty"`
 
-	// SessionRef references a session for conversation continuity
+	// SessionRef references a session for conversation continuity.
+	// It is immutable after Task creation because it bounds transcript access.
 	// +optional
 	SessionRef *SessionReference `json:"sessionRef,omitempty"`
 
@@ -237,9 +253,9 @@ type TaskSpec struct {
 	// +optional
 	AgentRuntime *AgentRuntimeSpec `json:"agentRuntime,omitempty"`
 
-	// Workspace defines repository checkout and push settings for tasks that need
-	// a git workspace. Agent tasks can continue to use agentRuntime.workspace for
-	// compatibility; this top-level field is used by container tasks as well.
+	// Workspace defines the canonical repository workspace, intent, credentials,
+	// and publication request. Agent Tasks that omit intent are interpreted as
+	// read by controller logic; an omitted intent preserves existing container behavior.
 	// +optional
 	Workspace *WorkspaceConfig `json:"workspace,omitempty"`
 
@@ -399,6 +415,19 @@ type AISpec struct {
 	Tools []string `json:"tools,omitempty"`
 }
 
+// MarshalJSON preserves an explicitly empty native tool policy instead of
+// omitting it. Nil and nonempty lists retain their existing wire representation.
+func (in AISpec) MarshalJSON() ([]byte, error) {
+	type aiSpecJSON AISpec
+	if in.Tools == nil || len(in.Tools) > 0 {
+		return json.Marshal(aiSpecJSON(in))
+	}
+	return json.Marshal(struct {
+		aiSpecJSON
+		Tools []string `json:"tools"`
+	}{aiSpecJSON: aiSpecJSON(in), Tools: in.Tools})
+}
+
 // SkillReference references a Skill CRD by name or inline skill content from a ConfigMap key.
 type SkillReference struct {
 	// Name references a Skill CR by name
@@ -412,6 +441,10 @@ type SkillReference struct {
 
 // TaskStatus defines the observed state of Task
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.executionOutcome) || self.executionOutcome == oldSelf.executionOutcome",message="executionOutcome is immutable once recorded"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.agentExecutionBinding) || (has(self.agentExecutionBinding) && self.agentExecutionBinding == oldSelf.agentExecutionBinding)",message="agentExecutionBinding is write-once and immutable"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.soulBinding) || (has(self.soulBinding) && self.soulBinding == oldSelf.soulBinding)",message="soulBinding is write-once and immutable"
+// Unknown fields reach admission so removed fields are rejected.
+// +kubebuilder:pruning:PreserveUnknownFields
 type TaskStatus struct {
 	// Phase is the current phase of the task
 	// +optional
@@ -438,26 +471,52 @@ type TaskStatus struct {
 	// +optional
 	JobName string `json:"jobName,omitempty"`
 
+	// JobUID is the immutable identity returned when the controller creates the
+	// current Job. A Job with the same name and a different UID has no worker authority.
+	// +optional
+	JobUID string `json:"jobUID,omitempty"`
+
 	// ResultRef indicates whether a result is available
 	// +optional
 	ResultRef *ResultReference `json:"resultRef,omitempty"`
 
-	// ExecutionOutcome is the immutable outcome recorded when workload execution ends. Workspace
-	// attachment revocation and cleanup continue independently while the Task is Finalizing.
+	// Execution reports the durable execution state and terminal outcome for the
+	// current attempt. Phase remains the compatibility projection.
 	// +optional
-	ExecutionOutcome *TaskExecutionOutcome `json:"executionOutcome,omitempty"`
+	Execution *TaskExecutionStatus `json:"execution,omitempty"`
+
+	// Delivery reports trusted workspace validation and publication reconciliation.
+	// +optional
+	Delivery *TaskDeliveryStatus `json:"delivery,omitempty"`
+
+	// AgentExecutionBinding is the authoritative, write-once, immutable
+	// execution route for this agent Task.
+	// +optional
+	AgentExecutionBinding *AgentExecutionBinding `json:"agentExecutionBinding,omitempty"`
+
+	// SoulBinding pins an AI Task's resolved persona and role prompt. It contains
+	// digests only, never prompt text. Retries reject configuration drift.
+	// +optional
+	SoulBinding *TaskSoulBinding `json:"soulBinding,omitempty"`
+
+	// ConnectionBindings freezes, for native type: ai Tasks, the identity of
+	// the requester's Connection behind each connection-mode
+	// OutboundAccessPolicy at Job creation. Connector-backed tool calls from
+	// the worker are honored only while the live Connection still matches.
+	// No token material is ever recorded.
+	// +optional
+	ConnectionBindings []ConnectionBinding `json:"connectionBindings,omitempty"`
+
+	// ExecutionOutcome records the immutable outcome of a non-ACP workload before
+	// provider-neutral execution-workspace finalization completes.
+	// +optional
+	ExecutionOutcome *TaskWorkloadExecutionOutcome `json:"executionOutcome,omitempty"`
 
 	// ExecutionWorkspace reports the provider-neutral lifecycle state for a
 	// requested execution workspace. Provider-native identifiers and credentials
 	// are intentionally omitted.
 	// +optional
 	ExecutionWorkspace *ExecutionWorkspaceStatus `json:"executionWorkspace,omitempty"`
-
-	// HarnessRuntime records the controller-resolved harness runtime target for an
-	// in-flight agent turn. It intentionally stores only non-secret routing metadata
-	// and Secret references, never bearer values.
-	// +optional
-	HarnessRuntime *HarnessRuntimeStatus `json:"harnessRuntime,omitempty"`
 
 	// WebhookDelivered indicates whether the webhook was successfully called
 	// +optional
@@ -477,7 +536,11 @@ type TaskStatus struct {
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
-	// LastScheduleTime is the last time a child task was created for a scheduled run.
+	// LastScheduleTime is the schedule's progress cursor: the last time a
+	// child task was created, or — when a run was missed past
+	// startingDeadlineSeconds (for example while suspended) — the time the
+	// skipped window was re-anchored so the schedule resumes from the
+	// present instead of replaying missed runs.
 	// +optional
 	LastScheduleTime *metav1.Time `json:"lastScheduleTime,omitempty"`
 
@@ -486,43 +549,41 @@ type TaskStatus struct {
 	NextScheduleTime *metav1.Time `json:"nextScheduleTime,omitempty"`
 }
 
-// HarnessRuntimeStatus records the resolved harness runtime selected by the controller.
-type HarnessRuntimeStatus struct {
-	// RuntimeRefName is the AgentRuntime name for custom runtimeRef turns. Empty means built-in CLI wrapper.
+// TaskSoulBinding is the non-secret, write-once identity of AI prompt configuration.
+type TaskSoulBinding struct {
+	// TaskGeneration is the Task spec generation whose prompt was resolved.
+	// +kubebuilder:validation:Minimum=1
+	TaskGeneration int64 `json:"taskGeneration"`
+	// AgentUID and AgentGeneration identify the exact Agent revision.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=128
+	AgentUID string `json:"agentUID"`
+	// +kubebuilder:validation:Minimum=1
+	AgentGeneration int64 `json:"agentGeneration"`
+	// SoulDigest identifies the exact persona source bytes.
+	// +kubebuilder:validation:Pattern=`^sha256:[0-9a-f]{64}$`
+	// +kubebuilder:validation:MaxLength=71
+	SoulDigest string `json:"soulDigest"`
+	// PromptDigest identifies the composed role and persona prompt.
+	// +kubebuilder:validation:Pattern=`^sha256:[0-9a-f]{64}$`
+	// +kubebuilder:validation:MaxLength=71
+	PromptDigest string `json:"promptDigest"`
+	// InputsDigest identifies the Task execution inputs, the spec without its
+	// control fields, that the binding froze. After the first binding it,
+	// rather than TaskGeneration, proves the inputs are unchanged, so a
+	// control-field edit such as spec.suspend keeps the binding valid.
+	// Bindings recorded before this field existed keep the generation check.
+	// +kubebuilder:validation:Pattern=`^sha256:[0-9a-f]{64}$`
+	// +kubebuilder:validation:MaxLength=71
 	// +optional
-	RuntimeRefName string `json:"runtimeRefName,omitempty"`
-
-	// RuntimeName is the runtime name advertised by the harness capabilities and sent in turn metadata.
-	// +optional
-	RuntimeName string `json:"runtimeName,omitempty"`
-
-	// ContractVersion is the Orka harness contract version used for the turn.
-	// +optional
-	ContractVersion string `json:"contractVersion,omitempty"`
-
-	// Endpoint is the non-secret harness base URL selected when the turn started.
-	// +optional
-	Endpoint string `json:"endpoint,omitempty"`
-
-	// RuntimeGeneration is the AgentRuntime generation selected when the turn started.
-	// +optional
-	RuntimeGeneration int64 `json:"runtimeGeneration,omitempty"`
-
-	// AuthRefName is the Secret name selected when the turn started.
-	// +optional
-	AuthRefName string `json:"authRefName,omitempty"`
-
-	// AuthRefField is the Secret data field selected when the turn started.
-	// +optional
-	AuthRefField string `json:"authRefField,omitempty"`
-
-	// AuthRefResourceVersion is the auth Secret resourceVersion validated before starting the turn.
-	// +optional
-	AuthRefResourceVersion string `json:"authRefResourceVersion,omitempty"`
+	InputsDigest string `json:"inputsDigest,omitempty"`
 }
 
-// TaskExecutionOutcome records the immutable result of workload execution before workspace finalization.
-type TaskExecutionOutcome struct {
+// TaskWorkloadExecutionOutcome records the immutable result of non-ACP workload
+// execution before provider-neutral workspace finalization. ACP agent attempts use
+// TaskStatus.Execution, whose stronger fencing and OutcomeUnknown semantics are
+// defined in task_runtime_types.go.
+type TaskWorkloadExecutionOutcome struct {
 	// Phase is the terminal workload execution phase.
 	// +kubebuilder:validation:Enum=Succeeded;Failed;Cancelled
 	Phase TaskPhase `json:"phase"`
@@ -686,6 +747,31 @@ type ChildTaskStatus struct {
 	Result string `json:"result,omitempty"`
 }
 
+// ConnectionBinding is one frozen person-to-provider link for a policy.
+type ConnectionBinding struct {
+	// PolicyName is the connection-mode OutboundAccessPolicy.
+	PolicyName string `json:"policyName"`
+	// Provider is the ConnectorProvider the policy selects.
+	Provider string `json:"provider"`
+	// ConnectionName is the requester's Connection for that provider.
+	ConnectionName string `json:"connectionName"`
+	// UID and Generation pin the Connection as it was when frozen.
+	UID        string `json:"uid"`
+	Generation int64  `json:"generation"`
+	// GrantSequence is the Connection's consent count when frozen; a
+	// re-link of the same object raises it and invalidates this binding.
+	GrantSequence int64 `json:"grantSequence"`
+	// Mode is the Connection mode at freeze time.
+	Mode string `json:"mode"`
+	// PolicyUID and PolicyGeneration pin the policy object the binding was
+	// frozen under, so a policy deleted and recreated, or edited, after
+	// dispatch is refused rather than executed under the old binding.
+	// +optional
+	PolicyUID string `json:"policyUID,omitempty"`
+	// +optional
+	PolicyGeneration int64 `json:"policyGeneration,omitempty"`
+}
+
 // +kubebuilder:object:root=true
 // +kubebuilder:metadata:annotations=gateway.orka.ai/session-cutoff-schema=v1
 // +kubebuilder:subresource:status
@@ -693,6 +779,11 @@ type ChildTaskStatus struct {
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
 // +kubebuilder:printcolumn:name="Priority",type=integer,JSONPath=`.spec.priority`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
+// +kubebuilder:selectablefield:JSONPath=.spec.sessionRef.name
+// The execution-authority rule freezes the whole spec for ACP-bound Tasks. For a
+// soul-only binding it compares every field except TaskControlFields; a test
+// regenerates that field list from TaskSpec.
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || ((!has(oldSelf.status.agentExecutionBinding) && !has(oldSelf.status.soulBinding)) || self.spec == oldSelf.spec || (!has(oldSelf.status.agentExecutionBinding) && (has(self.spec.type) == has(oldSelf.spec.type) && (!has(self.spec.type) || self.spec.type == oldSelf.spec.type) && has(self.spec.image) == has(oldSelf.spec.image) && (!has(self.spec.image) || self.spec.image == oldSelf.spec.image) && has(self.spec.command) == has(oldSelf.spec.command) && (!has(self.spec.command) || self.spec.command == oldSelf.spec.command) && has(self.spec.args) == has(oldSelf.spec.args) && (!has(self.spec.args) || self.spec.args == oldSelf.spec.args) && has(self.spec.env) == has(oldSelf.spec.env) && (!has(self.spec.env) || self.spec.env == oldSelf.spec.env) && has(self.spec.timeout) == has(oldSelf.spec.timeout) && (!has(self.spec.timeout) || self.spec.timeout == oldSelf.spec.timeout) && has(self.spec.priority) == has(oldSelf.spec.priority) && (!has(self.spec.priority) || self.spec.priority == oldSelf.spec.priority) && has(self.spec.retryPolicy) == has(oldSelf.spec.retryPolicy) && (!has(self.spec.retryPolicy) || self.spec.retryPolicy == oldSelf.spec.retryPolicy) && has(self.spec.webhookURL) == has(oldSelf.spec.webhookURL) && (!has(self.spec.webhookURL) || self.spec.webhookURL == oldSelf.spec.webhookURL) && has(self.spec.secretRef) == has(oldSelf.spec.secretRef) && (!has(self.spec.secretRef) || self.spec.secretRef == oldSelf.spec.secretRef) && has(self.spec.sessionRef) == has(oldSelf.spec.sessionRef) && (!has(self.spec.sessionRef) || self.spec.sessionRef == oldSelf.spec.sessionRef) && has(self.spec.resources) == has(oldSelf.spec.resources) && (!has(self.spec.resources) || self.spec.resources == oldSelf.spec.resources) && has(self.spec.execution) == has(oldSelf.spec.execution) && (!has(self.spec.execution) || self.spec.execution == oldSelf.spec.execution) && has(self.spec.schedule) == has(oldSelf.spec.schedule) && (!has(self.spec.schedule) || self.spec.schedule == oldSelf.spec.schedule) && has(self.spec.timeZone) == has(oldSelf.spec.timeZone) && (!has(self.spec.timeZone) || self.spec.timeZone == oldSelf.spec.timeZone) && has(self.spec.concurrencyPolicy) == has(oldSelf.spec.concurrencyPolicy) && (!has(self.spec.concurrencyPolicy) || self.spec.concurrencyPolicy == oldSelf.spec.concurrencyPolicy) && has(self.spec.startingDeadlineSeconds) == has(oldSelf.spec.startingDeadlineSeconds) && (!has(self.spec.startingDeadlineSeconds) || self.spec.startingDeadlineSeconds == oldSelf.spec.startingDeadlineSeconds) && has(self.spec.successfulRunsHistoryLimit) == has(oldSelf.spec.successfulRunsHistoryLimit) && (!has(self.spec.successfulRunsHistoryLimit) || self.spec.successfulRunsHistoryLimit == oldSelf.spec.successfulRunsHistoryLimit) && has(self.spec.failedRunsHistoryLimit) == has(oldSelf.spec.failedRunsHistoryLimit) && (!has(self.spec.failedRunsHistoryLimit) || self.spec.failedRunsHistoryLimit == oldSelf.spec.failedRunsHistoryLimit) && has(self.spec.ai) == has(oldSelf.spec.ai) && (!has(self.spec.ai) || self.spec.ai == oldSelf.spec.ai) && has(self.spec.agentRef) == has(oldSelf.spec.agentRef) && (!has(self.spec.agentRef) || self.spec.agentRef == oldSelf.spec.agentRef) && has(self.spec.prompt) == has(oldSelf.spec.prompt) && (!has(self.spec.prompt) || self.spec.prompt == oldSelf.spec.prompt) && has(self.spec.agentRuntime) == has(oldSelf.spec.agentRuntime) && (!has(self.spec.agentRuntime) || self.spec.agentRuntime == oldSelf.spec.agentRuntime) && has(self.spec.workspace) == has(oldSelf.spec.workspace) && (!has(self.spec.workspace) || self.spec.workspace == oldSelf.spec.workspace) && has(self.spec.priorTaskRef) == has(oldSelf.spec.priorTaskRef) && (!has(self.spec.priorTaskRef) || self.spec.priorTaskRef == oldSelf.spec.priorTaskRef) && has(self.spec.requestedBy) == has(oldSelf.spec.requestedBy) && (!has(self.spec.requestedBy) || self.spec.requestedBy == oldSelf.spec.requestedBy) && has(self.spec.transaction) == has(oldSelf.spec.transaction) && (!has(self.spec.transaction) || self.spec.transaction == oldSelf.spec.transaction))))",message="Task spec is immutable after execution authority is recorded"
 
 // Task is the Schema for the tasks API
 type Task struct {
@@ -713,27 +804,25 @@ type TaskList struct {
 }
 
 // AgentRuntimeType defines the agent runtime to use
-// +kubebuilder:validation:Enum=copilot;claude;codex;opencode
+// +kubebuilder:validation:Enum=claude;codex;copilot;opencode
 type AgentRuntimeType string
 
 const (
-	// AgentRuntimeCopilot uses GitHub Copilot CLI as the agent runtime
+	// AgentRuntimeCopilot uses GitHub Copilot CLI as the agent runtime.
 	AgentRuntimeCopilot AgentRuntimeType = "copilot"
 	// AgentRuntimeClaude uses Claude Code CLI as the agent runtime
 	AgentRuntimeClaude AgentRuntimeType = "claude"
 	// AgentRuntimeCodex uses OpenAI Codex CLI as the agent runtime
 	AgentRuntimeCodex AgentRuntimeType = "codex"
-	// AgentRuntimeOpencode uses OpenCode CLI as the agent runtime
+	// AgentRuntimeOpencode uses OpenCode CLI's native ACP server as the agent runtime.
 	AgentRuntimeOpencode AgentRuntimeType = "opencode"
 )
 
 // AgentRuntimeSpec defines task-level overrides for agent runtime configuration.
 // Runtime type and credentials come from the referenced Agent CRD.
+// Unknown fields reach admission so removed fields are rejected.
+// +kubebuilder:pruning:PreserveUnknownFields
 type AgentRuntimeSpec struct {
-	// Workspace defines the working directory configuration
-	// +optional
-	Workspace *WorkspaceConfig `json:"workspace,omitempty"`
-
 	// MaxTurns limits the number of agent loop iterations
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=1000
@@ -753,40 +842,173 @@ type AgentRuntimeSpec struct {
 	AllowBash *bool `json:"allowBash,omitempty"`
 }
 
-// WorkspaceConfig defines workspace setup for agent tasks
+// MarshalJSON preserves the distinction between an omitted task tool override
+// and an explicitly empty deny-all override.
+func (in AgentRuntimeSpec) MarshalJSON() ([]byte, error) {
+	type agentRuntimeSpecJSON struct {
+		MaxTurns        *int32    `json:"maxTurns,omitempty"`
+		AllowedTools    *[]string `json:"allowedTools,omitempty"`
+		DisallowedTools []string  `json:"disallowedTools,omitempty"`
+		AllowBash       *bool     `json:"allowBash,omitempty"`
+	}
+	var allowedTools *[]string
+	if in.AllowedTools != nil {
+		tools := append([]string{}, in.AllowedTools...)
+		allowedTools = &tools
+	}
+	return json.Marshal(agentRuntimeSpecJSON{
+		MaxTurns:        in.MaxTurns,
+		AllowedTools:    allowedTools,
+		DisallowedTools: in.DisallowedTools,
+		AllowBash:       in.AllowBash,
+	})
+}
+
+// WorkspaceConfig defines repository workspace, validation, and publication intent.
+// +kubebuilder:validation:XValidation:rule="!self.createPR || self.intent == 'write'",message="createPR requires write workspace intent"
+// +kubebuilder:validation:XValidation:rule="!has(self.gitRepo) || (!self.gitRepo.matches('(?i)^[A-Za-z][A-Za-z0-9+.-]*://[^/]*@') && !self.gitRepo.contains('?') && !self.gitRepo.contains('#'))",message="gitRepo must not contain embedded credentials, query parameters, or fragments"
+// +kubebuilder:validation:XValidation:rule="!has(self.publicationGitRepo) || (!self.publicationGitRepo.matches('(?i)^[A-Za-z][A-Za-z0-9+.-]*://[^/]*@') && !self.publicationGitRepo.contains('?') && !self.publicationGitRepo.contains('#'))",message="publicationGitRepo must not contain embedded credentials, query parameters, or fragments"
 type WorkspaceConfig struct {
-	// GitRepo is the repository URL to clone
+	// Intent declares whether the verified workspace must remain unchanged or may
+	// produce a publication artifact. It is immutable for the lifetime of the Task.
+	// Agent Tasks that omit intent are interpreted as read by controller logic;
+	// omitted intent preserves the existing behavior of container Tasks.
+	// +optional
+	Intent WorkspaceIntent `json:"intent,omitempty"`
+
+	// GitRepo is the source repository URL cloned by the clean-room workspace boundary.
+	// Credentials must not be embedded in the URL.
+	// +kubebuilder:validation:MaxLength=2048
 	// +optional
 	GitRepo string `json:"gitRepo,omitempty"`
 
-	// Branch is the git branch to checkout
+	// SourceRepository is the optional URL-derived identity for GitRepo. When set,
+	// it must match the normalized credential-free URL; for GitHub, use provider
+	// "github" and ID "github.com/owner/repo".
+	// +optional
+	SourceRepository *RepositoryIdentity `json:"sourceRepository,omitempty"`
+
+	// Branch is the source branch to check out.
+	// +kubebuilder:validation:MaxLength=255
 	// +optional
 	Branch string `json:"branch,omitempty"`
 
-	// Ref is a specific git ref (commit SHA, tag) to checkout
+	// Ref is a specific source git ref, commit SHA, or tag to check out.
+	// +kubebuilder:validation:MaxLength=512
 	// +optional
 	Ref string `json:"ref,omitempty"`
 
-	// GitSecretRef references a Secret containing git credentials
+	// ReadCredentialRef references the one-operation clone/read credential Secret.
+	// The Secret is resolved only by the clean-room workspace boundary.
 	// +optional
-	GitSecretRef *corev1.LocalObjectReference `json:"gitSecretRef,omitempty"`
+	ReadCredentialRef *WorkspaceCredentialReference `json:"readCredentialRef,omitempty"`
 
-	// SubPath is a subdirectory within the repo to use as workspace root
+	// PublicationGitRepo is the repository URL whose branch receives an exact CAS publication.
+	// Credentials must not be embedded in the URL.
+	// +kubebuilder:validation:MaxLength=2048
+	// +optional
+	PublicationGitRepo string `json:"publicationGitRepo,omitempty"`
+
+	// PublicationRepository is the optional URL-derived identity for
+	// PublicationGitRepo. When set, it must match the normalized credential-free
+	// URL; for GitHub, use provider "github" and ID "github.com/owner/repo".
+	// +optional
+	PublicationRepository *RepositoryIdentity `json:"publicationRepository,omitempty"`
+
+	// PublicationReadCredentialRef references the target-repository read
+	// credential used only for preflight and independent post-push verification.
+	// +optional
+	PublicationReadCredentialRef *WorkspaceCredentialReference `json:"publicationReadCredentialRef,omitempty"`
+
+	// PublicationCredentialRef references the target-repository write credential
+	// used only for the exact CAS push. It is never used to clone the source.
+	// +optional
+	PublicationCredentialRef *WorkspaceCredentialReference `json:"publicationCredentialRef,omitempty"`
+
+	// ForgeCredentialRef references the forge API credential used only for pull
+	// request reconciliation when createPR=true.
+	// +optional
+	ForgeCredentialRef *WorkspaceCredentialReference `json:"forgeCredentialRef,omitempty"`
+
+	// SubPath is a subdirectory within the source repository used as workspace root.
+	// +kubebuilder:validation:MaxLength=1024
 	// +optional
 	SubPath string `json:"subPath,omitempty"`
 
-	// ForkRepo is the writable fork repository URL for pushing changes
-	// +optional
-	ForkRepo string `json:"forkRepo,omitempty"`
-
-	// PRBaseBranch is the upstream branch to target for pull requests
+	// PRBaseBranch is the upstream branch targeted when CreatePR is true.
+	// +kubebuilder:validation:MaxLength=255
 	// +optional
 	PRBaseBranch string `json:"prBaseBranch,omitempty"`
 
-	// PushBranch is the remote branch name to push changes to after the agent completes.
-	// When set, FinalizeResult will commit and push changes to this branch.
+	// PRTitle is the pull request title supplied by the Task author. When empty,
+	// the controller uses the prompt's first nonblank line, limited to 256 characters.
+	// An empty or whitespace-only prompt falls back to the publication generation title.
+	// Nonempty whitespace-only titles are rejected. Secret-like titles, including
+	// prompt-derived titles, are rejected at runtime before publication.
+	// +kubebuilder:validation:MaxLength=256
+	// +kubebuilder:validation:XValidation:rule="self == '' || self.trim() != ''",message="prTitle must not be whitespace-only"
+	// +optional
+	PRTitle string `json:"prTitle,omitempty"`
+
+	// PRBody is the pull request body supplied by the Task author. When empty,
+	// the publisher describes the publication and identifies the Task. Publication
+	// generation and reconciliation markers are appended to either body.
+	// Orka reconciliation comments are reserved and must not be included.
+	// Secret-like text is rejected at runtime before publication.
+	// +kubebuilder:validation:MaxLength=32768
+	// +kubebuilder:validation:XValidation:rule="!self.contains('<!-- orka.publisher.pr-')",message="prBody must not contain reserved publisher reconciliation markers"
+	// +optional
+	PRBody string `json:"prBody,omitempty"`
+
+	// PushBranch is the publication branch. For write Tasks the controller derives
+	// a full-entropy Task- or Session-owned branch when this is omitted.
+	// +kubebuilder:validation:MaxLength=255
 	// +optional
 	PushBranch string `json:"pushBranch,omitempty"`
+
+	// ExpectedRemoteSHA requires the publication branch to exist at this exact
+	// commit before publication. Empty means the branch must be absent. It is
+	// supported only for agent Tasks using the trusted ACP publisher boundary.
+	// +kubebuilder:validation:Pattern=`^([a-f0-9]{40}|[a-f0-9]{64})$`
+	// +optional
+	ExpectedRemoteSHA string `json:"expectedRemoteSHA,omitempty"`
+
+	// MaxChangedFiles bounds the total changed, deleted, and symlink paths accepted
+	// from the trusted supervisor before publication. Zero uses the runtime limit.
+	// It is not supported for container Tasks.
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	MaxChangedFiles *int32 `json:"maxChangedFiles,omitempty"`
+
+	// AllowedPaths restricts publishable workspace changes to these path globs or
+	// directory prefixes ending in /**. Empty allows every otherwise-safe path.
+	// It is not supported for container Tasks.
+	// +kubebuilder:validation:MaxItems=256
+	// +optional
+	AllowedPaths []string `json:"allowedPaths,omitempty"`
+
+	// DenyRepositoryControlPaths rejects workflow, RBAC, and chart-secret paths
+	// before publication even when AllowedPaths is empty or otherwise matches.
+	// It is not supported for container Tasks.
+	// +optional
+	DenyRepositoryControlPaths bool `json:"denyRepositoryControlPaths,omitempty"`
+
+	// RejectBinaryFiles rejects changed file content that is not valid text. It is
+	// not supported for container Tasks.
+	// +optional
+	RejectBinaryFiles bool `json:"rejectBinaryFiles,omitempty"`
+
+	// RejectSecretLikeContent applies Orka's generic secret detector to changed
+	// paths and file contents before publication. It is not supported for container Tasks.
+	// +optional
+	RejectSecretLikeContent bool `json:"rejectSecretLikeContent,omitempty"`
+
+	// CreatePR explicitly requests pull request reconciliation after branch publication.
+	// Branch push remains the minimum durable delivery when false. It is supported only
+	// for agent Tasks using the trusted ACP publisher boundary.
+	// +kubebuilder:default=false
+	// +optional
+	CreatePR bool `json:"createPR,omitempty"`
 }
 
 func init() {

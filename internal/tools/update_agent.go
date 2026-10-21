@@ -10,11 +10,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 
 	"k8s.io/apimachinery/pkg/types"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/agentcontext"
 )
 
 // UpdateAgentTool updates an existing Agent CRD.
@@ -27,9 +27,15 @@ func (t *UpdateAgentTool) Description() string {
 }
 
 func (t *UpdateAgentTool) Parameters() json.RawMessage {
-	return mustMarshalSchema(map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{nameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: agentNameDescription}, namespaceField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: namespaceDescription}, systemPromptField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "System prompt for the agent"}, toolsField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeArray, itemsField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString}, jsonSchemaDescriptionField: "Tool names to attach"}, modelField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{
-		"provider": map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Model provider (e.g. anthropic, openai)"}, nameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Model name"}, "temperature": map[string]any{jsonSchemaTypeField: "number", jsonSchemaDescriptionField: "Sampling temperature"},
+	return marshalAgentSchema(map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{nameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: agentNameDescription}, namespaceField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: namespaceDescription}, systemPromptField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Role instructions for the agent. Built-in runtimes deliver these through their native instruction mechanism. Built-in harness v2 Copilot instructions cannot contain @ characters."}, toolsField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeArray, itemsField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString}, jsonSchemaDescriptionField: "Tool names to attach"}, modelField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{
+		providerField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Model provider (e.g. anthropic, openai). For OpenCode this is normalized into model.name."},
+		nameField:     map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Model name. OpenCode accepts a provider/model ID or a bare model name when the existing provider is retained."},
+		temperatureField: map[string]any{jsonSchemaTypeField: "number", jsonSchemaMinimumField: 0, "maximum": 2,
+			jsonSchemaDescriptionField: "Sampling temperature. OpenCode only accepts the legacy default 0.7."},
+		"contextWindow": map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaMinimumField: 1, jsonSchemaDescriptionField: "Reviewed model context capacity; required for OpenCode"},
+		"maxTokens":     map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaMinimumField: 1, jsonSchemaDescriptionField: "Reviewed maximum output tokens; required for OpenCode"},
 	},
+		jsonSchemaDescriptionField: "Partial model update. Omitted fields preserve their existing values.",
 	},
 	}, jsonSchemaRequiredField: []string{nameField},
 	})
@@ -41,8 +47,8 @@ func (t *UpdateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 		return ChatToolErrorResult(internalErrorType, "missing tool context", "")
 	}
 
-	var a map[string]any
-	if err := json.Unmarshal(args, &a); err != nil {
+	a, err := decodeUpdateAgentArgs(args)
+	if err != nil {
 		return ChatToolErrorResult("invalid_arguments", fmt.Sprintf("failed to parse arguments: %v", err), "Ensure arguments are valid JSON")
 	}
 
@@ -58,23 +64,36 @@ func (t *UpdateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 		return classifyChatK8sErr(err)
 	}
 
-	// Update specified fields
-	if modelProvider := chatGetStringArg(a, modelField); modelProvider != "" {
-		parts := strings.SplitN(modelProvider, "/", 2)
-		if agent.Spec.Model == nil {
-			agent.Spec.Model = &corev1alpha1.ModelConfig{}
+	requestedSystemPrompt := chatGetStringArg(a, systemPromptField)
+
+	if rawModel, supplied := a[modelField]; supplied {
+		modelUpdate, err := parseAgentModelUpdate(rawModel)
+		if err != nil {
+			return ChatToolErrorResult(
+				"invalid_arguments",
+				err.Error(),
+				"Provide model as an object with valid provider, name, temperature, contextWindow, and maxTokens fields.",
+			)
 		}
-		if len(parts) == 2 {
-			agent.Spec.Model.Provider = parts[0]
-			agent.Spec.Model.Name = parts[1]
-		} else {
-			agent.Spec.Model.Name = modelProvider
+		if err := applyAgentModelUpdate(agent, modelUpdate); err != nil {
+			return ChatToolErrorResult(
+				"invalid_arguments",
+				err.Error(),
+				"Use a consistent provider/model ID and reviewed model limits.",
+			)
 		}
 	}
 
-	if systemPrompt := chatGetStringArg(a, systemPromptField); systemPrompt != "" {
+	if value, supplied := a["soul"]; supplied {
+		source, err := soulArgument(value)
+		if err != nil {
+			return ChatToolErrorResult("invalid_arguments", err.Error(), "Provide inline Markdown or a ConfigMap reference with an expected digest.")
+		}
+		agent.Spec.Soul = source
+	}
+	if requestedSystemPrompt != "" {
 		agent.Spec.SystemPrompt = &corev1alpha1.PromptSource{
-			Inline: systemPrompt,
+			Inline: requestedSystemPrompt,
 		}
 	}
 
@@ -85,12 +104,28 @@ func (t *UpdateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 		}
 	}
 
-	// Re-fetch before update to avoid conflicts
-	latest := &corev1alpha1.Agent{}
-	if err := tc.Client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, latest); err != nil {
-		return classifyChatK8sErr(err)
+	// An Agent stored without a built-in contract runs under the namespace's
+	// mode, so validate the soul against that effective contract, as creation
+	// does. Only an omitted contract is filled; a stored one is left as is.
+	if runtime := agent.Spec.Runtime; runtime != nil && runtime.Type != "" && runtime.RuntimeRef == nil && runtime.ContractVersion == nil {
+		if contract := tc.ExecutionMode.ContractVersion(); contract != "" {
+			runtime.ContractVersion = &contract
+		}
 	}
-	agent.ResourceVersion = latest.ResourceVersion
+	if err := agentcontext.ValidateSoulRuntime(agent); err != nil {
+		return ChatToolErrorResult("invalid_arguments", err.Error(), "Use an AI worker Agent or a built-in orka.harness.v2 Agent; external runtimeRef Agents do not support souls.")
+	}
+	if err := agentcontext.ValidateInlineCopilotInstructions(agent); err != nil {
+		return ChatToolErrorResult("invalid_arguments", err.Error(), "Inline referenced text; built-in harness v2 Copilot role and soul instructions cannot contain @ characters.")
+	}
+
+	if isOpenCodeAgent(agent) {
+		if result, ok := normalizeChatOpenCodeModel(agent); !ok {
+			return result, nil
+		}
+	}
+
+	// Keep the version whose fields were edited; concurrent publication must conflict.
 	if result, ok := authorizeAgentUpdate(ctx, tc, agent); !ok {
 		return result, nil
 	}
@@ -100,4 +135,35 @@ func (t *UpdateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 	}
 
 	return ChatToolSuccess(map[string]any{nameField: agent.Name, messageField: "Agent updated"})
+}
+
+// decodeUpdateAgentArgs preserves temperature's exact number text until bounds
+// validation. Other arguments retain their existing float64 decoding, and model
+// strings and null values keep their existing behavior.
+func decodeUpdateAgentArgs(args json.RawMessage) (map[string]any, error) {
+	var values map[string]any
+	if err := json.Unmarshal(args, &values); err != nil {
+		return nil, err
+	}
+	model, ok := values[modelField].(map[string]any)
+	if !ok {
+		return values, nil
+	}
+	if _, numeric := model[temperatureField].(float64); !numeric {
+		return values, nil
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(args, &raw); err != nil {
+		return nil, err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw[modelField], &fields); err != nil {
+		return nil, err
+	}
+	var temperature json.Number
+	if err := json.Unmarshal(fields[temperatureField], &temperature); err != nil {
+		return nil, err
+	}
+	model[temperatureField] = temperature
+	return values, nil
 }

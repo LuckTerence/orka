@@ -7,12 +7,13 @@ MIT License - see LICENSE file for details.
 package api
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -27,22 +28,53 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/orka-agents/orka/internal/apierror"
+	"github.com/orka-agents/orka/internal/artifactcap"
+	"github.com/orka-agents/orka/internal/connectors"
 	"github.com/orka-agents/orka/internal/controller"
+	"github.com/orka-agents/orka/internal/executionmode"
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	"github.com/orka-agents/orka/internal/gateway/protocol"
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	memoryruntime "github.com/orka-agents/orka/internal/memory"
 	"github.com/orka-agents/orka/internal/memorybackend"
 	"github.com/orka-agents/orka/internal/store"
-	"github.com/orka-agents/orka/internal/uiembed"
 )
 
 var log = logf.Log.WithName("api-server")
 
+// ControllerEpochFenceSource exposes the controller's current durable fence to
+// internal broker authorization paths.
+type ControllerEpochFenceSource interface {
+	CurrentFence(context.Context) (store.ControllerEpochFence, error)
+}
+
+type ControllerEpochReader interface {
+	GetControllerEpochFence(context.Context, string) (store.ControllerEpochFence, error)
+}
+
+// ControllerEpochStoreFenceSource reads the current fence directly from the
+// durable epoch store. Unlike ControllerEpochManager, it is safe for API
+// handlers on non-leader replicas because it has no leader-readiness barrier.
+type ControllerEpochStoreFenceSource struct {
+	epochs ControllerEpochReader
+}
+
+func NewControllerEpochStoreFenceSource(epochs ControllerEpochReader) *ControllerEpochStoreFenceSource {
+	return &ControllerEpochStoreFenceSource{epochs: epochs}
+}
+
+func (s *ControllerEpochStoreFenceSource) CurrentFence(ctx context.Context) (store.ControllerEpochFence, error) {
+	if s == nil || s.epochs == nil {
+		return store.ControllerEpochFence{}, fmt.Errorf("controller epoch store is unavailable")
+	}
+	return s.epochs.GetControllerEpochFence(ctx, store.DefaultControllerEpochName)
+}
+
 // ServerConfig holds configuration for the API server
 type ServerConfig struct {
 	Port                      int
-	MetricsPort               int
 	WatchNamespace            string
+	ExecutionMode             executionmode.Mode
 	EnforceNamespaceIsolation bool
 	OIDC                      OIDCConfig
 	ContextTokens             ContextTokenConfig
@@ -51,9 +83,13 @@ type ServerConfig struct {
 	Chat                      ChatConfig
 	ResultStore               store.ResultStore
 	SessionStore              store.SessionStore
+	NativeSessionMaxBytes     int
 	PlanStore                 store.PlanStore
 	MessageStore              store.MessageStore
 	ArtifactStore             store.ArtifactStore
+	ArtifactReservations      artifactcap.CapabilityReservationRecorder
+	AgentExecutionSnapshots   store.AgentExecutionSnapshotStore
+	ExternalEffects           store.ExternalEffectIdentityReader
 	MemoryStore               store.MemoryStore
 	MemoryProposalStore       store.MemoryProposalStore
 	MemoryService             *memoryruntime.Service
@@ -67,72 +103,79 @@ type ServerConfig struct {
 	HealthChecker             store.HealthChecker
 	Clientset                 kubernetes.Interface
 	APIReader                 client.Reader
+	TaskProvenanceProtected   bool
+	ControllerEpochs          ControllerEpochFenceSource
+	E2EPromptFaultEnabled     bool
+	Connectors                ConnectorConfig
+	ConnectorTools            ConnectorToolExecutionConfig
+	// DashboardEnabled mirrors --dashboard-enabled: only then does the API
+	// port serve the embedded web dashboard and answer unrouted non-API
+	// paths with its index page.
+	DashboardEnabled bool
 }
 
 // Server is the REST API server
 type Server struct {
-	app                    *fiber.App
-	client                 client.Client
-	config                 ServerConfig
-	sessionManager         *controller.SessionManager
-	handlers               *Handlers
-	chatHandler            *ChatHandler
-	openaiHandler          *OpenAICompatHandler
-	anthropicHandler       *AnthropicCompatHandler
-	internalHandlers       *InternalHandlers
-	ResultStore            store.ResultStore
-	SessionStore           store.SessionStore
-	PlanStore              store.PlanStore
-	MessageStore           store.MessageStore
-	ArtifactStore          store.ArtifactStore
-	MemoryStore            store.MemoryStore
-	MemoryProposalStore    store.MemoryProposalStore
-	SecurityStore          store.SecurityStore
-	RepositoryMonitorStore store.RepositoryMonitorStore
-	ExecutionEventStore    store.ExecutionEventStore
-	GatewayEventStore      store.GatewayEventStore
-	GatewayDeliveryStore   store.GatewayDeliveryStore
-	GatewayService         *gatewayruntime.Service
+	app                 *fiber.App
+	client              client.Client
+	config              ServerConfig
+	sessionManager      *controller.SessionManager
+	handlers            *Handlers
+	chatHandler         *ChatHandler
+	openaiHandler       *OpenAICompatHandler
+	anthropicHandler    *AnthropicCompatHandler
+	internalHandlers    *InternalHandlers
+	ResultStore         store.ResultStore
+	SessionStore        store.SessionStore
+	PlanStore           store.PlanStore
+	MessageStore        store.MessageStore
+	ArtifactStore       store.ArtifactStore
+	MemoryStore         store.MemoryStore
+	MemoryProposalStore store.MemoryProposalStore
+	ExecutionEventStore store.ExecutionEventStore
+	GatewayEventStore   store.GatewayEventStore
 }
 
 // NewServer creates a new API server
 func NewServer(c client.Client, sessionManager *controller.SessionManager, config ServerConfig) *Server {
+	config.Chat.ExecutionMode = config.ExecutionMode
+	config.Chat.DashboardEnabled = config.DashboardEnabled
 	app := fiber.New(fiber.Config{
-		AppName:      "Orka API",
-		BodyLimit:    15 << 20, // 15MB — allows artifact uploads up to 10MB + overhead
-		ErrorHandler: customErrorHandler,
+		AppName:           "Orka API",
+		BodyLimit:         defaultAPIRequestBodyLimit,
+		StreamRequestBody: true,
+		ErrorHandler:      customErrorHandler,
 	})
-	app.Server().HeaderReceived = requestBodyConfig
+	redactRequestParseErrors(app)
 
 	server := &Server{
-		app:                    app,
-		client:                 c,
-		config:                 config,
-		sessionManager:         sessionManager,
-		ResultStore:            config.ResultStore,
-		SessionStore:           config.SessionStore,
-		PlanStore:              config.PlanStore,
-		MessageStore:           config.MessageStore,
-		ArtifactStore:          config.ArtifactStore,
-		MemoryStore:            config.MemoryStore,
-		MemoryProposalStore:    config.MemoryProposalStore,
-		SecurityStore:          config.SecurityStore,
-		RepositoryMonitorStore: config.RepositoryMonitorStore,
-		ExecutionEventStore:    config.ExecutionEventStore,
-		GatewayEventStore:      config.GatewayEventStore,
-		GatewayDeliveryStore:   config.GatewayDeliveryStore,
-		GatewayService:         config.GatewayService,
+		app:                 app,
+		client:              c,
+		config:              config,
+		sessionManager:      sessionManager,
+		ResultStore:         config.ResultStore,
+		SessionStore:        config.SessionStore,
+		PlanStore:           config.PlanStore,
+		MessageStore:        config.MessageStore,
+		ArtifactStore:       config.ArtifactStore,
+		MemoryStore:         config.MemoryStore,
+		MemoryProposalStore: config.MemoryProposalStore,
+		ExecutionEventStore: config.ExecutionEventStore,
+		GatewayEventStore:   config.GatewayEventStore,
 	}
 
 	server.handlers = NewHandlers(HandlersConfig{
 		Client:                    c,
 		APIReader:                 config.APIReader,
 		WatchNamespace:            config.WatchNamespace,
+		ExecutionMode:             config.ExecutionMode,
 		EnforceNamespaceIsolation: config.EnforceNamespaceIsolation,
 		ContextTokenAuthorization: config.ContextTokenAuthorization,
 		ContextTokenTTS:           config.ContextTokenTTS,
 		ResultStore:               config.ResultStore,
 		SessionStore:              config.SessionStore,
+		NativeSessionMaxBytes:     config.NativeSessionMaxBytes,
+		SessionManager:            sessionManager,
 		PlanStore:                 config.PlanStore,
 		KubeClient:                config.Clientset,
 		HealthChecker:             config.HealthChecker,
@@ -147,40 +190,89 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		GatewayEventStore:         config.GatewayEventStore,
 		GatewayDeliveryStore:      config.GatewayDeliveryStore,
 		GatewayService:            config.GatewayService,
+		Connectors:                config.Connectors,
 	})
 	resolver := NewProviderResolver(c, config.Chat)
-	server.chatHandler = NewChatHandler(c, sessionManager, config.Chat, config.WatchNamespace, config.EnforceNamespaceIsolation, config.SessionStore, config.ResultStore, resolver, config.Clientset)
+	server.chatHandler = NewChatHandler(c, config.APIReader, sessionManager, config.Chat, config.WatchNamespace, config.EnforceNamespaceIsolation, config.SessionStore, config.ResultStore, resolver, config.Clientset)
 	server.chatHandler.contextTokenAuthorization = config.ContextTokenAuthorization
-	server.openaiHandler = NewOpenAICompatHandler(c, config.WatchNamespace, config.EnforceNamespaceIsolation, config.Chat, resolver, config.ResultStore, config.Clientset)
+	server.chatHandler.gatewayEventStore = config.GatewayEventStore
+	server.openaiHandler = NewOpenAICompatHandler(c, config.APIReader, config.WatchNamespace, config.EnforceNamespaceIsolation, config.Chat, resolver, config.ResultStore, config.Clientset)
 	server.openaiHandler.contextTokenAuthorization = config.ContextTokenAuthorization
-	server.anthropicHandler = NewAnthropicCompatHandler(c, config.WatchNamespace, config.EnforceNamespaceIsolation, config.Chat, resolver, config.ResultStore, config.Clientset)
+	server.openaiHandler.gatewayEventStore = config.GatewayEventStore
+	app.Server().HeaderReceived = server.requestConfig
+	server.anthropicHandler = NewAnthropicCompatHandler(c, config.APIReader, config.WatchNamespace, config.EnforceNamespaceIsolation, config.Chat, resolver, config.ResultStore, config.Clientset)
 	server.anthropicHandler.contextTokenAuthorization = config.ContextTokenAuthorization
+	server.anthropicHandler.gatewayEventStore = config.GatewayEventStore
 	server.setupMiddleware()
 	server.setupRoutes()
 	server.setupStaticFiles()
-
 	return server
 }
 
 func requestBodyConfig(header *fasthttp.RequestHeader) fasthttp.RequestConfig {
+	return requestBodyConfigWithNativeSessionLimit(header, harnessv2.DefaultMaxNativeSessionBytes)
+}
+
+func requestBodyConfigWithNativeSessionLimit(header *fasthttp.RequestHeader, nativeSessionMaxBytes int) fasthttp.RequestConfig {
 	if string(header.Method()) != fiber.MethodPost {
 		return fasthttp.RequestConfig{}
 	}
 	rawTarget := string(header.RequestURI())
-	path := strings.SplitN(rawTarget, "?", 2)[0]
+	path, _, _ := strings.Cut(rawTarget, "?")
 	if parsed, err := url.ParseRequestURI(rawTarget); err == nil && parsed.EscapedPath() != "" {
 		path = parsed.EscapedPath()
 	}
-	parts := strings.Split(strings.Trim(path, "/"), "/")
-	if len(parts) == 6 && strings.EqualFold(parts[0], "api") && strings.EqualFold(parts[1], "v1") &&
-		strings.EqualFold(parts[2], "gateways") && strings.EqualFold(parts[5], "events") {
+	if isGatewayIngressPath(path) {
 		return fasthttp.RequestConfig{MaxRequestBodySize: protocol.MaxHTTPBodyBytes}
+	}
+	// Use Fiber's fasthttp path semantics for the streaming exemption, including
+	// fragment handling. net/url would retain a literal '#' in the path and
+	// leave a routed native import without its bounded read deadline.
+	var nativeURI fasthttp.URI
+	if nativeURI.Parse(header.Host(), header.RequestURI()) == nil && isNativeSessionImportPath(string(nativeURI.PathOriginal())) {
+		return fasthttp.RequestConfig{MaxRequestBodySize: harnessv2.NativeSessionJSONLimit(nativeSessionMaxBytes), ReadTimeout: 30 * time.Second}
+	}
+	// Internal broker endpoints authorize against per-pool secrets that are
+	// only resolvable from the request body, so unauthenticated peers cannot
+	// be rejected on headers alone. Bound both the body size and the full
+	// request read so a Pod-local peer cannot hold controller connections
+	// open by dripping chunked bodies.
+	if strings.HasPrefix(path, "/internal/v2/acp/") {
+		return fasthttp.RequestConfig{MaxRequestBodySize: 1 << 20, ReadTimeout: 30 * time.Second}
 	}
 	return fasthttp.RequestConfig{}
 }
 
+// requestConfig bounds writes on the Responses route as well as provider work.
+// A context deadline cannot interrupt a socket blocked by a client that stops
+// reading. fasthttp applies and clears this deadline for each keep-alive request.
+func (s *Server) requestConfig(header *fasthttp.RequestHeader) fasthttp.RequestConfig {
+	config := requestBodyConfigWithNativeSessionLimit(header, s.handlers.nativeSessionMaxBytes)
+	// Fiber routes on fasthttp PathOriginal, including its fragment handling.
+	// net/url's request-target parsing differs for a literal '#' character.
+	var uri fasthttp.URI
+	if header.IsPost() && uri.Parse(header.Host(), header.RequestURI()) == nil &&
+		bytes.EqualFold(bytes.TrimRight(uri.PathOriginal(), "/"), []byte("/openai/v1/responses")) {
+		// Allow a bounded grace period to deliver the terminal timeout event.
+		config.WriteTimeout = s.openaiHandler.config.MaxDuration + time.Second
+	}
+	return config
+}
+
+// isGatewayIngressPath matches /api/v1/gateways/{gateway}/{channel}/events,
+// the adapter ingress route with its own bounded request configuration and
+// streaming body reader.
+func isGatewayIngressPath(path string) bool {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	return len(parts) == 6 && strings.EqualFold(parts[0], "api") && strings.EqualFold(parts[1], "v1") &&
+		strings.EqualFold(parts[2], "gateways") && strings.EqualFold(parts[5], "events")
+}
+
 // setupMiddleware configures middleware for the server
 func (s *Server) setupMiddleware() {
+	// Outermost, so it runs after every handler and middleware has returned.
+	s.app.Use(drainUnreadRequestBody)
+
 	// Recovery middleware
 	s.app.Use(recover.New())
 
@@ -211,6 +303,7 @@ func (s *Server) setupMiddleware() {
 
 	// Metrics middleware
 	s.app.Use(NewMetricsMiddleware())
+
 }
 
 func allowedCORSHeaders(contextTokens ContextTokenConfig) []string {
@@ -237,6 +330,13 @@ func allowedCORSHeaders(contextTokens ContextTokenConfig) []string {
 
 // setupRoutes configures the API routes
 func (s *Server) setupRoutes() {
+	// The ACP artifact transport must be installed before other routes so large
+	// capability-bound uploads remain streamed while ordinary API bodies retain
+	// the historical bounded request limit.
+	s.installACPArtifactTransport()
+	s.installACPArtifactAuthorizationBroker()
+	s.installACPE2EPromptWriteFaultRecorder()
+
 	// Health endpoints
 	s.app.Get("/healthz", s.handlers.Healthz)
 	s.app.Get("/readyz", s.handlers.Readyz)
@@ -247,13 +347,15 @@ func (s *Server) setupRoutes() {
 	// GitHub webhooks use HMAC verification instead of Kubernetes/OIDC bearer auth.
 	s.app.Post("/webhooks/github", s.handlers.HandleGitHubWebhook)
 
+	// The connector OAuth callback arrives from the provider through the
+	// person's browser without an Orka bearer token. The signed single-use
+	// state and the sealed PKCE verifier authenticate it instead.
+	s.app.Get(connectors.CallbackPath, s.handlers.ConnectionCallback)
+
 	externalAuth := NewAuthMiddleware(s.client, AuthConfig{OIDC: s.config.OIDC, ContextTokens: s.config.ContextTokens})
 
 	// API v1 group
-	api := s.app.Group("/api/v1")
-
-	// Auth middleware for API endpoints
-	api.Use(externalAuth)
+	api := s.externalAPIGroup("/api/v1", externalAuth)
 
 	// Task endpoints
 	api.Post("/tasks", s.handlers.CreateTask)
@@ -276,6 +378,8 @@ func (s *Server) setupRoutes() {
 	// Session endpoints
 	api.Get("/sessions", s.handlers.ListSessions)
 	api.Get("/sessions/:id", s.handlers.GetSession)
+	api.Get("/sessions/:id/native", s.handlers.ExportNativeSession)
+	api.Post("/sessions/:id/native", s.handlers.ImportNativeSession)
 	api.Get("/sessions/:id/events", s.handlers.ListSessionEvents)
 	api.Get("/sessions/:id/stream", s.handlers.StreamSessionEvents)
 	api.Delete("/sessions/:id", s.handlers.DeleteSession)
@@ -327,6 +431,10 @@ func (s *Server) setupRoutes() {
 	api.Post("/memory-proposals/:id/archive", s.handlers.ArchiveMemoryProposal)
 
 	// Provider endpoints
+	api.Get("/usage", s.handlers.GetUsageReport)
+	api.Get("/usage/work/:id", s.handlers.GetUsageWork)
+	api.Get("/usage/other/:category", s.handlers.GetUsageOther)
+
 	api.Get("/providers", s.handlers.ListProviders)
 	api.Post("/providers", s.handlers.CreateProvider)
 	api.Get("/providers/:name", s.handlers.GetProvider)
@@ -340,10 +448,20 @@ func (s *Server) setupRoutes() {
 	api.Put("/tools/:name", s.handlers.UpdateTool)
 	api.Delete("/tools/:name", s.handlers.DeleteTool)
 
+	// Runtime fabric endpoints
+	api.Get("/runtime-pools", s.handlers.ListRuntimePools)
+	api.Get("/runtime-pools/:name", s.handlers.GetRuntimePool)
+	api.Get("/agent-runtimes", s.handlers.ListAgentRuntimes)
+	api.Post("/agent-runtimes", s.handlers.CreateAgentRuntime)
+	api.Get("/agent-runtimes/:name", s.handlers.GetAgentRuntime)
+	api.Put("/agent-runtimes/:name", s.handlers.UpdateAgentRuntime)
+	api.Delete("/agent-runtimes/:name", s.handlers.DeleteAgentRuntime)
+
 	// Agent endpoints
 	api.Post("/agents", s.handlers.CreateAgent)
 	api.Get("/agents", s.handlers.ListAgents)
 	api.Get("/agents/:name", s.handlers.GetAgent)
+	api.Get("/agents/:name/system-prompt", s.handlers.GetAgentSystemPrompt)
 	api.Put("/agents/:name", s.handlers.UpdateAgent)
 	api.Delete("/agents/:name", s.handlers.DeleteAgent)
 
@@ -365,6 +483,7 @@ func (s *Server) setupRoutes() {
 	api.Put("/security/repositories/:name/threat-model", s.handlers.UpdateThreatModel)
 	api.Get("/security/repositories/:name/scans", s.handlers.ListSecurityScanRuns)
 	api.Post("/security/repositories/:name/scans", s.handlers.CreateManualSecurityScan)
+	api.Get("/security/repositories/:name/scans/:scanID/progress", s.handlers.GetSecurityScanProgress)
 	api.Get("/security/repositories/:name/slices", s.handlers.ListSecurityReviewSlices)
 	api.Get("/security/repositories/:name/slices/:sliceID", s.handlers.GetSecurityReviewSlice)
 	api.Get("/security/repositories/:name/dropped-findings", s.handlers.ListSecurityDroppedFindings)
@@ -411,6 +530,17 @@ func (s *Server) setupRoutes() {
 	api.Get("/auth/validate", s.handleAuthValidate)
 	api.Get("/auth/whoami", s.handleAuthWhoAmI)
 
+	// Connector catalog and per-person Connections. Every handler re-checks
+	// that the caller is a verified human identity and owns the Connection.
+	api.Get("/connectors", s.handlers.ListConnectors)
+	api.Get("/connections", s.handlers.ListConnections)
+	api.Post("/connections", s.handlers.CreateConnection)
+	api.Get("/connections/:name", s.handlers.GetConnection)
+	api.Put("/connections/:name", s.handlers.UpdateConnection)
+	api.Delete("/connections/:name", s.handlers.DeleteConnection)
+	api.Post("/connections/:name/authorize", s.handlers.AuthorizeConnection)
+	api.Post("/connections/:name/complete", s.handlers.CompleteConnection)
+
 	// Reference endpoints (for dropdowns)
 	api.Get("/secrets", s.handlers.ListSecretNames)
 
@@ -423,18 +553,17 @@ func (s *Server) setupRoutes() {
 
 	// OpenAI-compatible API (under /openai/v1, separate from /api/v1)
 	// This allows OpenAI-compatible clients to use Orka as a custom provider.
-	oai := s.app.Group("/openai/v1")
-	oai.Use(externalAuth)
+	oai := s.externalAPIGroup("/openai/v1", externalAuth)
 	oai.Post("/chat/completions", s.openaiHandler.HandleChatCompletions)
+	oai.Post("/responses", s.openaiHandler.HandleResponses)
 	oai.Get("/models", s.openaiHandler.HandleListModels)
 
 	// Anthropic-compatible API
-	anthropic := s.app.Group("/anthropic/v1")
-	anthropic.Use(externalAuth)
+	anthropic := s.externalAPIGroup("/anthropic/v1", externalAuth)
 	anthropic.Post("/messages", s.anthropicHandler.HandleMessages)
 	anthropic.Get("/models", s.anthropicHandler.HandleListModels)
 
-	// Internal API for worker communication
+	// Internal API for worker communication.
 	if s.hasInternalStores() {
 		s.internalHandlers = NewInternalHandlers(
 			s.ResultStore,
@@ -451,11 +580,29 @@ func (s *Server) setupRoutes() {
 				ContextTokenAuthorization: s.config.ContextTokenAuthorization,
 				ExecutionEventStore:       s.ExecutionEventStore,
 				GatewayEventStore:         s.GatewayEventStore,
+				GatewayService:            s.config.GatewayService,
+				TaskProvenanceProtected:   s.config.TaskProvenanceProtected,
+				ConnectorTools:            s.config.ConnectorTools,
 			},
 		)
 		internal := s.app.Group("/internal/v1")
+		// Optional origin bootstrap must distinguish a TokenReview backend outage
+		// from an invalid token. Register before the default auth middleware so no
+		// other internal or public route changes its authentication error contract.
+		internal.Get("/tasks/:namespace/:taskName/gateway-messages/origin",
+			NewAuthMiddleware(s.client, AuthConfig{ReportTokenReviewUnavailable: true}),
+			s.internalHandlers.GetGatewayReplyOrigin)
+		// Workers authenticate with their Pod ServiceAccount token and may attach
+		// an independently verified, request-local task-scoped transaction token.
 		internal.Use(NewAuthMiddleware(s.client, AuthConfig{ContextTokens: s.config.ContextTokens}))
 		internal.Post("/results/:namespace/:taskName", s.internalHandlers.SubmitResult)
+		// Native workers run connector-backed tools here; the person's token
+		// never leaves the controller.
+		internal.Post("/tasks/:namespace/:taskName/connector-tools/:tool", s.internalHandlers.ExecuteConnectorTool)
+		internal.Post("/tasks/:namespace/:taskName/gateway-messages", s.internalHandlers.SubmitGatewayMessage)
+		internal.Post("/tasks/:namespace/:taskName/children/:child/requester-stamp", s.internalHandlers.SealChildRequesterStamp)
+		internal.Post("/tasks/:namespace/:taskName/children/:child/cancel", s.internalHandlers.CancelChildTask)
+		internal.Get("/tasks/:namespace/:taskName/gateway-messages/budget", s.internalHandlers.GetGatewayMessageBudget)
 		internal.Post("/tasks/:namespace/:taskName/execution-workspace/status", s.internalHandlers.UpdateExecutionWorkspaceStatus)
 		internal.Get("/sessions/:namespace/search", s.internalHandlers.SearchTranscript)
 		internal.Get("/sessions/:namespace/:name/transcript", s.internalHandlers.GetSessionTranscript)
@@ -493,7 +640,8 @@ func (s *Server) hasInternalStores() bool {
 		s.MemoryStore != nil ||
 		s.MemoryProposalStore != nil ||
 		s.config.MemoryService != nil ||
-		s.ExecutionEventStore != nil
+		s.ExecutionEventStore != nil ||
+		s.config.GatewayService != nil
 }
 
 // Start starts the API server
@@ -508,7 +656,6 @@ func (s *Server) Start(ctx context.Context) error {
 			errCh <- err
 		}
 	}()
-
 	// Wait for shutdown signal or error
 	select {
 	case <-ctx.Done():
@@ -517,6 +664,42 @@ func (s *Server) Start(ctx context.Context) error {
 	case err := <-errCh:
 		return err
 	}
+}
+
+// apiPathRoots are the request path roots served by an API rather than by the
+// dashboard. A 404 under one of them is a routing answer the caller needs to
+// see, not a client-side route for the SPA to resolve. Lower case and without
+// a trailing slash, matched against a normalized path: see routeLookupPath.
+var apiPathRoots = []string{"/api", "/openai", "/anthropic", "/internal", "/webhooks"}
+
+// routeLookupPath normalizes path the way the router matches it. Fiber is
+// case-insensitive and non-strict about a trailing slash by default, so
+// /OPENAI/v1/chat/completions and /openai/v1/chat/completions/ both reach the
+// registered handler. Unrouted paths have to be classified the same way, or a
+// caller gets a different answer for a spelling the router treats as identical.
+func routeLookupPath(path string) string {
+	folded := strings.ToLower(path)
+	for len(folded) > 1 && strings.HasSuffix(folded, "/") {
+		folded = folded[:len(folded)-1]
+	}
+	return folded
+}
+
+// staticAssetRoot holds the hashed build output. A missing file under it is a
+// stale or mistyped chunk reference: answering with index.html would hand the
+// browser HTML where it expects JavaScript or CSS, so it stays a 404.
+const staticAssetRoot = "/assets"
+
+// spaFallbackEligible reports whether a 404 for path is served as the SPA
+// index page instead of a JSON error. Telemetry middleware uses the same
+// predicate so the recorded status matches what the client receives.
+func spaFallbackEligible(path string) bool {
+	folded := routeLookupPath(path)
+	underRoot := func(root string) bool { return folded == root || strings.HasPrefix(folded, root+"/") }
+	if slices.ContainsFunc(apiPathRoots, underRoot) || underRoot(staticAssetRoot) {
+		return false
+	}
+	return folded != "/healthz" && folded != "/readyz"
 }
 
 // customErrorHandler handles errors returned by handlers and produces a
@@ -543,8 +726,7 @@ func customErrorHandler(c fiber.Ctx, err error) error {
 	message := "Internal Server Error"
 
 	reason := ""
-	var structured *apierror.Error
-	if errors.As(err, &structured) {
+	if structured, ok := errors.AsType[*apierror.Error](err); ok {
 		if structured.Status > 0 {
 			code = structured.Status
 		}
@@ -558,26 +740,27 @@ func customErrorHandler(c fiber.Ctx, err error) error {
 		code = e.Code
 		message = e.Message
 	}
+	// Every error body is JSON or the SPA page; neither may be sniffed.
+	c.Set(fiber.HeaderXContentTypeOptions, "nosniff")
 
 	// For 404s on non-API paths, serve the SPA index.html
+	if code == fiber.StatusNotFound && dashboardServed(c) && spaFallbackEligible(c.Path()) {
+		if page, ok := embeddedSPAIndexPage(); ok {
+			return page.send(c)
+		}
+	}
+
+	// Callers of the compatibility APIs are provider SDKs that parse only that
+	// provider's error envelope, so an unrouted path answers in its format.
 	if code == fiber.StatusNotFound {
-		path := c.Path()
-		isAPI := strings.HasPrefix(path, "/api") || strings.HasPrefix(path, "/internal/") || path == "/internal"
-		if !isAPI && path != "/healthz" && path != "/readyz" {
-			distFS, fsErr := uiembed.FS()
-			if fsErr == nil {
-				data, readErr := fs.ReadFile(distFS, "index.html")
-				if readErr == nil {
-					c.Set("Content-Type", "text/html; charset=utf-8")
-					return c.Status(fiber.StatusOK).Send(data)
-				}
-			}
+		if handled, resp := compatRouteNotFound(c); handled {
+			return resp
 		}
 	}
 
 	errorBody := fiber.Map{
-		"code":    code,
-		"message": message,
+		apiFieldCode:    code,
+		apiFieldMessage: message,
 	}
 	if reason != "" {
 		errorBody["reason"] = reason
@@ -588,5 +771,43 @@ func customErrorHandler(c fiber.Ctx, err error) error {
 			errorBody["cursor"] = cursor
 		}
 	}
-	return c.Status(code).JSON(fiber.Map{"error": errorBody})
+	return c.Status(code).JSON(fiber.Map{apiFieldError: errorBody})
+}
+
+// unsupportedCompatRoutes names endpoints of the emulated provider APIs that
+// Orka deliberately does not serve, and the supported route to use instead.
+// Keys are lower case and looked up with a folded path.
+// Saying so costs a client one line in its log rather than a parse failure
+// several frames from the cause.
+var unsupportedCompatRoutes = map[string]string{
+	"/openai/v1/conversations": "saved conversations are not supported; use /openai/v1/responses with store:false and client-owned history",
+}
+
+// compatRouteNotFound answers an unrouted compatibility-API path in the error
+// format that API's clients expect. It reports whether it handled the path.
+func compatRouteNotFound(c fiber.Ctx) (bool, error) {
+	path := routeLookupPath(c.Path())
+	status := fiber.StatusNotFound
+
+	message, unsupported := unsupportedCompatRoutes[path]
+	if unsupported {
+		// The endpoint is a real part of the emulated API and this server does
+		// not implement it, which is 501 rather than "no such route".
+		status = fiber.StatusNotImplemented
+		// Provider SDKs should not retry this permanent failure.
+		c.Set("X-Should-Retry", "false")
+	} else {
+		message = fmt.Sprintf("unknown path %s", path)
+	}
+
+	switch {
+	case path == "/openai" || strings.HasPrefix(path, "/openai/"):
+		return true, c.Status(status).JSON(OAIError{Error: OAIErrorDetail{
+			Message: message,
+			Type:    OAIErrorTypeInvalidRequest,
+		}})
+	case path == "/anthropic" || strings.HasPrefix(path, "/anthropic/"):
+		return true, anthropicError(c, status, "not_found_error", message)
+	}
+	return false, nil
 }

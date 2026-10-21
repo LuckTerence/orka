@@ -26,12 +26,32 @@ type jsonShape struct {
 	nullable bool
 }
 
+// JSON field names repeated across the closed wire shapes.
+const (
+	jsonFieldBinding       = "binding"
+	jsonFieldClusterID     = "clusterId"
+	jsonFieldBackendUID    = "backendUid"
+	jsonFieldContentDigest = "contentDigest"
+	jsonFieldState         = "state"
+	jsonFieldNamespaceUID  = "namespaceUid"
+	jsonFieldBindingDigest = "bindingDigest"
+	jsonFieldUpsertKey     = "upsertKey"
+	jsonFieldStoreUUID     = "storeUuid"
+	jsonFieldOperationID   = "operationId"
+
+	jsonFieldProtocolVersion = "protocolVersion"
+	jsonFieldBackendVersion  = "backendVersion"
+	jsonFieldBackendMemoryID = "backendMemoryId"
+	jsonFieldResult          = "result"
+)
+
 var bindingShape = jsonShape{required: []string{
-	"clusterId", "namespaceUid", "backendUid", "authorityEpoch", "routingEpoch", "tenantId", "storeUuid",
+	jsonFieldClusterID, jsonFieldNamespaceUID, jsonFieldBackendUID, "authorityEpoch", "routingEpoch", "tenantId",
+	jsonFieldStoreUUID,
 }}
 
 var storeResolutionBindingShape = jsonShape{required: []string{
-	"clusterId", "namespaceUid", "backendUid", "tenantId",
+	jsonFieldClusterID, jsonFieldNamespaceUID, jsonFieldBackendUID, "tenantId",
 }}
 
 var capabilitiesShape = jsonShape{required: []string{
@@ -49,14 +69,19 @@ var limitsShape = jsonShape{required: []string{
 var stateShape = jsonShape{required: []string{"content", "tags", "metadata"}, nullable: true}
 
 var receiptShape = jsonShape{
-	required: []string{"protocolVersion", "binding", "result", "operationId", "bindingDigest", "appliedGeneration",
-		"backendVersion", "backendMemoryId", "contentDigest", "mutationDigest", "completedAt"},
-	children: map[string]jsonShape{"binding": bindingShape},
+	required: []string{
+		jsonFieldProtocolVersion, jsonFieldBinding, jsonFieldResult, jsonFieldOperationID, jsonFieldBindingDigest,
+		"appliedGeneration", jsonFieldBackendVersion, jsonFieldBackendMemoryID, jsonFieldContentDigest,
+		"mutationDigest", "completedAt",
+	},
+	children: map[string]jsonShape{jsonFieldBinding: bindingShape},
 }
 
 var recordShape = jsonShape{
-	required: []string{"memoryId", "upsertKey", "state", "generation", "backendVersion", "backendMemoryId",
-		"contentDigest", "content", "tags", "metadata", "updatedAt"},
+	required: []string{
+		"memoryId", jsonFieldUpsertKey, jsonFieldState, "generation", jsonFieldBackendVersion, jsonFieldBackendMemoryID,
+		jsonFieldContentDigest, "content", "tags", "metadata", "updatedAt",
+	},
 	optional: []string{"score"},
 }
 
@@ -66,7 +91,7 @@ func DecodeHealthResponse(body []byte) (*HealthResponse, error) {
 		body,
 		MaxAdapterResponseBytes,
 		&response,
-		jsonShape{required: []string{"protocolVersion", "status"}},
+		jsonShape{required: []string{jsonFieldProtocolVersion, "status"}},
 	); err != nil {
 		return nil, fmt.Errorf("invalid health response: %w", err)
 	}
@@ -79,8 +104,8 @@ func DecodeHealthResponse(body []byte) (*HealthResponse, error) {
 func DecodeStoreResolveRequest(body []byte) (*StoreResolveRequest, error) {
 	var request StoreResolveRequest
 	shape := jsonShape{
-		required: []string{"protocolVersion", "binding", "storeName"},
-		children: map[string]jsonShape{"binding": storeResolutionBindingShape},
+		required: []string{jsonFieldProtocolVersion, jsonFieldBinding, "storeName"},
+		children: map[string]jsonShape{jsonFieldBinding: storeResolutionBindingShape},
 	}
 	if err := decodeClosed(body, MaxHTTPBodyBytes, &request, shape); err != nil {
 		return nil, fmt.Errorf("invalid store resolve request: %w", err)
@@ -94,8 +119,8 @@ func DecodeStoreResolveRequest(body []byte) (*StoreResolveRequest, error) {
 func DecodeStoreResolveResponse(body []byte) (*StoreResolveResponse, error) {
 	var response StoreResolveResponse
 	shape := jsonShape{
-		required: []string{"protocolVersion", "binding", "storeName", "storeUuid"},
-		children: map[string]jsonShape{"binding": storeResolutionBindingShape},
+		required: []string{jsonFieldProtocolVersion, jsonFieldBinding, "storeName", jsonFieldStoreUUID},
+		children: map[string]jsonShape{jsonFieldBinding: storeResolutionBindingShape},
 	}
 	if err := decodeClosed(body, MaxAdapterResponseBytes, &response, shape); err != nil {
 		return nil, fmt.Errorf("invalid store resolve response: %w", err)
@@ -109,8 +134,8 @@ func DecodeStoreResolveResponse(body []byte) (*StoreResolveResponse, error) {
 func DecodeCapabilitiesRequest(body []byte) (*CapabilitiesRequest, error) {
 	var request CapabilitiesRequest
 	shape := jsonShape{
-		required: []string{"protocolVersion", "binding"},
-		children: map[string]jsonShape{"binding": bindingShape},
+		required: []string{jsonFieldProtocolVersion, jsonFieldBinding},
+		children: map[string]jsonShape{jsonFieldBinding: bindingShape},
 	}
 	if err := decodeClosed(body, MaxHTTPBodyBytes, &request, shape); err != nil {
 		return nil, fmt.Errorf("invalid capabilities request: %w", err)
@@ -125,10 +150,12 @@ func DecodeCapabilitiesResponse(body []byte) (*CapabilitiesResponse, error) {
 	var response CapabilitiesResponse
 	shape := jsonShape{
 		required: []string{
-			"protocolVersion", "binding", "adapterName", "adapterVersion", "revision", "expiresAt", "capabilities",
+			jsonFieldProtocolVersion, jsonFieldBinding, "adapterName", "adapterVersion", "revision", "expiresAt", "capabilities",
 			"limits",
 		},
-		children: map[string]jsonShape{"binding": bindingShape, "capabilities": capabilitiesShape, "limits": limitsShape},
+		children: map[string]jsonShape{
+			jsonFieldBinding: bindingShape, "capabilities": capabilitiesShape, "limits": limitsShape,
+		},
 	}
 	if err := decodeClosed(body, MaxAdapterResponseBytes, &response, shape); err != nil {
 		return nil, fmt.Errorf("invalid capabilities response: %w", err)
@@ -142,8 +169,8 @@ func DecodeCapabilitiesResponse(body []byte) (*CapabilitiesResponse, error) {
 func DecodeOwnershipClaimRequest(body []byte) (*OwnershipClaimRequest, error) {
 	var request OwnershipClaimRequest
 	shape := jsonShape{
-		required: []string{"protocolVersion", "binding"},
-		children: map[string]jsonShape{"binding": bindingShape},
+		required: []string{jsonFieldProtocolVersion, jsonFieldBinding},
+		children: map[string]jsonShape{jsonFieldBinding: bindingShape},
 	}
 	if err := decodeClosed(body, MaxHTTPBodyBytes, &request, shape); err != nil {
 		return nil, fmt.Errorf("invalid ownership claim request: %w", err)
@@ -158,9 +185,10 @@ func DecodeOwnershipClaimResponse(body []byte) (*OwnershipClaimResponse, error) 
 	var response OwnershipClaimResponse
 	shape := jsonShape{
 		required: []string{
-			"protocolVersion", "binding", "result", "bindingDigest", "claimIdentity", "maximumRoutingEpoch", "claimedAt",
+			jsonFieldProtocolVersion, jsonFieldBinding, jsonFieldResult, jsonFieldBindingDigest, "claimIdentity",
+			"maximumRoutingEpoch", "claimedAt",
 		},
-		children: map[string]jsonShape{"binding": bindingShape},
+		children: map[string]jsonShape{jsonFieldBinding: bindingShape},
 	}
 	if err := decodeClosed(body, MaxAdapterResponseBytes, &response, shape); err != nil {
 		return nil, fmt.Errorf("invalid ownership claim response: %w", err)
@@ -174,8 +202,8 @@ func DecodeOwnershipClaimResponse(body []byte) (*OwnershipClaimResponse, error) 
 func DecodeRoutingFenceRequest(body []byte) (*RoutingFenceRequest, error) {
 	var request RoutingFenceRequest
 	shape := jsonShape{
-		required: []string{"protocolVersion", "binding"},
-		children: map[string]jsonShape{"binding": bindingShape},
+		required: []string{jsonFieldProtocolVersion, jsonFieldBinding},
+		children: map[string]jsonShape{jsonFieldBinding: bindingShape},
 	}
 	if err := decodeClosed(body, MaxHTTPBodyBytes, &request, shape); err != nil {
 		return nil, fmt.Errorf("invalid routing fence request: %w", err)
@@ -189,8 +217,11 @@ func DecodeRoutingFenceRequest(body []byte) (*RoutingFenceRequest, error) {
 func DecodeRoutingFenceResponse(body []byte) (*RoutingFenceResponse, error) {
 	var response RoutingFenceResponse
 	shape := jsonShape{
-		required: []string{"protocolVersion", "binding", "result", "bindingDigest", "maximumRoutingEpoch", "completedAt"},
-		children: map[string]jsonShape{"binding": bindingShape},
+		required: []string{
+			jsonFieldProtocolVersion, jsonFieldBinding, jsonFieldResult, jsonFieldBindingDigest,
+			"maximumRoutingEpoch", "completedAt",
+		},
+		children: map[string]jsonShape{jsonFieldBinding: bindingShape},
 	}
 	if err := decodeClosed(body, MaxAdapterResponseBytes, &response, shape); err != nil {
 		return nil, fmt.Errorf("invalid routing fence response: %w", err)
@@ -204,9 +235,12 @@ func DecodeRoutingFenceResponse(body []byte) (*RoutingFenceResponse, error) {
 func DecodeMutationEnvelope(body []byte) (*MutationEnvelope, error) {
 	var envelope MutationEnvelope
 	shape := jsonShape{
-		required: []string{"protocolVersion", "operationId", "binding", "memoryId", "upsertKey", "kind", "generation",
-			"expectedGeneration", "expectedBackendVersion", "contentDigest", "mutationDigest", "state"},
-		children: map[string]jsonShape{"binding": bindingShape, "state": stateShape},
+		required: []string{
+			jsonFieldProtocolVersion, jsonFieldOperationID, jsonFieldBinding, "memoryId", jsonFieldUpsertKey, "kind",
+			"generation", "expectedGeneration", "expectedBackendVersion", jsonFieldContentDigest, "mutationDigest",
+			jsonFieldState,
+		},
+		children: map[string]jsonShape{jsonFieldBinding: bindingShape, jsonFieldState: stateShape},
 	}
 	if err := decodeClosed(body, MaxHTTPBodyBytes, &envelope, shape); err != nil {
 		return nil, fmt.Errorf("invalid mutation envelope: %w", err)
@@ -231,8 +265,8 @@ func DecodeMutationReceipt(body []byte) (*MutationReceipt, error) {
 func DecodeGetRequest(body []byte) (*GetRequest, error) {
 	var request GetRequest
 	shape := jsonShape{
-		required: []string{"protocolVersion", "binding", "upsertKey"},
-		children: map[string]jsonShape{"binding": bindingShape},
+		required: []string{jsonFieldProtocolVersion, jsonFieldBinding, jsonFieldUpsertKey},
+		children: map[string]jsonShape{jsonFieldBinding: bindingShape},
 	}
 	if err := decodeClosed(body, MaxHTTPBodyBytes, &request, shape); err != nil {
 		return nil, fmt.Errorf("invalid get request: %w", err)
@@ -246,8 +280,8 @@ func DecodeGetRequest(body []byte) (*GetRequest, error) {
 func DecodeGetResponse(body []byte) (*GetResponse, error) {
 	var response GetResponse
 	shape := jsonShape{
-		required: []string{"protocolVersion", "binding", "found", "record"},
-		children: map[string]jsonShape{"binding": bindingShape, "record": withNullable(recordShape)},
+		required: []string{jsonFieldProtocolVersion, jsonFieldBinding, "found", "record"},
+		children: map[string]jsonShape{jsonFieldBinding: bindingShape, "record": withNullable(recordShape)},
 	}
 	if err := decodeClosed(body, MaxAdapterResponseBytes, &response, shape); err != nil {
 		return nil, fmt.Errorf("invalid get response: %w", err)
@@ -261,8 +295,8 @@ func DecodeGetResponse(body []byte) (*GetResponse, error) {
 func DecodeOperationLookupRequest(body []byte) (*OperationLookupRequest, error) {
 	var request OperationLookupRequest
 	shape := jsonShape{
-		required: []string{"protocolVersion", "binding", "operationId"},
-		children: map[string]jsonShape{"binding": bindingShape},
+		required: []string{jsonFieldProtocolVersion, jsonFieldBinding, jsonFieldOperationID},
+		children: map[string]jsonShape{jsonFieldBinding: bindingShape},
 	}
 	if err := decodeClosed(body, MaxHTTPBodyBytes, &request, shape); err != nil {
 		return nil, fmt.Errorf("invalid operation lookup request: %w", err)
@@ -276,8 +310,8 @@ func DecodeOperationLookupRequest(body []byte) (*OperationLookupRequest, error) 
 func DecodeOperationLookupResponse(body []byte) (*OperationLookupResponse, error) {
 	var response OperationLookupResponse
 	shape := jsonShape{
-		required: []string{"protocolVersion", "binding", "found", "receipt"},
-		children: map[string]jsonShape{"binding": bindingShape, "receipt": withNullable(receiptShape)},
+		required: []string{jsonFieldProtocolVersion, jsonFieldBinding, "found", "receipt"},
+		children: map[string]jsonShape{jsonFieldBinding: bindingShape, "receipt": withNullable(receiptShape)},
 	}
 	if err := decodeClosed(body, MaxAdapterResponseBytes, &response, shape); err != nil {
 		return nil, fmt.Errorf("invalid operation lookup response: %w", err)
@@ -291,8 +325,8 @@ func DecodeOperationLookupResponse(body []byte) (*OperationLookupResponse, error
 func DecodeSearchRequest(body []byte) (*SearchRequest, error) {
 	var request SearchRequest
 	shape := jsonShape{
-		required: []string{"protocolVersion", "binding", "mode", "query", "pageSize", "pageToken"},
-		children: map[string]jsonShape{"binding": bindingShape},
+		required: []string{jsonFieldProtocolVersion, jsonFieldBinding, "mode", "query", "pageSize", "pageToken"},
+		children: map[string]jsonShape{jsonFieldBinding: bindingShape},
 	}
 	if err := decodeClosed(body, MaxHTTPBodyBytes, &request, shape); err != nil {
 		return nil, fmt.Errorf("invalid search request: %w", err)
@@ -307,10 +341,10 @@ func DecodeSearchResponse(body []byte) (*SearchResponse, error) {
 	var response SearchResponse
 	shape := jsonShape{
 		required: []string{
-			"protocolVersion", "binding", "requestedMode", "actualMode", "records", "nextPageToken", "exhausted",
+			jsonFieldProtocolVersion, jsonFieldBinding, "requestedMode", "actualMode", "records", "nextPageToken", "exhausted",
 			"snapshotExpiresAt",
 		},
-		children: map[string]jsonShape{"binding": bindingShape},
+		children: map[string]jsonShape{jsonFieldBinding: bindingShape},
 		arrays:   map[string]jsonShape{"records": recordShape},
 	}
 	if err := decodeClosed(body, MaxAdapterResponseBytes, &response, shape); err != nil {
@@ -325,8 +359,8 @@ func DecodeSearchResponse(body []byte) (*SearchResponse, error) {
 func DecodeErrorResponse(body []byte) (*ErrorResponse, error) {
 	var response ErrorResponse
 	shape := jsonShape{
-		required: []string{"protocolVersion", "binding", "code", "message", "retryable", "retryAfterSeconds"},
-		children: map[string]jsonShape{"binding": withNullable(bindingShape)},
+		required: []string{jsonFieldProtocolVersion, jsonFieldBinding, "code", "message", "retryable", "retryAfterSeconds"},
+		children: map[string]jsonShape{jsonFieldBinding: withNullable(bindingShape)},
 	}
 	if err := decodeClosed(body, MaxAdapterResponseBytes, &response, shape); err != nil {
 		return nil, fmt.Errorf("invalid error response: %w", err)
@@ -413,7 +447,7 @@ func validateJSONNullability(raw []byte, targetType reflect.Type, path string) e
 			if field.PkgPath != "" {
 				continue
 			}
-			name := strings.Split(field.Tag.Get("json"), ",")[0]
+			name, _, _ := strings.Cut(field.Tag.Get("json"), ",")
 			if name == "-" {
 				continue
 			}

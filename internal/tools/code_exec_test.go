@@ -37,6 +37,10 @@ import (
 
 const typeObject = "object"
 
+func (e *KubernetesJobCodeExecutor) buildResources(req CodeExecutionRequest) (*kubernetesCodeExecResources, error) {
+	return e.buildResourcesWithJobName(testNamespace, req, e.jobNameForRequest(req))
+}
+
 func newInProcessCodeExecTestTool(workDir string, timeout time.Duration, allowed map[string]bool) *CodeExecTool {
 	if allowed == nil {
 		allowed = defaultCodeExecAllowedLangs()
@@ -61,18 +65,6 @@ func (e *recordingCodeExecutor) Execute(_ context.Context, req CodeExecutionRequ
 	e.calls++
 	e.req = req
 	return e.result
-}
-
-type recordingSandboxClient struct {
-	calls  int
-	req    SandboxRunRequest
-	result SandboxRunResult
-}
-
-func (c *recordingSandboxClient) Run(_ context.Context, req SandboxRunRequest) SandboxRunResult {
-	c.calls++
-	c.req = req
-	return c.result
 }
 
 func TestCodeExecTool_Name(t *testing.T) {
@@ -263,23 +255,26 @@ func TestCodeExecTool_Execute_TimeoutClampsToMax(t *testing.T) {
 		{name: "over max clamps down", requested: 120, want: time.Duration(maxCodeExecTimeoutSeconds) * time.Second},
 		{name: "at max is honored", requested: maxCodeExecTimeoutSeconds, want: time.Duration(maxCodeExecTimeoutSeconds) * time.Second},
 		{name: "under max is honored", requested: 5, want: 5 * time.Second},
-		{name: "unset uses default", requested: 0, want: defaultCodeExecTimeout},
+		{name: "omitted uses default", requested: 0, want: defaultCodeExecTimeout},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			sandbox := &recordingSandboxClient{result: SandboxRunResult{Output: "ok"}}
+			sandbox := &recordingCodeExecutor{result: CodeExecResult{Output: "ok"}}
 			tool := &CodeExecTool{
 				workDir:          t.TempDir(),
 				timeout:          defaultCodeExecTimeout,
 				allowedLangs:     defaultCodeExecAllowedLangs(),
 				denyPatterns:     defaultDenyPatterns,
-				sandboxClient:    sandbox,
+				executor:         sandbox,
 				backend:          codeExecBackendKubernetes,
 				outputLimitBytes: defaultCodeExecOutputLimitBytes,
 			}
 
 			args := fmt.Sprintf(`{"language":"bash","code":"echo test","timeout":%d}`, tt.requested)
+			if tt.requested == 0 {
+				args = `{"language":"bash","code":"echo test"}`
+			}
 			if _, err := tool.Execute(context.Background(), json.RawMessage(args)); err != nil {
 				t.Fatalf("Execute() error = %v", err)
 			}
@@ -663,7 +658,7 @@ func TestCodeExecTool_RunCommand_NonExecError(t *testing.T) {
 
 	// Command that doesn't exist — produces a non-ExitError
 	cmd := exec.CommandContext(context.Background(), "nonexistent-binary-xyz")
-	result := tool.runCommand(cmd)
+	result := (&InProcessCodeExecutor{}).runCommand(context.Background(), cmd, tool.workDir, tool.codeExecOutputLimitBytes())
 	if result.ExitCode != -1 {
 		t.Errorf("expected exit code -1, got %d", result.ExitCode)
 	}
@@ -712,6 +707,26 @@ func TestCodeExecTool_Execute_EnvironmentScrubbed(t *testing.T) {
 	}
 	if execResult.Output != "scrubbed\n" {
 		t.Fatalf("expected scrubbed environment, output=%q error=%q", execResult.Output, execResult.Error)
+	}
+}
+
+func TestScrubCodeExecEnvDropsDeveloperOverridesAndUsesStableToolPath(t *testing.T) {
+	env := scrubCodeExecEnv([]string{
+		"DEVELOPER_DIR=/Applications/Missing-Xcode.app/Contents/Developer",
+		"SystemRoot=C:\\Windows",
+		"ORKA_SECRET_TOKEN=secret",
+	})
+	joined := strings.Join(env, "\n")
+	if !strings.Contains(joined, "PATH="+safeCodeExecPath) {
+		t.Fatalf("scrubbed environment is missing the stable tool path: %q", env)
+	}
+	if !strings.Contains(joined, "SystemRoot=C:\\Windows") {
+		t.Fatalf("scrubbed environment dropped required Windows system state: %q", env)
+	}
+	for _, forbidden := range []string{"DEVELOPER_DIR=", "ORKA_SECRET_TOKEN="} {
+		if strings.Contains(joined, forbidden) {
+			t.Fatalf("scrubbed environment retained %q: %q", forbidden, env)
+		}
 	}
 }
 
@@ -906,11 +921,10 @@ func TestCodeExecTool_ExecuteUsesConfiguredExecutorWithoutScopedOverride(t *test
 	}
 }
 
-func TestCodeExecTool_ExecuteUsesSandboxClient(t *testing.T) {
+func TestCodeExecTool_ExecuteUsesConfiguredExecutor(t *testing.T) {
 	t.Setenv(codeExecBackendEnv, "")
 
-	executor := &recordingCodeExecutor{result: CodeExecResult{Output: "should not be used", ExitCode: 99}}
-	sandbox := &recordingSandboxClient{result: SandboxRunResult{
+	sandbox := &recordingCodeExecutor{result: CodeExecResult{
 		Output:          "from sandbox",
 		Error:           "sandbox stderr",
 		ExitCode:        42,
@@ -924,8 +938,7 @@ func TestCodeExecTool_ExecuteUsesSandboxClient(t *testing.T) {
 		timeout:          30 * time.Second,
 		allowedLangs:     defaultCodeExecAllowedLangs(),
 		denyPatterns:     defaultDenyPatterns,
-		sandboxClient:    sandbox,
-		executor:         executor,
+		executor:         sandbox,
 		backend:          codeExecBackendKubernetes,
 		outputLimitBytes: 321,
 	}
@@ -940,9 +953,6 @@ func TestCodeExecTool_ExecuteUsesSandboxClient(t *testing.T) {
 		t.Fatalf("Execute() error = %v", err)
 	}
 
-	if executor.calls != 0 {
-		t.Fatalf("configured executor calls = %d, want 0 when sandbox client is configured", executor.calls)
-	}
 	if sandbox.calls != 1 {
 		t.Fatalf("sandbox calls = %d, want 1", sandbox.calls)
 	}
@@ -1538,7 +1548,7 @@ func TestKubernetesJobCodeExecutor_BuildResourcesRuntimeClassName(t *testing.T) 
 	t.Setenv(codeExecKubernetesRuntimeClassNameEnv, "  gvisor  ")
 
 	executor := &KubernetesJobCodeExecutor{randomSuffix: func() string { return "runtime-class" }}
-	resources, err := executor.buildResources(testNamespace, CodeExecutionRequest{
+	resources, err := executor.buildResources(CodeExecutionRequest{
 		Language:         codeLanguagePython,
 		Code:             "print('runtime')",
 		Timeout:          time.Second,
@@ -1559,7 +1569,7 @@ func TestKubernetesJobCodeExecutor_BuildResourcesOmitsAppArmorByDefault(t *testi
 	setKubernetesCodeExecTestEnv(t)
 
 	executor := &KubernetesJobCodeExecutor{randomSuffix: func() string { return "apparmor-default" }}
-	resources, err := executor.buildResources(testNamespace, CodeExecutionRequest{
+	resources, err := executor.buildResources(CodeExecutionRequest{
 		Language:         codeLanguagePython,
 		Code:             "print('apparmor default')",
 		Timeout:          time.Second,
@@ -1583,7 +1593,7 @@ func TestKubernetesJobCodeExecutor_BuildResourcesAppArmorRuntimeDefaultOptIn(t *
 	t.Setenv(codeExecKubernetesAppArmorProfileEnv, " runtime/default ")
 
 	executor := &KubernetesJobCodeExecutor{randomSuffix: func() string { return "apparmor-runtime" }}
-	resources, err := executor.buildResources(testNamespace, CodeExecutionRequest{
+	resources, err := executor.buildResources(CodeExecutionRequest{
 		Language:         codeLanguagePython,
 		Code:             "print('apparmor runtime default')",
 		Timeout:          time.Second,
@@ -1617,7 +1627,7 @@ func TestKubernetesJobCodeExecutor_BuildResourcesUsesRunIdentityAnnotations(t *t
 	}
 	executor := &KubernetesJobCodeExecutor{randomSuffix: func() string { return "should-not-be-used" }}
 
-	resources, err := executor.buildResources(testNamespace, req)
+	resources, err := executor.buildResources(req)
 	if err != nil {
 		t.Fatalf("buildResources() error = %v", err)
 	}
@@ -1672,7 +1682,7 @@ func TestKubernetesJobCodeExecutor_CreateResourcesReusesOnlyMatchingRunIdentity(
 		InputHash:        "matching-input-hash",
 	}
 
-	resources, err := executor.buildResources(testNamespace, req)
+	resources, err := executor.buildResources(req)
 	if err != nil {
 		t.Fatalf("buildResources() error = %v", err)
 	}
@@ -1684,7 +1694,7 @@ func TestKubernetesJobCodeExecutor_CreateResourcesReusesOnlyMatchingRunIdentity(
 		t.Fatalf("first createResources() created = %+v, want all resources", created)
 	}
 
-	replayResources, err := executor.buildResources(testNamespace, req)
+	replayResources, err := executor.buildResources(req)
 	if err != nil {
 		t.Fatalf("second buildResources() error = %v", err)
 	}
@@ -1698,7 +1708,7 @@ func TestKubernetesJobCodeExecutor_CreateResourcesReusesOnlyMatchingRunIdentity(
 
 	mismatchReq := req
 	mismatchReq.InputHash = "different-input-hash"
-	mismatchResources, err := executor.buildResources(testNamespace, mismatchReq)
+	mismatchResources, err := executor.buildResources(mismatchReq)
 	if err != nil {
 		t.Fatalf("mismatch buildResources() error = %v", err)
 	}

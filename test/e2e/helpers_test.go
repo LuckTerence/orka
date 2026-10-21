@@ -26,6 +26,8 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/llm"
 	openaiprovider "github.com/orka-agents/orka/internal/llm/openai"
 	memoryruntime "github.com/orka-agents/orka/internal/memory"
@@ -41,10 +43,11 @@ const (
 
 // Keep this to models that work through the OpenAI provider path; the live
 // catalog can include runtime-only GPT models rejected by the worker route.
+// Prefer the smaller model for routine live checks.
 var liveProxyOpenAIModelPreferences = []string{
+	"gpt-5-mini",
 	"gpt-5.5",
 	"gpt-5.2",
-	"gpt-5-mini",
 	"gpt-4.1",
 	"gpt-4.1-2025-04-14",
 	"gpt-4o",
@@ -120,26 +123,25 @@ var (
 		"gpt-",
 	}
 	liveCopilotProxyChatGPTModelPreferences = []string{
+		"gpt-5-mini",
 		"gpt-4o",
 		"gpt-4o-2024-11-20",
 		"gpt-4o-2024-08-06",
-		"gpt-5-mini",
 		"gpt-5.2",
 		"gpt-5.5",
 		"gpt-4.1",
 		"gpt-4.1-2025-04-14",
 	}
-	// Keep this order aligned with the CLI smoke preferences shipped by the
-	// pinned Vekil release so runtime tests do not select retired aliases that
-	// remain visible in the upstream model catalog.
+	// Prefer Haiku for routine live checks. Keep the larger-model fallbacks
+	// aligned with the pinned Vekil CLI smoke preferences to avoid retired aliases.
 	liveCopilotProxyClaudeModelPreferences = []string{
+		"claude-haiku-4.5",
 		"claude-sonnet-5",
 		"claude-opus-4.8",
 		"claude-opus-4.7",
 		"claude-opus-4.6",
 		"claude-sonnet-4.6",
 		"claude-sonnet-4.5",
-		"claude-haiku-4.5",
 		"claude-sonnet-4",
 	}
 	liveCopilotProxyClaudeModelPrefixes = []string{
@@ -165,9 +167,17 @@ type apiMemoryProposalListResponse struct {
 	Items []store.MemoryProposal `json:"items"`
 }
 
-// skipIfNoKey skips the current test if the given environment variable is not set or empty.
+// skipIfNoKey skips the current test when the credential named by envVar is
+// unavailable. Model keys resolve to aimock unless E2E_DISABLE_MOCK_LLM is set.
 func skipIfNoKey(envVar string) {
-	if os.Getenv(envVar) == "" {
+	value := os.Getenv(envVar)
+	switch envVar {
+	case "E2E_OPENAI_API_KEY":
+		value = e2eOpenAIAPIKey
+	case "E2E_ANTHROPIC_API_KEY":
+		value = e2eAnthropicAPIKey
+	}
+	if value == "" {
 		Skip(fmt.Sprintf("Skipping: %s not set", envVar))
 	}
 }
@@ -215,39 +225,229 @@ func verifyResultAvailable(taskName string) {
 	}, 30*time.Second, time.Second).Should(Succeed())
 }
 
-// verifyHarnessWrapperMetadataForTask waits until a Task is planned for the
-// harness-wrapper backend and verifies selected metadata fields.
-func verifyHarnessWrapperMetadataForTask(taskName string, expected map[string]string, timeout time.Duration) {
+type acpWorkspaceExpectation struct {
+	Intent                    corev1alpha1.WorkspaceIntent
+	GitRepo                   string
+	Branch                    string
+	Ref                       string
+	SubPath                   string
+	ReadCredentialName        string
+	PublicationGitRepo        string
+	PublicationCredentialName string
+	PushBranch                string
+	PRBaseBranch              string
+	CreatePR                  *bool
+}
+
+type acpToolPolicyExpectation struct {
+	AllowedTools    []string
+	DisallowedTools []string
+	AllowBash       bool
+}
+
+type acpTaskExpectation struct {
+	ProviderKind    string
+	Model           string
+	ModelLimits     *corev1alpha1.ModelTokenLimits
+	WorkspaceIntent corev1alpha1.WorkspaceIntent
+	RuntimeImage    string
+	MaxTurns        *int32
+	AllowBash       *bool
+	AllowedTools    []string
+	DisallowedTools []string
+	ToolPolicy      *acpToolPolicyExpectation
+	SkillNames      []string
+	SessionName     string
+	Workspace       *acpWorkspaceExpectation
+	DeliveryState   *corev1alpha1.TaskDeliveryState
+	DeliveryOutcome *corev1alpha1.TaskDeliveryOutcome
+}
+
+func acpInt32(value int32) *int32 { return &value }
+func acpBool(value bool) *bool    { return &value }
+func acpDeliveryState(value corev1alpha1.TaskDeliveryState) *corev1alpha1.TaskDeliveryState {
+	return &value
+}
+func acpDeliveryOutcome(value corev1alpha1.TaskDeliveryOutcome) *corev1alpha1.TaskDeliveryOutcome {
+	return &value
+}
+
+// verifyACPTaskRuntimeForTask waits until an agent Task has been durably queued
+// for an Orka harness v2 RuntimePool and verifies the non-secret execution and delivery
+// projections. ACP Tasks never create one Kubernetes Job per prompt.
+func verifyACPTaskRuntimeForTask(taskName string, expected acpTaskExpectation, timeout time.Duration) {
 	Eventually(func(g Gomega) {
-		cmd := exec.Command("kubectl", "get", "task", taskName, "-n", namespace, "-o", "json")
+		task := fetchTaskForACPAssertion(g, taskName)
+		g.Expect(task.Status.JobName).To(BeEmpty(), "ACP runtime-pool tasks must not create worker Jobs")
+		g.Expect(task.Status.Phase).To(BeElementOf(
+			corev1alpha1.TaskPhasePending,
+			corev1alpha1.TaskPhaseRunning,
+			corev1alpha1.TaskPhaseSucceeded,
+			corev1alpha1.TaskPhaseFailed,
+			corev1alpha1.TaskPhaseCancelled,
+		))
+		g.Expect(task.Status.Execution).NotTo(BeNil(), "ACP execution status must be projected")
+		execution := task.Status.Execution
+		g.Expect(execution.State).NotTo(BeEmpty())
+		g.Expect(execution.Attempt).To(BeNumerically(">=", 1))
+		g.Expect(execution.PromptID).NotTo(BeEmpty())
+		g.Expect(execution.RuntimePoolName).NotTo(BeEmpty())
+		g.Expect(execution.RuntimePoolUID).NotTo(BeEmpty())
+		g.Expect(execution.RequestDigest).To(MatchRegexp(`^sha256:[a-f0-9]{64}$`))
+		g.Expect(execution.ControllerEpoch).To(BeNumerically(">=", 1))
+		g.Expect(task.Status.Delivery).NotTo(BeNil(), "ACP delivery status must be projected")
+		g.Expect(task.Status.Delivery.State).NotTo(BeEmpty())
+		if expected.DeliveryState != nil {
+			g.Expect(task.Status.Delivery.State).To(Equal(*expected.DeliveryState))
+		}
+		if expected.DeliveryOutcome != nil {
+			g.Expect(task.Status.Delivery.Outcome).To(Equal(*expected.DeliveryOutcome))
+		}
+
+		assertACPTaskSpec(g, task, expected)
+
+		cmd := exec.Command("kubectl", "get", "runtimepool", execution.RuntimePoolName, "-n", namespace, "-o", "json")
 		output, err := utils.Run(cmd)
 		g.Expect(err).NotTo(HaveOccurred())
-
-		var task struct {
-			Metadata struct {
-				Annotations map[string]string `json:"annotations"`
-			} `json:"metadata"`
-			Status struct {
-				JobName string `json:"jobName"`
-				Phase   string `json:"phase"`
-			} `json:"status"`
+		var pool corev1alpha1.RuntimePool
+		g.Expect(json.Unmarshal([]byte(output), &pool)).To(Succeed())
+		g.Expect(string(pool.UID)).To(Equal(execution.RuntimePoolUID))
+		g.Expect(pool.Spec.TrustDomain.Namespace).To(Equal(namespace))
+		g.Expect(pool.Spec.Runtime.Image).To(MatchRegexp(`@sha256:[a-f0-9]{64}$`))
+		if expected.RuntimeImage != "" {
+			g.Expect(pool.Spec.Runtime.Image).To(Equal(expected.RuntimeImage))
 		}
-		err = json.Unmarshal([]byte(output), &task)
-		g.Expect(err).NotTo(HaveOccurred())
-		g.Expect(task.Status.JobName).To(BeEmpty(), "harness-wrapper tasks should not create worker Jobs")
-		g.Expect(task.Status.Phase).To(BeElementOf("Pending", "Running", "Succeeded", "Failed"))
+		g.Expect(pool.Spec.Runtime.Profile.ProtocolVersion).To(Equal(corev1alpha1.RuntimePoolProtocolHarnessV2))
+		g.Expect(pool.Spec.Runtime.Profile.Digest).To(MatchRegexp(`^sha256:[a-f0-9]{64}$`))
+		if expected.ProviderKind != "" {
+			g.Expect(pool.Spec.Runtime.Profile.ProviderKind).To(Equal(expected.ProviderKind))
+		}
+		if expected.Model != "" {
+			g.Expect(pool.Spec.Runtime.Profile.Model).To(Equal(expected.Model))
+		}
+		if expected.ModelLimits != nil {
+			g.Expect(pool.Spec.Runtime.Profile.ModelLimits).NotTo(BeNil())
+			g.Expect(*pool.Spec.Runtime.Profile.ModelLimits).To(Equal(*expected.ModelLimits))
+		}
+		if expected.WorkspaceIntent != "" {
+			g.Expect(pool.Spec.Runtime.Profile.WorkspaceIntent).To(Equal(expected.WorkspaceIntent))
+		}
+		if expected.ToolPolicy != nil {
+			toolPolicyDigest, err := harnessv2.CanonicalRuntimeToolPolicyDigest(
+				expected.ToolPolicy.AllowedTools,
+				expected.ToolPolicy.DisallowedTools,
+				expected.ToolPolicy.AllowBash,
+			)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(pool.Spec.Runtime.Profile.ToolPolicyDigest).To(Equal(toolPolicyDigest))
+		}
+	}, timeout, time.Second).Should(Succeed())
+}
 
-		annotations := task.Metadata.Annotations
-		g.Expect(annotations).To(HaveKey("orka.ai/harness-wrapper-turn-id"))
-		g.Expect(annotations).To(HaveKey("orka.ai/harness-wrapper-runtime-session-id"))
-		g.Expect(annotations).To(HaveKey("orka.ai/harness-wrapper-correlation-id"))
-		rawMetadata := annotations["orka.ai/harness-wrapper-metadata"]
-		g.Expect(rawMetadata).NotTo(BeEmpty())
-		metadata := map[string]string{}
-		err = json.Unmarshal([]byte(rawMetadata), &metadata)
-		g.Expect(err).NotTo(HaveOccurred())
-		for key, value := range expected {
-			g.Expect(metadata).To(HaveKeyWithValue(key, value))
+func assertACPTaskSpec(g Gomega, task corev1alpha1.Task, expected acpTaskExpectation) {
+	if expected.SessionName != "" {
+		g.Expect(task.Spec.SessionRef).NotTo(BeNil())
+		g.Expect(task.Spec.SessionRef.Name).To(Equal(expected.SessionName))
+	}
+	if expected.Workspace != nil {
+		g.Expect(task.Spec.Workspace).NotTo(BeNil())
+		workspace := task.Spec.Workspace
+		want := expected.Workspace
+		g.Expect(workspace.Intent).To(Equal(want.Intent))
+		g.Expect(workspace.GitRepo).To(Equal(want.GitRepo))
+		g.Expect(workspace.Branch).To(Equal(want.Branch))
+		g.Expect(workspace.Ref).To(Equal(want.Ref))
+		g.Expect(workspace.SubPath).To(Equal(want.SubPath))
+		g.Expect(workspace.PublicationGitRepo).To(Equal(want.PublicationGitRepo))
+		g.Expect(workspace.PushBranch).To(Equal(want.PushBranch))
+		g.Expect(workspace.PRBaseBranch).To(Equal(want.PRBaseBranch))
+		if want.CreatePR != nil {
+			g.Expect(workspace.CreatePR).To(Equal(*want.CreatePR))
+		}
+		if want.ReadCredentialName != "" {
+			g.Expect(workspace.ReadCredentialRef).NotTo(BeNil())
+			g.Expect(workspace.ReadCredentialRef.Name).To(Equal(want.ReadCredentialName))
+		}
+		if want.PublicationCredentialName != "" {
+			g.Expect(workspace.PublicationCredentialRef).NotTo(BeNil())
+			g.Expect(workspace.PublicationCredentialRef.Name).To(Equal(want.PublicationCredentialName))
+		}
+	}
+
+	if expected.MaxTurns == nil && expected.AllowBash == nil && len(expected.AllowedTools) == 0 &&
+		len(expected.DisallowedTools) == 0 && len(expected.SkillNames) == 0 {
+		return
+	}
+	g.Expect(task.Spec.AgentRef).NotTo(BeNil())
+	cmd := exec.Command("kubectl", "get", "agent", task.Spec.AgentRef.Name, "-n", namespace, "-o", "json")
+	output, err := utils.Run(cmd)
+	g.Expect(err).NotTo(HaveOccurred())
+	var agent corev1alpha1.Agent
+	g.Expect(json.Unmarshal([]byte(output), &agent)).To(Succeed())
+	g.Expect(agent.Spec.Runtime).NotTo(BeNil())
+
+	if expected.MaxTurns != nil {
+		actual := int32(50)
+		if agent.Spec.Runtime.DefaultMaxTurns != nil {
+			actual = *agent.Spec.Runtime.DefaultMaxTurns
+		}
+		if task.Spec.AgentRuntime != nil && task.Spec.AgentRuntime.MaxTurns != nil {
+			actual = *task.Spec.AgentRuntime.MaxTurns
+		}
+		g.Expect(actual).To(Equal(*expected.MaxTurns))
+	}
+	if expected.AllowBash != nil {
+		actual := true
+		if agent.Spec.Runtime.DefaultAllowBash != nil {
+			actual = *agent.Spec.Runtime.DefaultAllowBash
+		}
+		if task.Spec.AgentRuntime != nil && task.Spec.AgentRuntime.AllowBash != nil {
+			actual = *task.Spec.AgentRuntime.AllowBash
+		}
+		g.Expect(actual).To(Equal(*expected.AllowBash))
+	}
+	if len(expected.AllowedTools) > 0 {
+		actual := append([]string(nil), agent.Spec.Runtime.DefaultAllowedTools...)
+		if task.Spec.AgentRuntime != nil && len(task.Spec.AgentRuntime.AllowedTools) > 0 {
+			actual = append([]string(nil), task.Spec.AgentRuntime.AllowedTools...)
+		}
+		g.Expect(actual).To(ConsistOf(expected.AllowedTools))
+	}
+	if len(expected.DisallowedTools) > 0 {
+		g.Expect(task.Spec.AgentRuntime).NotTo(BeNil())
+		g.Expect(task.Spec.AgentRuntime.DisallowedTools).To(ConsistOf(expected.DisallowedTools))
+	}
+	if len(expected.SkillNames) > 0 {
+		actual := make([]string, 0, len(agent.Spec.Skills))
+		for _, skill := range agent.Spec.Skills {
+			actual = append(actual, skill.Name)
+		}
+		g.Expect(actual).To(ConsistOf(expected.SkillNames))
+	}
+}
+
+func fetchTaskForACPAssertion(g Gomega, taskName string) corev1alpha1.Task {
+	cmd := exec.Command("kubectl", "get", "task", taskName, "-n", namespace, "-o", "json")
+	output, err := utils.Run(cmd)
+	g.Expect(err).NotTo(HaveOccurred())
+	var task corev1alpha1.Task
+	g.Expect(json.Unmarshal([]byte(output), &task)).To(Succeed())
+	return task
+}
+
+func verifyACPTaskTerminalStatus(
+	taskName string,
+	executionOutcome corev1alpha1.TaskExecutionOutcome,
+	deliveryOutcomes []corev1alpha1.TaskDeliveryOutcome,
+	timeout time.Duration,
+) {
+	Eventually(func(g Gomega) {
+		task := fetchTaskForACPAssertion(g, taskName)
+		g.Expect(task.Status.Execution).NotTo(BeNil())
+		g.Expect(task.Status.Execution.Outcome).To(Equal(executionOutcome))
+		g.Expect(task.Status.Delivery).NotTo(BeNil())
+		if len(deliveryOutcomes) > 0 {
+			g.Expect(task.Status.Delivery.Outcome).To(BeElementOf(deliveryOutcomes))
 		}
 	}, timeout, time.Second).Should(Succeed())
 }
@@ -1205,6 +1405,69 @@ func liveCopilotProxyServicePort() int {
 	return value
 }
 
+func liveACPProviderProxyServiceNamespace() string {
+	if ns := strings.TrimSpace(firstSetEnv("E2E_LIVE_ACP_PROVIDER_PROXY_SERVICE_NAMESPACE")); ns != "" {
+		return ns
+	}
+	return "vekil-system"
+}
+
+func liveACPProviderProxyServiceName() string {
+	if name := strings.TrimSpace(firstSetEnv("E2E_LIVE_ACP_PROVIDER_PROXY_SERVICE_NAME")); name != "" {
+		return name
+	}
+	return "vekil"
+}
+
+func liveACPProviderProxyServicePort() int {
+	port := strings.TrimSpace(firstSetEnv("E2E_LIVE_ACP_PROVIDER_PROXY_SERVICE_PORT"))
+	if port == "" {
+		return 1337
+	}
+
+	value, err := strconv.Atoi(port)
+	if err != nil || value <= 0 {
+		return 1337
+	}
+
+	return value
+}
+
+// expectProviderValidated checks that a Provider echoes its spec and that the
+// controller validated it: ready, with the validation message, time, and a
+// Ready condition.
+func expectProviderValidated(name, providerType, baseURL, model string) {
+	provider := fetchProviderSnapshot(name)
+	ExpectWithOffset(1, provider.Spec.Type).To(Equal(providerType))
+	ExpectWithOffset(1, provider.Spec.BaseURL).To(Equal(baseURL))
+	ExpectWithOffset(1, provider.Spec.DefaultModel).To(Equal(model))
+	ExpectWithOffset(1, provider.Status.Ready).To(BeTrue())
+	ExpectWithOffset(1, provider.Status.Message).To(Equal("Provider configuration is valid"))
+	ExpectWithOffset(1, provider.Status.LastValidated).NotTo(BeEmpty())
+	readyCondition := findStatusCondition(provider.Status.Conditions, "Ready")
+	ExpectWithOffset(1, readyCondition).NotTo(BeNil())
+	ExpectWithOffset(1, readyCondition.Status).To(Equal("True"))
+	ExpectWithOffset(1, readyCondition.Reason).To(Equal("ValidationSucceeded"))
+}
+
+// expectNativeAITaskSucceeded checks the status a native AI Task records when
+// its first attempt succeeds.
+func expectNativeAITaskSucceeded(taskName string) {
+	task := fetchTaskSnapshot(taskName)
+	ExpectWithOffset(1, task.Status.Phase).To(Equal("Succeeded"))
+	ExpectWithOffset(1, task.Status.JobName).NotTo(BeEmpty())
+	ExpectWithOffset(1, task.Status.Attempts).To(Equal(int32(1)))
+	ExpectWithOffset(1, task.Status.Message).To(Equal("task completed successfully"))
+	ExpectWithOffset(1, task.Status.StartTime).NotTo(BeEmpty())
+	ExpectWithOffset(1, task.Status.CompletionTime).NotTo(BeEmpty())
+	ExpectWithOffset(1, task.Status.ResultRef).NotTo(BeNil())
+	ExpectWithOffset(1, task.Status.ResultRef.Available).To(BeTrue())
+	completeCondition := findStatusCondition(task.Status.Conditions, "Complete")
+	ExpectWithOffset(1, completeCondition).NotTo(BeNil())
+	ExpectWithOffset(1, completeCondition.Status).To(Equal("True"))
+	ExpectWithOffset(1, completeCondition.Reason).To(Equal("TaskSucceeded"))
+}
+
 func fetchProviderSnapshot(name string) providerSnapshot {
 	var snapshot providerSnapshot
 	Eventually(func(g Gomega) {
@@ -1537,15 +1800,14 @@ func reviewMemoryProposalViaAPI(apiBaseURL, token, id string, review store.Memor
 	if strings.TrimSpace(review.Namespace) == "" {
 		review.Namespace = namespace
 	}
+	// The server records the caller's identity as the reviewer.
 	payload, err := json.Marshal(struct {
 		Namespace  string `json:"namespace"`
 		Status     string `json:"status"`
-		Reviewer   string `json:"reviewer,omitempty"`
 		ReviewNote string `json:"reviewNote,omitempty"`
 	}{
 		Namespace:  review.Namespace,
 		Status:     review.Status,
-		Reviewer:   review.Reviewer,
 		ReviewNote: review.ReviewNote,
 	})
 	Expect(err).NotTo(HaveOccurred())
@@ -1558,7 +1820,7 @@ func reviewMemoryProposalViaAPI(apiBaseURL, token, id string, review store.Memor
 		"",
 	)
 	Expect(err).NotTo(HaveOccurred())
-	Expect(statusCode).To(Equal(http.StatusNoContent), "unexpected memory proposal review response: %s", strings.TrimSpace(body))
+	Expect(statusCode).To(Equal(http.StatusOK), "unexpected memory proposal review response: %s", strings.TrimSpace(body))
 	return getMemoryProposalViaAPI(apiBaseURL, token, id)
 }
 
@@ -1660,7 +1922,43 @@ func dumpDebugInfo(taskNames ...string) {
 			_, _ = fmt.Fprintf(GinkgoWriter, "\n=== Task %s ===\n%s\n", name, output)
 		}
 
-		// Pod descriptions and logs for task
+		// Tool execution failures are persisted as task timeline events rather
+		// than Kubernetes Events. Read them through the in-cluster API service so
+		// delegation failures retain their exact, already-sanitized cause in CI.
+		eventPath := fmt.Sprintf(
+			"/api/v1/namespaces/%s/services/http:%s:8080/proxy/api/v1/tasks/%s/events?namespace=%s&type=ToolCallFailed",
+			url.PathEscape(namespace),
+			controllerAPIService,
+			url.PathEscape(name),
+			url.QueryEscape(namespace),
+		)
+		cmd = exec.Command("kubectl", "get", "--raw", eventPath)
+		output, err = utils.Run(cmd)
+		if err == nil && strings.TrimSpace(output) != "" {
+			_, _ = fmt.Fprintf(GinkgoWriter, "\n=== ToolCallFailed Events for task %s ===\n%s\n", name, output)
+		}
+
+		// ACP runtime-pool details (agent Tasks do not have per-Task Pods).
+		cmd = exec.Command("kubectl", "get", "task", name, "-n", namespace,
+			"-o", "jsonpath={.status.execution.runtimePoolName}")
+		poolName, poolErr := utils.Run(cmd)
+		poolName = strings.TrimSpace(poolName)
+		if poolErr == nil && poolName != "" {
+			cmd = exec.Command("kubectl", "get", "runtimepool", poolName, "-n", namespace, "-o", "yaml")
+			output, err = utils.Run(cmd)
+			if err == nil {
+				_, _ = fmt.Fprintf(GinkgoWriter, "\n=== RuntimePool %s ===\n%s\n", poolName, output)
+			}
+			cmd = exec.Command("kubectl", "get", "pods", "-n", "orka-runtimes",
+				"-l", fmt.Sprintf("orka.ai/runtime-pool-namespace=%s,orka.ai/runtime-pool-name=%s", namespace, poolName),
+				"-o", "wide")
+			output, err = utils.Run(cmd)
+			if err == nil {
+				_, _ = fmt.Fprintf(GinkgoWriter, "\n=== Runtime Pods for %s ===\n%s\n", poolName, output)
+			}
+		}
+
+		// Pod descriptions and logs for non-ACP tasks.
 		cmd = exec.Command("kubectl", "get", "pods", "-l", fmt.Sprintf("orka.ai/task=%s", name),
 			"-n", namespace, "-o", "wide")
 		output, err = utils.Run(cmd)

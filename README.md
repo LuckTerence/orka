@@ -4,17 +4,35 @@
 
 # Orka
 
-**Kubernetes-native AI agent orchestration.**
+**Run AI agents on your Kubernetes cluster. The keys stay in the cluster.**
 
-[Getting Started](website/docs/getting-started.md) · [Architecture](website/docs/concepts/architecture.md) · [API Reference](website/docs/reference/api-reference.md) · [Documentation](#documentation)
+[![Tests](https://github.com/orka-agents/orka/actions/workflows/test.yml/badge.svg)](https://github.com/orka-agents/orka/actions/workflows/test.yml)
+[![Release](https://img.shields.io/github/v/release/orka-agents/orka?include_prereleases)](https://github.com/orka-agents/orka/releases)
+[![License](https://img.shields.io/github/license/orka-agents/orka)](LICENSE)
+
+[Docs](https://orka-agents.github.io/orka/docs) · [Getting started](https://orka-agents.github.io/orka/docs/getting-started) · [Live demo](https://orka-agents.github.io/orka/demo/) · [Demo videos](https://orka-agents.github.io/orka/docs/demos) · [Contributing](CONTRIBUTING.md)
 
 </div>
 
 ---
 
-Orka turns your Kubernetes cluster into an AI-powered task execution platform. Spin up swarms of AI agents that write code, review PRs, research topics, or run containers — each as an isolated Kubernetes Job with full scheduling, retries, and observability. A coordinator agent dynamically decomposes complex tasks, spawns specialist agents to work in parallel, and synthesizes their results — no manual orchestration graphs required.
+Orka lets you hand a piece of work to an AI agent and get the result back, with
+Kubernetes doing what it is good at: running the work somewhere isolated, keeping a
+record of what happened, and cleaning up afterwards. You write a small YAML **Task**,
+Orka runs it in a Pod, and you read the answer from a REST API, a CLI, or the dashboard
+that comes built in ([try the demo](https://orka-agents.github.io/orka/demo/), which runs
+in your browser on sample data).
 
-One `helm install`, one LLM secret, and you're chatting with an orchestrator that handles the rest.
+Three kinds of work fit in a Task:
+
+- **Ask a model.** Orka's own AI worker talks to Anthropic, OpenAI, Azure OpenAI, or any
+  compatible endpoint, with built-in tools such as web search and code execution.
+- **Run a coding agent.** Codex, Claude Code, GitHub Copilot CLI, or OpenCode, working on
+  a real git repository and opening the pull request when it is done.
+- **Run a command.** Any container image, for the build and test steps agents ask for.
+
+Model keys never leave the cluster. People and CI get a token; the platform team decides
+which models and providers are allowed.
 
 > [!IMPORTANT]
 > **Orka is experimental and under active development.** APIs, CRDs, and behavior may change without notice between releases, and it is not yet recommended for production use. Feedback, bug reports, and feature ideas are very welcome — please [open an issue](https://github.com/orka-agents/orka/issues).
@@ -22,152 +40,79 @@ One `helm install`, one LLM secret, and you're chatting with an orchestrator tha
 > [!NOTE]
 > The organization and repositories are intended to be donated to a community-governed foundation at the appropriate time. Until then, the project is governed by Microsoft policy, and external contributors are required to sign the Microsoft Contributor License Agreement (CLA).
 
-## Why Run AI Agents on Kubernetes?
+## Try it in five minutes
 
-**No API keys on developer machines** — LLM credentials live in Kubernetes Secrets, managed by your platform team. Developers connect via ServiceAccount tokens — no risk of leaked keys in dotfiles, shell history, or laptops.
-
-**Centralized control** — One place to set model policies, rate limits, and allowed providers across every team. Swap models or providers without touching developer configs.
-
-**Every agent action is auditable** — Tasks run as Kubernetes Jobs with full logs, Prometheus metrics, and result storage. Know exactly what every agent did, when, and at what cost.
-
-**Isolated execution** — Each agent runs in its own Pod with a hardened security context: non-root, read-only rootfs, all capabilities dropped, seccomp enforced. Agents can't escape their sandbox.
-
-**Scale with your cluster** — Priority scheduling, retry policies, concurrency limits, and cron-based execution — all handled by the Kubernetes control plane you already operate.
-
-## What Can You Build?
-
-**Parallel code review** — Spawn a swarm of review agents — security, performance, test coverage, accessibility, whatever you need. Each reviews independently and in parallel, then the coordinator synthesizes findings into a single report.
-
-**Autonomous dev workflows** — A coordinator agent dynamically breaks down a feature request, delegates implementation to specialist agents (backend, frontend, tests), and opens a PR with the combined result — no predefined workflow graphs.
-
-**Research with competing hypotheses** — Multiple agents investigate different theories in parallel, challenge each other's findings, and converge on the strongest explanation. The adversarial structure avoids the anchoring bias of sequential investigation.
-
-**Scheduled operations** — Cron-based agents that run daily security scans, dependency audits, or report generation — all with retry policies and webhook notifications.
-
-**Use your favorite AI client** — Connect Continue, Cursor, or any OpenAI-compatible client to Orka's API. Your cluster manages the LLM credentials — developers just code.
-
-**CI/CD integration** — Trigger agent tasks from GitHub Actions, monitor progress via the REST API, and gate deployments on agent analysis.
-
-## Features
-
-- 🤖 **AI Agents** — Anthropic, OpenAI, or Azure OpenAI with tools, skills, and session persistence
-- 🛠️ **Agent Runtimes** — Delegate repo-backed coding tasks to Codex CLI, Claude Code CLI, GitHub Copilot CLI, or OpenCode CLI
-- 🔁 **Autonomous Task Loops** — Coordinators can iterate on long-running goals until complete, canceled, or at an iteration limit
-- 🔀 **Multi-Agent Coordination** — Coordinators delegate to specialists with depth and concurrency controls
-- 💬 **Interactive Chat** — Agentic orchestrator with SSE streaming that creates and manages agents and tasks for you
-- 🌐 **Generic Gateways** — Versioned, authenticated ingress and idempotent outbound delivery for external messaging and event systems
-- 🧠 **Durable Memory** — Namespace-scoped recall, transcript search, and reviewable memory proposals that can be applied
-- 🛡️ **Repository Security Scanning** — Scheduled and incremental repository scans with threat models, validated findings, patch generation, and remediation PRs
-- 🔎 **Repository Monitors** — Durable GitHub PR review queues with scheduled and webhook-triggered review runs
-- 🧰 **Agent Sandbox Workspaces** — Experimental durable, reusable coding workspaces through `agent-sandbox`
-- 🖥️ **Web Dashboard** — Built-in React UI embedded in the controller binary — zero extra deployments
-- 📦 **Declarative CRDs** — Task, Agent, AgentRuntime, Tool, Provider, Skill, RepositoryScan, RepositoryMonitor, and SubstrateActorPool custom resources for GitOps workflows
-- ⏰ **Scheduled Tasks** — Cron-based recurring execution with concurrency policies
-- 🔌 **REST & OpenAI-Compatible API** — Full CRUD + `/openai/v1/chat/completions` endpoint for Continue, Cursor, and any OpenAI-compatible client
-- 🔐 **Kubernetes, OIDC & Transaction-Token Auth** — ServiceAccount tokens by default, with optional OIDC and scoped vendor-neutral transaction governance
-- 🔮 **Anthropic-Compatible API** — `/anthropic/v1/messages` endpoint for Claude Code and other Anthropic-native clients
-- 📊 **Observability** — Prometheus metrics, structured logging, health probes, and optional OpenTelemetry traces + GenAI OTLP metrics
-- 🔒 **Hardened by Default** — Non-root containers, read-only rootfs, ServiceAccount token auth
-
-## Quick Start
-
-### Install
+You need a cluster, `kubectl`, and Helm. A local [kind](https://kind.sigs.k8s.io/) cluster
+is fine. No model API key yet.
 
 ```bash
-helm install orka charts/orka \
-  --namespace orka-system \
-  --create-namespace
+helm repo add orka https://orka-agents.github.io/orka/charts
+helm repo update orka
+helm install orka orka/orka --namespace orka-system --create-namespace --wait --timeout 10m
 ```
 
-A fresh install creates all twelve cluster-scoped Orka CRDs. Use `--skip-crds`
-only when one designated platform or release owner already manages compatible
-Orka CRDs for the cluster.
-
-> [!IMPORTANT]
-> Helm does not create or update files from `crds/` during `helm upgrade`.
-> Apply the CRDs from the exact target chart before
-> **every** upgrade, including an upgrade from the previous chart that installed
-> zero CRDs. Helm retains CRDs
-> on uninstall. See the [Helm CRD lifecycle guide](charts/orka/README.md).
-
-For the promoted raw installer, pre-create the harness-wrapper authentication
-Secret before applying the manifest; the token is intentionally not committed:
+That is the whole install. Now run something:
 
 ```bash
-set -euo pipefail
-
-kubectl create namespace orka-system --dry-run=client -o yaml | kubectl apply -f -
-if ! kubectl -n orka-system get secret harness-wrapper-auth >/dev/null 2>&1; then
-  openssl rand -hex 32 | \
-    kubectl -n orka-system create secret generic harness-wrapper-auth \
-      --from-file=token=/dev/stdin
-fi
-
-kubectl apply -f deploy/orka.yaml
-```
-
-See [`config/harness-wrapper/README.md`](config/harness-wrapper/README.md) for
-the canonical installer prerequisite.
-
-### Set Up a Provider
-
-```bash
-kubectl create secret generic anthropic-secret \
-  --from-literal=api-key=your-api-key
-
-kubectl apply -f - <<EOF
+kubectl -n orka-system apply -f - <<'EOF'
 apiVersion: core.orka.ai/v1alpha1
-kind: Provider
+kind: Task
 metadata:
-  name: anthropic
+  name: hello
 spec:
-  type: anthropic
-  secretRef:
-    name: anthropic-secret
-    key: api-key
-  defaultModel: claude-sonnet-4-20250514
+  type: container
+  command: ["sh", "-c", "echo hello from orka"]
 EOF
+kubectl -n orka-system get task hello --watch
 ```
 
-### Start Chatting
+When the phase reads `Succeeded`, Orka has run its first Task for you. From here,
+[Getting started](https://orka-agents.github.io/orka/docs/getting-started) walks through
+connecting to the API, adding a model, and running your first AI Task and your first
+coding agent.
 
-Use the built-in dashboard, or connect any OpenAI-compatible client:
+## What people build with it
 
-```bash
-kubectl port-forward -n orka-system svc/orka-api 8080:8080
+- **[Pull request review on every PR.](https://orka-agents.github.io/orka/docs/repository-monitors)**
+  A repository monitor queues review Tasks as PRs arrive and posts the findings back.
+- **[Issues that become pull requests.](https://orka-agents.github.io/orka/docs/guides/issue-to-pr-automation)**
+  Label an issue `orka:implement`; agents plan, implement, review, and repair the PR.
+- **["Just do it" chat.](https://orka-agents.github.io/orka/docs/chat)** Describe what
+  you want in plain language and an orchestrator creates and runs the Tasks, in the
+  dashboard or over the API.
+- **[Agents in Teams, Telegram, and A2A.](https://orka-agents.github.io/orka/docs/gateways)**
+  Gateways bring the same Agents into the conversations people already have.
+- **[Agents on a schedule.](https://orka-agents.github.io/orka/docs/scheduled-tasks)**
+  Nightly dependency audits, security scans, or reports, with retries and notifications
+  handled for you.
+- **[Your existing tools, safer.](https://orka-agents.github.io/orka/docs/openai-compat)**
+  Point Claude Code, Codex, OpenCode and more at Orka's OpenAI- and Anthropic-compatible
+  endpoints and stop handing out provider keys.
 
-# Open the web dashboard
-open http://localhost:8080
-```
+## Why on Kubernetes
 
-The built-in orchestrator creates agents, runs tasks, monitors progress, and returns results — all from natural language. See the [OpenAI Compatibility](website/docs/reference/openai-compat.md) and [Anthropic Compatibility](website/docs/reference/anthropic-compat.md) docs for proxy setup with your preferred client.
+- **No keys on laptops.** Provider credentials live in Secrets; people and CI get scoped tokens.
+- **One place to govern.** Models, providers, tools, and limits are set per Agent and per namespace.
+- **Everything is a record.** Tasks, sessions, artifacts, and the pull requests agents open are durable and auditable.
+- **Scale with the cluster.** Scheduling, retries, concurrency, and cron come from the control plane you already run.
 
-## Documentation
+## Learn more
 
-|                                                              |                                                       |
-| ------------------------------------------------------------ | ----------------------------------------------------- |
-| [Getting Started](website/docs/getting-started.md)                   | Installation, quick start, CLI setup                  |
-| [Architecture](website/docs/concepts/architecture.md)                         | System design, components, and data flow              |
-| [Configuration](website/docs/concepts/configuration.md)                       | CRD reference, Helm values, controller flags, metrics |
-| [Observability](website/docs/guides/observability.md)                        | OpenTelemetry traces, GenAI metrics, and task trace guidance |
-| [Agent Runtimes](website/docs/concepts/agent-runtimes.md)                     | Built-in CLI runtimes and bring-your-own remote AgentRuntime backends |
-| [CLI Harness Wrapper](website/docs/guides/cli-harness-wrapper.md)                  | Harness protocol wrapper for Codex, Claude, Copilot, and OpenCode CLI runtimes |
-| [Agent Sandbox](website/docs/concepts/agent-sandbox.md)                       | Experimental upstream `agent-sandbox` workspace execution for agent runtimes |
-| [Interactive Chat](website/docs/guides/chat.md)                             | Chat endpoint, tools, and SSE streaming               |
-| [Multi-Agent Coordination](website/docs/guides/multi-agent-coordination.md) | Coordinator agents and task delegation                |
-| [Autonomous Tasks](website/docs/guides/autonomous-tasks.md)                 | Long-running coordinator loops with persisted plan state |
-| [Memory](website/docs/concepts/memory.md)                                   | Durable memory, proposals, transcript search, and validation |
-| [API Reference](website/docs/reference/api-reference.md)                       | REST API endpoints and usage examples                 |
-| [OpenAI Compatibility](website/docs/reference/openai-compat.md)                | OpenAI-compatible chat completions API                |
-| [Anthropic Compatibility](website/docs/reference/anthropic-compat.md)          | Anthropic-compatible Messages API                     |
-| [Gateway API](website/docs/reference/gateway-api.md)                           | Generic Gateway resources, ingress, delivery, and operator APIs |
-| [Operating Gateways](website/docs/operations/gateways.md)                      | Gateway readiness, TLS, recovery, upgrades, and operations |
-| [Web Dashboard](website/docs/guides/ui.md)                                  | Frontend architecture and pages                       |
-| [Security](website/docs/concepts/security.md)                                 | Security model and hardening                          |
-| [Transaction Tokens](website/docs/concepts/transaction-tokens.md)             | Configure strict transaction governance and TTS |
-| [Outbound Access Policies](website/docs/concepts/outbound-access.md)           | Exchange resource credentials or route Tools through a trusted gateway |
-| [Repository Security Scanning](website/docs/guides/repository-security-scanning.md) | Repository scan workflow, threat models, findings, and remediation |
-| [Repository Monitors](website/docs/guides/repository-monitors.md) | Durable GitHub pull request monitor runs, review tasks, and dashboard state |
-| [GitHub Label Triggers](website/docs/guides/github-label-triggers.md) | Trigger Orka agent tasks from GitHub labels such as `agent:implement` and `agent:review` |
-| [Development](website/docs/development/development.md)                           | Building, generated charts, releases, and contributing |
-| [Testing](website/docs/development/testing.md)                                   | Test structure, patterns, and commands                |
+- [What is Orka?](https://orka-agents.github.io/orka/docs) — the mental model and everything it can do
+- [Architecture](https://orka-agents.github.io/orka/docs/architecture) — how a Task becomes a Pod
+- [Coding agents](https://orka-agents.github.io/orka/docs/agent-runtimes) — Codex, Claude Code, Copilot, and OpenCode as pooled runtimes
+- [Multi-agent coordination](https://orka-agents.github.io/orka/docs/multi-agent-coordination) — one agent delegating to several
+- [Security](https://orka-agents.github.io/orka/docs/security) — the trust model and hardening
+- [Troubleshooting](https://orka-agents.github.io/orka/docs/troubleshooting) — error strings, causes, fixes
+- [Development](https://orka-agents.github.io/orka/docs/development) — building and testing Orka itself
+
+## Join in
+
+Questions, bug reports, and ideas are welcome in
+[issues](https://github.com/orka-agents/orka/issues). If you want to contribute code,
+[CONTRIBUTING.md](CONTRIBUTING.md) has the setup and the review process, and
+[SECURITY.md](SECURITY.md) explains how to report a vulnerability privately.
+
+## License
+
+[MIT](LICENSE)

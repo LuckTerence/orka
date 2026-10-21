@@ -1,4 +1,4 @@
-export interface ObjectMeta {
+interface ObjectMeta {
   name: string
   namespace?: string
   uid?: string
@@ -6,13 +6,14 @@ export interface ObjectMeta {
   creationTimestamp?: string
 }
 
-export interface GatewayCapabilities {
+interface GatewayCapabilities {
   inboundText?: boolean
   outboundText?: boolean
   threads?: boolean
   senderIdentity?: boolean
   explicitSessions?: boolean
   idempotentDelivery?: boolean
+  interimDelivery?: boolean
 }
 
 export interface Gateway {
@@ -82,7 +83,7 @@ export interface GatewayBinding {
   }
 }
 
-export type GatewayEventState =
+type GatewayEventState =
   | 'Accepted' | 'Queued' | 'Dispatching' | 'TaskCreated' | 'Completed'
   | 'Rejected' | 'DeadLettered' | 'Expired'
 
@@ -110,7 +111,7 @@ export interface GatewayEvent {
   updatedAt: string
 }
 
-export type GatewayDeliveryState =
+type GatewayDeliveryState =
   | 'Pending' | 'Sending' | 'Delivered' | 'RetryScheduled'
   | 'Failed' | 'DeadLettered' | 'Expired'
 
@@ -122,7 +123,7 @@ export interface GatewayDelivery {
   eventId: string
   taskName?: string
   sessionName?: string
-  kind: 'final' | 'error'
+  kind: 'final' | 'error' | 'message'
   state: GatewayDeliveryState
   replyTarget: string
   text: string

@@ -1,10 +1,16 @@
 ---
 slug: /memory
+description: "The namespace-scoped memory layer: durable memories, proposals, and why writing one is a review request."
 ---
 
 # Memory
 
-Orka provides namespace-scoped durable memory for AI worker tasks. The design is governance-first: workers may propose reusable knowledge, but durable shared memory remains reviewable, auditable, bounded, and subject to an explicit content authority.
+Memory lets agents carry knowledge from one Task to the next: project facts, decisions,
+conventions, and procedures. In a shared cluster, memory that any model output could change
+would be a liability, so Orka makes writing a memory a review request. Agents propose; a
+person reviews and applies; only then do future Tasks see it. Memory is scoped to a namespace
+and available to native `type: ai` Tasks. Durable shared memory remains reviewable,
+auditable, bounded, and subject to an explicit content authority.
 
 ## Concepts and authority
 
@@ -60,6 +66,12 @@ Memory proposal review is **non-applying**:
 4. Apply may complete immediately or return a durable remote memory operation.
 5. Rejected or archived proposals cannot be applied.
 
+Both steps record who took them: `reviewer` on the review and `appliedBy` on the apply. The server takes these names from the signed-in identity of the request. A client cannot set them: a request body with a non-empty `reviewer` or `appliedBy` is rejected with `400 Bad Request`, and a request without an identity is refused.
+
+:::tip[Video demo]
+Watch [Review and publish an agent's memory](https://www.youtube.com/watch?v=iCqyVfWBpyg).
+:::
+
 Accepted proposals can suggest tags through the first `Tags:` line in `description`:
 
 ```text
@@ -71,7 +83,7 @@ Tags: release, testing
 
 ## Worker behavior
 
-When controller context is present, the AI worker registers and auto-enables the memory tool family independently of coordination mode:
+When controller context is present, every native `type: ai` Task receives the memory tools ([parameters](../reference/built-in-tools.md#memory-tools)), independently of coordination mode:
 
 | Tool | Purpose |
 |------|---------|
@@ -211,7 +223,7 @@ Administrative writes require an audit `reason`; destructive/lifecycle CLI comma
 | `/api/v1/memory-proposals/:id/apply` | POST | Apply an accepted memory proposal; may return Memory JSON or `202 MemoryOperation` |
 | `/api/v1/memory-proposals/:id/archive` | POST | Archive without applying |
 
-Review and archive return `204 No Content`. For context-token callers, review requires memory-operate; apply requires both memory-write and memory-operate. Proposal apply participates in the same remote idempotency and operation behavior as other mutations.
+Review returns the stored review record: `id`, `namespace`, `status`, `reviewer`, `reviewNote`, and `reviewedAt`, where `reviewer` is the identity that made the request. Archive returns `204 No Content`. For context-token callers, review requires memory-operate; apply requires both memory-write and memory-operate. Proposal apply participates in the same remote idempotency and operation behavior as other mutations.
 
 ## Internal worker routes
 

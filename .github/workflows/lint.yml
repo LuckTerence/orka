@@ -1,8 +1,13 @@
 name: Lint
 
 on:
+  workflow_call:
   workflow_dispatch:
   push:
+    # PR branches are linted by the pull_request event. Keep push coverage on
+    # main without running the same branch change twice.
+    branches:
+      - main
     paths-ignore:
       - ".agents/**"
       - ".claude/**"
@@ -21,6 +26,13 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
+
+concurrency:
+  # Supersede earlier runs of the same pull request. Every other event,
+  # including release workflow_call, gets a unique group and never cancels.
+  group: ${{ github.event_name == 'pull_request' && format('lint-pr-{0}', github.event.pull_request.number) || format('lint-{0}-{1}', github.ref, github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   lint:
@@ -33,15 +45,18 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: go.mod
+          go-version: '1.27'
+          check-latest: true
 
       - name: Create UI embed stub
         run: make ensure-ui-embed
 
       - name: Run linter
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        # Lint the whole tree on every event so findings a diff can't show,
+        # such as code another change left unused, fail before they merge.
         with:
-          version: v2.7.2
+          version: v2.14.0
           install-mode: goinstall
 
   ui-lint:
