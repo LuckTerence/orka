@@ -21,7 +21,7 @@ tags; development charts use the rolling `0.0.0-dev` tag. See
 | `controller.image.repository` | `ghcr.io/orka-agents/orka` | Controller image |
 | `controller.image.tag` | release version | Controller image tag. |
 | `controller.image.digest` | `""` | Optional SHA256 digest; takes precedence over `tag`. |
-| `controller.mode` | `harness-v2` | Static agent execution mode: `harness-v1` or `harness-v2`. Select v1 explicitly for a compatibility release; a release never serves both or changes mode in place. |
+| `controller.mode` | `harness-v2` | Fixed agent execution protocol identity. Only `harness-v2` is supported. |
 | `controller.watchNamespace` | Helm release namespace | Must match the release namespace, labeled `orka.ai/controller-mode` with the matching mode. |
 | `controller.agentExecutionSnapshot.existingSecret` | `""` | Your own snapshot encryption Secret. Empty renders an empty `<release>-agent-execution-snapshot` that the controller fills on first start. Immutable after install. See [Snapshot encryption key](#snapshot-encryption-key). |
 | `controller.agentExecutionSnapshot.key` | `key` | Item inside that Secret holding 32 raw bytes or their base64 encoding. Immutable after install. |
@@ -41,10 +41,11 @@ tags; development charts use the rolling `0.0.0-dev` tag. See
 | `controller.acpRuntime.copilotImage` | release image tag | GitHub Copilot ACP image tag or digest; an empty string disables it. |
 | `controller.acpRuntime.opencodeImage` | release image tag | OpenCode ACP image tag or digest; an empty string disables it. |
 | `controller.acpRuntime.upgradeDrain.*` | enabled | Two-phase planned-upgrade admission closure and RuntimePool drain settings. |
-| `harnessV1.image.digest` | `""` | Required immutable wrapper image digest for a `harness-v1` release. |
-| `harnessV1.auth.existingSecret` | `""` | Dedicated v1 wrapper bearer Secret, separate from its TLS Secret. Never share it with v2. |
-| `harnessV1.tls.existingSecret` | `""` | Dedicated v1 wrapper Secret containing `tls.crt`, `tls.key`, and `ca.crt`. |
-| `harnessV1.tls.rolloutNonce` | `""` | Non-secret revision marker for certificate renewal without changing the TLS Secret name. |
+| `controller.acpRuntime.toolboxes.enabled` | `false` | Let built-in Agents declare `runtime.toolboxes`, read-only tool images bound into runtime Pods. See [Toolboxes](../guides/toolboxes.md). |
+| `controller.acpRuntime.toolboxes.allowedRegistries` | `[]` | Registry hosts or host/path prefixes toolbox images may come from. Empty allows nothing. |
+| `controller.acpRuntime.toolboxes.imagePullSecrets` | `[]` | Secret names in the runtime namespace added to runtime Pod `imagePullSecrets` when toolboxes are bound. Never mounted into containers. |
+| `controller.acpRuntime.toolboxes.nodeSelector` | `{}` | Node selector merged into runtime Pods that bind toolboxes. |
+| `controller.acpRuntime.toolboxes.mountMethod` | `copy` | `copy` (init-container copier, every Kubernetes version) or `imageVolume` (Kubernetes 1.36+ with containerd 2.2+ or CRI-O 1.33+). |
 | `providerProxy.enabled` | `false` | Enable the authenticated proxy when connecting built-in coding agents to your model gateway. Installation and AI-worker tasks do not require it. |
 | `providerProxy.upstreamBaseURL` | `""` | Your gateway's HTTP(S) endpoint. Required when the proxy is enabled. Credentials, queries, and fragments are forbidden in the URL. |
 | `providerProxy.egress` | `[]` | NetworkPolicy egress rules allowing the proxy to reach your gateway. Leave empty when `upstreamBaseURL` names an in-cluster Service; the chart then derives the rule from that Service at install time. Required for external gateways, named target ports, or offline renders. DNS access is always added. |
@@ -65,14 +66,9 @@ tags; development charts use the rolling `0.0.0-dev` tag. See
 | `webhooks.caBundle` | `""` | Base64-encoded PEM CA bundle for an operator-supplied certificate. Leave empty with controller-issued TLS, which injects its own CA, or when `webhooks.caInjectionAnnotations` configures an injector. |
 | `webhooks.caInjectionAnnotations` | `{}` | CA-injection annotations (for example cert-manager) placed on the chart ValidatingWebhookConfiguration. With `webhooks.tls.existingSecret` set, rendering fails unless this or `webhooks.caBundle` is set. |
 | `webhooks.timeoutSeconds` | `10` | Admission webhook timeout. |
-| `controller.agentSandbox.enabled` | `false` | Enable experimental workspace-backed execution for agent Tasks that set `execution.workspace` |
-| `controller.agentSandbox.routerUrl` | `""` | Optional upstream agent-sandbox router base URL used for workspace claims |
-| `controller.agentSandbox.defaultTemplate` | `""` | Default agent-sandbox `SandboxWarmPool` name when a Task omits `templateRef.name` |
-| `controller.agentSandbox.warmPoolPolicy` | `disabled` | Legacy compatibility setting: `disabled` or `template`; v1 claims use `SandboxWarmPool` references |
-| `controller.agentSandbox.namespaceStrategy` | `task` | Sandbox resource namespace strategy: `task` or `controller` |
-| `controller.agentSandbox.claimTimeout` | `2m` | Timeout for workspace claim and readiness operations |
-| `controller.agentSandbox.commandTimeout` | `30m` | Timeout for agent runtime execution inside the sandbox |
-| `controller.agentSandbox.cleanupPolicy` | `delete` | Legacy setting, ignored by harness-v2 ACP. An omitted Task `cleanupPolicy` defaults to `delete`; `retain` is rejected. |
+| `controller.executionWorkspace.dispatchEnabled` | `false` | Enable class-backed ACP dispatch through registered external providers. |
+| `controller.executionWorkspace.workerNamespaces` | `[]` | Grant core read-only Pod observation in native worker namespaces; provider mutation RBAC is separate. |
+| `controller.substrate.mcpToolsEnabled` | `false` | Enable in-tree native Substrate MCP Tool actors and actor pools. |
 | `workers.ai.image.repository` | `ghcr.io/orka-agents/orka/ai-worker` | AI worker image |
 | `workers.general.image.repository` | `ghcr.io/orka-agents/orka/general-worker` | General worker image |
 | `service.type` | `ClusterIP` | Service type |
@@ -117,16 +113,22 @@ to disable that provider.
 The controller encrypts agent execution snapshots at rest with an AES-256 key
 mounted from a Secret. By default the chart renders an empty Secret named
 `<release>-agent-execution-snapshot` and the controller mints 32 random bytes
-into it on its first start, then reuses them on every later start. The chart
-never renders key material, so Helm release history and dry-run output contain
-no secrets, and Helm leaves the controller-written data alone on upgrade. The
-Secret is kept on `helm uninstall` so a restored data volume can still be
-decrypted. Back it up with the data volume.
+into it when it creates a new SQLite dataset, then reuses them on every later
+start. The chart never renders key material, so Helm release history and
+dry-run output contain no secrets, and Helm leaves the controller-written data
+alone on upgrade. The Secret is kept on `helm uninstall` so a restored data
+volume can still be decrypted. Back it up with the data volume.
 
-If the controller finds its SQLite store already present but the Secret empty,
-the key was lost. It refuses to start rather than mint a new key that could not
-read the existing records. Restore the Secret from backup, or delete the data
-volume to start over.
+The controller decides whether it may mint a key from the dataset history recorded
+inside the SQLite database, not from whether the database file exists. It mints a
+key only for a new dataset that has never completed key bootstrap and holds no
+records. A dataset that completed bootstrap, or was adopted from an older layout
+during an upgrade, needs its existing key even if every record has since been
+deleted. If the Secret is empty for such a dataset, the key was lost, and the
+controller refuses to start rather than mint a new key that could not read the
+existing records. Restore the Secret from backup, or delete the data volume to
+start over. See
+[Dataset identity and key bootstrap](../operations/upgrading.md#dataset-identity-and-key-bootstrap).
 
 To bring your own key, create the Secret before installing and set
 `controller.agentExecutionSnapshot.existingSecret`. The item must hold exactly
@@ -223,21 +225,6 @@ time.
 
 The Publisher, SCM proxy, and controller clients load these credentials at process startup. Update the Secret and bump its corresponding nonce in the same Helm upgrade: use `publisher.auth.rolloutNonce` for the publisher-auth Secret, and `scmEgressProxy.auth.rolloutNonce` for the SCM proxy-auth Secret. The publisher nonce is applied only to controller and Publisher Pod templates; the SCM nonce is applied only to Publisher and SCM proxy Pod templates. Nonces are safe revision strings, not Secret values. Coordinated rotation can briefly fail closed while Pods roll but prevents stale or split credential generations from persisting.
 
-### Harness v1 certificate rotation
-
-The harness-v1 wrapper keeps bearer and TLS credentials in separate Secrets.
-`harnessV1.auth.existingSecret` contains only the bearer token and is immutable
-while the wrapper Deployment exists. `harnessV1.tls.existingSecret` contains
-`tls.crt`, `tls.key`, and `ca.crt`.
-
-Changing the TLS Secret name triggers a drained wrapper restart. For certificate
-renewal under the same name, update the TLS Secret and bump
-`harnessV1.tls.rolloutNonce` in the same Helm upgrade. The hook drains the live
-wrapper before restarting the wrapper and controller.
-
-Keep the updated `ca.crt` able to verify the certificate served during the drain.
-Alternatively, use a new TLS Secret name so the hook can mount the prior CA.
-
 ### Canonical Kustomize overlay
 
 Direct Kustomize deployments must use:
@@ -294,9 +281,9 @@ When `ORKA_PUBLISHER_PUBLISH_TIMEOUT` is raised above the default on the Publish
 
 CRD behavior is not controlled through chart values. A fresh install creates all CRDs in the chart unless `--skip-crds` is used. Because CRDs are cluster-scoped, designate one lifecycle owner and use `--skip-crds` for other Orka releases. Helm does not update CRDs during `helm upgrade`; apply the CRDs from the exact target chart before upgrading the controller. Helm retains CRDs and Orka custom resources on uninstall. See the [Helm CRD lifecycle guide](https://github.com/orka-agents/orka/blob/main/charts/orka/README.md).
 
-Harness v1 and v2 use separate releases, endpoints, watched namespaces, RBAC,
-Leases, stores, and data planes. They do not migrate Tasks or continue Sessions
-across modes. See [Operating harness v1 and v2 on one cluster](../operations/harness-modes.md).
+Each installation owns a separate watched namespace, runtime namespace, endpoint,
+RBAC, Lease, database, and credentials. See
+[installation ownership](../operations/harness-modes.md).
 
 Context-token flags can also be configured through Helm under
 `controller.contextToken`. For example:
@@ -373,20 +360,18 @@ See [charts/orka/values.yaml](https://github.com/orka-agents/orka/blob/main/char
 | `--gateway-claim-lease` | `1m` | Event and delivery claim lease |
 | `--gateway-poll-interval` | `500ms` | Dispatcher and delivery poll interval |
 | `--gateway-batch-size` | `25` | Maximum gateway records processed per iteration |
-| `--controller-mode` / `ORKA_CONTROLLER_MODE` | required | Static controller mode: `harness-v1` or `harness-v2`. `dual`, `auto`, and drain modes are rejected. |
+| `--controller-mode` / `ORKA_CONTROLLER_MODE` | `harness-v2` | Fixed `harness-v2` protocol identity. Other values are rejected. |
 | `--watch-namespace` | required | One non-empty watched namespace. Its `orka.ai/controller-mode` label must match; the controller adds it when absent. |
 | `--claim-namespace-mode` | `true` | Label an unlabeled watched namespace with the controller's mode on first start. Set `false` to require an operator-applied label. |
 | `--enforce-namespace-isolation` | `false` | Restrict users to their ServiceAccount's namespace |
 | `--max-tasks-per-namespace` | `0` | Max active tasks per namespace (0 = unlimited) |
-| `--agent-sandbox-enabled` | `ORKA_AGENT_SANDBOX_ENABLED` env or `false` | Admit the agent-sandbox execution-workspace provider for agent Tasks that set `execution.workspace` |
 | `--acp-workspace-dispatch-enabled` | `ORKA_ACP_WORKSPACE_DISPATCH_ENABLED` env or `false` | Admit workspace-provider-backed ACP RuntimeSession dispatch; when false, workspace-backed agent Tasks fail closed |
-| `--agent-sandbox-router-url` | `ORKA_AGENT_SANDBOX_ROUTER_URL` env or `""` | Optional upstream agent-sandbox router base URL used for workspace claims |
-| `--agent-sandbox-default-template` | `ORKA_AGENT_SANDBOX_DEFAULT_TEMPLATE` env or `""` | Default agent-sandbox `SandboxWarmPool` name when a Task omits `templateRef.name` |
-| `--agent-sandbox-warm-pool-policy` | `ORKA_AGENT_SANDBOX_WARM_POOL_POLICY` env or `disabled` | Legacy compatibility setting: `disabled` or `template`; v1 claims use `SandboxWarmPool` references |
-| `--agent-sandbox-namespace-strategy` | `ORKA_AGENT_SANDBOX_NAMESPACE_STRATEGY` env or `task` | Sandbox resource namespace strategy: `task` or `controller` |
-| `--agent-sandbox-claim-timeout` | `ORKA_AGENT_SANDBOX_CLAIM_TIMEOUT` env or `2m` | Timeout for workspace claim and readiness operations |
-| `--agent-sandbox-command-timeout` | `ORKA_AGENT_SANDBOX_COMMAND_TIMEOUT` env or `30m` | Timeout for agent runtime execution inside the sandbox |
-| `--agent-sandbox-cleanup-policy` | `ORKA_AGENT_SANDBOX_CLEANUP_POLICY` env or `delete` | Legacy setting, ignored by harness-v2 ACP. An omitted Task `cleanupPolicy` defaults to `delete`; `retain` is rejected. |
+| `--substrate-mcp-tools-enabled` | `ORKA_SUBSTRATE_MCP_TOOLS_ENABLED` env or `false` | Enable native MCP Tool actors and actor pools; does not allocate ACP workspaces. |
+| `--acp-toolboxes-enabled` | `ORKA_ACP_TOOLBOXES_ENABLED` env or `false` | Let built-in Agents declare `runtime.toolboxes`. Off by default; see [Toolboxes](../guides/toolboxes.md) |
+| `--acp-toolbox-allowed-registries` | `ORKA_ACP_TOOLBOX_ALLOWED_REGISTRIES` env or `""` | Comma-separated registry hosts or host/path prefixes toolbox images may come from. Empty allows nothing |
+| `--acp-toolbox-image-pull-secrets` | `ORKA_ACP_TOOLBOX_IMAGE_PULL_SECRETS` env or `""` | Comma-separated Secret names in the runtime namespace added to runtime Pod `imagePullSecrets` when toolboxes are bound |
+| `--acp-toolbox-node-selector` | `ORKA_ACP_TOOLBOX_NODE_SELECTOR` env or `""` | Comma-separated `key=value` node selector merged into runtime Pods that bind toolboxes |
+| `--acp-toolbox-mount-method` | `ORKA_ACP_TOOLBOX_MOUNT_METHOD` env or `copy` | `copy` or `imageVolume`. With `imageVolume` on an API server older than 1.36, toolbox Agents are rejected with `ToolboxUnavailable`; there is no silent fallback |
 | `--controller-url` | `""` | Base URL workers use to reach the controller API (e.g., `http://orka-api.orka-system.svc:8080`). Required for worker result callbacks and session transcript fetching |
 | `--oidc-issuer` | `ORKA_OIDC_ISSUER` env or `""` | OIDC issuer URL for external API bearer token validation. Requires `--oidc-audience` when set |
 | `--oidc-audience` | `ORKA_OIDC_AUDIENCE` env or `""` | Expected OIDC audience for external API bearer tokens. Requires `--oidc-issuer` when set |
@@ -475,83 +460,63 @@ See [charts/orka/values.yaml](https://github.com/orka-agents/orka/blob/main/char
 
 ### Workspace providers (`workspace.orka.ai/v1alpha1`) {#workspace-providers}
 
-A **workspace provider** gives an agent a real machine to work on — a sandboxed
-container with a filesystem, rather than a plain Kubernetes Pod. Orka does not ship one;
-it talks to an external one. Two backends are supported:
-[agent-sandbox](../concepts/agent-sandbox.md) and [Substrate](../concepts/substrate.md).
+A separately deployed **workspace provider** realizes Orka's frozen public runtime
+request. Core owns runtime credentials, admission, and Task settlement; the
+provider owns infrastructure and reports exact startup and termination evidence.
+The external repository supplies [Agent Sandbox](../concepts/agent-sandbox.md),
+[Substrate](../concepts/substrate.md), and a development fake provider.
 
-The API is installed alongside everything else but its controllers start **off**. Nothing
-below happens until you turn them on.
+#### Enablement
 
-#### Turning it on
-
-| Flag | Environment variable | Purpose |
+| Core flag | Environment variable | Purpose |
 | --- | --- | --- |
-| `--enable-workspace-provider-api` | `ORKA_ENABLE_WORKSPACE_PROVIDER_API` | Enables the provider, class, pool, and workspace reconcilers. |
-| `--task-provenance-admission-enabled=true` *or* `--task-provenance-admission-external=true` | — | **Required.** Task provenance must be protected by a controller-served or separately deployed webhook. |
-| `--workspace-class-use-admission-enabled=true` | — | **Required.** The controller refuses to start without it. |
-| `--acp-workspace-dispatch-enabled` | — | Lets agent Tasks actually request a workspace. |
-| `--agent-sandbox-enabled` *or* `--substrate-enabled` | — | Picks the backend. Without one, workspace Tasks fail closed. |
-| `--substrate-direct-egress-enabled` | `ORKA_SUBSTRATE_DIRECT_EGRESS_ENABLED` | Required for native Substrate ACP admission. Acknowledges ateapi's `--egress-gateway-address=` configuration so worker NetworkPolicies see actual destinations. Defaults to `false`; suspension and cleanup still work. |
-| `--enable-fake-workspace-provider` | `ORKA_ENABLE_FAKE_WORKSPACE_PROVIDER` | Development only — see below. |
+| `--enable-workspace-provider-api` | `ORKA_ENABLE_WORKSPACE_PROVIDER_API` | Enables shared provider, class, pool, workspace, and checkpoint reconciliation. |
+| `--task-provenance-admission-enabled=true` or `--task-provenance-admission-external=true` | — | Protects reserved Task provenance and settlement metadata. |
+| `--workspace-class-use-admission-enabled=true` | — | Enables live class-use authorization through the required webhook. |
+| `--acp-workspace-dispatch-enabled` | `ORKA_ACP_WORKSPACE_DISPATCH_ENABLED` | Allows class-backed ACP workspace dispatch. |
 
-The source Helm chart enables both admission gates for `harness-v2`. It does not expose
-values for the provider API, workspace dispatch, or backend gates.
+Core does not accept Sandbox, Substrate ACP, or in-process fake provider flags.
+Install each provider as a separate Deployment with its own ServiceAccount,
+leader-election Lease, CRDs, registration, and immutable configuration. Use the
+[external provider installation instructions](https://github.com/orka-agents/orka-workspace/blob/main/README.md).
+Native MCP Tools retain the separate `--substrate-mcp-tools-enabled` flag.
 
-Task provenance protection is required because Orka stores workspace settlement state
-under reserved `acp.workspace.orka.ai/` Task metadata. The provenance webhook prevents
-clients from forging that metadata. Use `--task-provenance-admission-enabled` for the
-controller-served webhook. With the dedicated admission runtime, install and verify the
-fail-closed webhook configuration before enabling `--task-provenance-admission-external`.
+The source Helm chart enables provenance and class-use admission for `harness-v2`.
+`controller.executionWorkspace.dispatchEnabled` controls ACP dispatch;
+`controller.executionWorkspace.workerNamespaces` grants only Pod read access for
+independent native worker attestation. Configure provider mutation permissions in
+its own installation. With dedicated admission, verify fail-closed webhooks before
+enabling `--task-provenance-admission-external`.
 
-:::warning[Upgrades need the CRDs applied by hand]
-Helm installs a chart's `crds/` on first install and never updates them. Before enabling
-this on an existing cluster, apply the target chart's CRDs so the `workspace.orka.ai`
-schemas match the controller:
-
-```bash
-helm show crds '<chart>' | kubectl apply --server-side -f -
-```
-
-See [Upgrading](../operations/upgrading.md).
+:::warning[Drain legacy owners before changing the schema]
+Before applying the target RuntimePool CRD or starting the new core binary, drain
+old in-tree allocations and retained records through the original owner. This
+includes legacy workspaces in `Ready`, `Suspended`, `Failed`, and `Deleted` states,
+plus native journals and checkpoint references. The startup gate checks all
+namespaces, refuses leftovers, and never adopts or removes their finalizers.
+Helm does not update CRDs during upgrades. Apply the new schemas only after the
+drain, then install the new binary and external providers. See
+[external workspace migration](../operations/upgrading.md#external-workspace-migration).
 :::
-
-The fake adapter is for development only, and the release chart deliberately leaves its
-two CRDs out. Install them from a matching source checkout:
-
-```bash
-bin/kustomize build --load-restrictor LoadRestrictionsNone \
-  config/development/fake-workspace-provider | kubectl apply -f -
-```
 
 #### Who owns what
 
-| Object | Scope | Owned by | Holds |
+| Object | Scope | Owner | Holds |
 | --- | --- | --- | --- |
-| `ExecutionWorkspaceProvider` | cluster | operator | The adapter identity. For the in-tree adapter this is exactly `controllerName: acp.workspace.orka.ai/runtime-pool`. |
-| `RuntimeProviderConfig` | cluster | operator | Which backend — `agent-sandbox` or `substrate`. |
-| `RuntimeWorkspaceProfile` | namespaced | operator | Backend inputs: a Substrate profile names the infrastructure ActorTemplate and may set `substrate.suspend`; an agent-sandbox profile is empty unless the class allows suspension. |
-| `ExecutionWorkspaceClass` | namespaced | operator | What users pick by name. |
-| `Task.spec.execution.workspace.classRef` | — | user | The choice. Nothing else. |
+| `ExecutionWorkspaceProvider` | cluster | operator | Installed controller identity, ServiceAccount, contracts, and config reference. |
+| Provider config | cluster | operator | `SandboxProviderConfig`, `SubstrateProviderConfig`, or the installed provider's own config kind. |
+| Provider profile | namespaced | operator | `SandboxWorkspaceProfile` or `SubstrateWorkspaceProfile`; immutable parameters in the class namespace. |
+| `ExecutionWorkspaceClass` | namespaced | operator | Provider/profile binding, required features, reuse policy, and lifecycle bounds. |
+| `Task.spec.execution.workspace.classRef` | — | user | Authorized class selection, with optional permitted reuse/detach choices. |
 
-That split is the point: users name a class, and provider identity, backend parameters,
-pool implementation, and provider versions all stay with the operator. The older direct
-agent-sandbox and Substrate settings below still work during migration.
+Sandbox config/profile kinds use `sandbox.workspace.orka.ai/v1alpha1`; Substrate
+uses `substrate.workspace.orka.ai/v1alpha1`. Development fake kinds use
+`fake.workspace.orka.ai/v1alpha1`. Core resolves these through their advertised
+API references. It does not own or register their backend settings.
 
-`kubectl get executionworkspaceclass` shows each class's lifecycle rules, so a person
-choosing a class can see whether their workspace is kept asleep (`Suspend`) or deleted
-(`Delete`) when the agent stops, how long it may sit idle, and how long it may exist:
-
-```console
-$ kubectl get executionworkspaceclass
-NAME              MODE         PROVIDER       ON DETACH   IDLE TIMEOUT   MAX LIFETIME   READY   AGE
-sandbox-session   Interactive  agent-sandbox  Suspend     30m            24h            True    2d
-scratch           Interactive  agent-sandbox  Delete                     2h             True    2d
-```
-
-`-o wide` adds the detach timeout. Helm does not update CRDs during an upgrade, so the
-columns appear once the CRDs from the new chart are applied (see
-[Upgrading](../operations/upgrading.md)).
+`kubectl get executionworkspaceclass` shows lifecycle actions, idle timeout, and
+maximum lifetime; `-o wide` adds the detach timeout. An ACP-only class explicitly
+requires `acp.runtime.v2`, rather than claiming unsupported generic exec/TLS features.
 
 #### Who is allowed to use a class
 
@@ -599,13 +564,13 @@ slot-scoped.
 | `onDetach` | agent-sandbox | Substrate |
 | --- | --- | --- |
 | `Delete` | Works | Works |
-| `Suspend` | Works, when the profile sets `agentSandbox.suspend` | Works with a DataOnly Substrate profile and the native provider pin |
+| `Suspend` | Requires `SandboxWorkspaceProfile.spec.suspend` | Requires `SubstrateWorkspaceProfile.spec.suspend` with `mode: DataOnly` |
 
 `Delete` is always executable.
 
 Agent-sandbox suspension is cold, never a memory snapshot. The profile's
-`agentSandbox.suspend` freezes a durable workspace PVC shape (`capacity`, optional
-`storageClassName` and `accessModes`); the pool's SandboxClaim requests that PVC, which
+`SandboxWorkspaceProfile.spec.suspend.volume` freezes a durable workspace PVC shape
+(`capacity`, optional `storageClassName` and `accessModes`); the provider's claim requests it, which
 forces a cold start instead of adopting a warm sandbox. Suspending patches that exact
 Sandbox to `operatingMode: Suspended` so its Pod terminates while the PVC survives.
 Resume rotates the bootstrap material, refreshes the Sandbox blueprint, and returns the
@@ -627,31 +592,12 @@ readiness and Task binding fail closed.
 | --- | --- | --- |
 | `idleTimeout` | class lifecycle | Idle suspended workspaces expire; idle `Ready` workspaces take the class default action. |
 | `maxLifetime` | class lifecycle | Hard cleanup bound, always. |
-| `retention.maxSuspendedWorkspaces` | `RuntimeWorkspaceProfile` | Caps concurrently suspended workspaces per class and namespace. Rejected at admission, retried at settlement with the frozen Suspend action preserved. This is a cap, not an expiry. |
+| `spec.retention.maxSuspendedWorkspaces` | provider-owned workspace profile | Caps concurrently suspended workspaces per class and namespace. Rejected at admission, retried at settlement with the frozen Suspend action preserved. This is a cap, not an expiry. |
 
 A queued continuation may take a still-`Ready` workspace directly. Deletion policies that
 retain data past workspace deletion are rejected.
 
 ADRs 0026–0030 carry the full contract.
-
-### Agent Sandbox controller settings
-
-Workspace-provider-backed ACP RuntimeSession dispatch requires `--acp-workspace-dispatch-enabled` plus the matching provider flag (`--agent-sandbox-enabled` or `--substrate-enabled`); with either unset, `Task.spec.execution.workspace` agent Tasks fail closed. The Substrate backend also uses `--substrate-api-*`, `--substrate-router-url`, and `--substrate-actor-dns-suffix`. Native ACP additionally requires `--substrate-direct-egress-enabled`, available through Helm as `controller.substrate.directEgressEnabled`. See [Substrate setup](../concepts/substrate.md) for the provider configuration this acknowledges. The agent-sandbox router, template, timeout, and cleanup settings below belong to the earlier worker-path prototype and are not used by the ACP RuntimePool backend, which renders its own sandbox templates:
-
-| Flag | Environment variable | Helm value | Default |
-|------|----------------------|------------|---------|
-| `--agent-sandbox-enabled` | `ORKA_AGENT_SANDBOX_ENABLED` | `controller.agentSandbox.enabled` | `false` |
-| `--agent-sandbox-router-url` | `ORKA_AGENT_SANDBOX_ROUTER_URL` | `controller.agentSandbox.routerUrl` | empty |
-| `--agent-sandbox-default-template` | `ORKA_AGENT_SANDBOX_DEFAULT_TEMPLATE` | `controller.agentSandbox.defaultTemplate` | empty |
-| `--agent-sandbox-warm-pool-policy` | `ORKA_AGENT_SANDBOX_WARM_POOL_POLICY` | `controller.agentSandbox.warmPoolPolicy` | `disabled` |
-| `--agent-sandbox-namespace-strategy` | `ORKA_AGENT_SANDBOX_NAMESPACE_STRATEGY` | `controller.agentSandbox.namespaceStrategy` | `task` |
-| `--agent-sandbox-claim-timeout` | `ORKA_AGENT_SANDBOX_CLAIM_TIMEOUT` | `controller.agentSandbox.claimTimeout` | `2m` |
-| `--agent-sandbox-command-timeout` | `ORKA_AGENT_SANDBOX_COMMAND_TIMEOUT` | `controller.agentSandbox.commandTimeout` | `30m` |
-| `--agent-sandbox-cleanup-policy` | `ORKA_AGENT_SANDBOX_CLEANUP_POLICY` | `controller.agentSandbox.cleanupPolicy` | `delete` |
-
-Supported values are `disabled` or `template` for the legacy warm pool policy setting, `task` or `controller` for namespace strategy, and `delete` or `retain` for the legacy cleanup policy. ACP ignores this cleanup default and rejects Task `cleanupPolicy: retain`. `task` defaults sandbox claims to the Task namespace; `controller` defaults them to the controller namespace when discoverable, and explicit `templateRef.namespace` values are honored as the claim/warm-pool namespace. See [Agent Sandbox Workspaces](../concepts/agent-sandbox.md) for what the ACP-backed provider does today and the invariants it holds.
-
-Any future ACP-backed integration will need a separately reviewed identity and RBAC design. Do not grant these permissions to managed ACP RuntimePods; they intentionally run without Kubernetes service-account tokens or Kubernetes RBAC.
 
 ### External API OIDC authentication
 
@@ -755,7 +701,6 @@ Before upgrading from a controller that does not record `Task.status.jobUID`, pa
 
 The new authorization checks require the controller-recorded Job UID. They reject workers whose Tasks have only `status.jobName`, including otherwise valid Pods from the previous controller. Orka does not backfill UIDs by looking up Job names: namespace Job creators can replace those Jobs. Do not patch missing UIDs from a name lookup; finish the attempt before upgrading or explicitly submit a new Task after the upgrade.
 
-Built-in harness v1 artifact uploads also require the wrapper's Kubernetes workload identity. Configure the bound wrapper endpoint as a Kubernetes Service in the auth Secret's namespace. The uploading Pod must belong to a live ReplicaSet and Deployment selected by that Service. A worker Pod with a copy of the wrapper bearer does not receive artifact access.
 
 ## Prometheus metrics
 
@@ -787,6 +732,7 @@ Scrape configuration (for example a Prometheus Operator ServiceMonitor) is not s
 | `orka_acp_runtime_pool_queued_tasks` | Gauge | `namespace`, `runtime_pool` | Durable unsatisfied Task demand assigned to the pool |
 | `orka_acp_runtime_pool_admission_state` | Gauge | `namespace`, `runtime_pool`, `state` | One-hot authoritative admission state (`unknown`, `closed`, `accepting`, `draining`, or `ambiguous`) |
 | `orka_acp_runtime_pool_scale_to_zero_total` | Counter | `namespace`, `runtime_pool` | Completed RuntimePool scale-to-zero transitions |
+| `orka_approval_decision_duration_seconds` | Histogram | `outcome`, `path` | Seconds from approval request to committed decision; see [Observability](../guides/observability.md#approval-decision-duration) |
 
 All context-token metric labels use low-cardinality values only. See [Transaction tokens](../concepts/transaction-tokens.md) for the authentication they measure.
 

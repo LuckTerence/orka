@@ -46,6 +46,10 @@ for the external service lifecycle and capacity.
 | Copilot | `copilot` | Immutable Copilot ACP image definition is included. Configure a digest-pinned image. |
 | OpenCode | `opencode` | Immutable OpenCode ACP image definition is included. Configure a digest-pinned image. |
 
+Built-in runtimes can mount extra command-line tools from read-only toolbox
+images declared in `Agent.spec.runtime.toolboxes`; see
+[Toolboxes](../guides/toolboxes.md).
+
 External runtimes use an `AgentRuntime` registration with `contractVersion: orka.harness.v2`. Current-generation conformance proves the exact instance, profile, cancellation, duplicate, and workspace-governance claims. Dispatch revalidates the frozen registration, authentication authority, and observed runtime identity before every mutation. See [Bring your own AgentRuntime](../guides/bring-your-own-agent-runtime.md) and the [adapter contract](../development/agent-runtime-adapter-contract.md).
 
 ## Architecture
@@ -422,7 +426,8 @@ A built-in runtime Pod uses a digest-pinned image, a read-only root filesystem, 
 service-account token. It holds no Git credential and has no route to source control. Its
 model traffic goes only to the central provider proxy, and each RuntimeSession reaches Orka
 tools only through a credential-protected loopback MCP proxy that the controller rechecks on
-every call. The Workspace/Publisher, which does hold the Git credentials, has no access to
+every call. A call to a tool outside the frozen policy, such as one the model names on its own,
+is refused there as a failed tool call and the prompt continues. The Workspace/Publisher, which does hold the Git credentials, has no access to
 models or tools. [Security](security.md#acp-runtimepool-pods) describes each boundary.
 
 ## Controller configuration
@@ -458,8 +463,18 @@ cross-namespace Vekil ingress boundary.
 
 - **Task fails before queueing**: for a built-in runtime, verify the Agent has `runtime.type: codex`, `claude`, `copilot`, or `opencode`, ACP is enabled, and the matching digest-pinned image is configured. For `runtimeRef`, verify the registration is current-generation, ready, strict-governed, and matches the Task workspace intent.
 - **Task remains queued**: inspect the selected RuntimePool lifecycle/admission/capacity and the runtime Pod scheduling conditions.
+- **Agent warnings in Task results**: Orka advertises ACP session notices, so Codex and Claude Code send their own warnings, such as Codex's missing model metadata, as notices, which Orka keeps out of the result and does not log. Copilot CLI 1.0.96 ignores notices and still writes its `Info:` lines into the reply.
 - **Task reports `OutcomeUnknown`**: do not retry the same attempt automatically. Inspect the recorded attempt, controller epoch, runtime instance, and event timeline.
 - **Read Task fails validation**: inspect `status.delivery` for `ReadOnlyWorkspaceModified` and treat the session as poisoned.
 - **Write Task is blocked**: verify all required source-read, target-read, target-write, and forge credential references, the publication repository/branch, and the Workspace/Publisher broker configuration. Require a terminal verified delivery receipt before claiming success.
 - **`runtimeRef` Task is rejected**: inspect `AgentRuntime.status` for current-generation conformance, exact profile and instance identity, strict workspace governance, and valid authentication Secret bindings. Remove unsupported Task overrides such as `maxTurns`, `disallowedTools`, or `allowBash`.
-- **`spec.execution.workspace` Task is rejected**: workspace-provider-backed RuntimeSession dispatch is fail-closed unless `--acp-workspace-dispatch-enabled` is set together with the matching provider flag: `--agent-sandbox-enabled` for `provider: agent-sandbox` (which must omit `templateRef`), or `--substrate-enabled` for `provider: substrate` (which requires an infrastructure `templateRef`). Other options (`retain`, boot/pool/snapshot/hibernation, `onDetach`) stay fail-closed. The rejection reason is projected to `Task.status.executionWorkspace`. Repository access always uses top-level `spec.workspace`; see [Agent Sandbox](agent-sandbox.md) and [Substrate](substrate.md).
+- **`spec.execution.workspace` Task is rejected**: enable the workspace provider API and ACP dispatch with the required admission webhooks, then check the selected `classRef`, live `use` authorization, provider heartbeat/contracts, and immutable profile binding. Provider-specific Task selectors are removed. An ACP class must require `acp.runtime.v2`; its allowed reuse and detach actions must match the request. Core also needs read-only access to native worker Pods when applicable. The rejection reason appears in `Task.status.executionWorkspace`. Repository access uses top-level `spec.workspace`; see [Agent Sandbox](agent-sandbox.md) and [Substrate](substrate.md).
+
+## Agent persona
+
+Built-in harness v2 runtimes support an optional [`Agent.spec.soul`](./soul.md)
+source, independent of the role system prompt. The controller resolves and pins
+its content before dispatch. Codex and Claude use native instruction settings;
+Copilot and OpenCode use protected per-session instruction files. These files are
+not repository content and are not published or restored from a repository
+workspace checkpoint. External `runtimeRef` registrations do not accept souls.
