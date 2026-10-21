@@ -113,7 +113,7 @@ The workload may declare `idleStatusFile`, a path inside the Pod where it writes
 with at least `idle` (boolean) and `idleSince` (RFC 3339 or null), rewritten at least every
 five minutes. Freshness is judged by `updatedAt` (RFC 3339) when the file has one and by the
 file's modification time otherwise. A status is stale ten minutes after that time, twice the
-rewrite interval, or when that time is more than ten minutes ahead.
+rewrite interval, or when that time or `idleSince` is more than ten minutes ahead.
 copilotd's `--idle-status-file` format satisfies it.
 
 ### Readiness and status come from an Orka sidecar
@@ -147,6 +147,10 @@ image and pinned by digest (`--agent-host-agent-image`):
   doubling to 5 min) until a replacement becomes ready.
 - `spec.suspended: true` deletes the Pod and keeps the volume and Secrets; `false` creates
   it again. A suspended or replaced host never replays an in-progress turn.
+- An operator changes a template by recreating it under the same name. Every host on it
+  then gets a new Pod from the new template on its existing volume: the Pod records the
+  template UID it was rendered from, and a Pod from an earlier UID is replaced. The
+  volume keeps the storage settings it was created with.
 - Idle suspension is opt-in per template (`idleSuspend.after`, from 1m to 720h, checked by
   the API server so a malformed duration can never be stored). The controller reads the
   sidecar's idle status and suspends a host idle for that long, recording

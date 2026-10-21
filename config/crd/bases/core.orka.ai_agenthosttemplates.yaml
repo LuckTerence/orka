@@ -292,6 +292,9 @@ spec:
                   writes its idle status.
                 pattern: ^[A-Za-z0-9._-]{1,128}$
                 type: string
+                x-kubernetes-validations:
+                - message: idleStatusFile must be a plain file name
+                  rule: self != '.' && self != '..'
               idleSuspend:
                 description: |-
                   IdleSuspend suspends hosts that report idle for the given duration. Unset

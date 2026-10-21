@@ -208,6 +208,19 @@ func TestStatusStalenessUsesTheFileTimeAndRejectsTheFuture(t *testing.T) {
 	if err := json.Unmarshal(get(t, agent.routes(), "/status").Body.Bytes(), &body); err != nil || !body.Stale {
 		t.Fatalf("an updatedAt an hour ahead must be stale: %+v %v", body, err)
 	}
+
+	// A fresh document whose idleSince is far ahead, as after a clock that
+	// jumped and came back, cannot say how long the host has been idle.
+	for since, stale := range map[time.Duration]bool{time.Minute: false, time.Hour: true} {
+		ahead := writeFile(t, "idle.json", `{"idle":true,"idleSince":"`+now.Add(since).Format(time.RFC3339)+
+			`","updatedAt":"`+now.Format(time.RFC3339)+`"}`)
+		agent = newAgent(1, "unused", ahead, io.Discard)
+		agent.now = func() time.Time { return now }
+		var got agenthost.IdleStatus
+		if err := json.Unmarshal(get(t, agent.routes(), "/status").Body.Bytes(), &got); err != nil || got.Stale != stale {
+			t.Fatalf("idleSince %s ahead: stale = %v, want %v (%v)", since, got.Stale, stale, err)
+		}
+	}
 }
 
 func TestStartupFailsWithWrongTokenAndNeverLogsIt(t *testing.T) {

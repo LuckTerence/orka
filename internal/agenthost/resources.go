@@ -36,7 +36,9 @@ const (
 	// AnnotationNonce carries the creation nonce recorded in AgentHost status
 	// before the object was created.
 	AnnotationNonce = "orka.ai/agent-host-nonce"
-	// AnnotationTemplateUID pins the template a Pod was rendered from.
+	// AnnotationTemplateUID records the template an object was rendered
+	// from. A Pod rendered from an earlier template of the same name is
+	// replaced.
 	AnnotationTemplateUID = "orka.ai/agent-host-template-uid"
 	// AnnotationHost names the owning AgentHost as namespace/name.
 	AnnotationHost = "orka.ai/agent-host"

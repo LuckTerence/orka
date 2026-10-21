@@ -722,12 +722,12 @@ func (r *AgentHostReconciler) reconcilePod(
 			agentHostReasonRestarting, "the host's Pod stopped; replacing it", "")
 		return ctrl.Result{RequeueAfter: agentHostCleanupRequeue}, nil
 	}
-	if pod.Annotations[agenthost.AnnotationGitHubToken] != fmt.Sprintf("%t", githubToken) {
+	if message := staleAgentHostPod(pod, template, githubToken); message != "" {
 		if err := r.deletePod(ctx, host, names); err != nil {
 			return ctrl.Result{}, err
 		}
 		setAgentHostState(host, corev1alpha1.AgentHostPhaseProvisioning, "", metav1.ConditionFalse,
-			agentHostReasonProvisioning, "replacing the host's Pod to change its credentials", "")
+			agentHostReasonProvisioning, message, "")
 		return ctrl.Result{RequeueAfter: agentHostCleanupRequeue}, nil
 	}
 	if !agentHostPodReady(pod) {
@@ -874,6 +874,19 @@ func newAgentHostObject(kind string) client.Object {
 	default:
 		return &corev1.Secret{}
 	}
+}
+
+// staleAgentHostPod says why a running Pod must be replaced, or returns "".
+func staleAgentHostPod(pod *corev1.Pod, template *corev1alpha1.AgentHostTemplate, githubToken bool) string {
+	switch {
+	case pod.Annotations[agenthost.AnnotationGitHubToken] != fmt.Sprintf("%t", githubToken):
+		return "replacing the host's Pod to change its credentials"
+	case pod.Annotations[agenthost.AnnotationTemplateUID] != string(template.UID):
+		// Recreating a template under its name is how an operator changes
+		// it; its hosts move to the new one on their existing volumes.
+		return "replacing the host's Pod to run its recreated template"
+	}
+	return ""
 }
 
 func agentHostPodTerminated(pod *corev1.Pod) bool {

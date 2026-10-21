@@ -264,6 +264,7 @@ type AgentHostTemplateSpec struct {
 	// IdleStatusFile is the file name, inside ORKA_STATUS_DIR, where the host
 	// writes its idle status.
 	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9._-]{1,128}$`
+	// +kubebuilder:validation:XValidation:rule="self != '.' && self != '..'",message="idleStatusFile must be a plain file name"
 	// +optional
 	IdleStatusFile string `json:"idleStatusFile,omitempty"`
 

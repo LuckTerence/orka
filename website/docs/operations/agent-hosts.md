@@ -146,7 +146,8 @@ do not reap processes they never started, so start the daemon with
 exits with its status. When the template sets
 `idleStatusFile`, the host writes JSON with at least `idle` and `idleSince` there, and
 rewrites it at least every five minutes. Orka judges freshness by its `updatedAt`, or by the
-file's modification time when it has none, and treats the status as stale after ten minutes. copilotd's `--idle-status-file` format fits.
+file's modification time when it has none, and treats the status as stale after ten minutes,
+or when that time or `idleSince` is more than ten minutes ahead. copilotd's `--idle-status-file` format fits.
 
 The `orka-host-agent` sidecar answers the host's probes. The Pod is Ready only after an AHP
 `initialize` and `ping` succeed against the loopback listener; the check never sends
@@ -160,6 +161,9 @@ connections. It never keeps the host from being idle.
   on the same volume. A turn that was running is lost; sessions resume from the volume.
 - `spec.suspended: true` stops the Pod and keeps the volume and Secrets. Setting it back
   to `false` starts the host again.
+- A template's spec cannot change. To change a template, delete it and create it again
+  under the same name: each host on it gets a new Pod from the new template, on its
+  existing volume. A running turn is lost, and storage changes apply only to new hosts.
 - A template's `idleSuspend.after` suspends hosts that report idle for that long. A
   client cannot wake a suspended relay host; set `spec.wakeRequestedAt` to the current
   time to start it:
