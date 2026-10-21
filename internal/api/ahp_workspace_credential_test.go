@@ -95,9 +95,8 @@ func TestAHPWorkspaceCredentialInstallsOnceWhileRequestsOverlap(t *testing.T) {
 	// A request whose own context ends stops waiting.
 	w.writeToken = func(ctx context.Context, _ *corev1.Pod, _ string) error { <-ctx.Done(); return ctx.Err() }
 	w.provided = nil
-	busy, cancelBusy := context.WithCancel(context.Background())
-	defer cancelBusy()
-	go w.provideCredential(busy, principal, pod)
+	// The test's context ends the blocked installation when the test does.
+	go w.provideCredential(t.Context(), principal, pod)
 	require.Eventually(t, func() bool { w.mu.Lock(); defer w.mu.Unlock(); return w.providing[principal.UserKey] != nil },
 		time.Second, 10*time.Millisecond)
 	waiter, cancelWaiter := context.WithTimeout(context.Background(), 50*time.Millisecond)
