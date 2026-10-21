@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -40,6 +41,11 @@ func TestValidateTemplate(t *testing.T) {
 	if err := ValidateTemplate(validTemplate()); err != nil {
 		t.Fatalf("valid template rejected: %v", err)
 	}
+	withEgress := validTemplate()
+	withEgress.Spec.AdditionalEgress = []corev1alpha1.AgentHostEgressRule{{CIDR: "10.0.0.0/8", Ports: []int32{5432}}}
+	if err := ValidateTemplate(withEgress); err != nil {
+		t.Fatalf("valid egress rejected: %v", err)
+	}
 	cases := map[string]func(*corev1alpha1.AgentHostTemplateSpec){
 		"no host container":   func(s *corev1alpha1.AgentHostTemplateSpec) { s.Containers[0].Name = "daemon" },
 		"two host containers": func(s *corev1alpha1.AgentHostTemplateSpec) { s.Containers = append(s.Containers, s.Containers[0]) },
@@ -63,6 +69,28 @@ func TestValidateTemplate(t *testing.T) {
 		"suspend without status": func(s *corev1alpha1.AgentHostTemplateSpec) {
 			s.IdleStatusFile = ""
 			s.IdleSuspend = &corev1alpha1.AgentHostIdleSuspend{After: metav1.Duration{Duration: time.Minute}}
+		},
+		"mount at the connection token": func(s *corev1alpha1.AgentHostTemplateSpec) {
+			s.Containers[0].VolumeMounts[1].MountPath = "/run/orka/connection-token"
+		},
+		"mount under the status directory": func(s *corev1alpha1.AgentHostTemplateSpec) {
+			s.Containers[0].VolumeMounts[1].MountPath = "/var/run/orka/status/../status"
+		},
+		"two mounts at one path": func(s *corev1alpha1.AgentHostTemplateSpec) {
+			s.Containers[0].VolumeMounts[1].MountPath = "/workspace/"
+		},
+		"resource claim": func(s *corev1alpha1.AgentHostTemplateSpec) {
+			s.Containers[0].Resources.Claims = []corev1.ResourceClaim{{Name: "gpu"}}
+		},
+		"negative scratch size": func(s *corev1alpha1.AgentHostTemplateSpec) {
+			limit := resource.MustParse("-1Mi")
+			s.Volumes[0].SizeLimit = &limit
+		},
+		"egress to a non-CIDR": func(s *corev1alpha1.AgentHostTemplateSpec) {
+			s.AdditionalEgress = []corev1alpha1.AgentHostEgressRule{{CIDR: "not-a-cidr", Ports: []int32{443}}}
+		},
+		"egress to port zero": func(s *corev1alpha1.AgentHostTemplateSpec) {
+			s.AdditionalEgress = []corev1alpha1.AgentHostEgressRule{{CIDR: "10.0.0.0/8", Ports: []int32{0}}}
 		},
 	}
 	for name, mutate := range cases {

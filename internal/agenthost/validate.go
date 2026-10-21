@@ -8,6 +8,8 @@ package agenthost
 
 import (
 	"fmt"
+	"net"
+	"path"
 	"regexp"
 	"strings"
 
@@ -19,8 +21,12 @@ var (
 	statusFile  = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
 )
 
+// reservedMountRoots hold the paths the controller mounts into host Pods.
+var reservedMountRoots = []string{"/run/orka", "/var/run/orka"}
+
 // ValidateTemplate re-checks the invariants the controller relies on. The CRD
-// enforces them too; this guards against objects admitted by an older schema.
+// enforces most of them too, which guards against objects admitted by an older
+// schema; the rest are ones a rendered Pod or NetworkPolicy would fail on.
 func ValidateTemplate(template *corev1alpha1.AgentHostTemplate) error {
 	spec := &template.Spec
 	if err := validateSettings(spec); err != nil {
@@ -60,6 +66,16 @@ func validateSettings(spec *corev1alpha1.AgentHostTemplateSpec) error {
 	if spec.Storage.Size.Sign() <= 0 {
 		return fmt.Errorf("storage size must be positive")
 	}
+	for _, rule := range spec.AdditionalEgress {
+		if _, _, err := net.ParseCIDR(rule.CIDR); err != nil {
+			return fmt.Errorf("additionalEgress cidr %q is not a CIDR", rule.CIDR)
+		}
+		for _, port := range rule.Ports {
+			if port < 1 || port > 65535 {
+				return fmt.Errorf("additionalEgress port %d is not a TCP port", port)
+			}
+		}
+	}
 	return nil
 }
 
@@ -68,6 +84,9 @@ func validateContainers(spec *corev1alpha1.AgentHostTemplateSpec) error {
 	for _, volume := range spec.Volumes {
 		if volume.Name == corev1alpha1.AgentHostStateVolumeName || strings.HasPrefix(volume.Name, "orka-") {
 			return fmt.Errorf("volume name %q is reserved", volume.Name)
+		}
+		if volume.SizeLimit != nil && volume.SizeLimit.Sign() < 0 {
+			return fmt.Errorf("volume %q sizeLimit must not be negative", volume.Name)
 		}
 		scratch[volume.Name] = true
 	}
@@ -108,10 +127,25 @@ func validateContainer(container *corev1alpha1.AgentHostContainer, names, scratc
 			return fmt.Errorf("container %q sets reserved variable %s", container.Name, env.Name)
 		}
 	}
+	// Host Pods declare no resource claims, so a container cannot use one.
+	if len(container.Resources.Claims) > 0 {
+		return fmt.Errorf("container %q may not use resource claims", container.Name)
+	}
+	paths := map[string]bool{}
 	for _, mount := range container.VolumeMounts {
 		if mount.Name != corev1alpha1.AgentHostStateVolumeName && !scratch[mount.Name] {
 			return fmt.Errorf("container %q mounts undeclared volume %q", container.Name, mount.Name)
 		}
+		mountPath := path.Clean(mount.MountPath)
+		for _, root := range reservedMountRoots {
+			if mountPath == root || strings.HasPrefix(mountPath, root+"/") {
+				return fmt.Errorf("container %q mounts at %s, which Orka reserves", container.Name, mount.MountPath)
+			}
+		}
+		if paths[mountPath] {
+			return fmt.Errorf("container %q mounts two volumes at %s", container.Name, mount.MountPath)
+		}
+		paths[mountPath] = true
 	}
 	return nil
 }

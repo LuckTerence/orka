@@ -78,6 +78,11 @@ func authorizeVerb(
 	for key, values := range caller.Extra {
 		extra[key] = authorizationv1.ExtraValue(append([]string(nil), values...))
 	}
+	// Orka's resources are v1alpha1; core resources such as Secrets are v1.
+	version := "v1alpha1"
+	if group == "" {
+		version = "v1"
+	}
 	review := &authorizationv1.SubjectAccessReview{
 		Spec: authorizationv1.SubjectAccessReviewSpec{
 			User:   username,
@@ -88,7 +93,7 @@ func authorizeVerb(
 				Namespace: namespace,
 				Verb:      verb,
 				Group:     group,
-				Version:   "v1alpha1",
+				Version:   version,
 				Resource:  resource,
 				Name:      className,
 			},

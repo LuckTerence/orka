@@ -446,6 +446,25 @@ func TestAgentHostHostContainerExitRetiresThePod(t *testing.T) {
 	}
 }
 
+func TestAgentHostHelperContainerExitRetiresThePod(t *testing.T) {
+	h := newAgentHostHarness(t, testTemplate(corev1alpha1.AgentHostAccessRelay, corev1alpha1.AgentHostCredentialRequired),
+		testHost(), userToken("ghs_user_token"))
+	h.settle()
+	pod, _ := h.pod()
+	pod.Status.Phase = corev1.PodRunning
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{
+		{Name: corev1alpha1.AgentHostContainerName, State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
+		{Name: "helper", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1}}},
+	}
+	if err := h.client.Status().Update(context.Background(), pod); err != nil {
+		t.Fatal(err)
+	}
+	h.settle()
+	if _, ok := h.pod(); ok {
+		t.Fatal("a Pod whose template helper exited must be retired, since it can never become Ready")
+	}
+}
+
 func TestAgentHostSuspendsWithoutItsTemplateOrToken(t *testing.T) {
 	h := newAgentHostHarness(t, testTemplate(corev1alpha1.AgentHostAccessRelay, corev1alpha1.AgentHostCredentialRequired),
 		testHost(), userToken("ghs_user_token"))

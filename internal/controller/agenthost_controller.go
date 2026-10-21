@@ -848,10 +848,12 @@ func agentHostPodTerminated(pod *corev1.Pod) bool {
 	if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
 		return true
 	}
-	// With restartPolicy Never, a host that exits leaves the Pod running only
-	// until its sidecar stops; do not wait for that.
+	// With restartPolicy Never, nothing restarts a regular container that
+	// exits: the host leaves the Pod running only until its sidecar stops, and
+	// a template helper leaves it running but never Ready. Do not wait for
+	// either. The Orka sidecar is an init container and restarts on its own.
 	for _, status := range pod.Status.ContainerStatuses {
-		if status.Name == corev1alpha1.AgentHostContainerName && status.State.Terminated != nil {
+		if status.State.Terminated != nil {
 			return true
 		}
 	}

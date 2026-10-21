@@ -344,6 +344,8 @@ jobs:
           chart_package=${chart_packages[0]}
 
           expected_crds=$(cat <<'CRDS'
+          agenthosts.core.orka.ai
+          agenthosttemplates.core.orka.ai
           agentruntimes.core.orka.ai
           agents.core.orka.ai
           branchclaims.core.orka.ai

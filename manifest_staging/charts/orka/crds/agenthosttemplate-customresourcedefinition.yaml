@@ -94,6 +94,8 @@ spec:
                       description: Ports are the allowed TCP destination ports.
                       items:
                         format: int32
+                        maximum: 65535
+                        minimum: 1
                         type: integer
                       maxItems: 8
                       minItems: 1

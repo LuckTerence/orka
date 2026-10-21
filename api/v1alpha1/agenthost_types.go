@@ -167,6 +167,8 @@ type AgentHostEgressRule struct {
 	// Ports are the allowed TCP destination ports.
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=8
+	// +kubebuilder:validation:items:Minimum=1
+	// +kubebuilder:validation:items:Maximum=65535
 	// +listType=set
 	Ports []int32 `json:"ports"`
 }
