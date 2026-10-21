@@ -92,6 +92,8 @@ type ahpWorkspaces struct {
 	active map[string]time.Time
 	// provided is when each user's workspace last got their git token.
 	provided map[string]ahpProvidedCredential
+	// refreshing are the users whose token a terminal's input is renewing.
+	refreshing map[string]bool
 	// collecting are the workspaces an idle collection is deciding about.
 	collecting map[string]chan struct{}
 	// git serializes each user's clones and worktree changes, which share

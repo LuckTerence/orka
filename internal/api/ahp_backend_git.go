@@ -28,6 +28,7 @@ const (
 	// default branch. The namespace's repository credential is never sent
 	// anywhere else, and no other address is reached for a user.
 	ahpDefaultBranchHost    = "github.com"
+	ahpDefaultBranchBase    = "https://" + ahpDefaultBranchHost + "/"
 	ahpDefaultBranchTimeout = 10 * time.Second
 	ahpRefAdvertisementMax  = 64 << 10
 )
@@ -46,12 +47,16 @@ var ahpGitHTTPClient = &http.Client{
 // ref advertisement, without cloning. Any failure leaves it unknown.
 func (b *ahpBackend) defaultBranch(ctx context.Context, namespace, repo string) string {
 	parsed, err := url.Parse(repo)
-	if err != nil || parsed.Scheme != connectorSchemeHTTPS || parsed.Host != ahpDefaultBranchHost {
+	if err != nil || parsed.Scheme != connectorSchemeHTTPS || parsed.Host != ahpDefaultBranchHost ||
+		parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return ""
 	}
 	ctx, cancel := context.WithTimeout(ctx, ahpDefaultBranchTimeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, repo+".git/info/refs?service=git-upload-pack", nil)
+	// The request goes to the fixed github.com base; only the repository
+	// path comes from the project.
+	target := ahpDefaultBranchBase + strings.TrimPrefix(parsed.EscapedPath(), "/") + ".git/info/refs?service=git-upload-pack"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
 		return ""
 	}

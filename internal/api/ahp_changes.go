@@ -100,7 +100,7 @@ func (c *ahpChanges) removeFile(full string) {
 }
 
 func (c *ahpChanges) emitFile(file ahpFileContent) {
-	uri := "file://" + file.Path
+	uri := ahpDirectoryURI(file.Path)
 	var edit ahptypes.FileEdit
 	if file.After != "" {
 		after := file.After

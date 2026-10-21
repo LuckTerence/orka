@@ -78,7 +78,8 @@ top level, as in the [example](#example-usage) below. Fields outside that set, s
 
 `POST /api/v1/tasks/:id/cancel` records a cancel request and returns `202` with
 `{"status":"cancellation requested"}`, or `{"status":"Cancelled"}` if the Task is already
-cancelled; a Task that already succeeded or failed returns `409`. The Task reaches
+cancelled; a Task that already succeeded or failed returns `409`, and so does a scheduled
+Task, which is stopped by setting `spec.suspend` instead. The Task reaches
 `Cancelled` asynchronously, unless it finished first. For an agent Task the controller
 answers its pending permission requests as cancelled, cancels the prompt, and stops the
 agent if the cancel does not settle in time; the Task keeps its history and result, and

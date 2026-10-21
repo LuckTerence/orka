@@ -236,7 +236,9 @@ token. The same operations are available over the API; see the
   would allow and asks the person; policy still refuses what it refuses. With
   `allow-all`, policy decides alone. `assisted` behaves like `manual`. A client's
   approve-all toggle (`extensions/setSessionApproveAll`) selects `allow-all` or `manual`.
-  A changed mode applies from the session's next turn.
+  A changed mode applies from the session's next turn. A delegated context token needs
+  Task update scope to change the mode, as it does to cancel a turn, answer a
+  confirmation, or dispose of a session whose turn is running.
 - **New-session form.** `resolveSessionConfig` returns the approval mode and branches a
   new session would take, with the project's default branch filled in.
 
@@ -277,7 +279,10 @@ Each AHP user then gets one workspace Pod in that namespace (`--ahp-workspace-na
   as its connection keeps it, and reads never start a workspace;
 - agents never run there: each turn publishes to the session's branch, and the session's
   worktree fast-forwards to it;
-- the Pod reaches only DNS and HTTPS.
+- the Pod reaches only DNS and HTTPS;
+- only the person's own sign-in uses it: a connection with a delegated context token gets
+  no workspace, terminals or file reads, because a shell cannot keep to the token's scopes,
+  repository limits or transaction context.
 
 ### Private repositories
 
@@ -292,8 +297,9 @@ link, while the link is Ready, its provider is accepted and unchanged since cons
 - it arrives on standard input and sits in a file on the Pod's private `/tmp` that only
   the person's user can read;
 - git hands it to `https://github.com` only, through a credential helper;
-- it is replaced about every 20 minutes, before it would expire, and removed when the
-  person's link no longer serves it.
+- it is replaced about every 20 minutes, before it would expire, while the person uses the
+  workspace or types in one of its terminals, and removed when the person's link no longer
+  serves it.
 
 The token is the person's own, so their shell in the workspace can read it, as it could
 on their own machine. Agents never run in the workspace.

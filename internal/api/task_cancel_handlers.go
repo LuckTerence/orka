@@ -91,6 +91,10 @@ func (h *Handlers) requestTaskCancellation(ctx context.Context, ui *UserInfo, ta
 		if !current.DeletionTimestamp.IsZero() {
 			return fiber.NewError(fiber.StatusGone, "task is deleting")
 		}
+		// A schedule is not a run: cancelling records nothing it acts on.
+		if current.Spec.Schedule != "" || current.Status.Phase == corev1alpha1.TaskPhaseScheduled {
+			return fiber.NewError(fiber.StatusConflict, "a scheduled Task is not cancelled; set spec.suspend to stop its runs, or cancel a run")
+		}
 		switch current.Status.Phase {
 		case corev1alpha1.TaskPhaseCancelled:
 			status = string(corev1alpha1.TaskPhaseCancelled)

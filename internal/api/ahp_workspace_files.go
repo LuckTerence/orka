@@ -45,8 +45,8 @@ var errAHPOutputTooLarge = errors.New("the output is too large")
 
 // ahpWorkspacePath turns a file URI into a clean path inside the workspace.
 func ahpWorkspacePath(uri string) (string, bool) {
-	raw, ok := strings.CutPrefix(uri, "file://")
-	if !ok || raw == "" || strings.ContainsAny(raw, "\x00\n") {
+	raw, ok := ahpURIPath(uri)
+	if !ok {
 		return "", false
 	}
 	clean := path.Clean(raw)

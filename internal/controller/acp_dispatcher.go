@@ -32,6 +32,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/acp"
 	"github.com/orka-agents/orka/internal/artifactcap"
+	"github.com/orka-agents/orka/internal/events"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	v2conformance "github.com/orka-agents/orka/internal/harness/v2/conformance"
 	v2eventjournal "github.com/orka-agents/orka/internal/harness/v2/eventjournal"
@@ -7252,6 +7253,18 @@ func (p *acpLivePublisher) observe(event harnessv2.Event) {
 	}
 	if !p.confirmed {
 		return
+	}
+	// The final answer is whole, so the journal's pattern redaction applies
+	// to it before anyone sees it too. Streamed chunks carry only the
+	// runtime's exact-value redaction: no complete text exists to match yet.
+	if event.Type == harnessv2.EventCompleted && event.Completed != nil {
+		completed := *event.Completed
+		completed.Result.Content = make([]harnessv2.ContentBlock, len(event.Completed.Result.Content))
+		for i, block := range event.Completed.Result.Content {
+			block.Text = events.RedactExecutionEventText(block.Text)
+			completed.Result.Content[i] = block
+		}
+		event.Completed = &completed
 	}
 	p.broker.Publish(liveevents.Event{
 		Namespace: p.task.Namespace, Task: p.task.Name, TaskUID: string(p.task.UID), Runtime: &event,

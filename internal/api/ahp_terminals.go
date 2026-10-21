@@ -10,7 +10,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"path"
 	"sort"
 	"strings"
 	"sync"
@@ -82,12 +81,13 @@ func (b *ahpBackend) terminal(userKey, channel string) *ahpTerminal {
 	return b.shells[ahpTerminalKey(userKey, channel)]
 }
 
-// mayUseWorkspace refuses a delegated token that may not create Tasks: a
-// workspace runs the person's commands.
+// mayUseWorkspace admits only the person's own sign-in to their workspace. A
+// workspace is a shell over their checkouts and, with workspace Connectors,
+// their linked GitHub token; a shell cannot keep to a delegated token's scopes,
+// repository limits or transaction context, so delegated tokens get none.
 func (b *ahpBackend) mayUseWorkspace(principal ahphost.Principal) error {
-	cfg := b.h.contextTokenAuthorization
-	if principal.Constraints.Delegated && cfg.Enabled() && !hasAnyScope(principal.Constraints.Scopes, cfg.TaskCreateScopes) {
-		return &ahphost.Rejection{Reason: "this connection's token may not run commands"}
+	if principal.Constraints.Delegated {
+		return &ahphost.Rejection{Reason: "workspaces and terminals need the person's own sign-in, not a delegated token"}
 	}
 	return nil
 }
@@ -105,8 +105,7 @@ func (b *ahpBackend) CreateTerminal(ctx context.Context, principal ahphost.Princ
 	}
 	cwd := ahpWorkspaceRoot
 	if params.Cwd != nil {
-		dir := path.Clean(strings.TrimPrefix(*params.Cwd, "file://"))
-		if dir == ahpWorkspaceRoot || strings.HasPrefix(dir, ahpWorkspaceRoot+"/") {
+		if dir, ok := ahpWorkspacePath(*params.Cwd); ok {
 			cwd = dir
 		}
 	}
@@ -203,7 +202,7 @@ func (b *ahpBackend) CreateTerminal(ctx context.Context, principal ahphost.Princ
 		}
 		b.endTerminal(context.WithoutCancel(ctx), principal, term, emit, exitCode)
 	}()
-	cwdURI := "file://" + cwd
+	cwdURI := ahpDirectoryURI(cwd)
 	isPty := true
 	state := ahptypes.TerminalState{
 		Title: title, Cwd: &cwdURI, Cols: params.Cols, Rows: params.Rows, Content: []ahptypes.TerminalContentPart{},
@@ -353,6 +352,7 @@ func (b *ahpBackend) handleTerminalAction(principal ahphost.Principal, channel s
 		case term.input <- []byte(a.Data):
 		case <-term.ctx.Done():
 		}
+		b.workspaces.refreshCredentialForTerminal(principal)
 	case *ahptypes.TerminalResizedAction:
 		select {
 		case term.sizes <- remotecommand.TerminalSize{Width: uint16(a.Cols), Height: uint16(a.Rows)}: //nolint:gosec // validated at admission

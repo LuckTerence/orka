@@ -181,7 +181,10 @@ restricted namespace:
 - the user's projects are cloned at their project paths, anonymously unless the operator
   names a ConnectorProvider whose github.com links serve the user's own reads;
 - each session has a git worktree at its working directory, on the session's branch;
-- AHP terminals are shells in the Pod, streamed over the terminal channel.
+- AHP terminals are shells in the Pod, streamed over the terminal channel;
+- only the user's own sign-in reaches it: a shell cannot keep to a delegated context
+  token's scopes, repository limits or transaction context, so such a connection gets
+  no workspace, terminals or workspace file reads.
 
 The Pod holds no Orka credential, accepts no inbound traffic and reaches only DNS and
 HTTPS. When an operator opts in, it holds the user's own github.com token from their

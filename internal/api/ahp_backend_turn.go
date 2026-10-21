@@ -790,7 +790,7 @@ func (t *ahpTurn) recordDiffs(diffs []harnessv2.ToolCallDiff) {
 	changes := t.changes()
 	project := t.session.WorkDir
 	if project == "" {
-		project = strings.TrimPrefix(t.sessionProjectDir(), "file://")
+		project, _ = ahpURIPath(t.sessionProjectDir())
 	}
 	for _, diff := range diffs {
 		after := diff.NewText
@@ -806,7 +806,7 @@ func (t *ahpTurn) changes() *ahpChanges {
 func (t *ahpTurn) sessionProjectDir() string {
 	var project ahpProject
 	if err := t.b.getRecord(t.ctx, t.principal.UserKey, ahpRecordProject, t.session.ProjectID, &project); err != nil {
-		return "file://" + ahpProjectRoot
+		return ahpDirectoryURI(ahpProjectRoot)
 	}
 	return ahpDirectoryURI(project.Path)
 }

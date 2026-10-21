@@ -71,9 +71,50 @@ func (w *ahpWorkspaces) provideCredential(ctx context.Context, principal ahphost
 	writeCtx, cancel := context.WithTimeout(ctx, ahpWorkspaceExecTimeout)
 	defer cancel()
 	// The token travels on standard input, never in a command line.
-	_ = w.exec(writeCtx, pod, []string{ahpShell, "-c",
+	if err := w.exec(writeCtx, pod, []string{ahpShell, "-c",
 		`umask 077; mkdir -p "$1"; cat > "$2.next" && mv "$2.next" "$2"`, "sh", ahpGitTokenDir, ahpGitTokenFile},
-		remotecommand.StreamOptions{Stdin: strings.NewReader(token), Stdout: &ahpLimitedBuffer{limit: 4 << 10}, Stderr: &ahpLimitedBuffer{limit: 4 << 10}})
+		remotecommand.StreamOptions{Stdin: strings.NewReader(token), Stdout: &ahpLimitedBuffer{limit: 4 << 10}, Stderr: &ahpLimitedBuffer{limit: 4 << 10}}); err != nil {
+		// The token did not arrive; let the next request try again, unless a
+		// newer attempt has already taken this one's place.
+		w.mu.Lock()
+		if current := w.provided[principal.UserKey]; current.pod == string(pod.UID) && current.at.Equal(now) {
+			delete(w.provided, principal.UserKey)
+		}
+		w.mu.Unlock()
+	}
+}
+
+// refreshCredentialForTerminal renews the person's token while they use a
+// terminal: input goes straight to the shell, which would otherwise keep a
+// token past its expiry. It never blocks the input, and it starts at most one
+// renewal per person once the last token is due for replacement.
+func (w *ahpWorkspaces) refreshCredentialForTerminal(principal ahphost.Principal) {
+	if !w.enabled() || w.b.cfg.RepositoryCredential == nil {
+		return
+	}
+	w.mu.Lock()
+	last, ok := w.provided[principal.UserKey]
+	if (ok && w.b.now().Sub(last.at) < ahpGitTokenEvery) || w.refreshing[principal.UserKey] {
+		w.mu.Unlock()
+		return
+	}
+	if w.refreshing == nil {
+		w.refreshing = map[string]bool{}
+	}
+	w.refreshing[principal.UserKey] = true
+	w.mu.Unlock()
+	go func() {
+		defer func() {
+			w.mu.Lock()
+			delete(w.refreshing, principal.UserKey)
+			w.mu.Unlock()
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), 2*ahpWorkspaceExecTimeout)
+		defer cancel()
+		// ensure finds the running workspace and provides the token, checking
+		// again that this connection may use the workspace.
+		_, _ = w.ensure(ctx, principal, 0)
+	}()
 }
 
 // ahpProvidedCredential records when a workspace last got its token.

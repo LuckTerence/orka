@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -658,6 +659,61 @@ func TestAHPBackendSetsASessionsApproveAll(t *testing.T) {
 		"another user's session is unknown")
 }
 
+// A delegated token without Task update scope may neither change whether
+// later turns ask first nor cancel a running turn by disposing its session.
+func TestAHPBackendDelegatedTokensNeedTaskUpdateForApprovalsAndDisposal(t *testing.T) {
+	env := newAHPTestEnvWith(t, ContextTokenAuthorizationConfig{
+		Mode: ContextTokenAuthorizationModeEnforce, TaskUpdateScopes: []string{"orka:tasks:update"},
+	})
+	c := env.connect("alice")
+	ctx := ahpCtx(t)
+	env.setUpSession(c, "manual")
+	alice := ahphost.UserKey("https://issuer.example", "alice")
+	narrow := env.connectWith("alice", "client-narrow", ahphost.Constraints{Delegated: true, Scopes: []string{"orka:tasks:create"}})
+	_, _, err := narrow.Subscribe(ctx, ahpTestSession)
+	require.NoError(t, err)
+
+	_, err = narrow.Dispatch(ctx, ahpTestSession, ahptypes.StateAction{Value: &ahptypes.SessionConfigChangedAction{
+		Type: ahptypes.ActionTypeSessionConfigChanged, Config: map[string]json.RawMessage{"approvalMode": json.RawMessage(`"allow-all"`)},
+	}})
+	require.NoError(t, err)
+	require.Error(t, narrow.Request(ctx, ahpExtensionSetSessionApproveAll, map[string]any{"channel": ahpTestSession, "enabled": true}, nil))
+	time.Sleep(200 * time.Millisecond)
+	var record ahpSession
+	require.NoError(t, env.backend.getRecord(ctx, alice, ahpRecordSession, ahpTestSession, &record))
+	require.Equal(t, "manual", record.ApprovalMode, "the narrow token could not lift the approval hold")
+
+	env.backend.updateSession(ctx, alice, ahpTestSession, func(s *ahpSession) { s.ActiveTask = "running-task" })
+	require.Error(t, narrow.Request(ctx, "disposeSession", ahptypes.DisposeSessionParams{Channel: ahpTestSession}, nil),
+		"disposing of a session with a running turn cancels its Task")
+	require.NoError(t, env.backend.getRecord(ctx, alice, ahpRecordSession, ahpTestSession, &record))
+	require.NoError(t, c.Request(ctx, "disposeSession", ahptypes.DisposeSessionParams{Channel: ahpTestSession}, nil))
+}
+
+func TestAHPBackendWorkspacesNeedThePersonsOwnSignIn(t *testing.T) {
+	env := newAHPTestEnv(t)
+	require.NoError(t, env.backend.mayUseWorkspace(ahphost.Principal{}))
+	require.Error(t, env.backend.mayUseWorkspace(ahphost.Principal{Constraints: ahphost.Constraints{
+		Delegated: true, Scopes: []string{"orka:tasks:create"},
+	}}), "a shell cannot keep to a delegated token's limits")
+}
+
+// A token limited to one repository still sees the models: the project is not
+// known when they are listed, and each turn's complete Task is authorized.
+func TestAHPBackendListsModelsForARepositoryLimitedToken(t *testing.T) {
+	env := newAHPTestEnvWith(t, ContextTokenAuthorizationConfig{
+		Mode: ContextTokenAuthorizationModeEnforce, TaskCreateScopes: []string{"orka:tasks:create"},
+	})
+	limited := env.connectWith("alice", "client-limited", ahphost.Constraints{
+		Delegated: true, Scopes: []string{"orka:tasks:create"},
+		TransactionContext: map[string]any{"repo": ahpTestRepo},
+	})
+	result, _, err := limited.Subscribe(ahpCtx(t), ahptypes.RootResourceURI)
+	require.NoError(t, err)
+	require.Len(t, result.Snapshot.State.Root.Agents, 1)
+	require.Len(t, result.Snapshot.State.Root.Agents[0].Models, 3)
+}
+
 func TestAHPBackendReopensARefusedApproval(t *testing.T) {
 	env := newAHPTestEnv(t)
 	refusals := 1
@@ -1158,4 +1214,25 @@ func TestAHPBackendSwitchKeepsTheApprovalMode(t *testing.T) {
 	require.NoError(t, env.backend.getRecord(ctx, alice, ahpRecordSession, ahpTestSession, &current))
 	require.Equal(t, "manual", current.ApprovalMode)
 	require.Equal(t, 2, current.Generation)
+}
+
+// File URIs escape names a client's URI parser would otherwise split, and
+// read back as the same path.
+func TestAHPFileURIsEscapeAndRoundTrip(t *testing.T) {
+	for _, name := range []string{"a#b.go", "a?b.go", "a%20b.go", "a b.go", "plain.go"} {
+		file := "/workspace/src/octo/widgets/" + name
+		uri := ahpDirectoryURI(file)
+		parsed, err := url.Parse(uri)
+		require.NoError(t, err, uri)
+		require.Equal(t, file, parsed.Path, "a client reads the name %q back from %s", name, uri)
+		require.Empty(t, parsed.RawQuery+parsed.Fragment, uri)
+		got, ok := ahpWorkspacePath(uri)
+		require.True(t, ok, uri)
+		require.Equal(t, file, got)
+	}
+	require.Equal(t, "file:///workspace/src/octo/widgets", ahpDirectoryURI("/workspace/src/octo/widgets"))
+	for _, bad := range []string{"file:///workspace/a?b", "file:///workspace/a#b", "file://host/workspace/a", "https://example.com/workspace", "file:///workspace/%00"} {
+		_, ok := ahpWorkspacePath(bad)
+		require.False(t, ok, bad)
+	}
 }

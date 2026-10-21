@@ -411,11 +411,11 @@ func (b *ahpBackend) agentChoices(ctx context.Context, principal ahphost.Princip
 		if seen[key] {
 			continue
 		}
-		// Offer only Agents the user's token would let them run.
-		probe := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, AgentRef: &corev1alpha1.AgentReference{Name: agent.Name}}}
-		probe.Namespace = principal.Namespace
+		// Offer only Agents the user's token may start Tasks with. This checks
+		// the token's scope and agent limits only: the project is not known
+		// yet, so repository limits apply to each turn's complete Task.
 		if ui.ContextToken != nil {
-			if err := authorizeContextTokenTaskCreateObject(ctx, b.h.client, ui.ContextToken, b.h.contextTokenAuthorization, "ahpListAgents", probe); err != nil {
+			if err := authorizeContextTokenAgentTaskReference(ui.ContextToken, b.h.contextTokenAuthorization, principal.Namespace, agent.Name); err != nil {
 				continue
 			}
 		}
@@ -618,6 +618,9 @@ func (b *ahpBackend) setApproveAllCommand(ctx context.Context, principal ahphost
 	if len(params) == 0 || json.Unmarshal(params, &req) != nil || req.Channel == "" || req.Enabled == nil {
 		return &ahphost.Rejection{Reason: "a session channel and enabled are required"}
 	}
+	if err := b.mayOperateTasks(principal); err != nil {
+		return err
+	}
 	record, err := b.sessionForChannel(ctx, principal.UserKey, req.Channel)
 	if errors.Is(err, store.ErrNotFound) {
 		return &ahphost.Rejection{Reason: "unknown session"}
@@ -726,7 +729,20 @@ func ahpCanonicalRepository(raw string) (repo, owner, name string, err error) {
 	return fmt.Sprintf("https://%s/%s/%s", strings.ToLower(parsed.Host), owner, name), owner, name, nil
 }
 
-func ahpDirectoryURI(dir string) string { return "file://" + dir }
+// ahpDirectoryURI is the file URI of a host path, escaped so that names with
+// #, ? or % survive a client's URI parser.
+func ahpDirectoryURI(dir string) string { return (&url.URL{Scheme: "file", Path: dir}).String() }
+
+// ahpURIPath is the host path a file URI names, unescaped. Anything that is
+// not a plain file URI names no path.
+func ahpURIPath(uri string) (string, bool) {
+	parsed, err := url.Parse(uri)
+	if err != nil || parsed.Scheme != "file" || parsed.Host != "" || parsed.User != nil ||
+		parsed.RawQuery != "" || parsed.Fragment != "" || parsed.Path == "" || strings.ContainsAny(parsed.Path, "\x00\n") {
+		return "", false
+	}
+	return parsed.Path, true
+}
 
 // projectForDirectory finds the project a session's working directory names.
 func (b *ahpBackend) projectForDirectory(ctx context.Context, userKey string, dirs []string) (ahpProject, error) {
@@ -737,9 +753,11 @@ func (b *ahpBackend) projectForDirectory(ctx context.Context, userKey string, di
 	if err != nil {
 		return ahpProject{}, err
 	}
-	for _, project := range projects {
-		if dirs[0] == ahpDirectoryURI(project.Path) {
-			return project, nil
+	if dir, ok := ahpURIPath(dirs[0]); ok {
+		for _, project := range projects {
+			if dir == project.Path {
+				return project, nil
+			}
 		}
 	}
 	return ahpProject{}, &ahphost.Rejection{Reason: "the working directory is not a project on this host; add the repository first"}
@@ -894,7 +912,14 @@ func (b *ahpBackend) DisposeSession(ctx context.Context, principal ahphost.Princ
 		}
 		return err
 	}
-	if turn := b.activeTurn(principal.UserKey, session); turn != nil {
+	turn := b.activeTurn(principal.UserKey, session)
+	// Disposing of a session cancels its running turn's Task.
+	if turn != nil || record.ActiveTask != "" {
+		if err := b.mayOperateTasks(principal); err != nil {
+			return err
+		}
+	}
+	if turn != nil {
 		turn.stop()
 	}
 	if record.ActiveTask != "" {
@@ -1034,6 +1059,10 @@ func (b *ahpBackend) AuthorizeClientAction(ctx context.Context, principal ahphos
 			case ahpConfigApprovalMode:
 				if _, err := ahpApprovalModeFrom(a.Config); err != nil {
 					return &ahphost.Rejection{Reason: err.Error()}
+				}
+				// The mode decides whether later turns ask the person first.
+				if err := b.mayOperateTasks(principal); err != nil {
+					return err
 				}
 			case ahpConfigAvailableModes, ahpConfigEffectiveMode:
 				return &ahphost.Rejection{Reason: key + " is read-only"}
@@ -1249,7 +1278,11 @@ func (b *ahpBackend) ReadResource(ctx context.Context, principal ahphost.Princip
 		case strings.HasPrefix(uri, ahpContentScheme+hash[:24]+"/"):
 			nonce = strings.TrimPrefix(uri, ahpContentScheme+hash[:24]+"/")
 		case strings.HasPrefix(uri, "file:///"):
-			fileRecord, err := b.store.GetAHPRecord(ctx, principal.UserKey, ahpRecordFile, hash+"/"+strings.TrimPrefix(uri, "file://"))
+			filePath, ok := ahpURIPath(uri)
+			if !ok {
+				continue
+			}
+			fileRecord, err := b.store.GetAHPRecord(ctx, principal.UserKey, ahpRecordFile, hash+"/"+filePath)
 			if err != nil {
 				continue
 			}

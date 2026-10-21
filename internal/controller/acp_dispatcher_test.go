@@ -6218,6 +6218,35 @@ func assertACPDispatcherPublishedLiveEvents(t *testing.T, live *liveevents.Subsc
 	}
 }
 
+func TestACPLivePublisherPatternRedactsTheFinalAnswer(t *testing.T) {
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "task", UID: "task-uid"}}
+	secret := "github" + "_pat_" + "1234567890abcdefghijklmnopqrstuvwxyz"
+	completed := harnessv2.Event{Type: harnessv2.EventCompleted, Completed: &harnessv2.CompletedEvent{
+		Result: harnessv2.PromptResult{Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: "found " + secret}}},
+	}}
+	broker := liveevents.NewBroker(0)
+	live := broker.Subscribe("default", "task")
+	livePublisher := acpLivePublisher{broker: broker, task: task}
+	livePublisher.observe(harnessv2.Event{Type: harnessv2.EventAccepted, Accepted: &harnessv2.AcceptedEvent{LiveUpdates: true}})
+	livePublisher.observe(completed)
+	live.Close()
+	var final *harnessv2.Event
+	for event := range live.C() {
+		if event.Runtime != nil && event.Runtime.Type == harnessv2.EventCompleted {
+			final = event.Runtime
+		}
+	}
+	if final == nil {
+		t.Fatal("the completed event was not published")
+	}
+	if text := final.Completed.Result.Content[0].Text; strings.Contains(text, secret) {
+		t.Fatalf("published final answer kept a credential-shaped value: %q", text)
+	}
+	if completed.Completed.Result.Content[0].Text != "found "+secret {
+		t.Fatal("redacting the published copy changed the event the journal receives")
+	}
+}
+
 func TestACPLivePublisherPublishesOnlyConfirmedPrompts(t *testing.T) {
 	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "task", UID: "task-uid"}}
 	update := harnessv2.Event{Type: harnessv2.EventUpdate, Update: &harnessv2.UpdateEvent{

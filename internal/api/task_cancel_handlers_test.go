@@ -150,6 +150,22 @@ func TestCancelTaskReportsFinishedTasks(t *testing.T) {
 	}
 }
 
+func TestCancelTaskRefusesAScheduledTask(t *testing.T) {
+	scheduled := cancelTestTask("nightly", corev1alpha1.TaskTypeAgent, corev1alpha1.TaskPhaseScheduled)
+	scheduled.Spec.Schedule = "0 3 * * *"
+	pending := cancelTestTask("nightly-new", corev1alpha1.TaskTypeAgent, corev1alpha1.TaskPhasePending)
+	pending.Spec.Schedule = "0 3 * * *"
+	h, app := setupCancelHandlers(t, scheduled, pending)
+	for _, name := range []string{"nightly", "nightly-new"} {
+		if status, _ := postCancel(t, app, name, "alice"); status != http.StatusConflict {
+			t.Fatalf("cancel of scheduled Task %s = %d, want 409", name, status)
+		}
+		if _, ok := cancelAnnotation(t, h, name); ok {
+			t.Fatalf("scheduled Task %s got a cancel request", name)
+		}
+	}
+}
+
 func TestCancelTaskRecordsAContainerTask(t *testing.T) {
 	h, app := setupCancelHandlers(t,
 		cancelTestTask("job", corev1alpha1.TaskTypeContainer, corev1alpha1.TaskPhaseRunning))
