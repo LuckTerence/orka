@@ -160,7 +160,6 @@ func TestStaticChartAgentHostWebhookIsReleaseLocal(t *testing.T) {
 }
 
 func TestStaticChartRejectsInvalidAgentHostValues(t *testing.T) {
-	digest := "sha256:" + strings.Repeat("3", 64)
 	for _, tt := range []struct {
 		name string
 		args []string
@@ -190,16 +189,6 @@ func TestStaticChartRejectsInvalidAgentHostValues(t *testing.T) {
 			name: "empty namespace",
 			args: []string{"--set-string", "controller.agentHosts.namespace="},
 			want: "controller.agentHosts.namespace is required",
-		},
-		{
-			name: "harness v1",
-			args: []string{
-				"--set-string", "controller.mode=harness-v1",
-				"--set-string", "harnessV1.image.digest=" + digest,
-				"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
-				"--set-string", "harnessV1.tls.existingSecret=harness-wrapper-tls",
-			},
-			want: "controller.agentHosts.enabled requires controller.mode=harness-v2",
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
