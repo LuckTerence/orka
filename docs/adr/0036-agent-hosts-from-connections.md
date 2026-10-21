@@ -92,6 +92,10 @@ custody rule, and [ADR 0035](0035-agent-hosts.md) with a second token source. It
   serves the existing volume to another account.
 - No owner reference runs from a Connection to its host. Deleting a Connection never
   deletes a volume.
+- These hosts follow their template by name, like any other host: recreating the template
+  under its name moves them to it on their volumes (0035). Pointing the provider at a
+  different template affects only hosts created afterwards, because `templateRef` is
+  immutable.
 
 ### Orka hands the host access tokens only, and keeps them fresh
 
@@ -140,8 +144,6 @@ custody rule, and [ADR 0035](0035-agent-hosts.md) with a second token source. It
 
 ### Not in this record
 
-- Moving existing hosts to a replaced template (the open question in 0035). New
-  defaults reach new hosts only.
 - Waking a suspended host from the client, and a per-person choice of whether to have a
   host.
 - More than one host provider or template per namespace.
