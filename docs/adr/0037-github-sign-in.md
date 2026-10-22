@@ -8,7 +8,8 @@ Proposed. Adds GitHub as a way for people to sign in to Orka, beside OIDC. `orka
 uses GitHub's device flow with the operator's GitHub App, and Orka issues its own
 short-lived session token. The same login links the person's GitHub account as a
 Connection, which provisions their agent host under
-[ADR 0036](0036-agent-hosts-from-connections.md). Builds on
+[ADR 0036](0036-agent-hosts-from-connections.md). Where people cannot reach Orka at all,
+an operator invites them instead, and Orka runs the device flow itself. Builds on
 [ADR 0033](0033-user-connectors.md). OIDC sign-in is unchanged.
 
 ## Context
@@ -83,11 +84,47 @@ logged.
 - `orka login --no-host` links the account for renewal and connector use, and records
   that the person declined a host. ADR 0036 provisions none for such a Connection.
 
+### Reaching Orka
+
+- Only the `orka` CLI needs a path to Orka's API. The Copilot app reaches hosts through
+  GitHub's relay, outbound from the cluster, and the device flow has no callback.
+- The chart can render an Ingress for the API, given a host and a TLS Secret. With
+  `ingressClassName: tailscale`, the Tailscale Kubernetes operator serves the API to the
+  tailnet only. It provisions a MagicDNS name such as `orka.<tailnet>.ts.net` and a Let's
+  Encrypt certificate, so a team on one tailnet needs no domain and exposes nothing to
+  the internet. That address is what people pass to `orka login --server`.
+- The CLI refuses a plain-HTTP `--server` other than localhost, because it sends session
+  tokens.
+
+### Invites, for people who cannot reach Orka
+
+- `orka host invite <github-login>` asks Orka to start the device flow itself. The caller
+  needs `create` on `agenthosts` in the watch namespace, which the API checks with a
+  SubjectAccessReview. Orka returns the code and the verification URL for the operator to
+  pass on, then polls GitHub outbound until the person approves or the code expires,
+  after 15 minutes.
+- On approval Orka makes the sign-in checks: its own app, membership of an allowed org or
+  team. It also requires that the GitHub login is the invited one. If someone else
+  entered the code, Orka refuses, and deletes the tokens with GitHub's app-authenticated
+  token API.
+- Orka then records the Connection as signing in does, and ADR 0036 provisions the host.
+  It issues no session token: the invited person needs only a browser and the Copilot app.
+- An invite is single-use and lasts as long as its code. `orka host invite` waits for the
+  outcome and prints it.
+- Invited people cannot manage their host themselves. Keep idle suspension off for them,
+  or an operator wakes their hosts. If they later sign in with `orka login`, they reach the
+  same Connection, and so the same host.
+
 ### Configuration
 
-The chart takes the GitHub App's client ID and a Secret holding its client secret, the
-allowed orgs and teams, and whether signing in creates hosts. From these it renders the
-`ConnectorProvider` with the agent-host template, and the controller flags.
+The chart takes:
+- the GitHub App's client ID, and a Secret holding its client secret;
+- the allowed orgs and teams;
+- whether signing in creates hosts;
+- optionally, the API Ingress.
+
+From these it renders the `ConnectorProvider` with the agent-host template, the Ingress,
+and the controller flags.
 
 ### Not in this record
 
@@ -98,9 +135,13 @@ allowed orgs and teams, and whether signing in creates hosts. From these it rend
 
 ## Acceptance
 
-The ADR 0036 acceptance run is done with two people who sign in with `orka login`. A third
-person outside the allowed org is refused. Removing one person from the org then ends
-their renewal and stops their host.
+The ADR 0036 acceptance run passes with these people:
+- two people who sign in with `orka login` over a tailnet address;
+- one person invited with `orka host invite`, who has no CLI;
+- a person outside the allowed org, who is refused;
+- someone other than the invited person entering an invite's code, who is refused.
+
+Removing one person from the org then ends their renewal and stops their host.
 
 ## Consequences
 
@@ -123,3 +164,5 @@ their renewal and stops their host.
   repository access.
 - **Checking membership with the app's installation token.** That needs the app's private
   key in Orka. The person's own token is enough.
+- **A public address only.** It is simplest where one exists. A tailnet address or an
+  invite serves teams that have none, or do not want one.
