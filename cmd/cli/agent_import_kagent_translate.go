@@ -223,6 +223,10 @@ func translateKagentModel(model map[string]any, providerRef string) (map[string]
 			// kagent defaults the OpenAI wire shape; Orka's provider owns its
 			// own, and the shape does not change the agent's behavior.
 		case "baseUrl":
+			// An empty baseUrl is kagent's default endpoint.
+			if kagentString(settings, "baseUrl") == "" {
+				break
+			}
 			if providerRef == "" {
 				problems = append(problems, "uses a custom endpoint; map it to an Orka Provider with --provider-ref")
 			}
