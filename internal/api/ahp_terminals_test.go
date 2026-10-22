@@ -71,28 +71,46 @@ func TestAHPTerminalOutputFlushesQuietOutput(t *testing.T) {
 }
 
 // Terminal data is journaled, so the workspace's git token never leaves in it,
-// even split across writes; a held prefix that never completes a token is
-// released on the next tick.
+// however its output is split or delayed.
 func TestAHPTerminalOutputRedactsTheWorkspaceToken(t *testing.T) {
 	const token = "ghu_0123456789abcdefghijklmnopqrstuvwx"
-	emit := &ahpRecordingEmitter{}
-	out := newAHPTerminalOutput(context.Background(), emit, "ahp-terminal:/t", func() []string { return []string{token} })
-	joined := func() string {
-		emit.mu.Lock()
-		defer emit.mu.Unlock()
-		return strings.Join(emit.data, "")
+	for name, tc := range map[string]struct {
+		writes []string
+		want   string
+	}{
+		"split inside the secret, slowly": {
+			writes: []string{"$ cat token\r\n" + token[:10], token[10:] + "\r\n$ "},
+			want:   "$ cat token\r\n[REDACTED]\r\n$ ",
+		},
+		"split after the public start, slowly": {
+			writes: []string{"x ghu_", token[4:] + "\r\n"},
+			want:   "x ghu_[REDACTED]\r\n",
+		},
+		"a public start that never becomes a token": {
+			writes: []string{"$ gh"},
+			want:   "$ gh",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			emit := &ahpRecordingEmitter{}
+			out := newAHPTerminalOutput(context.Background(), emit, "ahp-terminal:/t", func() []string { return []string{token} })
+			joined := func() string {
+				emit.mu.Lock()
+				defer emit.mu.Unlock()
+				return strings.Join(emit.data, "")
+			}
+			for _, write := range tc.writes {
+				_, _ = out.Write([]byte(write))
+				// Longer than the hold, so a slow split is covered.
+				time.Sleep(2 * ahpTerminalTokenHold)
+				require.NotContains(t, joined(), token[4:14], "part of the token's secret was emitted")
+			}
+			require.Eventually(t, func() bool { return joined() == tc.want }, time.Second, 5*time.Millisecond,
+				"got %q", joined())
+		})
 	}
-	_, _ = out.Write([]byte("$ cat token\r\n" + token[:10]))
-	time.Sleep(3 * ahpTerminalFlushEvery)
-	require.NotContains(t, joined(), token[:10], "a possible token prefix is held while more may follow")
-	_, _ = out.Write([]byte(token[10:] + "\r\n$ gh"))
-	require.Eventually(t, func() bool { return strings.HasSuffix(joined(), "$ gh") }, time.Second, 5*time.Millisecond,
-		"a prefix that never becomes a token is released on the next tick")
-	require.Equal(t, "$ cat token\r\n[REDACTED]\r\n$ gh", joined())
 }
 
-// The terminal list comes from the backend's terminals, so a renamed terminal
-// keeps its new name there.
 func TestAHPTerminalTitleChangesReachTheTerminalList(t *testing.T) {
 	principal := ahphost.Principal{UserKey: "alice"}
 	b := &ahpBackend{shells: map[string]*ahpTerminal{}}
