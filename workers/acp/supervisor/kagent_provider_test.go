@@ -213,3 +213,31 @@ func TestKagentProxyRecordsBrokerReportedTokenUsage(t *testing.T) {
 		t.Fatal("usage leaked to another prompt")
 	}
 }
+
+// A prompt's cached input total is known only while every response reported
+// its breakdown; one without it leaves the total unknown, in either order.
+// Both lifecycle brokers share the aggregation.
+func TestPromptUsageLeavesAPartialCacheCountUnknown(t *testing.T) {
+	cached := func(n uint64) *uint64 { return &n }
+	for kind, adapter := range map[string]string{providerKindKagent: kagentAdapterName, providerKindFoundry: foundryAdapterName} {
+		for name, updates := range map[string][]harnessv2.UsageUpdate{
+			"missing last":  {{InputTokens: 100, CachedInputTokens: cached(20)}, {InputTokens: 50}},
+			"missing first": {{InputTokens: 50}, {InputTokens: 100, CachedInputTokens: cached(20)}},
+			"complete":      {{InputTokens: 100, CachedInputTokens: cached(20)}, {InputTokens: 50, CachedInputTokens: cached(5)}},
+		} {
+			session, _, prompt := newLifecycleBrokerTestSession(t, kind, adapter, http.NotFoundHandler())
+			promptID := string(prompt.Metadata.PromptID)
+			for _, update := range updates {
+				session.recordInferenceUsage(promptID, update)
+			}
+			usage := session.promptUsage(promptID)
+			if usage == nil || usage.InputTokens != 150 {
+				t.Fatalf("%s %s: usage = %#v", kind, name, usage)
+			}
+			if complete := name == "complete"; complete != (usage.CachedInputTokens != nil) ||
+				(complete && *usage.CachedInputTokens != 25) {
+				t.Errorf("%s %s: cached input tokens = %v", kind, name, usage.CachedInputTokens)
+			}
+		}
+	}
+}

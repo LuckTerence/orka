@@ -701,18 +701,23 @@ func (s *providerProxySession) recordInferenceUsage(promptID string, usage harne
 	if strings.TrimSpace(promptID) == "" || s.turnPromptID != strings.TrimSpace(promptID) {
 		return
 	}
-	if s.turnUsage == nil {
+	first := s.turnUsage == nil
+	if first {
 		s.turnUsage = &harnessv2.UsageUpdate{Reported: true}
 	}
 	s.turnUsage.InputTokens += usage.InputTokens
 	s.turnUsage.OutputTokens += usage.OutputTokens
-	if usage.CachedInputTokens != nil {
-		cached := *usage.CachedInputTokens
-		if s.turnUsage.CachedInputTokens != nil {
-			cached += *s.turnUsage.CachedInputTokens
-		}
-		s.turnUsage.CachedInputTokens = &cached
+	// One response without a cache breakdown leaves the prompt's cached
+	// total unknown, not partial.
+	if usage.CachedInputTokens == nil || (!first && s.turnUsage.CachedInputTokens == nil) {
+		s.turnUsage.CachedInputTokens = nil
+		return
 	}
+	cached := *usage.CachedInputTokens
+	if s.turnUsage.CachedInputTokens != nil {
+		cached += *s.turnUsage.CachedInputTokens
+	}
+	s.turnUsage.CachedInputTokens = &cached
 }
 
 // promptUsage returns the prompt's reported token usage, if any.
