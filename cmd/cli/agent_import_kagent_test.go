@@ -873,6 +873,15 @@ func TestTranslateKagentAgentsMapsOnlyKnownFields(t *testing.T) {
 			t.Errorf("%s: a harness override was translated away", name)
 		}
 	}
+	// A top-level Agent field would be dropped.
+	egress := strings.Replace(translatableKagentFixture, "  harnessRef:", "  egressPolicyRefs: [{name: e}]\n  harnessRef:", 1)
+	if egress == translatableKagentFixture {
+		t.Fatal("fixture has no harnessRef to put a field beside")
+	}
+	if _, _, err := translateKagentAgents([]byte(egress), kagentTranslateOptions{Tools: map[string]string{"k8s/list_pods": "k8s-list-pods"}}); err == nil ||
+		!strings.Contains(err.Error(), "spec.egressPolicyRefs has no Orka equivalent") {
+		t.Errorf("a top-level Agent field was translated away: %v", err)
+	}
 	placed := strings.Replace(translatableKagentFixture, "spec: {kagent: {}}", "spec: {kagent: {}, substrate: {workerPoolRef: {name: p}}}", 1)
 	if _, _, err := translateKagentAgents([]byte(placed), kagentTranslateOptions{Tools: map[string]string{"k8s/list_pods": "k8s-list-pods"}}); err != nil {
 		t.Errorf("substrate placement was refused: %v", err)
