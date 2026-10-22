@@ -357,8 +357,10 @@ func (b *ahpBackend) handleTerminalAction(principal ahphost.Principal, channel s
 }
 
 // ahpTerminalOutput turns a shell's output into terminal/data actions,
-// coalesced and cut on UTF-8 boundaries. Terminal data is journaled, so the
-// workspace's own git tokens are replaced before it leaves.
+// coalesced and cut on UTF-8 boundaries. Terminal data is journaled, so it
+// never carries one of the workspace's git tokens, nor
+// ahpMinRedactedToken or more leading bytes of a token's secret, however the
+// output is split, delayed, or cut short.
 type ahpTerminalOutput struct {
 	ctx     context.Context
 	emit    ahphost.Emitter
@@ -368,27 +370,28 @@ type ahpTerminalOutput struct {
 
 	mu      sync.Mutex
 	pending []byte
-	timer   *time.Timer
-	closed  bool
-	// heldAt is when pending started to end in what could begin a token. It is
-	// held back until more output arrives, or ahpTerminalTokenHold passes.
-	heldAt time.Time
+	// recent ends what was emitted, so a token that began there is still
+	// recognized as the rest of it arrives.
+	recent []byte
+	timer  *time.Timer
+	closed bool
 }
 
 func newAHPTerminalOutput(ctx context.Context, emit ahphost.Emitter, channel string, credentials func() []string) *ahpTerminalOutput {
 	return &ahpTerminalOutput{ctx: ctx, emit: emit, channel: channel, credentials: credentials}
 }
 
-// ahpTerminalTokenHold is how long terminal output that is a token's public
-// start, such as "gh", waits for more output.
-const ahpTerminalTokenHold = 250 * time.Millisecond
-
 // ahpTerminalTitleMax bounds a terminal's title.
 const ahpTerminalTitleMax = 256
 
-// ahpMinRedactedToken ignores values too short to be a token: replacing them
+// ahpMinRedactedToken is the shortest run of a token's secret that output
+// never carries. Shorter values are not treated as tokens: replacing them
 // would mangle ordinary output.
 const ahpMinRedactedToken = 8
+
+// ahpTokenHoldMin is the shortest start of a token's secret that output waits
+// on for more: shorter ones are too common in ordinary output to delay it.
+const ahpTokenHoldMin = 4
 
 // ahpTokenPublicStart is the length of a token's type prefix through its
 // first underscore, such as "ghu_", which reveals nothing about the token.
@@ -396,54 +399,90 @@ func ahpTokenPublicStart(token string) int {
 	return strings.IndexByte(token, '_') + 1
 }
 
-// ahpTokenForms are what terminal output never carries for a token: the token,
-// and its secret part, which output split right after the public start carries
-// alone.
-func ahpTokenForms(token string) []string {
-	if len(token) < ahpMinRedactedToken {
-		return nil
+// ahpTokenSecret is the part of a token after its public start, or "" for a
+// token too short to redact.
+func ahpTokenSecret(token string) string {
+	if secret := token[ahpTokenPublicStart(token):]; len(secret) >= ahpMinRedactedToken {
+		return secret
 	}
-	forms := []string{token}
-	if secret := token[ahpTokenPublicStart(token):]; secret != token && len(secret) >= ahpMinRedactedToken {
-		forms = append(forms, secret)
-	}
-	return forms
+	return ""
 }
 
-// ahpRedactTokens replaces every form of every token in data, longest first.
-func ahpRedactTokens(data []byte, tokens []string) []byte {
-	var forms []string
+// ahpRedactTokens replaces what pending carries of a token, reading pending
+// after recent, the end of what was already emitted. Each run that begins
+// with ahpMinRedactedToken or more bytes of a token's secret is replaced,
+// with the token's public start before it, however the run ends; a run that
+// reaches pending's end and could go on is left for ahpTokenHeld.
+func ahpRedactTokens(recent, pending []byte, tokens []string) []byte {
+	data := append(slices.Clip(recent), pending...)
+	var spans [][2]int
 	for _, token := range tokens {
-		forms = append(forms, ahpTokenForms(token)...)
+		secret := ahpTokenSecret(token)
+		if secret == "" {
+			continue
+		}
+		public := token[:ahpTokenPublicStart(token)]
+		lead := []byte(secret[:ahpMinRedactedToken])
+		for i := 0; ; {
+			at := bytes.Index(data[i:], lead)
+			if at < 0 {
+				break
+			}
+			at += i
+			i = at + 1
+			end := at + len(lead)
+			for end < len(data) && end-at < len(secret) && data[end] == secret[end-at] {
+				end++
+			}
+			if end == len(data) && end-at < len(secret) {
+				continue
+			}
+			from := at
+			if bytes.HasSuffix(data[:at], []byte(public)) {
+				from -= len(public)
+			}
+			spans = append(spans, [2]int{from, end})
+		}
 	}
-	slices.SortFunc(forms, func(a, b string) int { return len(b) - len(a) })
-	for _, form := range forms {
-		data = bytes.ReplaceAll(data, []byte(form), []byte(executionevents.ExecutionEventRedactedValue))
+	if len(spans) == 0 {
+		return pending
 	}
-	return data
+	slices.SortFunc(spans, func(a, b [2]int) int { return a[0] - b[0] })
+	out := make([]byte, 0, len(pending))
+	// at is the next byte of data to copy; replaced is where the last
+	// replacement ended, so overlapping runs are replaced once.
+	at, replaced := len(recent), -1
+	for _, span := range spans {
+		from, end := span[0], span[1]
+		if end <= at {
+			continue
+		}
+		if from > replaced {
+			from = max(from, at)
+			out = append(out, data[at:from]...)
+			out = append(out, executionevents.ExecutionEventRedactedValue...)
+		}
+		at, replaced = end, end
+	}
+	return append(out, data[at:]...)
 }
 
-// ahpTokenHeld says how much of data's end could be the start of a token
-// form. long is past a token's public start, so a token is under way; short
-// is a public start alone, such as "gh".
-func ahpTokenHeld(data []byte, tokens []string) (long, short int) {
+// ahpTokenHeld says how much of pending's end, read after recent, is the
+// start of a token's secret, at least ahpTokenHoldMin bytes of it: that much
+// waits for more output, however long.
+func ahpTokenHeld(recent, pending []byte, tokens []string) int {
+	data := append(slices.Clip(recent), pending...)
+	held := 0
 	for _, token := range tokens {
-		public := ahpTokenPublicStart(token)
-		for i, form := range ahpTokenForms(token) {
-			for k := min(len(form)-1, len(data)); k > 0; k-- {
-				if !bytes.HasSuffix(data, []byte(form[:k])) {
-					continue
-				}
-				if i == 0 && k <= public {
-					short = max(short, k)
-				} else {
-					long = max(long, k)
-				}
+		secret := ahpTokenSecret(token)
+		for k := min(len(secret)-1, len(data)); k >= ahpTokenHoldMin; k-- {
+			if bytes.HasSuffix(data, []byte(secret[:k])) {
+				held = max(held, k)
 				break
 			}
 		}
 	}
-	return long, short
+	return min(held, len(pending))
 }
 
 func (o *ahpTerminalOutput) Write(p []byte) (int, error) {
@@ -453,7 +492,6 @@ func (o *ahpTerminalOutput) Write(p []byte) (int, error) {
 		return 0, io.ErrClosedPipe
 	}
 	o.pending = append(o.pending, p...)
-	o.heldAt = time.Time{}
 	if len(o.pending) >= ahpTerminalChunkMax {
 		o.flushLocked()
 	} else if o.timer == nil {
@@ -468,40 +506,21 @@ func (o *ahpTerminalOutput) Write(p []byte) (int, error) {
 }
 
 func (o *ahpTerminalOutput) flushLocked() {
-	ready := len(o.pending)
+	var tokens []string
 	if o.credentials != nil {
-		if tokens := o.credentials(); len(tokens) > 0 {
-			o.pending = ahpRedactTokens(o.pending, tokens)
+		tokens = o.credentials()
+	}
+	ready := len(o.pending)
+	if len(tokens) > 0 {
+		o.pending = ahpRedactTokens(o.recent, o.pending, tokens)
+		ready = len(o.pending)
+		if held := ahpTokenHeld(o.recent, o.pending, tokens); held > 0 && o.closed {
+			// The output ended inside a token: what arrived of it is
+			// still secret.
+			o.pending = append(o.pending[:ready-held], executionevents.ExecutionEventRedactedValue...)
 			ready = len(o.pending)
-			// A token may be split across writes. Text that is one under way
-			// waits for more output, however long; a token's public start,
-			// such as "gh", waits only ahpTerminalTokenHold, because what
-			// follows it is redacted on its own.
-			long, short := ahpTokenHeld(o.pending, tokens)
-			switch {
-			case long > 0 && o.closed:
-				// The output ended inside a token: what arrived of it is
-				// still secret.
-				o.pending = append(o.pending[:len(o.pending)-long], executionevents.ExecutionEventRedactedValue...)
-				ready = len(o.pending)
-			case long > 0:
-				ready -= long
-			case !o.closed && short > 0:
-				if o.heldAt.IsZero() {
-					o.heldAt = time.Now()
-				}
-				if wait := ahpTerminalTokenHold - time.Since(o.heldAt); wait > 0 {
-					ready -= short
-					if o.timer == nil {
-						o.timer = time.AfterFunc(wait, func() {
-							o.mu.Lock()
-							defer o.mu.Unlock()
-							o.timer = nil
-							o.flushLocked()
-						})
-					}
-				}
-			}
+		} else {
+			ready -= held
 		}
 	}
 	for ready > 0 {
@@ -534,7 +553,21 @@ func (o *ahpTerminalOutput) flushLocked() {
 		data := strings.ToValidUTF8(string(o.pending[:cut]), "\uFFFD")
 		o.pending = o.pending[cut:]
 		ready -= cut
+		o.keepRecent(data, tokens)
 		_ = o.emit.Emit(o.ctx, o.channel, ahptypes.StateAction{Value: &ahptypes.TerminalDataAction{Type: ahptypes.ActionTypeTerminalData, Data: data}})
+	}
+}
+
+// keepRecent keeps as much of the end of emitted output as a token could
+// have begun in.
+func (o *ahpTerminalOutput) keepRecent(data string, tokens []string) {
+	keep := 0
+	for _, token := range tokens {
+		keep = max(keep, len(token)-1)
+	}
+	o.recent = append(o.recent, data...)
+	if len(o.recent) > keep {
+		o.recent = slices.Clone(o.recent[len(o.recent)-keep:])
 	}
 }
 

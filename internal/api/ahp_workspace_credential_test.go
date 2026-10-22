@@ -81,7 +81,7 @@ func TestAHPWorkspaceTokenIsKnownBeforeItIsWritten(t *testing.T) {
 
 	token = "second-token-0123456789"
 	w.provideCredential(context.Background(), principal, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{UID: "pod-2"}})
-	require.Equal(t, []string{"second-token-0123456789", "first-token-0123456789"}, known)
+	require.Equal(t, []string{"first-token-0123456789", "second-token-0123456789"}, known)
 
 	// Writes that fail never make output forget the token still installed.
 	w.writeToken = func(context.Context, *corev1.Pod, string) error { return errors.New("exec failed") }
@@ -89,7 +89,7 @@ func TestAHPWorkspaceTokenIsKnownBeforeItIsWritten(t *testing.T) {
 		token = next
 		w.provideCredential(context.Background(), principal, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{UID: types.UID(fmt.Sprintf("pod-%d", 3+i))}})
 	}
-	require.Equal(t, []string{"fourth-token-0123456789", "third-token-0123456789", "second-token-0123456789", "first-token-0123456789"},
+	require.Equal(t, []string{"first-token-0123456789", "second-token-0123456789", "third-token-0123456789", "fourth-token-0123456789"},
 		w.tokensFor(principal.UserKey))
 }
 

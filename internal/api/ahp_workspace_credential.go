@@ -8,6 +8,7 @@ package api
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"time"
 
@@ -115,46 +116,28 @@ func (w *ahpWorkspaces) installCredential(ctx context.Context, principal ahphost
 	return now, true
 }
 
-// ahpTokenMemory is how long terminal output stays redacted for a token given
-// to a workspace: longer than any token the workspace gets stays valid, so a
-// token is never forgotten while a shell can still hold it, whether its write
-// succeeded or newer ones followed.
-const ahpTokenMemory = 24 * time.Hour
-
-type ahpRememberedToken struct {
-	value string
-	at    time.Time
-}
-
+// rememberToken records a token given to a user's workspace. Terminal output
+// stays redacted for every token the workspace was given while this server
+// runs: a token may never expire, and a shell can hold one long after it was
+// replaced. The list grows only with distinct tokens, and a person's token
+// changes only when it is refreshed near its expiry.
 func (w *ahpWorkspaces) rememberToken(userKey, token string) {
-	now := w.b.now()
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if slices.Contains(w.tokens[userKey], token) {
+		return
+	}
 	if w.tokens == nil {
-		w.tokens = map[string][]ahpRememberedToken{}
+		w.tokens = map[string][]string{}
 	}
-	kept := []ahpRememberedToken{{value: token, at: now}}
-	for _, held := range w.tokens[userKey] {
-		if held.value != token && now.Sub(held.at) < ahpTokenMemory {
-			kept = append(kept, held)
-		}
-	}
-	w.tokens[userKey] = kept
+	w.tokens[userKey] = append(w.tokens[userKey], token)
 }
 
-// tokensFor returns the git tokens a user's workspace was given recently,
-// newest first.
+// tokensFor returns the git tokens a user's workspace was given, oldest first.
 func (w *ahpWorkspaces) tokensFor(userKey string) []string {
-	now := w.b.now()
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	var tokens []string
-	for _, held := range w.tokens[userKey] {
-		if now.Sub(held.at) < ahpTokenMemory {
-			tokens = append(tokens, held.value)
-		}
-	}
-	return tokens
+	return slices.Clone(w.tokens[userKey])
 }
 
 // execWriteToken writes a token to the workspace. It travels on standard

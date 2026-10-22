@@ -71,7 +71,7 @@ func TestAHPTerminalOutputFlushesQuietOutput(t *testing.T) {
 }
 
 // Terminal data is journaled, so the workspace's git token never leaves in it,
-// however its output is split or delayed.
+// however its output is split, delayed, or cut short.
 func TestAHPTerminalOutputRedactsTheWorkspaceToken(t *testing.T) {
 	const token = "ghu_0123456789abcdefghijklmnopqrstuvwx"
 	for name, tc := range map[string]struct {
@@ -86,7 +86,23 @@ func TestAHPTerminalOutputRedactsTheWorkspaceToken(t *testing.T) {
 		},
 		"split inside the secret, slowly": {
 			writes: []string{"$ cat token\r\n" + token[:10], token[10:] + "\r\n$ "},
-			want:   "$ cat token\r\n[REDACTED]\r\n$ ",
+			want:   "$ cat token\r\nghu_[REDACTED]\r\n$ ",
+		},
+		"cut short at the end of a write": {
+			writes: []string{token[:len(token)-1], "\r\n$ "},
+			want:   "ghu_[REDACTED]\r\n$ ",
+		},
+		"cut short within a write": {
+			writes: []string{"$ " + token[:20] + "\r\n$ "},
+			want:   "$ [REDACTED]\r\n$ ",
+		},
+		"continued from emitted output": {
+			writes: []string{"$ ghu_012", "3456789ab\r\n"},
+			want:   "$ ghu_012[REDACTED]\r\n",
+		},
+		"a few characters that start the secret": {
+			writes: []string{"$ 012"},
+			want:   "$ 012",
 		},
 		"split after the public start, slowly": {
 			writes: []string{"x ghu_", token[4:] + "\r\n"},
@@ -107,8 +123,8 @@ func TestAHPTerminalOutputRedactsTheWorkspaceToken(t *testing.T) {
 			}
 			for _, write := range tc.writes {
 				_, _ = out.Write([]byte(write))
-				// Longer than the hold, so a slow split is covered.
-				time.Sleep(2 * ahpTerminalTokenHold)
+				// Longer than a flush, so each write is emitted on its own.
+				time.Sleep(10 * ahpTerminalFlushEvery)
 				require.NotContains(t, joined(), token[4:14], "part of the token's secret was emitted")
 			}
 			if tc.close {
@@ -117,6 +133,36 @@ func TestAHPTerminalOutputRedactsTheWorkspaceToken(t *testing.T) {
 			require.Eventually(t, func() bool { return joined() == tc.want }, time.Second, 5*time.Millisecond,
 				"got %q", joined())
 		})
+	}
+}
+
+// However output is cut into writes, the journal never carries the start of a
+// token's secret, whether the token is whole or cut short.
+func TestAHPTerminalOutputRedactsAtEveryCut(t *testing.T) {
+	const token = "ghu_0123456789abcdefghijklmnopqrstuvwx"
+	for _, text := range []string{
+		"$ cat token\r\n" + token + "\r\n$ ",
+		"x" + token[:len(token)-3] + "\r\n$ ",
+		token[:14] + token + " " + token[4:],
+	} {
+		for first := 1; first < len(text); first++ {
+			for second := first; second < len(text); second++ {
+				emit := &ahpRecordingEmitter{}
+				out := newAHPTerminalOutput(context.Background(), emit, "ahp-terminal:/t", func() []string { return []string{token} })
+				for _, write := range []string{text[:first], text[first:second], text[second:]} {
+					_, _ = out.Write([]byte(write))
+					out.mu.Lock()
+					out.flushLocked()
+					out.mu.Unlock()
+				}
+				out.close()
+				emit.mu.Lock()
+				joined := strings.Join(emit.data, "")
+				emit.mu.Unlock()
+				require.NotContains(t, joined, token[4:4+ahpMinRedactedToken], "cut at %d and %d: %q", first, second, joined)
+				require.True(t, strings.HasSuffix(joined, "$ ") == strings.HasSuffix(text, "$ "), "output after the token is kept: %q", joined)
+			}
+		}
 	}
 }
 
