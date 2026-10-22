@@ -66,6 +66,8 @@ type ahpTestEnv struct {
 	mu          sync.Mutex
 	decisions   []string
 	gitRequests []*http.Request
+	// onTaskCreate, when set, runs before a Task is created and can refuse it.
+	onTaskCreate func(*corev1alpha1.Task) error
 }
 
 type ahpRoundTrip func(*http.Request) (*http.Response, error)
@@ -105,9 +107,15 @@ func newAHPTestEnvWith(t *testing.T, authz ContextTokenAuthorizationConfig, obje
 		&corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "no-model", Namespace: ahpTestNamespace},
 			Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex}}},
 	)
+	var env *ahpTestEnv
 	kube := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(objects...).
 		WithStatusSubresource(&corev1alpha1.Task{}).
 		WithInterceptorFuncs(interceptor.Funcs{Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			if task, ok := obj.(*corev1alpha1.Task); ok && env != nil && env.onTaskCreate != nil {
+				if err := env.onTaskCreate(task); err != nil {
+					return err
+				}
+			}
 			if obj.GetUID() == "" {
 				obj.SetUID(types.UID("uid-" + obj.GetName()))
 			}
@@ -124,7 +132,7 @@ func newAHPTestEnvWith(t *testing.T, authz ContextTokenAuthorizationConfig, obje
 	handlers := NewHandlers(HandlersConfig{
 		Client: kube, APIReader: kube, ExecutionMode: executionmode.HarnessV2, ResultStore: s, ContextTokenAuthorization: authz,
 	})
-	env := &ahpTestEnv{t: t, kube: kube, live: live, host: host, tokens: tokens}
+	env = &ahpTestEnv{t: t, kube: kube, live: live, host: host, tokens: tokens}
 	backend := newAHPBackend(handlers, s, live, AHPBackendConfig{GitCredentialSecret: "git-token"})
 	backend.emitterFor = host.Emitter
 	backend.decideApproval = func(_ context.Context, ui *UserInfo, namespace, task, approvalID string, approve bool) error {
@@ -1066,9 +1074,9 @@ func TestAHPBackendKeepsAMessageItCouldNotTakeOffTheQueue(t *testing.T) {
 	require.Len(t, current.Pending, 1)
 }
 
-// A turn whose Task cannot be recorded on its session is stopped, because
-// nothing could find that Task again, and the person sees the turn fail.
-func TestAHPBackendStopsATurnItCouldNotRecord(t *testing.T) {
+// A turn that cannot be recorded on its session fails visibly and creates no
+// Task, because nothing could find that Task again.
+func TestAHPBackendFailsATurnItCannotRecord(t *testing.T) {
 	env := newAHPTestEnv(t)
 	failing := &ahpFailingStore{AHPStore: env.backend.store, fail: func(record store.AHPRecord) bool {
 		return bytes.Contains(record.Value, []byte(`"activeTask":`))
@@ -1086,16 +1094,74 @@ func TestAHPBackendStopsATurnItCouldNotRecord(t *testing.T) {
 	failing.armed.Store(true)
 	_, err = c.Dispatch(ctx, chat, ahpUserTurn("turn-1", "first"))
 	require.NoError(t, err)
-	taskName := record.OrkaSession + "-t1"
-	env.waitForTask(taskName)
 	waitForActionType(t, chatSub, "chat/error")
-	require.Eventually(t, func() bool {
-		current := &corev1alpha1.Task{}
-		_ = env.kube.Get(context.Background(), types.NamespacedName{Namespace: ahpTestNamespace, Name: taskName}, current)
-		_, ok := current.Annotations[labels.AnnotationCancelRequested]
-		return ok
-	}, 5*time.Second, 20*time.Millisecond, "an unrecorded turn's Task must be cancelled")
+	require.Never(t, func() bool {
+		return env.kube.Get(ctx, types.NamespacedName{Namespace: ahpTestNamespace, Name: record.OrkaSession + "-t1"}, &corev1alpha1.Task{}) == nil
+	}, time.Second, 20*time.Millisecond, "an unrecorded turn created a Task")
 	require.Nil(t, env.backend.activeTurn(alice, ahpTestSession))
+}
+
+// A turn is on its session before its Task exists, so a controller that stops
+// in between leaves a turn recovery can settle, never a Task nothing finds.
+func TestAHPBackendRecordsATurnBeforeItsTask(t *testing.T) {
+	env := newAHPTestEnv(t)
+	c := env.connect("alice")
+	ctx := ahpCtx(t)
+	chat := env.setUpSession(c, "allow-all")
+	alice := ahphost.UserKey("https://issuer.example", "alice")
+	recorded := make(chan string, 1)
+	env.onTaskCreate = func(task *corev1alpha1.Task) error {
+		var current ahpSession
+		if err := env.backend.getRecord(context.Background(), alice, ahpRecordSession, ahpTestSession, &current); err == nil {
+			recorded <- current.ActiveTask
+		}
+		return nil
+	}
+	_, err := c.Dispatch(ctx, chat, ahpUserTurn("turn-1", "first"))
+	require.NoError(t, err)
+	record := ahpSession{}
+	require.NoError(t, env.backend.getRecord(ctx, alice, ahpRecordSession, ahpTestSession, &record))
+	env.waitForTask(record.OrkaSession + "-t1")
+	select {
+	case active := <-recorded:
+		require.Equal(t, record.OrkaSession+"-t1", active, "the session must name the Task before it is created")
+	case <-time.After(5 * time.Second):
+		t.Fatal("the turn's Task was created without the session recording it")
+	}
+}
+
+// A turn whose Task cannot be created is taken back: the session is free and
+// the next message runs as that turn.
+func TestAHPBackendTakesBackATurnWhoseTaskWasNotCreated(t *testing.T) {
+	env := newAHPTestEnv(t)
+	c := env.connect("alice")
+	ctx := ahpCtx(t)
+	chat := env.setUpSession(c, "allow-all")
+	_, chatSub, err := c.Subscribe(ctx, chat)
+	require.NoError(t, err)
+	alice := ahphost.UserKey("https://issuer.example", "alice")
+	var refuse atomic.Bool
+	refuse.Store(true)
+	env.onTaskCreate = func(*corev1alpha1.Task) error {
+		if refuse.Load() {
+			return apierrors.NewServiceUnavailable("try later")
+		}
+		return nil
+	}
+	_, err = c.Dispatch(ctx, chat, ahpUserTurn("turn-1", "first"))
+	require.NoError(t, err)
+	waitForActionType(t, chatSub, "chat/error")
+	require.Eventually(t, func() bool { return env.backend.activeTurn(alice, ahpTestSession) == nil }, 5*time.Second, 20*time.Millisecond)
+	record := ahpSession{}
+	require.NoError(t, env.backend.getRecord(ctx, alice, ahpRecordSession, ahpTestSession, &record))
+	require.Empty(t, record.ActiveTurn)
+	require.Zero(t, record.Turns)
+	require.Empty(t, record.History)
+
+	refuse.Store(false)
+	_, err = c.Dispatch(ctx, chat, ahpUserTurn("turn-2", "again"))
+	require.NoError(t, err)
+	require.Equal(t, "again", env.waitForTask(record.OrkaSession+"-t1").Spec.Prompt)
 }
 
 func TestAHPReorderPending(t *testing.T) {

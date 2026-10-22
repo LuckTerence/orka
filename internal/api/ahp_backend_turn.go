@@ -177,27 +177,19 @@ func (b *ahpBackend) startTurn(ctx context.Context, principal ahphost.Principal,
 		fail(ahpErrorMessage(err))
 		return
 	}
-	if err := b.h.client.Create(ctx, task); err != nil {
-		sub.Close()
-		if invalid := invalidObjectError("task", err); invalid != nil {
-			fail(ahpErrorMessage(invalid))
-		} else {
-			fail("the turn's Task could not be created")
-			log.Error(err, "create AHP turn Task", "namespace", task.Namespace, "task", task.Name)
-		}
-		return
-	}
-	sealRequesterStamp(ctx, b.h.client, task)
-
 	turnCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	turn := &ahpTurn{
 		b: b, principal: principal, session: record, id: action.TurnId, task: name, startedAt: started, emit: emit,
 		ctx: turnCtx, cancel: cancel, tools: map[string]*ahpToolCall{},
 	}
+	// The turn is recorded, and registered for this process, before its Task
+	// exists. A controller that stops after creating the Task leaves a turn
+	// that recovery follows to its end, and one that stops before leaves a
+	// turn recovery settles as deleted; neither leaves a Task nothing finds.
 	// Disposal holds the user's lifecycle lock while it cancels the session's
-	// active Task and deletes the session. Recording the Task under the same
-	// lock means disposal either finds and cancels it, or has already deleted
-	// the session, and then the Task is cancelled here.
+	// active Task and deletes the session. Holding it through the Task's
+	// creation means disposal either finds and cancels the created Task, or
+	// has already deleted the session, and then nothing is created.
 	unlock := b.lockUser(principal.UserKey)
 	err = b.updateSession(ctx, principal.UserKey, record.Session, func(s *ahpSession) {
 		s.Agent, s.Model, s.Turns = choice.Agent, choice.Model, number
@@ -206,22 +198,48 @@ func (b *ahpBackend) startTurn(ctx context.Context, principal ahphost.Principal,
 		s.History = ahpKeepHistory(append(s.History, ahpExchange{User: ahpBounded(action.Message.Text, ahpExchangeMax)}))
 		turn.session = *s
 	})
-	unlock()
 	if err != nil {
-		// Unrecorded, the Task could not be found again: stop it. A disposed
-		// session ends quietly; otherwise the person sees the turn fail.
+		unlock()
 		sub.Close()
 		cancel()
-		b.cancelTask(context.WithoutCancel(ctx), principal, task.Namespace, name)
 		if !errors.Is(err, store.ErrNotFound) {
 			log.Error(err, "record AHP turn", "session", record.Session, "task", name)
 			fail("the turn could not be recorded")
 		}
 		return
 	}
+	turnKey := ahpTurnKey(principal.UserKey, record.Session)
 	b.mu.Lock()
-	b.turns[ahpTurnKey(principal.UserKey, record.Session)] = turn
+	b.turns[turnKey] = turn
 	b.mu.Unlock()
+	if err := b.h.client.Create(ctx, task); err != nil {
+		// The Task may exist even so; stop it, then take the turn back.
+		b.cancelTask(context.WithoutCancel(ctx), principal, task.Namespace, name)
+		logSessionUpdate(b.updateSession(ctx, principal.UserKey, record.Session, func(s *ahpSession) {
+			if s.ActiveTurn != action.TurnId {
+				return
+			}
+			s.ActiveTurn, s.ActiveTask, s.ActiveStartedAt = "", "", ""
+			s.Agent, s.Model, s.Turns, s.SessionTurns, s.History = record.Agent, record.Model, record.Turns, record.SessionTurns, record.History
+		}), record.Session, "take back a turn whose Task was not created")
+		b.mu.Lock()
+		if b.turns[turnKey] == turn {
+			delete(b.turns, turnKey)
+		}
+		b.mu.Unlock()
+		unlock()
+		sub.Close()
+		cancel()
+		if invalid := invalidObjectError("task", err); invalid != nil {
+			fail(ahpErrorMessage(invalid))
+		} else {
+			fail("the turn's Task could not be created")
+			log.Error(err, "create AHP turn Task", "namespace", task.Namespace, "task", task.Name)
+		}
+		return
+	}
+	unlock()
+	sealRequesterStamp(ctx, b.h.client, task)
 
 	now := ahpNow(b)
 	_ = emit.Emit(ctx, record.Session, ahptypes.StateAction{Value: &ahptypes.SessionChatUpdatedAction{
