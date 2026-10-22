@@ -409,14 +409,6 @@ func (b *ahpBackend) agentChoices(ctx context.Context, principal ahphost.Princip
 	return choices, nil
 }
 
-func ahpModelConfigSchema() *ahptypes.ConfigSchema {
-	description := "Orka runs the model its Agent pins; the effort is passed to runtimes that take one."
-	enum := []json.RawMessage{json.RawMessage(`"low"`), json.RawMessage(`"medium"`), json.RawMessage(`"high"`)}
-	return &ahptypes.ConfigSchema{Type: "object", Properties: map[string]ahptypes.ConfigPropertySchema{
-		"reasoningEffort": {Type: ahpSchemaString, Title: "Reasoning effort", Description: &description, Enum: enum},
-	}}
-}
-
 // Agents lists one AHP agent offering every model the user has an Agent for,
 // each labelled with the runtime that runs it.
 func (b *ahpBackend) Agents(ctx context.Context, principal ahphost.Principal) ([]ahptypes.AgentInfo, error) {
@@ -441,7 +433,7 @@ func (b *ahpBackend) Agents(ctx context.Context, principal ahphost.Principal) ([
 			listed[choice.Model] = true
 			models = append(models, ahptypes.SessionModelInfo{
 				Id: choice.Model, Provider: string(ahpAgentProvider), Name: choice.Model + " (" + runtime.name + ")",
-				ConfigSchema: ahpModelConfigSchema(), PolicyState: &enabled,
+				PolicyState: &enabled,
 			})
 		}
 	}
