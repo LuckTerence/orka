@@ -807,7 +807,7 @@ func (c *StoreCoordinator) recordRoutingFenceAcknowledgement(
 	return c.Store.AppendMemoryAudit(ctx, store.MemoryAuditRecord{
 		Namespace: binding.Namespace, NamespaceUID: binding.NamespaceUID, Actor: c.actor(),
 		Action: memoryBackendRoutingFenceAckAuditAction,
-		Reason: "exact OMS routing fence acknowledgement persisted", NewState: string(target),
+		Reason: "exact memory protocol routing fence acknowledgement persisted", NewState: string(target),
 		AuthorityEpoch: binding.AuthorityEpoch, RoutingEpoch: binding.RoutingEpoch,
 		RequestDigest: intentDigest, RequestID: binding.BackendUID, CreatedAt: c.now(),
 	})
@@ -929,7 +929,7 @@ func (c *StoreCoordinator) persistValidationCandidate(
 	}
 	if err := c.Store.AppendMemoryAudit(ctx, store.MemoryAuditRecord{
 		Namespace: snapshot.Namespace, NamespaceUID: snapshot.NamespaceUID, Actor: c.actor(),
-		Action: memoryValidationCandidateAuditAction, Reason: "durable OMS validation candidate prepared",
+		Action: memoryValidationCandidateAuditAction, Reason: "durable memory protocol validation candidate prepared",
 		PreviousState: memoryValidationCandidateTrackingState, NewState: string(snapshot.RequestedLifecycle),
 		AuthorityEpoch: authorityEpoch, RoutingEpoch: routingEpoch,
 		RequestDigest: digest, RequestID: snapshot.BackendUID, CreatedAt: c.now(),
@@ -1002,7 +1002,7 @@ func (c *StoreCoordinator) persistValidationCandidateAtExactEpoch(
 	if !found {
 		if err := c.Store.AppendMemoryAudit(ctx, store.MemoryAuditRecord{
 			Namespace: snapshot.Namespace, NamespaceUID: snapshot.NamespaceUID, Actor: c.actor(),
-			Action: memoryValidationCandidateAuditAction, Reason: "durable OMS validation candidate prepared",
+			Action: memoryValidationCandidateAuditAction, Reason: "durable memory protocol validation candidate prepared",
 			PreviousState: memoryValidationCandidateTrackingState, NewState: string(snapshot.RequestedLifecycle),
 			AuthorityEpoch: authorityEpoch, RoutingEpoch: routingEpoch, RequestDigest: digest,
 			RequestID: snapshot.BackendUID, CreatedAt: c.now(),
@@ -1089,7 +1089,7 @@ func (c *StoreCoordinator) RecordMemoryBackendOwnershipClaimAttempt(
 	}
 	return c.Store.AppendMemoryAudit(ctx, store.MemoryAuditRecord{
 		Namespace: snapshot.Namespace, NamespaceUID: snapshot.NamespaceUID, Actor: c.actor(),
-		Action: memoryValidationClaimAttemptAuditAction, Reason: "OMS validation candidate ownership claim may be sent",
+		Action: memoryValidationClaimAttemptAuditAction, Reason: "memory protocol validation candidate ownership claim may be sent",
 		PreviousState: string(store.MemoryBackendBindingValidating), NewState: string(snapshot.RequestedLifecycle),
 		AuthorityEpoch: candidate.authorityEpoch, RoutingEpoch: candidate.routingEpoch,
 		RequestDigest: snapshot.CandidateDigest, RequestID: snapshot.BackendUID, CreatedAt: c.now(),
@@ -1133,7 +1133,7 @@ func (c *StoreCoordinator) recordValidationCandidateClaim(
 	}
 	return c.Store.AppendMemoryAudit(ctx, store.MemoryAuditRecord{
 		Namespace: snapshot.Namespace, NamespaceUID: snapshot.NamespaceUID, Actor: c.actor(),
-		Action: memoryValidationClaimedAuditAction, Reason: "OMS validation candidate ownership was claimed",
+		Action: memoryValidationClaimedAuditAction, Reason: "memory protocol validation candidate ownership was claimed",
 		PreviousState: string(store.MemoryBackendBindingValidating), NewState: "claimed",
 		AuthorityEpoch: candidate.authorityEpoch, RoutingEpoch: candidate.routingEpoch,
 		RequestDigest: snapshot.CandidateDigest, RequestID: snapshot.BackendUID, CreatedAt: c.now(),

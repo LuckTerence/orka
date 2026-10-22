@@ -33,8 +33,8 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/endpointpolicy"
-	"github.com/orka-agents/orka/internal/oms/referenceadapter"
-	omsprotocol "github.com/orka-agents/orka/pkg/oms/protocol"
+	"github.com/orka-agents/orka/internal/memory/referenceadapter"
+	memoryv1 "github.com/orka-agents/orka/pkg/memory/v1"
 )
 
 const (
@@ -338,7 +338,7 @@ func TestMemoryBackendReconcilerStagedValidatesWithoutCutover(t *testing.T) {
 	}
 }
 
-func TestMemoryBackendReconcilerStagedUsesFreshTimeoutForEachOMSProbe(t *testing.T) {
+func TestMemoryBackendReconcilerStagedUsesFreshTimeoutForEachProtocolProbe(t *testing.T) {
 	const probeTimeout = 5 * time.Second
 	now := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
 	backend, namespace, secret := memoryBackendTestObjects(t, corev1alpha1.MemoryBackendLifecycleStaged)
@@ -398,7 +398,7 @@ func TestMemoryBackendReconcilerEndpointResolutionHonorsProbeTimeout(t *testing.
 		t.Fatalf("stalled resolution observation = %#v", observation)
 	}
 	if prober.storeCalls != 0 {
-		t.Fatalf("stalled resolution reached OMS store probe %d times", prober.storeCalls)
+		t.Fatalf("stalled resolution reached memory adapter store probe %d times", prober.storeCalls)
 	}
 	updated := getMemoryBackend(t, kubeClient, backend.Namespace)
 	if updated.Status.Reason != "EndpointRejected" || updated.Status.Ready {
@@ -436,7 +436,7 @@ func TestMemoryBackendReconcilerEndpointResolutionPreservesParentCancellation(t 
 		t.Fatalf("canceled resolution observation = %#v", observation)
 	}
 	if prober.storeCalls != 0 {
-		t.Fatalf("canceled resolution reached OMS store probe %d times", prober.storeCalls)
+		t.Fatalf("canceled resolution reached memory adapter store probe %d times", prober.storeCalls)
 	}
 }
 
@@ -672,7 +672,7 @@ func TestMemoryBackendRetiresStaleCandidateUsingPersistedRoute(t *testing.T) {
 		SecretName: secret.Name, SecretKey: backend.Spec.ClientAuth.BearerTokenSecretRef.Key,
 		SecretUID: string(secret.UID), SecretResourceVersion: secret.ResourceVersion,
 		TenantID: deriveMemoryBackendTenantID(testMemoryClusterID, namespace.UID), StoreName: backend.Spec.Store.Name,
-		StoreUUID: storeProbe.StoreUUID, Protocol: backend.Spec.Protocol.Profile,
+		StoreUUID: storeProbe.StoreUUID, Protocol: backend.Spec.ContractVersion,
 		AuthorityEpoch: 3, RoutingEpoch: 7, CandidateDigest: "candidate-old-route",
 	}
 	encoded, err := encodeMemoryBackendValidationCandidate(candidate)
@@ -824,7 +824,7 @@ func TestMemoryBackendReconcilerDisabledKeepsPreviousLifecycleWhenRemoteFenceUna
 	backend, namespace, secret := memoryBackendTestObjects(t, corev1alpha1.MemoryBackendLifecycleDisabled)
 	backend.Finalizers = []string{MemoryBackendProtectionFinalizer}
 	seedActivatedMemoryBackendStatus(t, backend, namespace, secret, 7)
-	prober := &fakeMemoryBackendProber{fenceErr: newOMSProbeError("OMSProbeTransportFailed", "OMS routing fence request failed")}
+	prober := &fakeMemoryBackendProber{fenceErr: newProtocolProbeError("ProtocolProbeTransportFailed", "memory protocol routing fence request failed")}
 	route := testMemoryBackendDurableRoute(t, backend, namespace, secret, 3, 8)
 	coordinator := &fakeMemoryBackendCoordinator{bindingResult: MemoryBackendBindingResult{
 		EffectiveLifecycleState: corev1alpha1.MemoryBackendEffectiveLifecycleRecovering,
@@ -838,7 +838,7 @@ func TestMemoryBackendReconcilerDisabledKeepsPreviousLifecycleWhenRemoteFenceUna
 	}
 	updated := getMemoryBackend(t, kubeClient, backend.Namespace)
 	if updated.Status.EffectiveLifecycleState != corev1alpha1.MemoryBackendEffectiveLifecycleActive ||
-		updated.Status.RoutingEpoch != 7 || updated.Status.Reason != "OMSProbeTransportFailed" || prober.fenceCalls != 1 {
+		updated.Status.RoutingEpoch != 7 || updated.Status.Reason != "ProtocolProbeTransportFailed" || prober.fenceCalls != 1 {
 		t.Fatalf("failed remote fence published unsafe lifecycle: %+v", updated.Status)
 	}
 }
@@ -934,7 +934,7 @@ func TestMemoryBackendDeletionRequiresRemoteFenceForDecommissionedAuthority(t *t
 	deletedAt := metav1.NewTime(now.Add(-time.Minute))
 	backend.DeletionTimestamp = &deletedAt
 	backend.Finalizers = []string{MemoryBackendProtectionFinalizer}
-	prober := &fakeMemoryBackendProber{fenceErr: newOMSProbeError("OMSProbeTransportFailed", "remote adapter unavailable")}
+	prober := &fakeMemoryBackendProber{fenceErr: newProtocolProbeError("ProtocolProbeTransportFailed", "remote adapter unavailable")}
 	coordinator := &fakeMemoryBackendCoordinator{deleteResult: MemoryBackendDeletionResult{
 		SafeToRemove: true, EffectiveLifecycleState: corev1alpha1.MemoryBackendEffectiveLifecycleDecommissioned,
 		AuthorityEpoch: 3, RoutingEpoch: 8, Reason: "Decommissioned",
@@ -968,7 +968,7 @@ func TestMemoryBackendDeletionForceOrphanRemovedBypassesUnavailableRemote(t *tes
 	deletedAt := metav1.NewTime(now.Add(-time.Minute))
 	backend.DeletionTimestamp = &deletedAt
 	backend.Finalizers = []string{MemoryBackendProtectionFinalizer}
-	prober := &fakeMemoryBackendProber{fenceErr: newOMSProbeError("OMSProbeTransportFailed", "remote adapter unavailable")}
+	prober := &fakeMemoryBackendProber{fenceErr: newProtocolProbeError("ProtocolProbeTransportFailed", "remote adapter unavailable")}
 	coordinator := &fakeMemoryBackendCoordinator{deleteResult: MemoryBackendDeletionResult{
 		SafeToRemove: true, EffectiveLifecycleState: corev1alpha1.MemoryBackendEffectiveLifecycleRemoved,
 		AuthorityEpoch: 3, RoutingEpoch: 10, Reason: "Removed",
@@ -1075,7 +1075,7 @@ func TestValidateMemoryBackendProbeResultRejectsMissingCapability(t *testing.T) 
 	}
 }
 
-func TestOMSHTTPProberPerformsExactProtocolSequence(t *testing.T) {
+func TestProtocolHTTPProberPerformsExactProtocolSequence(t *testing.T) {
 	now := time.Now().UTC()
 	resolver := memoryStaticResolver{testMemoryBackendHost: {netip.MustParseAddr("8.8.8.8")}}
 	policy := endpointpolicy.PublicHTTPSPolicy{Resolver: resolver}
@@ -1094,44 +1094,44 @@ func TestOMSHTTPProberPerformsExactProtocolSequence(t *testing.T) {
 		var response any
 		status := http.StatusOK
 		switch request.URL.Path {
-		case omsprotocol.PathStoreResolve:
-			decoded, err := omsprotocol.DecodeStoreResolveRequest(requestBody)
+		case memoryv1.PathStoreResolve:
+			decoded, err := memoryv1.DecodeStoreResolveRequest(requestBody)
 			if err != nil {
 				t.Fatal(err)
 			}
-			response = omsprotocol.StoreResolveResponse{
-				ProtocolVersion: omsprotocol.Version, Binding: decoded.Binding,
+			response = memoryv1.StoreResolveResponse{
+				ProtocolVersion: memoryv1.Version, Binding: decoded.Binding,
 				StoreName: decoded.StoreName, StoreUUID: testMemoryStoreUUID,
 			}
-		case omsprotocol.PathCapabilities:
-			decoded, err := omsprotocol.DecodeCapabilitiesRequest(requestBody)
+		case memoryv1.PathCapabilities:
+			decoded, err := memoryv1.DecodeCapabilitiesRequest(requestBody)
 			if err != nil {
 				t.Fatal(err)
 			}
-			response = omsprotocol.CapabilitiesResponse{
-				ProtocolVersion: omsprotocol.Version, Binding: decoded.Binding,
+			response = memoryv1.CapabilitiesResponse{
+				ProtocolVersion: memoryv1.Version, Binding: decoded.Binding,
 				AdapterName: "adapter", AdapterVersion: "v1", Revision: "revision-1",
-				ExpiresAt: now.Add(time.Minute), Capabilities: validOMSProtocolCapabilities(),
-				Limits: validOMSProtocolCapabilityLimits(),
+				ExpiresAt: now.Add(time.Minute), Capabilities: validProtocolProtocolCapabilities(),
+				Limits: validProtocolProtocolCapabilityLimits(),
 			}
-		case omsprotocol.PathOwnershipClaim:
-			decoded, err := omsprotocol.DecodeOwnershipClaimRequest(requestBody)
+		case memoryv1.PathOwnershipClaim:
+			decoded, err := memoryv1.DecodeOwnershipClaimRequest(requestBody)
 			if err != nil {
 				t.Fatal(err)
 			}
-			response = omsprotocol.OwnershipClaimResponse{
-				ProtocolVersion: omsprotocol.Version, Binding: decoded.Binding, Result: omsprotocol.ResultApplied,
-				BindingDigest: omsprotocol.BindingDigest(decoded.Binding), ClaimIdentity: omsprotocol.AuthorityDigest(decoded.Binding),
+			response = memoryv1.OwnershipClaimResponse{
+				ProtocolVersion: memoryv1.Version, Binding: decoded.Binding, Result: memoryv1.ResultApplied,
+				BindingDigest: memoryv1.BindingDigest(decoded.Binding), ClaimIdentity: memoryv1.AuthorityDigest(decoded.Binding),
 				MaximumRoutingEpoch: decoded.Binding.RoutingEpoch, ClaimedAt: now,
 			}
-		case omsprotocol.PathRoutingFence:
-			decoded, err := omsprotocol.DecodeRoutingFenceRequest(requestBody)
+		case memoryv1.PathRoutingFence:
+			decoded, err := memoryv1.DecodeRoutingFenceRequest(requestBody)
 			if err != nil {
 				t.Fatal(err)
 			}
-			response = omsprotocol.RoutingFenceResponse{
-				ProtocolVersion: omsprotocol.Version, Binding: decoded.Binding, Result: omsprotocol.ResultApplied,
-				BindingDigest:       omsprotocol.BindingDigest(decoded.Binding),
+			response = memoryv1.RoutingFenceResponse{
+				ProtocolVersion: memoryv1.Version, Binding: decoded.Binding, Result: memoryv1.ResultApplied,
+				BindingDigest:       memoryv1.BindingDigest(decoded.Binding),
 				MaximumRoutingEpoch: decoded.Binding.RoutingEpoch, CompletedAt: now,
 			}
 		default:
@@ -1141,9 +1141,9 @@ func TestOMSHTTPProberPerformsExactProtocolSequence(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		return omsTestHTTPResponse(request, status, body), nil
+		return adapterTestHTTPResponse(request, status, body), nil
 	})
-	prober := &OMSHTTPProber{
+	prober := &ProtocolHTTPProber{
 		Policy: policy,
 		newClient: func(*http.Client, time.Duration, endpointpolicy.Resolution) (*http.Client, error) {
 			return &http.Client{Transport: transport}, nil
@@ -1153,7 +1153,7 @@ func TestOMSHTTPProberPerformsExactProtocolSequence(t *testing.T) {
 		Endpoint: resolution.BaseURL, EndpointIdentity: resolution.Identity,
 		EndpointDigest: resolution.EndpointDigest, ResolvedAddressDigest: resolution.ResolvedAddressDigest,
 		ResolvedAddresses: resolution.Addresses,
-		BearerToken:       testProbeToken, Profile: corev1alpha1.MemoryBackendProfileV0Alpha1,
+		BearerToken:       testProbeToken, Profile: corev1alpha1.MemoryBackendContractMemoryV1,
 		ClusterID: testMemoryClusterID, NamespaceUID: string(testMemoryNamespaceUID), BackendUID: string(testMemoryBackendUID),
 		TenantID: deriveMemoryBackendTenantID(testMemoryClusterID, testMemoryNamespaceUID), StoreName: "store-a", Timeout: time.Second,
 	})
@@ -1164,7 +1164,7 @@ func TestOMSHTTPProberPerformsExactProtocolSequence(t *testing.T) {
 		Endpoint: resolution.BaseURL, EndpointIdentity: resolution.Identity,
 		EndpointDigest: resolution.EndpointDigest, ResolvedAddressDigest: resolution.ResolvedAddressDigest,
 		ResolvedAddresses: resolution.Addresses,
-		BearerToken:       testProbeToken, Profile: corev1alpha1.MemoryBackendProfileV0Alpha1,
+		BearerToken:       testProbeToken, Profile: corev1alpha1.MemoryBackendContractMemoryV1,
 		ClusterID: testMemoryClusterID, NamespaceUID: string(testMemoryNamespaceUID), BackendUID: string(testMemoryBackendUID),
 		TenantID: deriveMemoryBackendTenantID(testMemoryClusterID, testMemoryNamespaceUID), StoreUUID: store.StoreUUID,
 		AuthorityEpoch: 3, RoutingEpoch: 7, Timeout: time.Second,
@@ -1181,7 +1181,7 @@ func TestOMSHTTPProberPerformsExactProtocolSequence(t *testing.T) {
 		Endpoint: resolution.BaseURL, EndpointIdentity: resolution.Identity,
 		EndpointDigest: resolution.EndpointDigest, ResolvedAddressDigest: resolution.ResolvedAddressDigest,
 		ResolvedAddresses: resolution.Addresses, ExpectedServerCertificateDigest: result.ServerCertificateDigest,
-		BearerToken: testProbeToken, Profile: corev1alpha1.MemoryBackendProfileV0Alpha1,
+		BearerToken: testProbeToken, Profile: corev1alpha1.MemoryBackendContractMemoryV1,
 		ClusterID: testMemoryClusterID, NamespaceUID: string(testMemoryNamespaceUID), BackendUID: string(testMemoryBackendUID),
 		TenantID: deriveMemoryBackendTenantID(testMemoryClusterID, testMemoryNamespaceUID), StoreUUID: store.StoreUUID,
 		AuthorityEpoch: 3, RoutingEpoch: 8, Timeout: time.Second,
@@ -1191,7 +1191,7 @@ func TestOMSHTTPProberPerformsExactProtocolSequence(t *testing.T) {
 	}
 }
 
-func TestOMSHTTPProberActualAdapterFenceRejectsStaleMutation(t *testing.T) {
+func TestProtocolHTTPProberActualAdapterFenceRejectsStaleMutation(t *testing.T) {
 	const token = "adapter-test-token"
 	adapter, err := referenceadapter.Open(context.Background(), referenceadapter.Config{
 		DatabasePath: filepath.Join(t.TempDir(), "adapter.db"), BearerToken: token,
@@ -1216,13 +1216,13 @@ func TestOMSHTTPProberActualAdapterFenceRejectsStaleMutation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	prober := &OMSHTTPProber{Policy: policy, BaseClient: server.Client()}
+	prober := &ProtocolHTTPProber{Policy: policy, BaseClient: server.Client()}
 	tenantID := deriveMemoryBackendTenantID(testMemoryClusterID, testMemoryNamespaceUID)
 	store, err := prober.ResolveStore(context.Background(), MemoryBackendStoreProbeTarget{
 		Endpoint: resolution.BaseURL, EndpointIdentity: resolution.Identity,
 		EndpointDigest: resolution.EndpointDigest, ResolvedAddressDigest: resolution.ResolvedAddressDigest,
 		ResolvedAddresses: resolution.Addresses, BearerToken: token,
-		Profile: corev1alpha1.MemoryBackendProfileV0Alpha1, ClusterID: testMemoryClusterID,
+		Profile: corev1alpha1.MemoryBackendContractMemoryV1, ClusterID: testMemoryClusterID,
 		NamespaceUID: string(testMemoryNamespaceUID), BackendUID: string(testMemoryBackendUID),
 		TenantID: tenantID, StoreName: "store-a", Timeout: time.Second,
 	})
@@ -1233,7 +1233,7 @@ func TestOMSHTTPProberActualAdapterFenceRejectsStaleMutation(t *testing.T) {
 		Endpoint: resolution.BaseURL, EndpointIdentity: resolution.Identity,
 		EndpointDigest: resolution.EndpointDigest, ResolvedAddressDigest: resolution.ResolvedAddressDigest,
 		ResolvedAddresses: resolution.Addresses, BearerToken: token,
-		Profile: corev1alpha1.MemoryBackendProfileV0Alpha1, ClusterID: testMemoryClusterID,
+		Profile: corev1alpha1.MemoryBackendContractMemoryV1, ClusterID: testMemoryClusterID,
 		NamespaceUID: string(testMemoryNamespaceUID), BackendUID: string(testMemoryBackendUID),
 		TenantID: tenantID, StoreUUID: store.StoreUUID, AuthorityEpoch: 1, RoutingEpoch: 1, Timeout: time.Second,
 	})
@@ -1244,22 +1244,22 @@ func TestOMSHTTPProberActualAdapterFenceRejectsStaleMutation(t *testing.T) {
 		Endpoint: resolution.BaseURL, EndpointIdentity: resolution.Identity,
 		EndpointDigest: resolution.EndpointDigest, ResolvedAddressDigest: resolution.ResolvedAddressDigest,
 		ResolvedAddresses: resolution.Addresses, ExpectedServerCertificateDigest: probe.ServerCertificateDigest,
-		BearerToken: token, Profile: corev1alpha1.MemoryBackendProfileV0Alpha1,
+		BearerToken: token, Profile: corev1alpha1.MemoryBackendContractMemoryV1,
 		ClusterID: testMemoryClusterID, NamespaceUID: string(testMemoryNamespaceUID), BackendUID: string(testMemoryBackendUID),
 		TenantID: tenantID, StoreUUID: store.StoreUUID, AuthorityEpoch: 1, RoutingEpoch: 2, Timeout: time.Second,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	staleBinding := omsprotocol.Binding{
+	staleBinding := memoryv1.Binding{
 		ClusterID: testMemoryClusterID, NamespaceUID: string(testMemoryNamespaceUID), BackendUID: string(testMemoryBackendUID),
 		AuthorityEpoch: 1, RoutingEpoch: 1, TenantID: tenantID, StoreUUID: store.StoreUUID,
 	}
-	mutation := omsprotocol.MutationEnvelope{
-		ProtocolVersion: omsprotocol.Version, OperationID: "mop-stale-after-controller-fence", Binding: staleBinding,
-		MemoryID: "mem-stale-after-controller-fence", Kind: omsprotocol.MutationKindCreate, Generation: 1,
-		State: &omsprotocol.MutationState{Content: "must not be applied", Tags: []string{}, Metadata: map[string]string{}},
+	mutation := memoryv1.MutationEnvelope{
+		ProtocolVersion: memoryv1.Version, OperationID: "mop-stale-after-controller-fence", Binding: staleBinding,
+		MemoryID: "mem-stale-after-controller-fence", Kind: memoryv1.MutationKindCreate, Generation: 1,
+		State: &memoryv1.MutationState{Content: "must not be applied", Tags: []string{}, Metadata: map[string]string{}},
 	}
-	if err := omsprotocol.PrepareMutation(&mutation); err != nil {
+	if err := memoryv1.PrepareMutation(&mutation); err != nil {
 		t.Fatal(err)
 	}
 	body, err := json.Marshal(mutation)
@@ -1270,7 +1270,7 @@ func TestOMSHTTPProberActualAdapterFenceRejectsStaleMutation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request, err := http.NewRequestWithContext(context.Background(), http.MethodPost, resolution.BaseURL+omsprotocol.PathMutations, bytes.NewReader(body))
+	request, err := http.NewRequestWithContext(context.Background(), http.MethodPost, resolution.BaseURL+memoryv1.PathMutations, bytes.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1286,8 +1286,8 @@ func TestOMSHTTPProberActualAdapterFenceRejectsStaleMutation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	decoded, decodeErr := omsprotocol.DecodeMutationReceipt(responseBody)
-	if response.StatusCode != http.StatusConflict || decodeErr != nil || decoded.Result != omsprotocol.ResultIdentityConflict ||
+	decoded, decodeErr := memoryv1.DecodeMutationReceipt(responseBody)
+	if response.StatusCode != http.StatusConflict || decodeErr != nil || decoded.Result != memoryv1.ResultIdentityConflict ||
 		decoded.AppliedGeneration != 0 || decoded.BackendMemoryID != "" {
 		t.Fatalf("stale mutation response status=%d body=%s decodeErr=%v", response.StatusCode, responseBody, decodeErr)
 	}
@@ -1298,7 +1298,7 @@ func TestOMSHTTPProberActualAdapterFenceRejectsStaleMutation(t *testing.T) {
 	}
 }
 
-func TestOMSHTTPProberRejectsNonProtocolStoreResponses(t *testing.T) {
+func TestProtocolHTTPProberRejectsNonProtocolStoreResponses(t *testing.T) {
 	resolver := memoryStaticResolver{testMemoryBackendHost: {netip.MustParseAddr("8.8.8.8")}}
 	policy := endpointpolicy.PublicHTTPSPolicy{Resolver: resolver}
 	resolution, err := policy.Resolve(context.Background(), "https://memory.example.com")
@@ -1306,15 +1306,15 @@ func TestOMSHTTPProberRejectsNonProtocolStoreResponses(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, responseBody := range map[string][]byte{
-		"unknown field": []byte(`{"protocolVersion":"orka.oms.v0alpha1","binding":{"clusterId":"cluster-a","namespaceUid":"namespace-uid-1","backendUid":"backend-uid-1","tenantId":"orka-tenant-sha256:00"},"storeName":"store-a","storeUuid":"` + testMemoryStoreUUID + `","extra":true}`),
+		"unknown field": []byte(`{"protocolVersion":"orka.memory.v1","binding":{"clusterId":"cluster-a","namespaceUid":"namespace-uid-1","backendUid":"backend-uid-1","tenantId":"orka-tenant-sha256:00"},"storeName":"store-a","storeUuid":"` + testMemoryStoreUUID + `","extra":true}`),
 		"trailing data": []byte(`{} {}`),
 	} {
 		t.Run(name, func(t *testing.T) {
-			prober := &OMSHTTPProber{
+			prober := &ProtocolHTTPProber{
 				Policy: policy,
 				newClient: func(*http.Client, time.Duration, endpointpolicy.Resolution) (*http.Client, error) {
 					return &http.Client{Transport: roundTripperFunc(func(request *http.Request) (*http.Response, error) {
-						return omsTestHTTPResponse(request, http.StatusOK, responseBody), nil
+						return adapterTestHTTPResponse(request, http.StatusOK, responseBody), nil
 					})}, nil
 				},
 			}
@@ -1322,18 +1322,18 @@ func TestOMSHTTPProberRejectsNonProtocolStoreResponses(t *testing.T) {
 				Endpoint: resolution.BaseURL, EndpointIdentity: resolution.Identity,
 				EndpointDigest: resolution.EndpointDigest, ResolvedAddressDigest: resolution.ResolvedAddressDigest,
 				ResolvedAddresses: resolution.Addresses,
-				BearerToken:       testProbeToken, Profile: corev1alpha1.MemoryBackendProfileV0Alpha1,
+				BearerToken:       testProbeToken, Profile: corev1alpha1.MemoryBackendContractMemoryV1,
 				ClusterID: testMemoryClusterID, NamespaceUID: string(testMemoryNamespaceUID), BackendUID: string(testMemoryBackendUID),
 				TenantID: deriveMemoryBackendTenantID(testMemoryClusterID, testMemoryNamespaceUID), StoreName: "store-a", Timeout: time.Second,
 			})
-			if err == nil || !strings.Contains(err.Error(), "strict OMS decoding") {
+			if err == nil || !strings.Contains(err.Error(), "strict memory protocol decoding") {
 				t.Fatalf("ResolveStore() error = %v", err)
 			}
 		})
 	}
 }
 
-func omsTestHTTPResponse(request *http.Request, status int, body []byte) *http.Response {
+func adapterTestHTTPResponse(request *http.Request, status int, body []byte) *http.Response {
 	return &http.Response{
 		StatusCode: status,
 		Header:     http.Header{"Content-Type": []string{"application/json"}},
@@ -1347,8 +1347,8 @@ func omsTestHTTPResponse(request *http.Request, status int, body []byte) *http.R
 	}
 }
 
-func validOMSProtocolCapabilities() omsprotocol.Capabilities {
-	return omsprotocol.Capabilities{
+func validProtocolProtocolCapabilities() memoryv1.Capabilities {
+	return memoryv1.Capabilities{
 		DurableIdempotency: true, IdempotencyDigestConflicts: true, CreateIfAbsent: true,
 		ConditionalMutation: true, MonotonicGenerations: true, DeleteHighWatermark: true,
 		DurableRoutingFence: true, OperationLookup: true, ExactGet: true, StablePagination: true,
@@ -1356,20 +1356,20 @@ func validOMSProtocolCapabilities() omsprotocol.Capabilities {
 	}
 }
 
-func validOMSProtocolCapabilityLimits() omsprotocol.CapabilityLimits {
-	return omsprotocol.CapabilityLimits{
-		MaxRequestBytes: omsprotocol.MaxHTTPBodyBytes, MaxResponseBytes: omsprotocol.MaxAdapterResponseBytes,
-		MaxContentBytes: omsprotocol.MaxContentBytes, MaxTags: omsprotocol.MaxTags, MaxTagBytes: omsprotocol.MaxTagBytes,
-		MaxMetadataEntries: omsprotocol.MaxMetadataEntries, MaxMetadataKeyBytes: omsprotocol.MaxMetadataKeyBytes,
-		MaxMetadataValueBytes: omsprotocol.MaxMetadataValueBytes, MaxQueryBytes: omsprotocol.MaxQueryBytes,
-		MaxPageSize: omsprotocol.MaxPageSize, MaxSnapshotRecords: 256, SnapshotTTLSeconds: 900,
+func validProtocolProtocolCapabilityLimits() memoryv1.CapabilityLimits {
+	return memoryv1.CapabilityLimits{
+		MaxRequestBytes: memoryv1.MaxHTTPBodyBytes, MaxResponseBytes: memoryv1.MaxAdapterResponseBytes,
+		MaxContentBytes: memoryv1.MaxContentBytes, MaxTags: memoryv1.MaxTags, MaxTagBytes: memoryv1.MaxTagBytes,
+		MaxMetadataEntries: memoryv1.MaxMetadataEntries, MaxMetadataKeyBytes: memoryv1.MaxMetadataKeyBytes,
+		MaxMetadataValueBytes: memoryv1.MaxMetadataValueBytes, MaxQueryBytes: memoryv1.MaxQueryBytes,
+		MaxPageSize: memoryv1.MaxPageSize, MaxSnapshotRecords: 256, SnapshotTTLSeconds: 900,
 	}
 }
 
 func newMemoryBackendReconciler(
 	t *testing.T,
 	now time.Time,
-	prober MemoryBackendOMSProber,
+	prober MemoryBackendProtocolProber,
 	coordinator MemoryBackendBindingCoordinator,
 	objects ...client.Object,
 ) (*MemoryBackendReconciler, client.Client) {
@@ -1383,7 +1383,7 @@ func newMemoryBackendReconciler(
 	return &MemoryBackendReconciler{
 		Client: kubeClient, APIReader: kubeClient,
 		EndpointPolicy: endpointpolicy.PublicHTTPSPolicy{Resolver: resolver},
-		OMSProber:      prober, BindingCoordinator: coordinator, ClusterIdentity: testMemoryClusterID,
+		ProtocolProber: prober, BindingCoordinator: coordinator, ClusterIdentity: testMemoryClusterID,
 		Now: func() time.Time { return now }, ValidationTTL: 5 * time.Minute,
 	}, kubeClient
 }
@@ -1410,10 +1410,7 @@ func memoryBackendTestObjects(
 			Name: corev1alpha1.MemoryBackendDefaultName, Namespace: "memory-test", UID: testMemoryBackendUID, Generation: 1,
 		},
 		Spec: corev1alpha1.MemoryBackendSpec{
-			Protocol: corev1alpha1.MemoryBackendProtocol{
-				OMSVersion: corev1alpha1.MemoryBackendOMSVersionV01,
-				Profile:    corev1alpha1.MemoryBackendProfileV0Alpha1,
-			},
+			ContractVersion: corev1alpha1.MemoryBackendContractMemoryV1,
 			Deployment: corev1alpha1.MemoryBackendDeployment{
 				Mode: corev1alpha1.MemoryBackendDeploymentModeExternalEndpoint, Endpoint: "https://memory.example.com",
 			},
@@ -1478,7 +1475,7 @@ func testMemoryBackendDurableRoute(
 		SecretKey:               backend.Spec.ClientAuth.BearerTokenSecretRef.Key, SecretUID: string(secret.UID),
 		SecretResourceVersion: secret.ResourceVersion,
 		TenantID:              deriveMemoryBackendTenantID(testMemoryClusterID, namespace.UID), StoreName: backend.Spec.Store.Name,
-		StoreUUID: testMemoryStoreUUID, Protocol: string(backend.Spec.Protocol.Profile),
+		StoreUUID: testMemoryStoreUUID, Protocol: string(backend.Spec.ContractVersion),
 	}
 }
 
@@ -1548,7 +1545,7 @@ func requireFreshMemoryBackendProbeObservations(
 		}
 		for j := range i {
 			if observation.deadline.Equal(observations[j].deadline) {
-				t.Fatalf("outbound OMS probes %d and %d reused the same timeout deadline", j, i)
+				t.Fatalf("outbound memory protocol probes %d and %d reused the same timeout deadline", j, i)
 			}
 		}
 	}
@@ -1610,7 +1607,7 @@ func validMemoryBackendCapabilities() []corev1alpha1.MemoryBackendCapability {
 
 func validMemoryBackendCapabilityLimits() corev1alpha1.MemoryBackendCapabilityLimits {
 	return corev1alpha1.MemoryBackendCapabilityLimits{
-		MaxRequestBytes: omsprotocol.MaxHTTPBodyBytes, MaxResponseBytes: omsprotocol.MaxAdapterResponseBytes, MaxContentBytes: omsprotocol.MaxContentBytes,
+		MaxRequestBytes: memoryv1.MaxHTTPBodyBytes, MaxResponseBytes: memoryv1.MaxAdapterResponseBytes, MaxContentBytes: memoryv1.MaxContentBytes,
 		MaxTags: 32, MaxTagBytes: 128, MaxMetadataEntries: 32, MaxMetadataKeyBytes: 64,
 		MaxMetadataValueBytes: 1024, MaxQueryBytes: 1024, MaxPageSize: 8,
 		MaxSnapshotRecords: 1024, SnapshotTTLSeconds: 900,

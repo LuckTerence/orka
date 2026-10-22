@@ -16,7 +16,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/orka-agents/orka/internal/store"
-	"github.com/orka-agents/orka/pkg/oms/protocol"
+	memoryv1 "github.com/orka-agents/orka/pkg/memory/v1"
 )
 
 const (
@@ -32,8 +32,8 @@ func TestMemoryOperationPayloadCapIsImmutable512KiB(t *testing.T) {
 	if store.MaxMemoryOperationPayloadBytes != 512<<10 {
 		t.Fatalf("MaxMemoryOperationPayloadBytes = %d, want %d", store.MaxMemoryOperationPayloadBytes, 512<<10)
 	}
-	if store.MaxMemoryOperationPayloadBytes >= protocol.MaxHTTPBodyBytes {
-		t.Fatalf("durable cap %d must remain below wire cap %d", store.MaxMemoryOperationPayloadBytes, protocol.MaxHTTPBodyBytes)
+	if store.MaxMemoryOperationPayloadBytes >= memoryv1.MaxHTTPBodyBytes {
+		t.Fatalf("durable cap %d must remain below wire cap %d", store.MaxMemoryOperationPayloadBytes, memoryv1.MaxHTTPBodyBytes)
 	}
 }
 
@@ -78,43 +78,43 @@ func TestMemoryGovernanceSchemaInFreshStore(t *testing.T) {
 	}
 }
 
-func TestRemoteMemoryAdmissionRetainsMaxEscapedOMSRequest(t *testing.T) {
+func TestRemoteMemoryAdmissionRetainsMaxEscapedProtocolRequest(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
 	now := time.Date(2026, 7, 29, 14, 30, 0, 0, time.UTC)
 	binding := activateMemoryBackendForTest(t, s, "team-max-payload", "team-max-payload-uid", now)
-	omsBinding := protocol.Binding{
+	adapterBinding := memoryv1.Binding{
 		ClusterID: binding.ClusterID, NamespaceUID: binding.NamespaceUID, BackendUID: binding.BackendUID,
 		AuthorityEpoch: uint64(binding.AuthorityEpoch), RoutingEpoch: uint64(binding.RoutingEpoch),
-		TenantID:  protocol.DeriveTenantID(binding.ClusterID, binding.NamespaceUID),
+		TenantID:  memoryv1.DeriveTenantID(binding.ClusterID, binding.NamespaceUID),
 		StoreUUID: "11111111-1111-4111-8111-111111111111",
 	}
-	mutation := protocol.MutationEnvelope{
-		ProtocolVersion: protocol.Version, OperationID: "mop-max-escaped-content", Binding: omsBinding,
-		MemoryID: "mem-max-escaped-content", Kind: protocol.MutationKindCreate, Generation: 1,
-		State: &protocol.MutationState{
-			Content: strings.Repeat("\n", protocol.MaxContentBytes),
+	mutation := memoryv1.MutationEnvelope{
+		ProtocolVersion: memoryv1.Version, OperationID: "mop-max-escaped-content", Binding: adapterBinding,
+		MemoryID: "mem-max-escaped-content", Kind: memoryv1.MutationKindCreate, Generation: 1,
+		State: &memoryv1.MutationState{
+			Content: strings.Repeat("\n", memoryv1.MaxContentBytes),
 			Tags:    []string{}, Metadata: map[string]string{},
 		},
 	}
-	if err := protocol.PrepareMutation(&mutation); err != nil {
+	if err := memoryv1.PrepareMutation(&mutation); err != nil {
 		t.Fatal(err)
 	}
 	payload, err := json.Marshal(mutation)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(payload) <= store.MaxMemoryOperationPayloadBytes || len(payload) > protocol.MaxHTTPBodyBytes {
+	if len(payload) <= store.MaxMemoryOperationPayloadBytes || len(payload) > memoryv1.MaxHTTPBodyBytes {
 		t.Fatalf("escaped max-content payload bytes = %d, want > durable cap %d and <= wire cap %d",
-			len(payload), store.MaxMemoryOperationPayloadBytes, protocol.MaxHTTPBodyBytes)
+			len(payload), store.MaxMemoryOperationPayloadBytes, memoryv1.MaxHTTPBodyBytes)
 	}
-	canonicalPayload, err := protocol.EncodeJSON(mutation)
+	canonicalPayload, err := memoryv1.EncodeJSON(mutation)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(canonicalPayload) <= store.MaxMemoryOperationPayloadBytes || len(canonicalPayload) > protocol.MaxHTTPBodyBytes {
+	if len(canonicalPayload) <= store.MaxMemoryOperationPayloadBytes || len(canonicalPayload) > memoryv1.MaxHTTPBodyBytes {
 		t.Fatalf("canonical payload bytes = %d, want > durable stored cap %d and <= wire cap %d",
-			len(canonicalPayload), store.MaxMemoryOperationPayloadBytes, protocol.MaxHTTPBodyBytes)
+			len(canonicalPayload), store.MaxMemoryOperationPayloadBytes, memoryv1.MaxHTTPBodyBytes)
 	}
 	admission := store.RemoteMemoryCreateAdmission{
 		Mutation: newMemoryMutationFromEnvelope(binding, now.Add(time.Second), mutation.MemoryID,
@@ -393,7 +393,7 @@ func TestLegacyRestoreBlocksRemoteDeletedArchivedIDs(t *testing.T) {
 	checkpoint, err := s.RecordMemoryVerifiedCheckpoint(ctx, store.MemoryVerifiedCheckpoint{
 		ID: "mcheckpoint-restore-delete", NamespaceUID: binding.NamespaceUID, BackendUID: binding.BackendUID,
 		AuthorityEpoch: binding.AuthorityEpoch, RoutingEpoch: binding.RoutingEpoch, StoreUUID: binding.StoreUUID,
-		MaximumOperationSequence: deleteOperation.Sequence, CheckpointDigest: protocol.ContentDigest("restore delete checkpoint"),
+		MaximumOperationSequence: deleteOperation.Sequence, CheckpointDigest: memoryv1.ContentDigest("restore delete checkpoint"),
 		Actor: "operator", Reason: "verified deletion checkpoint", VerifiedAt: retentionNow,
 	})
 	if err != nil {
@@ -486,7 +486,7 @@ func TestTombstonePurgePreservesArchivedLegacyMemoryForNeverAppliedCreate(t *tes
 	checkpoint, err := s.RecordMemoryVerifiedCheckpoint(ctx, store.MemoryVerifiedCheckpoint{
 		ID: "mcheckpoint-restore-never-applied", NamespaceUID: binding.NamespaceUID, BackendUID: binding.BackendUID,
 		AuthorityEpoch: binding.AuthorityEpoch, RoutingEpoch: binding.RoutingEpoch, StoreUUID: binding.StoreUUID,
-		MaximumOperationSequence: abandoned.Sequence, CheckpointDigest: protocol.ContentDigest("restore never-applied checkpoint"),
+		MaximumOperationSequence: abandoned.Sequence, CheckpointDigest: memoryv1.ContentDigest("restore never-applied checkpoint"),
 		Actor: "operator", Reason: "verified never-applied checkpoint", VerifiedAt: retentionNow,
 	})
 	if err != nil {
@@ -1375,15 +1375,15 @@ func TestRemoteProposalApplyRequiresCanonicalReviewedProposalContentAndMetadata(
 			name: "content differs from reviewed proposal",
 			mutate: func(t *testing.T, admission *store.RemoteMemoryProposalApplyAdmission) {
 				t.Helper()
-				envelope, err := protocol.DecodeMutationEnvelope(admission.Mutation.Payload)
+				envelope, err := memoryv1.DecodeMutationEnvelope(admission.Mutation.Payload)
 				if err != nil {
 					t.Fatal(err)
 				}
 				envelope.State.Content = "tampered content"
-				if err := protocol.PrepareMutation(envelope); err != nil {
+				if err := memoryv1.PrepareMutation(envelope); err != nil {
 					t.Fatal(err)
 				}
-				admission.Mutation.Payload, err = protocol.EncodeJSON(envelope)
+				admission.Mutation.Payload, err = memoryv1.EncodeJSON(envelope)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -1396,15 +1396,15 @@ func TestRemoteProposalApplyRequiresCanonicalReviewedProposalContentAndMetadata(
 			name: "metadata differs from reviewed proposal",
 			mutate: func(t *testing.T, admission *store.RemoteMemoryProposalApplyAdmission) {
 				t.Helper()
-				envelope, err := protocol.DecodeMutationEnvelope(admission.Mutation.Payload)
+				envelope, err := memoryv1.DecodeMutationEnvelope(admission.Mutation.Payload)
 				if err != nil {
 					t.Fatal(err)
 				}
 				envelope.State.Metadata["agentname"] = "attacker"
-				if err := protocol.PrepareMutation(envelope); err != nil {
+				if err := memoryv1.PrepareMutation(envelope); err != nil {
 					t.Fatal(err)
 				}
-				admission.Mutation.Payload, err = protocol.EncodeJSON(envelope)
+				admission.Mutation.Payload, err = memoryv1.EncodeJSON(envelope)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -3043,50 +3043,50 @@ func TestAdmissionStrictlyBindsCanonicalMutationEnvelope(t *testing.T) {
 		{
 			name: "operation id",
 			mutate: func(admission *store.RemoteMemoryCreateAdmission) {
-				envelope, _ := protocol.DecodeMutationEnvelope(admission.Mutation.Payload)
+				envelope, _ := memoryv1.DecodeMutationEnvelope(admission.Mutation.Payload)
 				envelope.OperationID = "mop-different-operation"
-				_ = protocol.PrepareMutation(envelope)
-				admission.Mutation.Payload, _ = protocol.EncodeJSON(envelope)
+				_ = memoryv1.PrepareMutation(envelope)
+				admission.Mutation.Payload, _ = memoryv1.EncodeJSON(envelope)
 			},
 		},
 		{
 			name: "memory id",
 			mutate: func(admission *store.RemoteMemoryCreateAdmission) {
-				envelope, _ := protocol.DecodeMutationEnvelope(admission.Mutation.Payload)
+				envelope, _ := memoryv1.DecodeMutationEnvelope(admission.Mutation.Payload)
 				envelope.MemoryID = "mem-different-memory"
 				envelope.UpsertKey = ""
-				_ = protocol.PrepareMutation(envelope)
-				admission.Mutation.Payload, _ = protocol.EncodeJSON(envelope)
+				_ = memoryv1.PrepareMutation(envelope)
+				admission.Mutation.Payload, _ = memoryv1.EncodeJSON(envelope)
 			},
 		},
 		{
 			name: "binding",
 			mutate: func(admission *store.RemoteMemoryCreateAdmission) {
-				envelope, _ := protocol.DecodeMutationEnvelope(admission.Mutation.Payload)
+				envelope, _ := memoryv1.DecodeMutationEnvelope(admission.Mutation.Payload)
 				envelope.Binding.StoreUUID = "22222222-2222-4222-8222-222222222222"
-				_ = protocol.PrepareMutation(envelope)
-				admission.Mutation.Payload, _ = protocol.EncodeJSON(envelope)
+				_ = memoryv1.PrepareMutation(envelope)
+				admission.Mutation.Payload, _ = memoryv1.EncodeJSON(envelope)
 			},
 		},
 		{
 			name: "generation",
 			mutate: func(admission *store.RemoteMemoryCreateAdmission) {
-				envelope, _ := protocol.DecodeMutationEnvelope(admission.Mutation.Payload)
+				envelope, _ := memoryv1.DecodeMutationEnvelope(admission.Mutation.Payload)
 				envelope.Generation = 2
-				_ = protocol.PrepareMutation(envelope)
-				admission.Mutation.Payload, _ = protocol.EncodeJSON(envelope)
+				_ = memoryv1.PrepareMutation(envelope)
+				admission.Mutation.Payload, _ = memoryv1.EncodeJSON(envelope)
 			},
 		},
 		{
 			name: "mutation digest",
 			mutate: func(admission *store.RemoteMemoryCreateAdmission) {
-				admission.Mutation.MutationDigest = protocol.ContentDigest("different mutation")
+				admission.Mutation.MutationDigest = memoryv1.ContentDigest("different mutation")
 			},
 		},
 		{
 			name: "content digest",
 			mutate: func(admission *store.RemoteMemoryCreateAdmission) {
-				admission.Mutation.ContentDigest = protocol.ContentDigest("different content")
+				admission.Mutation.ContentDigest = memoryv1.ContentDigest("different content")
 			},
 		},
 	}
@@ -3123,7 +3123,7 @@ func TestReplaceAdmissionCrossChecksExpectedGenerationAndVersionEnvelope(t *test
 			current := materializedRemoteMemoryForTest(t, s, binding, now.Add(time.Second), "replace-envelope-"+field)
 			mutation := newCanonicalMemoryMutation(binding, now.Add(4*time.Second), current.Memory.ID, "replace-mismatch-"+field,
 				"replace-request-"+field, store.MemoryOperationReplace, 2, 1, "backend-v1", "v2")
-			envelope, err := protocol.DecodeMutationEnvelope(mutation.Payload)
+			envelope, err := memoryv1.DecodeMutationEnvelope(mutation.Payload)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -3133,10 +3133,10 @@ func TestReplaceAdmissionCrossChecksExpectedGenerationAndVersionEnvelope(t *test
 			} else {
 				envelope.ExpectedBackendVersion = "different-version"
 			}
-			if err := protocol.PrepareMutation(envelope); err != nil {
+			if err := memoryv1.PrepareMutation(envelope); err != nil {
 				t.Fatal(err)
 			}
-			mutation.Payload, _ = protocol.EncodeJSON(envelope)
+			mutation.Payload, _ = memoryv1.EncodeJSON(envelope)
 			if _, err := s.AdmitRemoteMemoryReplace(context.Background(), store.RemoteMemoryReplaceAdmission{
 				Mutation: mutation, Memory: store.RemoteMemoryCatalogEntry{Source: "manual"},
 				ExpectedGeneration: 1, ExpectedBackendVersion: "backend-v1",
@@ -3516,7 +3516,7 @@ func TestVerifiedCheckpointPurgesCoveredPayloadReceiptsAndAudit(t *testing.T) {
 	checkpoint, err := s.RecordMemoryVerifiedCheckpoint(ctx, store.MemoryVerifiedCheckpoint{
 		ID: "mcheckpoint-purge", NamespaceUID: binding.NamespaceUID, BackendUID: binding.BackendUID,
 		AuthorityEpoch: binding.AuthorityEpoch, RoutingEpoch: binding.RoutingEpoch, StoreUUID: binding.StoreUUID,
-		MaximumOperationSequence: operation.Sequence, CheckpointDigest: protocol.ContentDigest("checkpoint"),
+		MaximumOperationSequence: operation.Sequence, CheckpointDigest: memoryv1.ContentDigest("checkpoint"),
 		Actor: "operator", Reason: "verified matched checkpoint", VerifiedAt: checkpointAt,
 	})
 	if err != nil {
@@ -3576,7 +3576,7 @@ func TestReceiptPurgeSelectsAppliedGenerationAndCompletionTimestamp(t *testing.T
 	checkpoint, err := s.RecordMemoryVerifiedCheckpoint(ctx, store.MemoryVerifiedCheckpoint{
 		ID: "mcheckpoint-partial-receipt", NamespaceUID: binding.NamespaceUID, BackendUID: binding.BackendUID,
 		AuthorityEpoch: binding.AuthorityEpoch, RoutingEpoch: binding.RoutingEpoch, StoreUUID: binding.StoreUUID,
-		MaximumOperationSequence: partial.Sequence, CheckpointDigest: protocol.ContentDigest("partial receipt checkpoint"),
+		MaximumOperationSequence: partial.Sequence, CheckpointDigest: memoryv1.ContentDigest("partial receipt checkpoint"),
 		Actor: "operator", Reason: "verified partial receipt checkpoint", VerifiedAt: checkpointAt,
 	})
 	if err != nil {
@@ -3624,7 +3624,7 @@ func TestCheckpointAndPurgeAuditUseVerifiedRoutingEpoch(t *testing.T) {
 	checkpoint, err := s.RecordMemoryVerifiedCheckpoint(ctx, store.MemoryVerifiedCheckpoint{
 		ID: "mcheckpoint-old-route-audit", NamespaceUID: binding.NamespaceUID, BackendUID: binding.BackendUID,
 		AuthorityEpoch: binding.AuthorityEpoch, RoutingEpoch: binding.RoutingEpoch, StoreUUID: binding.StoreUUID,
-		MaximumOperationSequence: operation.Sequence, CheckpointDigest: protocol.ContentDigest("old route checkpoint"),
+		MaximumOperationSequence: operation.Sequence, CheckpointDigest: memoryv1.ContentDigest("old route checkpoint"),
 		Actor: "operator", Reason: "verify old route", VerifiedAt: checkpointAt,
 	})
 	if err != nil {
@@ -3736,8 +3736,8 @@ func activateMemoryBackendForTest(t *testing.T, s *Store, namespace, namespaceUI
 		SpecDigest: "spec-digest", EndpointDigest: "endpoint-digest",
 		ResolvedAddressDigest: "address-digest", ServerCertificateDigest: "certificate-digest",
 		SecretName: "memory-auth", SecretKey: "token",
-		SecretUID: "secret-uid", SecretResourceVersion: "1", TenantID: protocol.DeriveTenantID("cluster-a", namespaceUID), StoreName: "memories", StoreUUID: "11111111-1111-4111-8111-111111111111",
-		OwnershipClaim: "claim-a", CapabilityRevision: "cap-a", Protocol: "oms/v0alpha1",
+		SecretUID: "secret-uid", SecretResourceVersion: "1", TenantID: memoryv1.DeriveTenantID("cluster-a", namespaceUID), StoreName: "memories", StoreUUID: "11111111-1111-4111-8111-111111111111",
+		OwnershipClaim: "claim-a", CapabilityRevision: "cap-a", Protocol: "orka.memory.v1",
 		State: store.MemoryBackendBindingAccepting, ActivationEpoch: 1, MinimumFeatureEpoch: 1,
 		ValidationExpiresAt: now.Add(30 * time.Minute),
 	}
@@ -3756,7 +3756,7 @@ func recordActivationRecoveryReceiptForTest(t *testing.T, s *Store, binding stor
 	if _, err := s.RecordMemoryActivationRecoveryReceipt(context.Background(), store.MemoryActivationRecoveryReceipt{
 		Namespace: binding.Namespace, NamespaceUID: binding.NamespaceUID, BackendUID: binding.BackendUID,
 		RouteDigest: binding.RecoveryRouteIdentity().Digest(), StoreUUID: binding.StoreUUID,
-		ManifestDigest: protocol.ContentDigest("matched recovery manifest:" + binding.NamespaceUID + ":" + binding.BackendUID),
+		ManifestDigest: memoryv1.ContentDigest("matched recovery manifest:" + binding.NamespaceUID + ":" + binding.BackendUID),
 		Actor:          "operator", Reason: "test matched recovery prerequisite", VerifiedAt: now,
 	}); err != nil {
 		t.Fatalf("RecordMemoryActivationRecoveryReceipt: %v", err)
@@ -3796,23 +3796,23 @@ func newCanonicalMemoryMutation(
 	}
 	operationID := "mop-" + safeKey
 	protocolKind := ""
-	var state *protocol.MutationState
+	var state *memoryv1.MutationState
 	switch kind {
 	case store.MemoryOperationCreate:
-		protocolKind = protocol.MutationKindCreate
-		state = &protocol.MutationState{Content: content, Tags: []string{}, Metadata: map[string]string{}}
+		protocolKind = memoryv1.MutationKindCreate
+		state = &memoryv1.MutationState{Content: content, Tags: []string{}, Metadata: map[string]string{}}
 	case store.MemoryOperationReplace:
-		protocolKind = protocol.MutationKindReplace
-		state = &protocol.MutationState{Content: content, Tags: []string{}, Metadata: map[string]string{}}
+		protocolKind = memoryv1.MutationKindReplace
+		state = &memoryv1.MutationState{Content: content, Tags: []string{}, Metadata: map[string]string{}}
 	case store.MemoryOperationDelete:
-		protocolKind = protocol.MutationKindDelete
+		protocolKind = memoryv1.MutationKindDelete
 	default:
 		panic("unsupported test mutation kind: " + kind)
 	}
-	envelope := protocol.MutationEnvelope{
-		ProtocolVersion: protocol.Version,
+	envelope := memoryv1.MutationEnvelope{
+		ProtocolVersion: memoryv1.Version,
 		OperationID:     operationID,
-		Binding: protocol.Binding{
+		Binding: memoryv1.Binding{
 			ClusterID: binding.ClusterID, NamespaceUID: binding.NamespaceUID, BackendUID: binding.BackendUID,
 			AuthorityEpoch: uint64(binding.AuthorityEpoch), RoutingEpoch: uint64(binding.RoutingEpoch),
 			TenantID: binding.TenantID, StoreUUID: binding.StoreUUID,
@@ -3820,10 +3820,10 @@ func newCanonicalMemoryMutation(
 		MemoryID: memoryID, Kind: protocolKind, Generation: uint64(desiredGeneration),
 		ExpectedGeneration: uint64(expectedGeneration), ExpectedBackendVersion: expectedBackendVersion, State: state,
 	}
-	if err := protocol.PrepareMutation(&envelope); err != nil {
+	if err := memoryv1.PrepareMutation(&envelope); err != nil {
 		panic(err)
 	}
-	payload, err := protocol.EncodeJSON(envelope)
+	payload, err := memoryv1.EncodeJSON(envelope)
 	if err != nil {
 		panic(err)
 	}
@@ -3834,7 +3834,7 @@ func newMemoryMutationFromEnvelope(
 	binding store.MemoryBackendBinding,
 	now time.Time,
 	memoryID, key, requestDigest string,
-	envelope protocol.MutationEnvelope,
+	envelope memoryv1.MutationEnvelope,
 	payload []byte,
 ) store.MemoryMutationAdmission {
 	operationID := envelope.OperationID
@@ -3924,22 +3924,22 @@ func newRemoteProposalApplyAdmission(binding store.MemoryBackendBinding, proposa
 	operationID := "mop-" + key
 	tags, _ := canonicalRemoteProposalTags(proposal.Description)
 	metadata, _ := canonicalRemoteProposalMetadata(proposal)
-	envelope := protocol.MutationEnvelope{
-		ProtocolVersion: protocol.Version,
+	envelope := memoryv1.MutationEnvelope{
+		ProtocolVersion: memoryv1.Version,
 		OperationID:     operationID,
-		Binding: protocol.Binding{
+		Binding: memoryv1.Binding{
 			ClusterID: binding.ClusterID, NamespaceUID: binding.NamespaceUID, BackendUID: binding.BackendUID,
 			AuthorityEpoch: uint64(binding.AuthorityEpoch), RoutingEpoch: uint64(binding.RoutingEpoch),
 			TenantID: binding.TenantID, StoreUUID: binding.StoreUUID,
 		},
-		MemoryID: memoryID, Kind: protocol.MutationKindCreate, Generation: 1,
+		MemoryID: memoryID, Kind: memoryv1.MutationKindCreate, Generation: 1,
 		ExpectedGeneration: 0, ExpectedBackendVersion: "",
-		State: &protocol.MutationState{Content: proposal.Content, Tags: tags, Metadata: metadata},
+		State: &memoryv1.MutationState{Content: proposal.Content, Tags: tags, Metadata: metadata},
 	}
-	if err := protocol.PrepareMutation(&envelope); err != nil {
+	if err := memoryv1.PrepareMutation(&envelope); err != nil {
 		panic(err)
 	}
-	payload, err := protocol.EncodeJSON(envelope)
+	payload, err := memoryv1.EncodeJSON(envelope)
 	if err != nil {
 		panic(err)
 	}
@@ -4207,7 +4207,7 @@ func TestDeleteCompletionRejectsWrongBindingAndContentDigests(t *testing.T) {
 	}
 	dispatch := claimAndSendOperationForTest(t, s, binding, deleted.Operation, now.Add(6*time.Second))
 	completion := completionForDispatch(binding, dispatch, now.Add(8*time.Second), "backend-v2", "remote-delete")
-	completion.Receipt.BindingIdentityDigest = protocol.ContentDigest("wrong binding")
+	completion.Receipt.BindingIdentityDigest = memoryv1.ContentDigest("wrong binding")
 	if _, err := s.CompleteMemoryOperation(ctx, completion); !errors.Is(err, store.ErrConflict) {
 		t.Fatalf("wrong binding digest error = %v, want ErrConflict", err)
 	}
@@ -4245,7 +4245,7 @@ func TestHistoricalRoutingCheckpointCanPurgeRetainedOperation(t *testing.T) {
 	checkpoint, err := s.RecordMemoryVerifiedCheckpoint(ctx, store.MemoryVerifiedCheckpoint{
 		ID: "mcheckpoint-historical", NamespaceUID: binding.NamespaceUID, BackendUID: binding.BackendUID,
 		AuthorityEpoch: binding.AuthorityEpoch, RoutingEpoch: binding.RoutingEpoch, StoreUUID: binding.StoreUUID,
-		MaximumOperationSequence: operation.Sequence, CheckpointDigest: protocol.ContentDigest("historical checkpoint"),
+		MaximumOperationSequence: operation.Sequence, CheckpointDigest: memoryv1.ContentDigest("historical checkpoint"),
 		Actor: "operator", Reason: "verified old route checkpoint", VerifiedAt: checkpointAt,
 	})
 	if err != nil {
@@ -4276,7 +4276,7 @@ func TestCurrentRoutingCheckpointCoversPriorFencedPayloads(t *testing.T) {
 	oldCheckpoint, err := s.RecordMemoryVerifiedCheckpoint(ctx, store.MemoryVerifiedCheckpoint{
 		ID: "mcheckpoint-prior-route", NamespaceUID: binding.NamespaceUID, BackendUID: binding.BackendUID,
 		AuthorityEpoch: binding.AuthorityEpoch, RoutingEpoch: binding.RoutingEpoch, StoreUUID: binding.StoreUUID,
-		MaximumOperationSequence: operation.Sequence, CheckpointDigest: protocol.ContentDigest("prior route checkpoint"),
+		MaximumOperationSequence: operation.Sequence, CheckpointDigest: memoryv1.ContentDigest("prior route checkpoint"),
 		Actor: "operator", Reason: "verify prior route", VerifiedAt: now.Add(2 * time.Second),
 	})
 	if err != nil || oldCheckpoint.RoutingEpoch != binding.RoutingEpoch {
@@ -4295,7 +4295,7 @@ func TestCurrentRoutingCheckpointCoversPriorFencedPayloads(t *testing.T) {
 	checkpoint, err := s.RecordMemoryVerifiedCheckpoint(ctx, store.MemoryVerifiedCheckpoint{
 		ID: "mcheckpoint-current-route", NamespaceUID: current.NamespaceUID, BackendUID: current.BackendUID,
 		AuthorityEpoch: current.AuthorityEpoch, RoutingEpoch: current.RoutingEpoch, StoreUUID: current.StoreUUID,
-		MaximumOperationSequence: operation.Sequence, CheckpointDigest: protocol.ContentDigest("current route checkpoint"),
+		MaximumOperationSequence: operation.Sequence, CheckpointDigest: memoryv1.ContentDigest("current route checkpoint"),
 		Actor: "operator", Reason: "verify current route and prior fenced ledger", VerifiedAt: checkpointAt,
 	})
 	if err != nil {
@@ -4347,7 +4347,7 @@ func TestTombstonePurgeWaitsForIndependentRetentionGates(t *testing.T) {
 	checkpoint, err := s.RecordMemoryVerifiedCheckpoint(ctx, store.MemoryVerifiedCheckpoint{
 		ID: "mcheckpoint-tombstone", NamespaceUID: binding.NamespaceUID, BackendUID: binding.BackendUID,
 		AuthorityEpoch: binding.AuthorityEpoch, RoutingEpoch: binding.RoutingEpoch, StoreUUID: binding.StoreUUID,
-		MaximumOperationSequence: deleteOperation.Sequence, CheckpointDigest: protocol.ContentDigest("tombstone checkpoint"),
+		MaximumOperationSequence: deleteOperation.Sequence, CheckpointDigest: memoryv1.ContentDigest("tombstone checkpoint"),
 		Actor: "operator", Reason: "verified checkpoint", VerifiedAt: checkpointAt,
 	})
 	if err != nil {
@@ -4442,9 +4442,9 @@ func TestActivationUsesExactBindingMinimumFeatureEpoch(t *testing.T) {
 		AuthorityEpoch: 1, RoutingEpoch: 1, SpecDigest: "spec", EndpointDigest: "endpoint",
 		ResolvedAddressDigest: "addresses", ServerCertificateDigest: "certificate",
 		SecretName: "memory-auth", SecretKey: "token", SecretUID: "secret-a", SecretResourceVersion: "1",
-		TenantID:  protocol.DeriveTenantID("cluster-a", "team-feature-epoch-uid"),
+		TenantID:  memoryv1.DeriveTenantID("cluster-a", "team-feature-epoch-uid"),
 		StoreName: "memories", StoreUUID: "11111111-1111-4111-8111-111111111111",
-		OwnershipClaim: "claim", CapabilityRevision: "cap", Protocol: "oms/v0alpha1",
+		OwnershipClaim: "claim", CapabilityRevision: "cap", Protocol: "orka.memory.v1",
 		State: store.MemoryBackendBindingAccepting, ActivationEpoch: 1, MinimumFeatureEpoch: 2,
 		ValidationExpiresAt: now.Add(time.Hour),
 	}
@@ -4472,9 +4472,9 @@ func TestActivationFeatureEpochRequiresObservedFoundationRelease(t *testing.T) {
 		SpecDigest: "spec", EndpointDigest: "endpoint", ResolvedAddressDigest: "addresses",
 		ServerCertificateDigest: "certificate", SecretName: "memory-auth", SecretKey: "token",
 		SecretUID: "secret-a", SecretResourceVersion: "1",
-		TenantID:  protocol.DeriveTenantID("cluster-a", "team-foundation-history-uid"),
+		TenantID:  memoryv1.DeriveTenantID("cluster-a", "team-foundation-history-uid"),
 		StoreName: "memories", StoreUUID: "11111111-1111-4111-8111-111111111111",
-		OwnershipClaim: "claim", CapabilityRevision: "cap", Protocol: "oms/v0alpha1",
+		OwnershipClaim: "claim", CapabilityRevision: "cap", Protocol: "orka.memory.v1",
 		State: store.MemoryBackendBindingAccepting, ValidationExpiresAt: now.Add(time.Hour),
 	}
 	recordActivationRecoveryReceiptForTest(t, s, binding, now)
@@ -4584,13 +4584,13 @@ func TestRetainedTerminalPayloadsCountTowardAdmissionQuota(t *testing.T) {
 func TestMemorySearchReplayQuotaCoversMaximumSnapshot(t *testing.T) {
 	const maximumPerCursorOverhead = 4 << 10
 	var requiredBytes int64
-	for seen := 1; seen < protocol.MaxSnapshotRecords; seen++ {
+	for seen := 1; seen < memoryv1.MaxSnapshotRecords; seen++ {
 		rawIdentityBytes := 1 + seen*sha256.Size
 		requiredBytes += int64(base64.StdEncoding.EncodedLen(rawIdentityBytes) + maximumPerCursorOverhead)
 	}
-	if governedMemoryQuotas.NamespaceSearchReplayRows < int64(protocol.MaxSnapshotRecords-1) {
+	if governedMemoryQuotas.NamespaceSearchReplayRows < int64(memoryv1.MaxSnapshotRecords-1) {
 		t.Fatalf("namespace replay rows = %d, want at least %d",
-			governedMemoryQuotas.NamespaceSearchReplayRows, protocol.MaxSnapshotRecords-1)
+			governedMemoryQuotas.NamespaceSearchReplayRows, memoryv1.MaxSnapshotRecords-1)
 	}
 	if governedMemoryQuotas.NamespaceSearchReplayBytes < requiredBytes {
 		t.Fatalf("namespace replay bytes = %d, want at least conservative maximum %d",
@@ -4872,7 +4872,7 @@ func TestCheckpointAndAuditPurgeUseReservedAuditCapacity(t *testing.T) {
 	checkpoint, err := s.RecordMemoryVerifiedCheckpoint(ctx, store.MemoryVerifiedCheckpoint{
 		ID: "mcheckpoint-audit-reserve", NamespaceUID: binding.NamespaceUID, BackendUID: binding.BackendUID,
 		AuthorityEpoch: binding.AuthorityEpoch, RoutingEpoch: binding.RoutingEpoch, StoreUUID: binding.StoreUUID,
-		MaximumOperationSequence: 0, CheckpointDigest: protocol.ContentDigest("audit reserve checkpoint"),
+		MaximumOperationSequence: 0, CheckpointDigest: memoryv1.ContentDigest("audit reserve checkpoint"),
 		Actor: "operator", Reason: "recover audit capacity", VerifiedAt: checkpointAt,
 	})
 	if err != nil {
@@ -4905,9 +4905,9 @@ func TestActivationRequiresFreshMatchedRecoveryReceipt(t *testing.T) {
 		AuthorityEpoch: 1, RoutingEpoch: 1, ActivationEpoch: 1, MinimumFeatureEpoch: 1,
 		SpecDigest: "spec", EndpointDigest: "endpoint", ResolvedAddressDigest: "addresses",
 		ServerCertificateDigest: "certificate", SecretName: "memory-auth", SecretKey: "token",
-		SecretUID: "secret-a", SecretResourceVersion: "1", TenantID: protocol.DeriveTenantID("cluster-a", "team-recovery-gate-uid"),
+		SecretUID: "secret-a", SecretResourceVersion: "1", TenantID: memoryv1.DeriveTenantID("cluster-a", "team-recovery-gate-uid"),
 		StoreName: "memories", StoreUUID: "11111111-1111-4111-8111-111111111111",
-		OwnershipClaim: "claim", CapabilityRevision: "cap", Protocol: "oms/v0alpha1",
+		OwnershipClaim: "claim", CapabilityRevision: "cap", Protocol: "orka.memory.v1",
 		State: store.MemoryBackendBindingAccepting, ValidationExpiresAt: now.Add(time.Hour),
 	}
 	activation := store.MemoryBackendActivation{Binding: binding, RequiredFeatureEpoch: 1, Actor: "operator", Reason: "activate", Now: now}
@@ -4992,7 +4992,7 @@ func TestAuditPurgePreservesAuthoritativeLifecycleAndGovernanceRows(t *testing.T
 	for _, action := range []string{"backend.lifecycle.intent", "backend.lifecycle.requested", "memory.trust", "memory.disable", "memory.transient"} {
 		if err := s.AppendMemoryAudit(ctx, store.MemoryAuditRecord{
 			Namespace: binding.Namespace, NamespaceUID: binding.NamespaceUID, Actor: "operator",
-			Action: action, MemoryID: "mem-a", RequestDigest: protocol.ContentDigest(action), CreatedAt: now.Add(time.Second),
+			Action: action, MemoryID: "mem-a", RequestDigest: memoryv1.ContentDigest(action), CreatedAt: now.Add(time.Second),
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -5001,7 +5001,7 @@ func TestAuditPurgePreservesAuthoritativeLifecycleAndGovernanceRows(t *testing.T
 	checkpoint, err := s.RecordMemoryVerifiedCheckpoint(ctx, store.MemoryVerifiedCheckpoint{
 		NamespaceUID: binding.NamespaceUID, BackendUID: binding.BackendUID,
 		AuthorityEpoch: binding.AuthorityEpoch, RoutingEpoch: binding.RoutingEpoch, StoreUUID: binding.StoreUUID,
-		MaximumOperationSequence: 0, CheckpointDigest: protocol.ContentDigest("audit checkpoint"),
+		MaximumOperationSequence: 0, CheckpointDigest: memoryv1.ContentDigest("audit checkpoint"),
 		Actor: "operator", Reason: "audit retention", VerifiedAt: checkpointAt,
 	})
 	if err != nil {

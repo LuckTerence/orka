@@ -544,7 +544,7 @@ func main() {
 	flag.DurationVar(&memoryBackendValidationTTL, "memory-backend-validation-ttl", 5*time.Minute,
 		"Maximum freshness lifetime for MemoryBackend validation.")
 	flag.DurationVar(&memoryBackendProbeTimeout, "memory-backend-probe-timeout", 15*time.Second,
-		"Timeout for strict OMS store, capability, and ownership probes.")
+		"Timeout for strict memory protocol store, capability, and ownership probes.")
 	flag.DurationVar(&memoryDispatcherInterval, "memory-dispatcher-interval", time.Second,
 		"Background durable memory operation dispatch interval.")
 	flag.IntVar(&memoryDispatcherGlobalConcurrency, "memory-dispatcher-global-concurrency", 16,

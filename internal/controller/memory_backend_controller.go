@@ -45,7 +45,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/endpointpolicy"
 	"github.com/orka-agents/orka/internal/events"
-	omsprotocol "github.com/orka-agents/orka/pkg/oms/protocol"
+	memoryv1 "github.com/orka-agents/orka/pkg/memory/v1"
 )
 
 const (
@@ -135,7 +135,7 @@ type MemoryBackendValidationSnapshot struct {
 }
 
 // MemoryBackendValidationBinding is a durable, non-effective candidate binding
-// used by OMS capabilities and ownership claim probes.
+// used by memory protocol capabilities and ownership claim probes.
 type MemoryBackendValidationBinding struct {
 	AuthorityEpoch      int64
 	RoutingEpoch        int64
@@ -269,11 +269,11 @@ type MemoryBackendDeletionResult struct {
 	Route                   MemoryBackendDurableRoute
 }
 
-// MemoryBackendOMSProber validates the exact pkg/oms/protocol store,
+// MemoryBackendProtocolProber validates the exact pkg/memory/v1 store,
 // capability, and ownership contract. Implementations must never persist or log
 // BearerToken. Store resolution is pre-authority; binding probes require durable
 // positive candidate epochs from MemoryBackendBindingCoordinator.
-type MemoryBackendOMSProber interface {
+type MemoryBackendProtocolProber interface {
 	ResolveStore(context.Context, MemoryBackendStoreProbeTarget) (MemoryBackendStoreProbeResult, error)
 	ProbeCapabilities(context.Context, MemoryBackendProbeTarget) (MemoryBackendProbeResult, error)
 	ProbeBinding(context.Context, MemoryBackendProbeTarget) (MemoryBackendProbeResult, error)
@@ -288,7 +288,7 @@ type MemoryBackendStoreProbeTarget struct {
 	ResolvedAddressDigest string
 	ResolvedAddresses     []netip.Addr
 	BearerToken           string
-	Profile               corev1alpha1.MemoryBackendProfile
+	Profile               corev1alpha1.MemoryBackendContractVersion
 	ClusterID             string
 	NamespaceUID          string
 	BackendUID            string
@@ -312,7 +312,7 @@ type MemoryBackendProbeTarget struct {
 	ResolvedAddressDigest string
 	ResolvedAddresses     []netip.Addr
 	BearerToken           string
-	Profile               corev1alpha1.MemoryBackendProfile
+	Profile               corev1alpha1.MemoryBackendContractVersion
 	ClusterID             string
 	NamespaceUID          string
 	BackendUID            string
@@ -323,7 +323,7 @@ type MemoryBackendProbeTarget struct {
 	Timeout               time.Duration
 }
 
-// MemoryBackendProbeResult is bounded, non-secret OMS validation output.
+// MemoryBackendProbeResult is bounded, non-secret memory protocol validation output.
 type MemoryBackendProbeResult struct {
 	AdapterName             string
 	AdapterVersion          string
@@ -335,7 +335,7 @@ type MemoryBackendProbeResult struct {
 	ServerCertificateDigest string
 }
 
-// MemoryBackendRoutingFenceTarget contains the freshly authorized, exact OMS
+// MemoryBackendRoutingFenceTarget contains the freshly authorized, exact memory protocol
 // authority identity whose durable routing fence must advance.
 type MemoryBackendRoutingFenceTarget struct {
 	Endpoint                        string
@@ -345,7 +345,7 @@ type MemoryBackendRoutingFenceTarget struct {
 	ResolvedAddresses               []netip.Addr
 	ExpectedServerCertificateDigest string
 	BearerToken                     string
-	Profile                         corev1alpha1.MemoryBackendProfile
+	Profile                         corev1alpha1.MemoryBackendContractVersion
 	ClusterID                       string
 	NamespaceUID                    string
 	BackendUID                      string
@@ -357,14 +357,14 @@ type MemoryBackendRoutingFenceTarget struct {
 }
 
 // MemoryBackendRoutingFenceResult is the bounded durable acknowledgement from
-// the OMS adapter.
+// the memory adapter.
 type MemoryBackendRoutingFenceResult struct {
 	MaximumRoutingEpoch     int64
 	ServerCertificateDigest string
 }
 
-// OMSHTTPProber implements the closed initial Orka OMS control-plane profile.
-type OMSHTTPProber struct {
+// ProtocolHTTPProber implements the closed initial Orka memory protocol control-plane contract.
+type ProtocolHTTPProber struct {
 	Policy     endpointpolicy.PublicHTTPSPolicy
 	BaseClient *http.Client
 	newClient  func(*http.Client, time.Duration, endpointpolicy.Resolution) (*http.Client, error)
@@ -376,7 +376,7 @@ type MemoryBackendReconciler struct {
 	client.Client
 	APIReader          client.Reader
 	EndpointPolicy     endpointpolicy.PublicHTTPSPolicy
-	OMSProber          MemoryBackendOMSProber
+	ProtocolProber     MemoryBackendProtocolProber
 	BindingCoordinator MemoryBackendBindingCoordinator
 	ClusterIdentity    string
 	ValidationTTL      time.Duration
@@ -503,7 +503,7 @@ func (r *MemoryBackendReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		if !validationCandidateMatchesCurrent(candidate, backend, specDigest) {
 			if candidateErr = r.fenceAndRetireMemoryBackendValidationCandidate(ctx, backend, candidate); candidateErr != nil {
 				status.Reason, status.Message = memoryBackendProbeFailure(candidateErr)
-				if status.Reason == "OMSProbeFailed" {
+				if status.Reason == "ProtocolProbeFailed" {
 					status.Reason = "CandidateRetirementBlocked"
 					status.Message = "previous validation candidate could not be safely fenced and retired"
 				}
@@ -539,9 +539,9 @@ func (r *MemoryBackendReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	status.ResolvedRefs = true
 	conditions.resolved = true
 
-	prober := r.OMSProber
+	prober := r.ProtocolProber
 	if prober == nil {
-		prober = &OMSHTTPProber{Policy: r.EndpointPolicy}
+		prober = &ProtocolHTTPProber{Policy: r.EndpointPolicy}
 	}
 	storeProbeCtx, cancelStoreProbe := context.WithTimeout(ctx, probeTimeout)
 	storeProbe, err := prober.ResolveStore(storeProbeCtx, MemoryBackendStoreProbeTarget{
@@ -551,7 +551,7 @@ func (r *MemoryBackendReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		ResolvedAddressDigest: resolution.ResolvedAddressDigest,
 		ResolvedAddresses:     resolution.Addresses,
 		BearerToken:           secret.Token,
-		Profile:               backend.Spec.Protocol.Profile,
+		Profile:               backend.Spec.ContractVersion,
 		ClusterID:             r.ClusterIdentity,
 		NamespaceUID:          string(namespace.UID),
 		BackendUID:            string(backend.UID),
@@ -611,7 +611,7 @@ func (r *MemoryBackendReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		SecretResourceVersion:      secret.ResourceVersion,
 		StoreName:                  backend.Spec.Store.Name,
 		StoreUUID:                  storeProbe.StoreUUID,
-		Protocol:                   string(backend.Spec.Protocol.Profile),
+		Protocol:                   string(backend.Spec.ContractVersion),
 		PreviousEffectiveLifecycle: backend.Status.EffectiveLifecycleState,
 		PreviousAuthorityEpoch:     backend.Status.AuthorityEpoch,
 		PreviousRoutingEpoch:       backend.Status.RoutingEpoch,
@@ -661,7 +661,7 @@ func (r *MemoryBackendReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			EndpointDigest: resolution.EndpointDigest, ResolvedAddressDigest: resolution.ResolvedAddressDigest,
 			ServerCertificateDigest: storeProbe.ServerCertificateDigest, SecretName: secret.Name, SecretKey: secret.Key,
 			SecretUID: string(secret.UID), SecretResourceVersion: secret.ResourceVersion, TenantID: tenantID,
-			StoreName: backend.Spec.Store.Name, StoreUUID: storeProbe.StoreUUID, Protocol: backend.Spec.Protocol.Profile,
+			StoreName: backend.Spec.Store.Name, StoreUUID: storeProbe.StoreUUID, Protocol: backend.Spec.ContractVersion,
 			AuthorityEpoch: prepared.AuthorityEpoch, RoutingEpoch: prepared.RoutingEpoch,
 			CandidateDigest: prepared.CandidateDigest,
 		}
@@ -687,7 +687,7 @@ func (r *MemoryBackendReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		Endpoint: resolution.BaseURL, EndpointIdentity: resolution.Identity,
 		EndpointDigest: resolution.EndpointDigest, ResolvedAddressDigest: resolution.ResolvedAddressDigest,
 		ResolvedAddresses: resolution.Addresses, BearerToken: secret.Token,
-		Profile: backend.Spec.Protocol.Profile, ClusterID: r.ClusterIdentity,
+		Profile: backend.Spec.ContractVersion, ClusterID: r.ClusterIdentity,
 		NamespaceUID: string(namespace.UID), BackendUID: string(backend.UID), TenantID: tenantID,
 		StoreUUID: storeProbe.StoreUUID, AuthorityEpoch: prepared.AuthorityEpoch,
 		RoutingEpoch: prepared.RoutingEpoch, Timeout: probeTimeout,
@@ -717,8 +717,8 @@ func (r *MemoryBackendReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			if fenceErr != nil {
 				status.Reason, status.Message = memoryBackendProbeFailure(fenceErr)
 			} else {
-				status.Reason = "OMSRoutingFenceAcknowledgementInvalid"
-				status.Message = "OMS routing fence acknowledgement did not match the validation candidate"
+				status.Reason = "ProtocolRoutingFenceAcknowledgementInvalid"
+				status.Message = "memory protocol routing fence acknowledgement did not match the validation candidate"
 			}
 			expireMemoryBackendValidation(&status, now)
 			return r.publishMemoryBackendStatus(ctx, backend, status, conditions, now, defaultMemoryBackendRequeueInterval)
@@ -774,8 +774,8 @@ func (r *MemoryBackendReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return r.publishMemoryBackendStatus(ctx, backend, status, conditions, now, defaultMemoryBackendRequeueInterval)
 	}
 	if probe.ServerCertificateDigest != storeProbe.ServerCertificateDigest {
-		status.Reason = "OMSCertificateChanged"
-		status.Message = "OMS server certificate identity changed during validation"
+		status.Reason = "ProtocolCertificateChanged"
+		status.Message = "memory adapter server certificate identity changed during validation"
 		expireMemoryBackendValidation(&status, now)
 		return r.publishMemoryBackendStatus(ctx, backend, status, conditions, now, defaultMemoryBackendRequeueInterval)
 	}
@@ -827,7 +827,7 @@ func (r *MemoryBackendReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		SecretUID:                  string(secret.UID),
 		SecretResourceVersion:      secret.ResourceVersion,
 		StoreName:                  backend.Spec.Store.Name,
-		Protocol:                   string(backend.Spec.Protocol.Profile),
+		Protocol:                   string(backend.Spec.ContractVersion),
 		StoreUUID:                  storeProbe.StoreUUID,
 		OwnershipClaimIdentity:     probe.OwnershipClaimIdentity,
 		Capabilities:               *status.ObservedCapabilities,
@@ -997,7 +997,7 @@ func (r *MemoryBackendReconciler) reconcileMemoryBackendBarrierWithoutProbe(
 		Namespace: backend.Namespace, NamespaceUID: string(namespace.UID), BackendUID: string(backend.UID),
 		BackendGeneration: backend.Generation, ClusterID: r.ClusterIdentity,
 		ClusterIdentityDigest: memoryBackendDigest(r.ClusterIdentity), RequestedLifecycle: backend.Spec.RequestedLifecycle(),
-		SpecDigest: specDigest, StoreName: backend.Spec.Store.Name, Protocol: string(backend.Spec.Protocol.Profile),
+		SpecDigest: specDigest, StoreName: backend.Spec.Store.Name, Protocol: string(backend.Spec.ContractVersion),
 		LifecycleIntentDigest: intentDigest,
 	}
 	binding, err := r.BindingCoordinator.ReconcileMemoryBackendBinding(ctx, snapshot)
@@ -1082,59 +1082,59 @@ func (r *MemoryBackendReconciler) resolveMemoryBackendDurableRoute(
 		route.EndpointDigest == "" || route.ResolvedAddressDigest == "" || route.ServerCertificateDigest == "" ||
 		route.SecretName == "" || route.SecretKey == "" || route.SecretUID == "" ||
 		route.SecretResourceVersion == "" || route.TenantID == "" || route.StoreName == "" || route.StoreUUID == "" {
-		return nil, newOMSProbeError("OMSRoutingFenceIdentityInvalid", "durable routing fence target contains incomplete identity")
+		return nil, newProtocolProbeError("ProtocolRoutingFenceIdentityInvalid", "durable routing fence target contains incomplete identity")
 	}
 	if r.APIReader == nil || strings.TrimSpace(r.ClusterIdentity) == "" {
-		return nil, newOMSProbeError("OMSRoutingFenceConfigurationInvalid", "durable routing fence requires uncached Kubernetes identity reads")
+		return nil, newProtocolProbeError("ProtocolRoutingFenceConfigurationInvalid", "durable routing fence requires uncached Kubernetes identity reads")
 	}
 	fresh := &corev1alpha1.MemoryBackend{}
 	if err := r.APIReader.Get(ctx, client.ObjectKeyFromObject(backend), fresh); err != nil {
-		return nil, newOMSProbeError("OMSRoutingFenceBackendReadFailed", "durable routing fence backend identity could not be read")
+		return nil, newProtocolProbeError("ProtocolRoutingFenceBackendReadFailed", "durable routing fence backend identity could not be read")
 	}
 	if fresh.UID != backend.UID || fresh.Generation != backend.Generation || !fresh.DeletionTimestamp.IsZero() ||
 		string(fresh.UID) != route.BackendUID || fresh.Namespace != route.Namespace ||
-		fresh.Spec.Store.Name != route.StoreName || string(fresh.Spec.Protocol.Profile) != route.Protocol ||
+		fresh.Spec.Store.Name != route.StoreName || string(fresh.Spec.ContractVersion) != route.Protocol ||
 		strings.TrimSpace(fresh.Spec.ClientAuth.BearerTokenSecretRef.Name) != route.SecretName ||
 		strings.TrimSpace(fresh.Spec.ClientAuth.BearerTokenSecretRef.Key) != route.SecretKey {
-		return nil, newOMSProbeError("OMSRoutingFenceIdentityInvalid", "durable routing fence backend or route identity changed")
+		return nil, newProtocolProbeError("ProtocolRoutingFenceIdentityInvalid", "durable routing fence backend or route identity changed")
 	}
 	namespace := &corev1.Namespace{}
 	if err := r.APIReader.Get(ctx, client.ObjectKey{Name: fresh.Namespace}, namespace); err != nil || namespace.UID == "" {
-		return nil, newOMSProbeError("OMSRoutingFenceNamespaceReadFailed", "durable routing fence namespace identity could not be read")
+		return nil, newProtocolProbeError("ProtocolRoutingFenceNamespaceReadFailed", "durable routing fence namespace identity could not be read")
 	}
 	if string(namespace.UID) != route.NamespaceUID || !namespace.DeletionTimestamp.IsZero() {
-		return nil, newOMSProbeError("OMSRoutingFenceIdentityInvalid", "durable routing fence namespace identity or termination state changed")
+		return nil, newProtocolProbeError("ProtocolRoutingFenceIdentityInvalid", "durable routing fence namespace identity or termination state changed")
 	}
 	tenantID := deriveMemoryBackendTenantID(r.ClusterIdentity, namespace.UID)
 	if tenantID != route.TenantID || route.ClusterID != "" && route.ClusterID != r.ClusterIdentity {
-		return nil, newOMSProbeError("OMSRoutingFenceIdentityInvalid", "durable routing fence tenant or cluster identity changed")
+		return nil, newProtocolProbeError("ProtocolRoutingFenceIdentityInvalid", "durable routing fence tenant or cluster identity changed")
 	}
 	timeout := r.probeTimeout()
 	resolution, err := r.resolveMemoryBackendEndpoint(ctx, fresh.Spec.Deployment.Endpoint, timeout)
 	if err != nil {
-		return nil, newOMSProbeError("OMSEndpointResolutionFailed", "OMS endpoint failed fresh public DNS validation")
+		return nil, newProtocolProbeError("ProtocolEndpointResolutionFailed", "memory adapter endpoint failed fresh public DNS validation")
 	}
 	if resolution.EndpointDigest != route.EndpointDigest || resolution.ResolvedAddressDigest != route.ResolvedAddressDigest {
-		return nil, newOMSProbeError("OMSEndpointIdentityChanged", "OMS endpoint or resolved address identity changed before durable routing fence acknowledgement")
+		return nil, newProtocolProbeError("ProtocolEndpointIdentityChanged", "memory adapter endpoint or resolved address identity changed before durable routing fence acknowledgement")
 	}
 	secret, err := readMemoryBackendBearerSecret(ctx, r.APIReader, fresh, namespace.UID, tenantID, resolution.Identity)
 	if err != nil {
-		return nil, newOMSProbeError("OMSSecretBindingRejected", "OMS routing fence bearer Secret failed fresh identity validation")
+		return nil, newProtocolProbeError("ProtocolSecretBindingRejected", "memory protocol routing fence bearer Secret failed fresh identity validation")
 	}
 	if secret.Name != route.SecretName || secret.Key != route.SecretKey || string(secret.UID) != route.SecretUID ||
 		secret.ResourceVersion != route.SecretResourceVersion {
-		return nil, newOMSProbeError("OMSSecretIdentityChanged", "OMS routing fence bearer Secret identity or resourceVersion changed")
+		return nil, newProtocolProbeError("ProtocolSecretIdentityChanged", "memory protocol routing fence bearer Secret identity or resourceVersion changed")
 	}
-	prober := r.OMSProber
+	prober := r.ProtocolProber
 	if prober == nil {
-		prober = &OMSHTTPProber{Policy: r.EndpointPolicy}
+		prober = &ProtocolHTTPProber{Policy: r.EndpointPolicy}
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	storeProbe, err := prober.ResolveStore(probeCtx, MemoryBackendStoreProbeTarget{
 		Endpoint: resolution.BaseURL, EndpointIdentity: resolution.Identity,
 		EndpointDigest: resolution.EndpointDigest, ResolvedAddressDigest: resolution.ResolvedAddressDigest,
-		ResolvedAddresses: resolution.Addresses, BearerToken: secret.Token, Profile: fresh.Spec.Protocol.Profile,
+		ResolvedAddresses: resolution.Addresses, BearerToken: secret.Token, Profile: fresh.Spec.ContractVersion,
 		ClusterID: r.ClusterIdentity, NamespaceUID: route.NamespaceUID, BackendUID: route.BackendUID,
 		TenantID: route.TenantID, StoreName: route.StoreName, Timeout: timeout,
 	})
@@ -1142,7 +1142,7 @@ func (r *MemoryBackendReconciler) resolveMemoryBackendDurableRoute(
 		return nil, err
 	}
 	if storeProbe.StoreUUID != route.StoreUUID || storeProbe.ServerCertificateDigest != route.ServerCertificateDigest {
-		return nil, newOMSProbeError("OMSStoreIdentityChanged", "OMS store UUID or server certificate changed before durable routing fence acknowledgement")
+		return nil, newProtocolProbeError("ProtocolStoreIdentityChanged", "memory adapter store UUID or server certificate changed before durable routing fence acknowledgement")
 	}
 	return &memoryBackendRemoteFenceObservation{
 		resolution: resolution, secret: secret, serverCertificateDigest: storeProbe.ServerCertificateDigest,
@@ -1159,9 +1159,9 @@ func (r *MemoryBackendReconciler) advanceMemoryBackendRemoteFence(
 		return nil, err
 	}
 	timeout := r.probeTimeout()
-	prober := r.OMSProber
+	prober := r.ProtocolProber
 	if prober == nil {
-		prober = &OMSHTTPProber{Policy: r.EndpointPolicy}
+		prober = &ProtocolHTTPProber{Policy: r.EndpointPolicy}
 	}
 	fenceCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -1171,7 +1171,7 @@ func (r *MemoryBackendReconciler) advanceMemoryBackendRemoteFence(
 		ResolvedAddressDigest:           observation.resolution.ResolvedAddressDigest,
 		ResolvedAddresses:               observation.resolution.Addresses,
 		ExpectedServerCertificateDigest: observation.serverCertificateDigest,
-		BearerToken:                     observation.secret.Token, Profile: corev1alpha1.MemoryBackendProfile(route.Protocol),
+		BearerToken:                     observation.secret.Token, Profile: corev1alpha1.MemoryBackendContractVersion(route.Protocol),
 		ClusterID: r.ClusterIdentity, NamespaceUID: route.NamespaceUID, BackendUID: route.BackendUID,
 		TenantID: route.TenantID, StoreUUID: route.StoreUUID,
 		AuthorityEpoch: route.AuthorityEpoch, RoutingEpoch: route.RoutingEpoch, Timeout: timeout,
@@ -1180,7 +1180,7 @@ func (r *MemoryBackendReconciler) advanceMemoryBackendRemoteFence(
 		return nil, err
 	}
 	if result.MaximumRoutingEpoch != route.RoutingEpoch || result.ServerCertificateDigest != observation.serverCertificateDigest {
-		return nil, newOMSProbeError("OMSRoutingFenceAcknowledgementInvalid", "OMS routing fence acknowledgement did not match the exact durable target")
+		return nil, newProtocolProbeError("ProtocolRoutingFenceAcknowledgementInvalid", "memory protocol routing fence acknowledgement did not match the exact durable target")
 	}
 	observation.serverCertificateDigest = result.ServerCertificateDigest
 	return observation, nil
@@ -1497,8 +1497,8 @@ func setMemoryBackendConditions(
 	set(corev1alpha1.MemoryBackendConditionAccepted, state.accepted, "SpecAccepted", "SpecRejected", "backend spec is accepted", status.Message)
 	set(corev1alpha1.MemoryBackendConditionProtected, state.protected, "FinalizerPersisted", "FinalizerMissing", "backend protection finalizer is persisted", status.Message)
 	set(corev1alpha1.MemoryBackendConditionResolvedRefs, state.resolved, "ReferencesResolved", "ReferencesUnresolved", "namespace and Secret bindings are freshly resolved", status.Message)
-	set(corev1alpha1.MemoryBackendConditionConnected, state.connected, "OMSProbesPassed", "OMSProbesFailed", "strict OMS probes passed", status.Message)
-	set(corev1alpha1.MemoryBackendConditionCapabilitiesCompatible, state.capabilitiesCompatible, "CapabilitiesCompatible", "CapabilitiesIncompatible", "required OMS capabilities are present", status.Message)
+	set(corev1alpha1.MemoryBackendConditionConnected, state.connected, "ProtocolProbesPassed", "ProtocolProbesFailed", "strict memory protocol probes passed", status.Message)
+	set(corev1alpha1.MemoryBackendConditionCapabilitiesCompatible, state.capabilitiesCompatible, "CapabilitiesCompatible", "CapabilitiesIncompatible", "required memory protocol capabilities are present", status.Message)
 	set(corev1alpha1.MemoryBackendConditionFresh, state.fresh, "ValidationFresh", "ValidationExpired", "backend validation is fresh", status.Message)
 	set(corev1alpha1.MemoryBackendConditionReady, state.ready, "Ready", "NotReady", "backend is ready for its requested lifecycle", status.Message)
 	set(corev1alpha1.MemoryBackendConditionDeletionSafe, state.deletionSafe, "NotDeleting", "DeletionBlocked", "backend is not awaiting deletion", status.Message)
@@ -1521,9 +1521,8 @@ func validateMemoryBackendSpec(backend *corev1alpha1.MemoryBackend) error {
 	if strings.TrimSpace(backend.Namespace) == "" {
 		return fmt.Errorf("MemoryBackend namespace is required")
 	}
-	if backend.Spec.Protocol.OMSVersion != corev1alpha1.MemoryBackendOMSVersionV01 ||
-		backend.Spec.Protocol.Profile != corev1alpha1.MemoryBackendProfileV0Alpha1 {
-		return fmt.Errorf("unsupported OMS protocol/profile")
+	if backend.Spec.ContractVersion != corev1alpha1.MemoryBackendContractMemoryV1 {
+		return fmt.Errorf("unsupported memory backend contractVersion")
 	}
 	if backend.Spec.Deployment.Mode != corev1alpha1.MemoryBackendDeploymentModeExternalEndpoint {
 		return fmt.Errorf("deployment mode must be external-endpoint")
@@ -1572,33 +1571,33 @@ func memoryBackendDigestBytes(value []byte) string {
 }
 
 func deriveMemoryBackendTenantID(clusterID string, namespaceUID types.UID) string {
-	return omsprotocol.DeriveTenantID(strings.TrimSpace(clusterID), string(namespaceUID))
+	return memoryv1.DeriveTenantID(strings.TrimSpace(clusterID), string(namespaceUID))
 }
 
 type memoryBackendValidationCandidateSnapshot struct {
-	Version                 string                                   `json:"version"`
-	Namespace               string                                   `json:"namespace"`
-	NamespaceUID            string                                   `json:"namespaceUid"`
-	BackendUID              string                                   `json:"backendUid"`
-	BackendGeneration       int64                                    `json:"backendGeneration"`
-	RequestedLifecycle      corev1alpha1.MemoryBackendLifecycleState `json:"requestedLifecycle"`
-	LifecycleIntentDigest   string                                   `json:"lifecycleIntentDigest"`
-	SpecDigest              string                                   `json:"specDigest"`
-	EndpointIdentity        string                                   `json:"endpointIdentity"`
-	EndpointDigest          string                                   `json:"endpointDigest"`
-	ResolvedAddressDigest   string                                   `json:"resolvedAddressDigest"`
-	ServerCertificateDigest string                                   `json:"serverCertificateDigest"`
-	SecretName              string                                   `json:"secretName"`
-	SecretKey               string                                   `json:"secretKey"`
-	SecretUID               string                                   `json:"secretUid"`
-	SecretResourceVersion   string                                   `json:"secretResourceVersion"`
-	TenantID                string                                   `json:"tenantId"`
-	StoreName               string                                   `json:"storeName"`
-	StoreUUID               string                                   `json:"storeUuid"`
-	Protocol                corev1alpha1.MemoryBackendProfile        `json:"protocol"`
-	AuthorityEpoch          int64                                    `json:"authorityEpoch"`
-	RoutingEpoch            int64                                    `json:"routingEpoch"`
-	CandidateDigest         string                                   `json:"candidateDigest"`
+	Version                 string                                    `json:"version"`
+	Namespace               string                                    `json:"namespace"`
+	NamespaceUID            string                                    `json:"namespaceUid"`
+	BackendUID              string                                    `json:"backendUid"`
+	BackendGeneration       int64                                     `json:"backendGeneration"`
+	RequestedLifecycle      corev1alpha1.MemoryBackendLifecycleState  `json:"requestedLifecycle"`
+	LifecycleIntentDigest   string                                    `json:"lifecycleIntentDigest"`
+	SpecDigest              string                                    `json:"specDigest"`
+	EndpointIdentity        string                                    `json:"endpointIdentity"`
+	EndpointDigest          string                                    `json:"endpointDigest"`
+	ResolvedAddressDigest   string                                    `json:"resolvedAddressDigest"`
+	ServerCertificateDigest string                                    `json:"serverCertificateDigest"`
+	SecretName              string                                    `json:"secretName"`
+	SecretKey               string                                    `json:"secretKey"`
+	SecretUID               string                                    `json:"secretUid"`
+	SecretResourceVersion   string                                    `json:"secretResourceVersion"`
+	TenantID                string                                    `json:"tenantId"`
+	StoreName               string                                    `json:"storeName"`
+	StoreUUID               string                                    `json:"storeUuid"`
+	Protocol                corev1alpha1.MemoryBackendContractVersion `json:"protocol"`
+	AuthorityEpoch          int64                                     `json:"authorityEpoch"`
+	RoutingEpoch            int64                                     `json:"routingEpoch"`
+	CandidateDigest         string                                    `json:"candidateDigest"`
 }
 
 func decodeMemoryBackendValidationCandidate(value string) (memoryBackendValidationCandidateSnapshot, error) {
@@ -1648,7 +1647,7 @@ func validationCandidateMatchesCurrent(
 		candidate.BackendGeneration == backend.Generation && candidate.RequestedLifecycle == backend.Spec.RequestedLifecycle() &&
 		candidate.LifecycleIntentDigest == strings.TrimSpace(backend.Annotations[corev1alpha1.MemoryBackendLifecycleIntentAnnotation]) &&
 		candidate.SpecDigest == specDigest && candidate.StoreName == backend.Spec.Store.Name &&
-		candidate.Protocol == backend.Spec.Protocol.Profile &&
+		candidate.Protocol == backend.Spec.ContractVersion &&
 		candidate.SecretName == strings.TrimSpace(backend.Spec.ClientAuth.BearerTokenSecretRef.Name) &&
 		candidate.SecretKey == strings.TrimSpace(backend.Spec.ClientAuth.BearerTokenSecretRef.Key)
 }
@@ -1772,7 +1771,7 @@ func (r *MemoryBackendReconciler) clearMemoryBackendValidationCandidate(
 func (r *MemoryBackendReconciler) revalidateMemoryBackendCandidateRoute(
 	ctx context.Context,
 	candidate memoryBackendValidationCandidateSnapshot,
-	prober MemoryBackendOMSProber,
+	prober MemoryBackendProtocolProber,
 	probeTimeout time.Duration,
 	allowDeleting bool,
 ) (memoryBackendFreshCandidateRoute, error) {
@@ -1828,7 +1827,7 @@ func (r *MemoryBackendReconciler) revalidateMemoryBackendCandidateRoute(
 	storeProbe, err := prober.ResolveStore(probeCtx, MemoryBackendStoreProbeTarget{
 		Endpoint: resolution.BaseURL, EndpointIdentity: resolution.Identity,
 		EndpointDigest: resolution.EndpointDigest, ResolvedAddressDigest: resolution.ResolvedAddressDigest,
-		ResolvedAddresses: resolution.Addresses, BearerToken: secret.Token, Profile: fresh.Spec.Protocol.Profile,
+		ResolvedAddresses: resolution.Addresses, BearerToken: secret.Token, Profile: fresh.Spec.ContractVersion,
 		ClusterID: r.ClusterIdentity, NamespaceUID: candidate.NamespaceUID, BackendUID: candidate.BackendUID,
 		TenantID: tenantID, StoreName: candidate.StoreName, Timeout: probeTimeout,
 	})
@@ -1846,7 +1845,7 @@ func (r *MemoryBackendReconciler) revalidateMemoryBackendCandidateRoute(
 func (r *MemoryBackendReconciler) revalidateRetiringMemoryBackendCandidateRoute(
 	ctx context.Context,
 	candidate memoryBackendValidationCandidateSnapshot,
-	prober MemoryBackendOMSProber,
+	prober MemoryBackendProtocolProber,
 	probeTimeout time.Duration,
 ) (memoryBackendFreshCandidateRoute, error) {
 	if r.APIReader == nil {
@@ -1884,7 +1883,7 @@ func (r *MemoryBackendReconciler) revalidateRetiringMemoryBackendCandidateRoute(
 		return memoryBackendFreshCandidateRoute{}, fmt.Errorf("tenant identity changed")
 	}
 	candidateBackend := fresh.DeepCopy()
-	candidateBackend.Spec.Protocol.Profile = candidate.Protocol
+	candidateBackend.Spec.ContractVersion = candidate.Protocol
 	candidateBackend.Spec.Deployment.Endpoint = candidate.EndpointIdentity
 	candidateBackend.Spec.ClientAuth.BearerTokenSecretRef.Name = candidate.SecretName
 	candidateBackend.Spec.ClientAuth.BearerTokenSecretRef.Key = candidate.SecretKey
@@ -1926,9 +1925,9 @@ func (r *MemoryBackendReconciler) fenceAndRetireMemoryBackendValidationCandidate
 		return fmt.Errorf("durable backend coordinator is not configured")
 	}
 	probeTimeout := r.probeTimeout()
-	prober := r.OMSProber
+	prober := r.ProtocolProber
 	if prober == nil {
-		prober = &OMSHTTPProber{Policy: r.EndpointPolicy}
+		prober = &ProtocolHTTPProber{Policy: r.EndpointPolicy}
 	}
 	fresh, err := r.revalidateRetiringMemoryBackendCandidateRoute(ctx, candidate, prober, probeTimeout)
 	if err != nil {
@@ -1950,7 +1949,7 @@ func (r *MemoryBackendReconciler) fenceAndRetireMemoryBackendValidationCandidate
 		return err
 	}
 	if fence.MaximumRoutingEpoch != candidate.RoutingEpoch || fence.ServerCertificateDigest != candidate.ServerCertificateDigest {
-		return fmt.Errorf("OMS routing fence acknowledgement did not match validation candidate")
+		return fmt.Errorf("memory protocol routing fence acknowledgement did not match validation candidate")
 	}
 	if err := r.BindingCoordinator.RetireMemoryBackendValidationCandidate(ctx, MemoryBackendValidationCandidateRetirement{
 		Namespace: candidate.Namespace, NamespaceUID: candidate.NamespaceUID, BackendUID: candidate.BackendUID,
@@ -2006,10 +2005,10 @@ func readMemoryBackendBearerSecret(
 
 func validateMemoryBackendStoreProbeResult(result MemoryBackendStoreProbeResult) error {
 	if !memoryBackendStoreUUIDPattern.MatchString(result.StoreUUID) {
-		return fmt.Errorf("OMS store UUID is invalid")
+		return fmt.Errorf("memory adapter store UUID is invalid")
 	}
 	if !memoryBackendDigestPattern.MatchString(result.ServerCertificateDigest) {
-		return fmt.Errorf("OMS store probe TLS identity is invalid")
+		return fmt.Errorf("memory adapter store probe TLS identity is invalid")
 	}
 	return nil
 }
@@ -2019,7 +2018,7 @@ func validateMemoryBackendProbeResult(result MemoryBackendProbeResult, now time.
 		return err
 	}
 	if !memoryBackendSafeIdentityPattern.MatchString(result.OwnershipClaimIdentity) {
-		return fmt.Errorf("OMS ownership claim identity is invalid")
+		return fmt.Errorf("memory adapter ownership claim identity is invalid")
 	}
 	return nil
 }
@@ -2027,17 +2026,17 @@ func validateMemoryBackendProbeResult(result MemoryBackendProbeResult, now time.
 func validateMemoryBackendCapabilityProbeResult(result MemoryBackendProbeResult, now time.Time) error {
 	if !memoryBackendProtocolIDPattern.MatchString(result.AdapterName) ||
 		!memoryBackendProtocolIDPattern.MatchString(result.AdapterVersion) {
-		return fmt.Errorf("OMS adapter identity is invalid")
+		return fmt.Errorf("memory adapter identity is invalid")
 	}
 	if len(result.CapabilityRevision) == 0 || len(result.CapabilityRevision) > 128 ||
 		!memoryBackendProtocolIDPattern.MatchString(result.CapabilityRevision) {
-		return fmt.Errorf("OMS capability revision is invalid")
+		return fmt.Errorf("memory adapter capability revision is invalid")
 	}
 	if !result.CapabilityExpiresAt.After(now) {
-		return fmt.Errorf("OMS capability response is already expired")
+		return fmt.Errorf("memory adapter capability response is already expired")
 	}
 	if !memoryBackendDigestPattern.MatchString(result.ServerCertificateDigest) {
-		return fmt.Errorf("OMS server certificate identity is invalid")
+		return fmt.Errorf("memory adapter server certificate identity is invalid")
 	}
 	if err := validateMemoryBackendCapabilityLimits(result.CapabilityLimits); err != nil {
 		return err
@@ -2045,26 +2044,26 @@ func validateMemoryBackendCapabilityProbeResult(result MemoryBackendProbeResult,
 	seen := make(map[corev1alpha1.MemoryBackendCapability]struct{}, len(result.Capabilities))
 	for _, capability := range result.Capabilities {
 		if !knownMemoryBackendCapability(capability) {
-			return fmt.Errorf("OMS advertised an unknown capability")
+			return fmt.Errorf("memory adapter advertised an unknown capability")
 		}
 		if _, duplicate := seen[capability]; duplicate {
-			return fmt.Errorf("OMS advertised a duplicate capability")
+			return fmt.Errorf("memory adapter advertised a duplicate capability")
 		}
 		seen[capability] = struct{}{}
 	}
 	for _, required := range requiredMemoryBackendCapabilities {
 		if _, exists := seen[required]; !exists {
-			return fmt.Errorf("OMS is missing required capability %s", required)
+			return fmt.Errorf("memory adapter is missing required capability %s", required)
 		}
 	}
 	return nil
 }
 
 func validateMemoryBackendCapabilityLimits(limits corev1alpha1.MemoryBackendCapabilityLimits) error {
-	if limits.MaxRequestBytes < 1 || limits.MaxRequestBytes > omsprotocol.MaxHTTPBodyBytes ||
-		limits.MaxResponseBytes < 1 || limits.MaxResponseBytes > omsprotocol.MaxAdapterResponseBytes ||
-		limits.MaxContentBytes < 1 || limits.MaxContentBytes > omsprotocol.MaxContentBytes ||
-		limits.MaxTags < 1 || limits.MaxTags > omsprotocol.MaxTags ||
+	if limits.MaxRequestBytes < 1 || limits.MaxRequestBytes > memoryv1.MaxHTTPBodyBytes ||
+		limits.MaxResponseBytes < 1 || limits.MaxResponseBytes > memoryv1.MaxAdapterResponseBytes ||
+		limits.MaxContentBytes < 1 || limits.MaxContentBytes > memoryv1.MaxContentBytes ||
+		limits.MaxTags < 1 || limits.MaxTags > memoryv1.MaxTags ||
 		limits.MaxTagBytes < 1 || limits.MaxTagBytes > 128 ||
 		limits.MaxMetadataEntries < 1 || limits.MaxMetadataEntries > 32 ||
 		limits.MaxMetadataKeyBytes < 1 || limits.MaxMetadataKeyBytes > 64 ||
@@ -2072,8 +2071,8 @@ func validateMemoryBackendCapabilityLimits(limits corev1alpha1.MemoryBackendCapa
 		limits.MaxQueryBytes < 1 || limits.MaxQueryBytes > 1024 ||
 		limits.MaxPageSize < 1 || limits.MaxPageSize > 8 ||
 		limits.MaxSnapshotRecords < 1 || limits.MaxSnapshotRecords > 1024 ||
-		limits.SnapshotTTLSeconds < 1 || limits.SnapshotTTLSeconds > omsprotocol.MaxSnapshotTTLSeconds {
-		return fmt.Errorf("OMS capability limits are invalid")
+		limits.SnapshotTTLSeconds < 1 || limits.SnapshotTTLSeconds > memoryv1.MaxSnapshotTTLSeconds {
+		return fmt.Errorf("memory adapter capability limits are invalid")
 	}
 	return nil
 }
@@ -2156,10 +2155,10 @@ func validateMemoryBackendBindingResult(
 }
 
 func memoryBackendProbeFailure(err error) (string, string) {
-	if failure, ok := err.(*omsProbeError); ok {
-		return sanitizeMemoryBackendReason(failure.reason, "OMSProbeFailed"), sanitizeMemoryBackendMessage(failure.message)
+	if failure, ok := err.(*adapterProbeError); ok {
+		return sanitizeMemoryBackendReason(failure.reason, "ProtocolProbeFailed"), sanitizeMemoryBackendMessage(failure.message)
 	}
-	return "OMSProbeFailed", "strict OMS validation probe failed"
+	return "ProtocolProbeFailed", "strict memory protocol validation probe failed"
 }
 
 func sanitizeMemoryBackendReason(reason, fallback string) string {
@@ -2204,26 +2203,26 @@ func memoryBackendRequeueAfter(now, expiry time.Time) time.Duration {
 	return min(candidate, defaultMemoryBackendRequeueInterval)
 }
 
-// --- Strict OMS HTTP probe implementation ---
+// --- Strict memory protocol HTTP probe implementation ---
 
-type omsProbeError struct {
+type adapterProbeError struct {
 	reason  string
 	message string
 }
 
-func (e *omsProbeError) Error() string { return e.message }
+func (e *adapterProbeError) Error() string { return e.message }
 
-func newOMSProbeError(reason, message string) error {
-	return &omsProbeError{reason: reason, message: message}
+func newProtocolProbeError(reason, message string) error {
+	return &adapterProbeError{reason: reason, message: message}
 }
 
 // ResolveStore performs the exact pre-authority /v1/stores/resolve exchange.
-func (p *OMSHTTPProber) ResolveStore(
+func (p *ProtocolHTTPProber) ResolveStore(
 	ctx context.Context,
 	target MemoryBackendStoreProbeTarget,
 ) (MemoryBackendStoreProbeResult, error) {
-	if p == nil || strings.TrimSpace(target.BearerToken) == "" || string(target.Profile) != omsprotocol.Version {
-		return MemoryBackendStoreProbeResult{}, newOMSProbeError("OMSProbeConfigurationInvalid", "OMS store probe configuration is incomplete")
+	if p == nil || strings.TrimSpace(target.BearerToken) == "" || string(target.Profile) != memoryv1.Version {
+		return MemoryBackendStoreProbeResult{}, newProtocolProbeError("ProtocolProbeConfigurationInvalid", "memory adapter store probe configuration is incomplete")
 	}
 	httpClient, err := p.httpClient(target.Timeout, endpointpolicy.Resolution{
 		BaseURL: target.Endpoint, Identity: target.EndpointIdentity, EndpointDigest: target.EndpointDigest,
@@ -2235,42 +2234,42 @@ func (p *OMSHTTPProber) ResolveStore(
 	if transport, ok := httpClient.Transport.(*http.Transport); ok {
 		defer transport.CloseIdleConnections()
 	}
-	binding := omsprotocol.StoreResolutionBinding{
+	binding := memoryv1.StoreResolutionBinding{
 		ClusterID: target.ClusterID, NamespaceUID: target.NamespaceUID,
 		BackendUID: target.BackendUID, TenantID: target.TenantID,
 	}
-	requestValue := omsprotocol.StoreResolveRequest{
-		ProtocolVersion: omsprotocol.Version,
+	requestValue := memoryv1.StoreResolveRequest{
+		ProtocolVersion: memoryv1.Version,
 		Binding:         binding,
 		StoreName:       target.StoreName,
 	}
-	if err := omsprotocol.ValidateStoreResolveRequest(&requestValue); err != nil {
-		return MemoryBackendStoreProbeResult{}, newOMSProbeError("OMSStoreProbeRequestInvalid", "OMS store probe identity was invalid")
+	if err := memoryv1.ValidateStoreResolveRequest(&requestValue); err != nil {
+		return MemoryBackendStoreProbeResult{}, newProtocolProbeError("ProtocolStoreProbeRequestInvalid", "memory adapter store probe identity was invalid")
 	}
-	payload, certificate, _, err := doOMSProbeRaw(
-		ctx, httpClient, target.Endpoint, omsprotocol.PathStoreResolve, target.BearerToken, requestValue, http.StatusOK,
+	payload, certificate, _, err := doProtocolProbeRaw(
+		ctx, httpClient, target.Endpoint, memoryv1.PathStoreResolve, target.BearerToken, requestValue, http.StatusOK,
 	)
 	if err != nil {
 		return MemoryBackendStoreProbeResult{}, err
 	}
-	response, err := omsprotocol.DecodeStoreResolveResponse(payload)
+	response, err := memoryv1.DecodeStoreResolveResponse(payload)
 	if err != nil {
-		return MemoryBackendStoreProbeResult{}, newOMSProbeError("OMSStoreProbeResponseInvalid", "OMS store probe response failed strict OMS decoding")
+		return MemoryBackendStoreProbeResult{}, newProtocolProbeError("ProtocolStoreProbeResponseInvalid", "memory adapter store probe response failed strict memory protocol decoding")
 	}
-	if !omsprotocol.StoreResolutionBindingEqual(response.Binding, binding) || response.StoreName != target.StoreName {
-		return MemoryBackendStoreProbeResult{}, newOMSProbeError("OMSStoreIdentityMismatch", "OMS store probe returned mismatched identity")
+	if !memoryv1.StoreResolutionBindingEqual(response.Binding, binding) || response.StoreName != target.StoreName {
+		return MemoryBackendStoreProbeResult{}, newProtocolProbeError("ProtocolStoreIdentityMismatch", "memory adapter store probe returned mismatched identity")
 	}
 	return MemoryBackendStoreProbeResult{StoreUUID: response.StoreUUID, ServerCertificateDigest: certificate}, nil
 }
 
 // ProbeCapabilities performs the non-mutating /v1/capabilities exchange used by Staged validation.
-func (p *OMSHTTPProber) ProbeCapabilities(
+func (p *ProtocolHTTPProber) ProbeCapabilities(
 	ctx context.Context,
 	target MemoryBackendProbeTarget,
 ) (MemoryBackendProbeResult, error) {
-	if p == nil || strings.TrimSpace(target.BearerToken) == "" || string(target.Profile) != omsprotocol.Version ||
+	if p == nil || strings.TrimSpace(target.BearerToken) == "" || string(target.Profile) != memoryv1.Version ||
 		target.AuthorityEpoch < 1 || target.RoutingEpoch < 1 {
-		return MemoryBackendProbeResult{}, newOMSProbeError("OMSProbeConfigurationInvalid", "OMS capability probe configuration is incomplete")
+		return MemoryBackendProbeResult{}, newProtocolProbeError("ProtocolProbeConfigurationInvalid", "memory adapter capability probe configuration is incomplete")
 	}
 	httpClient, err := p.httpClient(target.Timeout, endpointpolicy.Resolution{
 		BaseURL: target.Endpoint, Identity: target.EndpointIdentity, EndpointDigest: target.EndpointDigest,
@@ -2282,44 +2281,44 @@ func (p *OMSHTTPProber) ProbeCapabilities(
 	if transport, ok := httpClient.Transport.(*http.Transport); ok {
 		defer transport.CloseIdleConnections()
 	}
-	binding := omsprotocol.Binding{
+	binding := memoryv1.Binding{
 		ClusterID: target.ClusterID, NamespaceUID: target.NamespaceUID, BackendUID: target.BackendUID,
 		AuthorityEpoch: uint64(target.AuthorityEpoch), RoutingEpoch: uint64(target.RoutingEpoch),
 		TenantID: target.TenantID, StoreUUID: target.StoreUUID,
 	}
-	request := omsprotocol.CapabilitiesRequest{ProtocolVersion: omsprotocol.Version, Binding: binding}
-	if err := omsprotocol.ValidateCapabilitiesRequest(&request); err != nil {
-		return MemoryBackendProbeResult{}, newOMSProbeError("OMSCapabilityRequestInvalid", "OMS capability probe binding was invalid")
+	request := memoryv1.CapabilitiesRequest{ProtocolVersion: memoryv1.Version, Binding: binding}
+	if err := memoryv1.ValidateCapabilitiesRequest(&request); err != nil {
+		return MemoryBackendProbeResult{}, newProtocolProbeError("ProtocolCapabilityRequestInvalid", "memory adapter capability probe binding was invalid")
 	}
-	payload, certificate, _, err := doOMSProbeRaw(
-		ctx, httpClient, target.Endpoint, omsprotocol.PathCapabilities, target.BearerToken, request, http.StatusOK,
+	payload, certificate, _, err := doProtocolProbeRaw(
+		ctx, httpClient, target.Endpoint, memoryv1.PathCapabilities, target.BearerToken, request, http.StatusOK,
 	)
 	if err != nil {
 		return MemoryBackendProbeResult{}, err
 	}
-	capabilities, err := omsprotocol.DecodeCapabilitiesResponse(payload)
+	capabilities, err := memoryv1.DecodeCapabilitiesResponse(payload)
 	if err != nil {
-		return MemoryBackendProbeResult{}, newOMSProbeError("OMSCapabilityResponseInvalid", "OMS capability response failed strict OMS decoding")
+		return MemoryBackendProbeResult{}, newProtocolProbeError("ProtocolCapabilityResponseInvalid", "memory adapter capability response failed strict memory protocol decoding")
 	}
-	if !omsprotocol.BindingEqual(capabilities.Binding, binding) {
-		return MemoryBackendProbeResult{}, newOMSProbeError("OMSCapabilityIdentityMismatch", "OMS capability probe returned mismatched identity")
+	if !memoryv1.BindingEqual(capabilities.Binding, binding) {
+		return MemoryBackendProbeResult{}, newProtocolProbeError("ProtocolCapabilityIdentityMismatch", "memory adapter capability probe returned mismatched identity")
 	}
 	return MemoryBackendProbeResult{
 		AdapterName: capabilities.AdapterName, AdapterVersion: capabilities.AdapterVersion,
-		Capabilities: memoryBackendCapabilitiesFromOMS(capabilities.Capabilities), CapabilityRevision: capabilities.Revision,
-		CapabilityLimits:    memoryBackendLimitsFromOMS(capabilities.Limits),
+		Capabilities: memoryBackendCapabilitiesFromProtocol(capabilities.Capabilities), CapabilityRevision: capabilities.Revision,
+		CapabilityLimits:    memoryBackendLimitsFromProtocol(capabilities.Limits),
 		CapabilityExpiresAt: capabilities.ExpiresAt.UTC(), ServerCertificateDigest: certificate,
 	}, nil
 }
 
 // ProbeBinding performs exact /v1/capabilities and /v1/ownership/claim exchanges.
-func (p *OMSHTTPProber) ProbeBinding(
+func (p *ProtocolHTTPProber) ProbeBinding(
 	ctx context.Context,
 	target MemoryBackendProbeTarget,
 ) (MemoryBackendProbeResult, error) {
-	if p == nil || strings.TrimSpace(target.BearerToken) == "" || string(target.Profile) != omsprotocol.Version ||
+	if p == nil || strings.TrimSpace(target.BearerToken) == "" || string(target.Profile) != memoryv1.Version ||
 		target.AuthorityEpoch < 1 || target.RoutingEpoch < 1 {
-		return MemoryBackendProbeResult{}, newOMSProbeError("OMSProbeConfigurationInvalid", "OMS binding probe configuration is incomplete")
+		return MemoryBackendProbeResult{}, newProtocolProbeError("ProtocolProbeConfigurationInvalid", "memory protocol binding probe configuration is incomplete")
 	}
 	httpClient, err := p.httpClient(target.Timeout, endpointpolicy.Resolution{
 		BaseURL: target.Endpoint, Identity: target.EndpointIdentity, EndpointDigest: target.EndpointDigest,
@@ -2331,63 +2330,63 @@ func (p *OMSHTTPProber) ProbeBinding(
 	if transport, ok := httpClient.Transport.(*http.Transport); ok {
 		defer transport.CloseIdleConnections()
 	}
-	binding := omsprotocol.Binding{
+	binding := memoryv1.Binding{
 		ClusterID: target.ClusterID, NamespaceUID: target.NamespaceUID, BackendUID: target.BackendUID,
 		AuthorityEpoch: uint64(target.AuthorityEpoch), RoutingEpoch: uint64(target.RoutingEpoch),
 		TenantID: target.TenantID, StoreUUID: target.StoreUUID,
 	}
-	capabilityRequest := omsprotocol.CapabilitiesRequest{ProtocolVersion: omsprotocol.Version, Binding: binding}
-	if err := omsprotocol.ValidateCapabilitiesRequest(&capabilityRequest); err != nil {
-		return MemoryBackendProbeResult{}, newOMSProbeError("OMSCapabilityRequestInvalid", "OMS capability probe binding was invalid")
+	capabilityRequest := memoryv1.CapabilitiesRequest{ProtocolVersion: memoryv1.Version, Binding: binding}
+	if err := memoryv1.ValidateCapabilitiesRequest(&capabilityRequest); err != nil {
+		return MemoryBackendProbeResult{}, newProtocolProbeError("ProtocolCapabilityRequestInvalid", "memory adapter capability probe binding was invalid")
 	}
-	payload, capabilityCertificate, _, err := doOMSProbeRaw(
-		ctx, httpClient, target.Endpoint, omsprotocol.PathCapabilities, target.BearerToken, capabilityRequest, http.StatusOK,
+	payload, capabilityCertificate, _, err := doProtocolProbeRaw(
+		ctx, httpClient, target.Endpoint, memoryv1.PathCapabilities, target.BearerToken, capabilityRequest, http.StatusOK,
 	)
 	if err != nil {
 		return MemoryBackendProbeResult{}, err
 	}
-	capabilities, err := omsprotocol.DecodeCapabilitiesResponse(payload)
+	capabilities, err := memoryv1.DecodeCapabilitiesResponse(payload)
 	if err != nil {
-		return MemoryBackendProbeResult{}, newOMSProbeError("OMSCapabilityResponseInvalid", "OMS capability response failed strict OMS decoding")
+		return MemoryBackendProbeResult{}, newProtocolProbeError("ProtocolCapabilityResponseInvalid", "memory adapter capability response failed strict memory protocol decoding")
 	}
-	if !omsprotocol.BindingEqual(capabilities.Binding, binding) {
-		return MemoryBackendProbeResult{}, newOMSProbeError("OMSCapabilityIdentityMismatch", "OMS capability probe returned mismatched identity")
+	if !memoryv1.BindingEqual(capabilities.Binding, binding) {
+		return MemoryBackendProbeResult{}, newProtocolProbeError("ProtocolCapabilityIdentityMismatch", "memory adapter capability probe returned mismatched identity")
 	}
 
-	ownershipRequest := omsprotocol.OwnershipClaimRequest{ProtocolVersion: omsprotocol.Version, Binding: binding}
-	if err := omsprotocol.ValidateOwnershipClaimRequest(&ownershipRequest); err != nil {
-		return MemoryBackendProbeResult{}, newOMSProbeError("OMSOwnershipRequestInvalid", "OMS ownership claim binding was invalid")
+	ownershipRequest := memoryv1.OwnershipClaimRequest{ProtocolVersion: memoryv1.Version, Binding: binding}
+	if err := memoryv1.ValidateOwnershipClaimRequest(&ownershipRequest); err != nil {
+		return MemoryBackendProbeResult{}, newProtocolProbeError("ProtocolOwnershipRequestInvalid", "memory adapter ownership claim binding was invalid")
 	}
-	payload, ownershipCertificate, statusCode, err := doOMSProbeRaw(
-		ctx, httpClient, target.Endpoint, omsprotocol.PathOwnershipClaim, target.BearerToken, ownershipRequest,
+	payload, ownershipCertificate, statusCode, err := doProtocolProbeRaw(
+		ctx, httpClient, target.Endpoint, memoryv1.PathOwnershipClaim, target.BearerToken, ownershipRequest,
 		http.StatusOK, http.StatusConflict,
 	)
 	if err != nil {
 		return MemoryBackendProbeResult{}, err
 	}
-	ownership, err := omsprotocol.DecodeOwnershipClaimResponse(payload)
+	ownership, err := memoryv1.DecodeOwnershipClaimResponse(payload)
 	if err != nil {
-		return MemoryBackendProbeResult{}, newOMSProbeError("OMSOwnershipResponseInvalid", "OMS ownership response failed strict OMS decoding")
+		return MemoryBackendProbeResult{}, newProtocolProbeError("ProtocolOwnershipResponseInvalid", "memory adapter ownership response failed strict memory protocol decoding")
 	}
-	if !omsprotocol.BindingEqual(ownership.Binding, binding) {
-		return MemoryBackendProbeResult{}, newOMSProbeError("OMSOwnershipIdentityMismatch", "OMS ownership claim returned mismatched identity")
+	if !memoryv1.BindingEqual(ownership.Binding, binding) {
+		return MemoryBackendProbeResult{}, newProtocolProbeError("ProtocolOwnershipIdentityMismatch", "memory adapter ownership claim returned mismatched identity")
 	}
-	if statusCode == http.StatusConflict || ownership.Result == omsprotocol.ResultIdentityConflict {
-		return MemoryBackendProbeResult{}, newOMSProbeError("OMSOwnershipConflict", "OMS store is owned by a different authority identity")
+	if statusCode == http.StatusConflict || ownership.Result == memoryv1.ResultIdentityConflict {
+		return MemoryBackendProbeResult{}, newProtocolProbeError("ProtocolOwnershipConflict", "memory protocol store is owned by a different authority identity")
 	}
-	if ownership.Result != omsprotocol.ResultApplied || ownership.MaximumRoutingEpoch != binding.RoutingEpoch {
-		return MemoryBackendProbeResult{}, newOMSProbeError("OMSOwnershipFenceMismatch", "OMS ownership claim did not preserve the candidate routing epoch")
+	if ownership.Result != memoryv1.ResultApplied || ownership.MaximumRoutingEpoch != binding.RoutingEpoch {
+		return MemoryBackendProbeResult{}, newProtocolProbeError("ProtocolOwnershipFenceMismatch", "memory adapter ownership claim did not preserve the candidate routing epoch")
 	}
 	if capabilityCertificate != ownershipCertificate {
-		return MemoryBackendProbeResult{}, newOMSProbeError("OMSCertificateChanged", "OMS server certificate identity changed during validation")
+		return MemoryBackendProbeResult{}, newProtocolProbeError("ProtocolCertificateChanged", "memory adapter server certificate identity changed during validation")
 	}
 	return MemoryBackendProbeResult{
 		AdapterName:             capabilities.AdapterName,
 		AdapterVersion:          capabilities.AdapterVersion,
 		OwnershipClaimIdentity:  ownership.ClaimIdentity,
-		Capabilities:            memoryBackendCapabilitiesFromOMS(capabilities.Capabilities),
+		Capabilities:            memoryBackendCapabilitiesFromProtocol(capabilities.Capabilities),
 		CapabilityRevision:      capabilities.Revision,
-		CapabilityLimits:        memoryBackendLimitsFromOMS(capabilities.Limits),
+		CapabilityLimits:        memoryBackendLimitsFromProtocol(capabilities.Limits),
 		CapabilityExpiresAt:     capabilities.ExpiresAt.UTC(),
 		ServerCertificateDigest: capabilityCertificate,
 	}, nil
@@ -2395,14 +2394,14 @@ func (p *OMSHTTPProber) ProbeBinding(
 
 // AdvanceRoutingFence performs the authenticated durable
 // /v1/routing-fences/advance exchange for one exact target epoch.
-func (p *OMSHTTPProber) AdvanceRoutingFence(
+func (p *ProtocolHTTPProber) AdvanceRoutingFence(
 	ctx context.Context,
 	target MemoryBackendRoutingFenceTarget,
 ) (MemoryBackendRoutingFenceResult, error) {
-	if p == nil || strings.TrimSpace(target.BearerToken) == "" || string(target.Profile) != omsprotocol.Version ||
+	if p == nil || strings.TrimSpace(target.BearerToken) == "" || string(target.Profile) != memoryv1.Version ||
 		target.AuthorityEpoch < 1 || target.RoutingEpoch < 1 ||
 		!memoryBackendDigestPattern.MatchString(target.ExpectedServerCertificateDigest) {
-		return MemoryBackendRoutingFenceResult{}, newOMSProbeError("OMSProbeConfigurationInvalid", "OMS routing fence configuration is incomplete")
+		return MemoryBackendRoutingFenceResult{}, newProtocolProbeError("ProtocolProbeConfigurationInvalid", "memory protocol routing fence configuration is incomplete")
 	}
 	httpClient, err := p.httpClient(target.Timeout, endpointpolicy.Resolution{
 		BaseURL: target.Endpoint, Identity: target.EndpointIdentity, EndpointDigest: target.EndpointDigest,
@@ -2414,44 +2413,44 @@ func (p *OMSHTTPProber) AdvanceRoutingFence(
 	if transport, ok := httpClient.Transport.(*http.Transport); ok {
 		defer transport.CloseIdleConnections()
 	}
-	binding := omsprotocol.Binding{
+	binding := memoryv1.Binding{
 		ClusterID: target.ClusterID, NamespaceUID: target.NamespaceUID, BackendUID: target.BackendUID,
 		AuthorityEpoch: uint64(target.AuthorityEpoch), RoutingEpoch: uint64(target.RoutingEpoch),
 		TenantID: target.TenantID, StoreUUID: target.StoreUUID,
 	}
-	requestValue := omsprotocol.RoutingFenceRequest{ProtocolVersion: omsprotocol.Version, Binding: binding}
-	if err := omsprotocol.ValidateRoutingFenceRequest(&requestValue); err != nil {
-		return MemoryBackendRoutingFenceResult{}, newOMSProbeError("OMSRoutingFenceRequestInvalid", "OMS routing fence binding was invalid")
+	requestValue := memoryv1.RoutingFenceRequest{ProtocolVersion: memoryv1.Version, Binding: binding}
+	if err := memoryv1.ValidateRoutingFenceRequest(&requestValue); err != nil {
+		return MemoryBackendRoutingFenceResult{}, newProtocolProbeError("ProtocolRoutingFenceRequestInvalid", "memory protocol routing fence binding was invalid")
 	}
-	payload, certificate, statusCode, err := doOMSProbeRaw(
-		ctx, httpClient, target.Endpoint, omsprotocol.PathRoutingFence, target.BearerToken, requestValue,
+	payload, certificate, statusCode, err := doProtocolProbeRaw(
+		ctx, httpClient, target.Endpoint, memoryv1.PathRoutingFence, target.BearerToken, requestValue,
 		http.StatusOK, http.StatusConflict,
 	)
 	if err != nil {
 		return MemoryBackendRoutingFenceResult{}, err
 	}
-	response, err := omsprotocol.DecodeRoutingFenceResponse(payload)
+	response, err := memoryv1.DecodeRoutingFenceResponse(payload)
 	if err != nil {
-		return MemoryBackendRoutingFenceResult{}, newOMSProbeError("OMSRoutingFenceResponseInvalid", "OMS routing fence response failed strict OMS decoding")
+		return MemoryBackendRoutingFenceResult{}, newProtocolProbeError("ProtocolRoutingFenceResponseInvalid", "memory protocol routing fence response failed strict memory protocol decoding")
 	}
-	if !omsprotocol.BindingEqual(response.Binding, binding) {
-		return MemoryBackendRoutingFenceResult{}, newOMSProbeError("OMSRoutingFenceIdentityMismatch", "OMS routing fence returned mismatched identity")
+	if !memoryv1.BindingEqual(response.Binding, binding) {
+		return MemoryBackendRoutingFenceResult{}, newProtocolProbeError("ProtocolRoutingFenceIdentityMismatch", "memory protocol routing fence returned mismatched identity")
 	}
-	if statusCode == http.StatusConflict || response.Result != omsprotocol.ResultApplied {
-		return MemoryBackendRoutingFenceResult{}, newOMSProbeError("OMSRoutingFenceRejected", "OMS routing fence rejected the exact target authority")
+	if statusCode == http.StatusConflict || response.Result != memoryv1.ResultApplied {
+		return MemoryBackendRoutingFenceResult{}, newProtocolProbeError("ProtocolRoutingFenceRejected", "memory protocol routing fence rejected the exact target authority")
 	}
 	if response.MaximumRoutingEpoch != binding.RoutingEpoch {
-		return MemoryBackendRoutingFenceResult{}, newOMSProbeError("OMSRoutingFenceEpochMismatch", "OMS routing fence did not durably acknowledge the exact target epoch")
+		return MemoryBackendRoutingFenceResult{}, newProtocolProbeError("ProtocolRoutingFenceEpochMismatch", "memory protocol routing fence did not durably acknowledge the exact target epoch")
 	}
 	if certificate != target.ExpectedServerCertificateDigest {
-		return MemoryBackendRoutingFenceResult{}, newOMSProbeError("OMSCertificateChanged", "OMS server certificate identity changed before routing fence acknowledgement")
+		return MemoryBackendRoutingFenceResult{}, newProtocolProbeError("ProtocolCertificateChanged", "memory adapter server certificate identity changed before routing fence acknowledgement")
 	}
 	return MemoryBackendRoutingFenceResult{
 		MaximumRoutingEpoch: int64(response.MaximumRoutingEpoch), ServerCertificateDigest: certificate,
 	}, nil
 }
 
-func (p *OMSHTTPProber) httpClient(timeout time.Duration, resolution endpointpolicy.Resolution) (*http.Client, error) {
+func (p *ProtocolHTTPProber) httpClient(timeout time.Duration, resolution endpointpolicy.Resolution) (*http.Client, error) {
 	if timeout <= 0 {
 		timeout = defaultMemoryBackendProbeTimeout
 	}
@@ -2461,12 +2460,12 @@ func (p *OMSHTTPProber) httpClient(timeout time.Duration, resolution endpointpol
 	}
 	httpClient, err := newClient(p.BaseClient, timeout, resolution)
 	if err != nil {
-		return nil, newOMSProbeError("OMSClientPolicyRejected", "OMS probe HTTP client could not enforce endpoint policy")
+		return nil, newProtocolProbeError("ProtocolClientPolicyRejected", "memory protocol probe HTTP client could not enforce endpoint policy")
 	}
 	return httpClient, nil
 }
 
-func doOMSProbeRaw(
+func doProtocolProbeRaw(
 	ctx context.Context,
 	httpClient *http.Client,
 	baseURL, probePath, bearerToken string,
@@ -2474,16 +2473,16 @@ func doOMSProbeRaw(
 	allowedStatuses ...int,
 ) ([]byte, string, int, error) {
 	body, err := json.Marshal(requestValue)
-	if err != nil || len(body) > omsprotocol.MaxHTTPBodyBytes {
-		return nil, "", 0, newOMSProbeError("OMSProbeRequestInvalid", "OMS probe request was invalid or oversized")
+	if err != nil || len(body) > memoryv1.MaxHTTPBodyBytes {
+		return nil, "", 0, newProtocolProbeError("ProtocolProbeRequestInvalid", "memory protocol probe request was invalid or oversized")
 	}
-	requestURL, err := joinOMSProbeURL(baseURL, probePath)
+	requestURL, err := joinProtocolProbeURL(baseURL, probePath)
 	if err != nil {
-		return nil, "", 0, newOMSProbeError("OMSProbeRequestInvalid", "OMS probe URL was invalid")
+		return nil, "", 0, newProtocolProbeError("ProtocolProbeRequestInvalid", "memory protocol probe URL was invalid")
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, bytes.NewReader(body))
 	if err != nil {
-		return nil, "", 0, newOMSProbeError("OMSProbeRequestInvalid", "OMS probe request could not be created")
+		return nil, "", 0, newProtocolProbeError("ProtocolProbeRequestInvalid", "memory protocol probe request could not be created")
 	}
 	request.Header.Set("Authorization", "Bearer "+bearerToken)
 	request.Header.Set("Content-Type", "application/json")
@@ -2492,37 +2491,37 @@ func doOMSProbeRaw(
 
 	response, err := httpClient.Do(request)
 	if err != nil {
-		return nil, "", 0, newOMSProbeError("OMSProbeTransportFailed", "OMS probe request failed")
+		return nil, "", 0, newProtocolProbeError("ProtocolProbeTransportFailed", "memory protocol probe request failed")
 	}
 	defer response.Body.Close() //nolint:errcheck
 	if !slices.Contains(allowedStatuses, response.StatusCode) {
-		return nil, "", response.StatusCode, newOMSProbeError("OMSProbeHTTPRejected", "OMS probe returned an unexpected status")
+		return nil, "", response.StatusCode, newProtocolProbeError("ProtocolProbeHTTPRejected", "memory protocol probe returned an unexpected status")
 	}
-	if response.ContentLength > omsprotocol.MaxAdapterResponseBytes {
-		return nil, "", response.StatusCode, newOMSProbeError("OMSProbeResponseOversized", "OMS probe response exceeded the size limit")
+	if response.ContentLength > memoryv1.MaxAdapterResponseBytes {
+		return nil, "", response.StatusCode, newProtocolProbeError("ProtocolProbeResponseOversized", "memory protocol probe response exceeded the size limit")
 	}
 	if encoding := strings.TrimSpace(response.Header.Get("Content-Encoding")); encoding != "" && encoding != "identity" {
-		return nil, "", response.StatusCode, newOMSProbeError("OMSProbeResponseEncodingRejected", "OMS probe response used an unsupported content encoding")
+		return nil, "", response.StatusCode, newProtocolProbeError("ProtocolProbeResponseEncodingRejected", "memory protocol probe response used an unsupported content encoding")
 	}
 	mediaType, _, err := mime.ParseMediaType(response.Header.Get("Content-Type"))
 	if err != nil || mediaType != "application/json" {
-		return nil, "", response.StatusCode, newOMSProbeError("OMSProbeResponseTypeRejected", "OMS probe response was not application/json")
+		return nil, "", response.StatusCode, newProtocolProbeError("ProtocolProbeResponseTypeRejected", "memory protocol probe response was not application/json")
 	}
-	payload, err := io.ReadAll(io.LimitReader(response.Body, omsprotocol.MaxAdapterResponseBytes+1))
-	if err != nil || len(payload) > omsprotocol.MaxAdapterResponseBytes {
-		return nil, "", response.StatusCode, newOMSProbeError("OMSProbeResponseOversized", "OMS probe response was invalid or oversized")
+	payload, err := io.ReadAll(io.LimitReader(response.Body, memoryv1.MaxAdapterResponseBytes+1))
+	if err != nil || len(payload) > memoryv1.MaxAdapterResponseBytes {
+		return nil, "", response.StatusCode, newProtocolProbeError("ProtocolProbeResponseOversized", "memory protocol probe response was invalid or oversized")
 	}
 	certificateDigest, err := endpointpolicy.CertificateDigest(response.TLS)
 	if err != nil {
-		return nil, "", response.StatusCode, newOMSProbeError("OMSProbeTLSIdentityMissing", "OMS probe response did not include verified TLS identity")
+		return nil, "", response.StatusCode, newProtocolProbeError("ProtocolProbeTLSIdentityMissing", "memory protocol probe response did not include verified TLS identity")
 	}
 	return payload, certificateDigest, response.StatusCode, nil
 }
 
-func joinOMSProbeURL(baseURL, suffix string) (string, error) {
+func joinProtocolProbeURL(baseURL, suffix string) (string, error) {
 	parsed, err := url.Parse(baseURL)
 	if err != nil || parsed.Scheme != urlSchemeHTTPS || parsed.Host == "" {
-		return "", fmt.Errorf("invalid OMS base URL")
+		return "", fmt.Errorf("invalid memory adapter base URL")
 	}
 	parsed.Path = path.Join(parsed.Path, suffix)
 	parsed.RawPath = ""
@@ -2531,7 +2530,7 @@ func joinOMSProbeURL(baseURL, suffix string) (string, error) {
 	return parsed.String(), nil
 }
 
-func memoryBackendCapabilitiesFromOMS(capabilities omsprotocol.Capabilities) []corev1alpha1.MemoryBackendCapability {
+func memoryBackendCapabilitiesFromProtocol(capabilities memoryv1.Capabilities) []corev1alpha1.MemoryBackendCapability {
 	result := make([]corev1alpha1.MemoryBackendCapability, 0, 15)
 	appendIf := func(enabled bool, capability corev1alpha1.MemoryBackendCapability) {
 		if enabled {
@@ -2556,7 +2555,7 @@ func memoryBackendCapabilitiesFromOMS(capabilities omsprotocol.Capabilities) []c
 	return result
 }
 
-func memoryBackendLimitsFromOMS(limits omsprotocol.CapabilityLimits) corev1alpha1.MemoryBackendCapabilityLimits {
+func memoryBackendLimitsFromProtocol(limits memoryv1.CapabilityLimits) corev1alpha1.MemoryBackendCapabilityLimits {
 	return corev1alpha1.MemoryBackendCapabilityLimits{
 		MaxRequestBytes: int64(limits.MaxRequestBytes), MaxResponseBytes: int64(limits.MaxResponseBytes),
 		MaxContentBytes: int64(limits.MaxContentBytes), MaxTags: int32(limits.MaxTags), MaxTagBytes: int32(limits.MaxTagBytes),

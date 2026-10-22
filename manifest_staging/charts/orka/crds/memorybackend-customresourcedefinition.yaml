@@ -39,7 +39,7 @@ spec:
     schema:
       openAPIV3Schema:
         description: MemoryBackend is the namespaced control-plane binding for external
-          OMS memory.
+          memory.
         properties:
           apiVersion:
             description: |-
@@ -90,9 +90,15 @@ spec:
                 required:
                 - bearerTokenSecretRef
                 type: object
+              contractVersion:
+                description: ContractVersion is the immutable Orka memory adapter
+                  contract.
+                enum:
+                - orka.memory.v1
+                type: string
               deployment:
-                description: MemoryBackendDeployment configures the external OMS adapter
-                  endpoint.
+                description: MemoryBackendDeployment configures the external memory
+                  adapter endpoint.
                 properties:
                   endpoint:
                     description: |-
@@ -123,24 +129,6 @@ spec:
                 - Disabled
                 - Decommissioning
                 type: string
-              protocol:
-                description: MemoryBackendProtocol selects the exact OMS wire contract.
-                properties:
-                  omsVersion:
-                    description: OMSVersion is the adapter API version.
-                    enum:
-                    - "0.1"
-                    type: string
-                  profile:
-                    description: Profile is the closed Orka OMS profile implemented
-                      by the adapter.
-                    enum:
-                    - orka.oms.v0alpha1
-                    type: string
-                required:
-                - omsVersion
-                - profile
-                type: object
               store:
                 description: MemoryBackendStore identifies an operator-precreated
                   provider store.
@@ -156,13 +144,13 @@ spec:
                 type: object
             required:
             - clientAuth
+            - contractVersion
             - deployment
-            - protocol
             - store
             type: object
             x-kubernetes-validations:
-            - message: spec.protocol is immutable
-              rule: self.protocol == oldSelf.protocol
+            - message: spec.contractVersion is immutable
+              rule: self.contractVersion == oldSelf.contractVersion
             - message: spec.store.name is immutable
               rule: self.store.name == oldSelf.store.name
           status:
@@ -246,8 +234,8 @@ spec:
                 - type
                 x-kubernetes-list-type: map
               connected:
-                description: Connected reports whether strict OMS store, capability,
-                  and ownership probes succeeded.
+                description: Connected reports whether strict memory protocol store,
+                  capability, and ownership probes succeeded.
                 type: boolean
               effectiveLifecycleState:
                 description: EffectiveLifecycleState changes only after the durable
@@ -288,7 +276,7 @@ spec:
                 type: string
               observedCapabilities:
                 description: MemoryBackendObservedCapabilities records strict, non-secret
-                  OMS capability metadata.
+                  memory adapter capability metadata.
                 properties:
                   adapterName:
                     description: AdapterName is the bounded adapter implementation
@@ -304,7 +292,7 @@ spec:
                     description: Effective is the capability set Orka can safely use.
                     items:
                       description: MemoryBackendCapability is a closed capability
-                        advertised by the Orka OMS profile.
+                        advertised by the Orka memory protocol.
                       enum:
                       - durableIdempotency
                       - idempotencyDigestConflicts
@@ -412,7 +400,7 @@ spec:
                       the adapter.
                     items:
                       description: MemoryBackendCapability is a closed capability
-                        advertised by the Orka OMS profile.
+                        advertised by the Orka memory protocol.
                       enum:
                       - durableIdempotency
                       - idempotencyDigestConflicts

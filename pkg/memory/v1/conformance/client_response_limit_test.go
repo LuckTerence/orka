@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/orka-agents/orka/pkg/oms/protocol"
+	memoryv1 "github.com/orka-agents/orka/pkg/memory/v1"
 )
 
 const testResponseAuthorizationValue = "test-value"
@@ -54,7 +54,7 @@ func TestContractClientEnforcesAdvertisedMaxResponseBytes(t *testing.T) {
 }
 
 func TestContractClientEnforcesHardMaxResponseBytes(t *testing.T) {
-	responseBody := bytes.Repeat([]byte("x"), protocol.MaxAdapterResponseBytes+1)
+	responseBody := bytes.Repeat([]byte("x"), memoryv1.MaxAdapterResponseBytes+1)
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		writer.Header().Set("Content-Type", jsonMediaType)
 		writer.Header().Set("Cache-Control", "no-store")
@@ -82,7 +82,7 @@ func TestContractClientEnforcesHardMaxResponseBytes(t *testing.T) {
 
 func TestProbeRetroactivelyEnforcesAdvertisedMaxResponseBytes(t *testing.T) {
 	binding := DefaultBinding()
-	healthBody := encodeTestJSON(t, protocol.HealthResponse{ProtocolVersion: protocol.Version, Status: "ok"})
+	healthBody := encodeTestJSON(t, memoryv1.HealthResponse{ProtocolVersion: memoryv1.Version, Status: "ok"})
 
 	for _, tc := range []struct {
 		name              string
@@ -96,7 +96,7 @@ func TestProbeRetroactivelyEnforcesAdvertisedMaxResponseBytes(t *testing.T) {
 			prepareHealthBody: func(body []byte, _ int) []byte {
 				return body
 			},
-			wantPath: protocol.PathCapabilities,
+			wantPath: memoryv1.PathCapabilities,
 		},
 		{
 			name:             "health response",
@@ -104,7 +104,7 @@ func TestProbeRetroactivelyEnforcesAdvertisedMaxResponseBytes(t *testing.T) {
 			prepareHealthBody: func(body []byte, limit int) []byte {
 				return append(body, bytes.Repeat([]byte(" "), limit-len(body)+1)...)
 			},
-			wantPath: protocol.PathHealth,
+			wantPath: memoryv1.PathHealth,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -112,10 +112,10 @@ func TestProbeRetroactivelyEnforcesAdvertisedMaxResponseBytes(t *testing.T) {
 			capabilities.Limits.MaxResponseBytes = tc.maxResponseBytes
 			capabilityBody := encodeTestJSON(t, capabilities)
 			servedHealthBody := tc.prepareHealthBody(append([]byte(nil), healthBody...), tc.maxResponseBytes)
-			if tc.wantPath == protocol.PathCapabilities && len(capabilityBody) <= tc.maxResponseBytes {
+			if tc.wantPath == memoryv1.PathCapabilities && len(capabilityBody) <= tc.maxResponseBytes {
 				t.Fatalf("capability fixture length = %d, want > %d", len(capabilityBody), tc.maxResponseBytes)
 			}
-			if tc.wantPath == protocol.PathHealth && len(capabilityBody) > tc.maxResponseBytes {
+			if tc.wantPath == memoryv1.PathHealth && len(capabilityBody) > tc.maxResponseBytes {
 				t.Fatalf("capability fixture length = %d, want <= %d", len(capabilityBody), tc.maxResponseBytes)
 			}
 
@@ -123,9 +123,9 @@ func TestProbeRetroactivelyEnforcesAdvertisedMaxResponseBytes(t *testing.T) {
 				writer.Header().Set("Content-Type", jsonMediaType)
 				writer.Header().Set("Cache-Control", "no-store")
 				switch request.URL.Path {
-				case protocol.PathHealth:
+				case memoryv1.PathHealth:
 					_, _ = writer.Write(servedHealthBody)
-				case protocol.PathCapabilities:
+				case memoryv1.PathCapabilities:
 					_, _ = writer.Write(capabilityBody)
 				default:
 					http.NotFound(writer, request)
@@ -155,15 +155,15 @@ func TestProbeRetroactivelyEnforcesAdvertisedMaxResponseBytes(t *testing.T) {
 	}
 }
 
-func testCapabilitiesResponse(binding protocol.Binding) protocol.CapabilitiesResponse {
-	return protocol.CapabilitiesResponse{
-		ProtocolVersion: protocol.Version,
+func testCapabilitiesResponse(binding memoryv1.Binding) memoryv1.CapabilitiesResponse {
+	return memoryv1.CapabilitiesResponse{
+		ProtocolVersion: memoryv1.Version,
 		Binding:         binding,
 		AdapterName:     "adapter",
 		AdapterVersion:  "v1",
 		Revision:        "revision-1",
 		ExpiresAt:       time.Now().Add(time.Minute),
-		Capabilities: protocol.Capabilities{
+		Capabilities: memoryv1.Capabilities{
 			DurableIdempotency:         true,
 			IdempotencyDigestConflicts: true,
 			CreateIfAbsent:             true,

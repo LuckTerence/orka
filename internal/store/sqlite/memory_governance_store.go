@@ -22,7 +22,7 @@ import (
 
 	"github.com/orka-agents/orka/internal/redact"
 	"github.com/orka-agents/orka/internal/store"
-	omsprotocol "github.com/orka-agents/orka/pkg/oms/protocol"
+	memoryv1 "github.com/orka-agents/orka/pkg/memory/v1"
 )
 
 var _ store.GovernedMemoryStore = (*Store)(nil)
@@ -1771,17 +1771,17 @@ func validateRemoteProposalApplyMutation(
 	binding *store.MemoryBackendBinding,
 	desiredGeneration, expectedGeneration int64,
 ) error {
-	envelope, err := omsprotocol.DecodeMutationEnvelope(mutation.Payload)
+	envelope, err := memoryv1.DecodeMutationEnvelope(mutation.Payload)
 	if err != nil {
 		return store.ValidationErrorf("canonical proposal mutation payload is invalid: %v", err)
 	}
 	if envelope.OperationID != mutation.OperationID || envelope.MemoryID != mutation.MemoryID ||
-		envelope.Kind != omsprotocol.MutationKindCreate || envelope.Generation != uint64(desiredGeneration) ||
+		envelope.Kind != memoryv1.MutationKindCreate || envelope.Generation != uint64(desiredGeneration) ||
 		envelope.ExpectedGeneration != uint64(expectedGeneration) || envelope.ExpectedBackendVersion != "" ||
 		envelope.MutationDigest != mutation.MutationDigest || envelope.ContentDigest != mutation.ContentDigest {
 		return store.ValidationErrorf("canonical proposal mutation payload does not match the admitted mutation")
 	}
-	expectedBinding := omsprotocol.Binding{
+	expectedBinding := memoryv1.Binding{
 		ClusterID: mutation.ClusterID, NamespaceUID: mutation.NamespaceUID, BackendUID: mutation.BackendUID,
 		AuthorityEpoch: uint64(mutation.AuthorityEpoch), RoutingEpoch: uint64(mutation.RoutingEpoch),
 		TenantID: binding.TenantID, StoreUUID: binding.StoreUUID,
@@ -1794,7 +1794,7 @@ func validateRemoteProposalApplyMutation(
 	}
 
 	expectedContent := redact.SensitiveText(proposal.Content)
-	expectedContentDigest := omsprotocol.ContentDigest(expectedContent)
+	expectedContentDigest := memoryv1.ContentDigest(expectedContent)
 	if envelope.State.Content != expectedContent || envelope.ContentDigest != expectedContentDigest ||
 		mutation.ContentDigest != expectedContentDigest || desired.ContentDigest != expectedContentDigest {
 		return store.ValidationErrorf("proposal mutation content does not match the accepted reviewed proposal")
@@ -1822,7 +1822,7 @@ func validateRemoteProposalApplyMutation(
 	if desiredTags == nil {
 		desiredTags = []string{}
 	}
-	normalizedDesiredTags, err := omsprotocol.NormalizeTags(desiredTags)
+	normalizedDesiredTags, err := memoryv1.NormalizeTags(desiredTags)
 	if err != nil || !slices.Equal(normalizedDesiredTags, expectedTags) {
 		return store.ValidationErrorf("proposal catalog tags do not match the accepted reviewed proposal")
 	}
@@ -1842,7 +1842,7 @@ func canonicalRemoteProposalTags(description string) ([]string, error) {
 	if tags == nil {
 		tags = []string{}
 	}
-	return omsprotocol.NormalizeTags(tags)
+	return memoryv1.NormalizeTags(tags)
 }
 
 func canonicalRemoteProposalMetadata(proposal *store.MemoryProposal) (map[string]string, error) {
@@ -1856,7 +1856,7 @@ func canonicalRemoteProposalMetadata(proposal *store.MemoryProposal) (map[string
 	if taskName := strings.TrimSpace(redact.SensitiveText(proposal.TaskName)); taskName != "" {
 		metadata["taskName"] = taskName
 	}
-	return omsprotocol.NormalizeMetadata(metadata)
+	return memoryv1.NormalizeMetadata(metadata)
 }
 
 func admitRemoteMemoryReplaceTx(
@@ -2005,22 +2005,22 @@ func validateAndCanonicalizeMemoryMutation(
 	if mutation == nil || binding == nil {
 		return store.ValidationErrorf("canonical mutation and durable binding are required")
 	}
-	envelope, err := omsprotocol.DecodeMutationEnvelope(mutation.Payload)
+	envelope, err := memoryv1.DecodeMutationEnvelope(mutation.Payload)
 	if err != nil {
 		return store.ValidationErrorf("canonical mutation payload is invalid: %v", err)
 	}
 	expectedKind := ""
 	switch kind {
 	case store.MemoryOperationCreate:
-		expectedKind = omsprotocol.MutationKindCreate
+		expectedKind = memoryv1.MutationKindCreate
 	case store.MemoryOperationReplace:
-		expectedKind = omsprotocol.MutationKindReplace
+		expectedKind = memoryv1.MutationKindReplace
 	case store.MemoryOperationDelete:
-		expectedKind = omsprotocol.MutationKindDelete
+		expectedKind = memoryv1.MutationKindDelete
 	default:
 		return store.ValidationErrorf("unsupported memory operation kind %q", kind)
 	}
-	expectedBinding := omsprotocol.Binding{
+	expectedBinding := memoryv1.Binding{
 		ClusterID: mutation.ClusterID, NamespaceUID: mutation.NamespaceUID, BackendUID: mutation.BackendUID,
 		AuthorityEpoch: uint64(mutation.AuthorityEpoch), RoutingEpoch: uint64(mutation.RoutingEpoch),
 		TenantID: binding.TenantID, StoreUUID: binding.StoreUUID,
@@ -2032,19 +2032,19 @@ func validateAndCanonicalizeMemoryMutation(
 		envelope.ContentDigest != mutation.ContentDigest {
 		return store.ValidationErrorf("canonical mutation payload does not match the admitted operation and binding")
 	}
-	canonical, err := omsprotocol.EncodeJSON(envelope)
+	canonical, err := memoryv1.EncodeJSON(envelope)
 	if err != nil {
 		return store.ValidationErrorf("canonical mutation payload could not be encoded: %v", err)
 	}
-	if len(canonical) > omsprotocol.MaxHTTPBodyBytes {
-		return store.ValidationErrorf("canonical operation payload exceeds %d bytes", omsprotocol.MaxHTTPBodyBytes)
+	if len(canonical) > memoryv1.MaxHTTPBodyBytes {
+		return store.ValidationErrorf("canonical operation payload exceeds %d bytes", memoryv1.MaxHTTPBodyBytes)
 	}
 	mutation.Payload = canonical
 	return nil
 }
 
 func canonicalMutationTags(payload []byte) ([]string, error) {
-	envelope, err := omsprotocol.DecodeMutationEnvelope(payload)
+	envelope, err := memoryv1.DecodeMutationEnvelope(payload)
 	if err != nil || envelope.State == nil {
 		return nil, store.ValidationErrorf("live mutation payload is invalid")
 	}
@@ -2122,7 +2122,7 @@ func insertRemoteMemoryCatalog(ctx context.Context, tx *sql.Tx, catalog *store.R
 }
 
 func encodeDurableMemoryOperationPayload(payload []byte) ([]byte, error) {
-	if len(payload) == 0 || len(payload) > omsprotocol.MaxHTTPBodyBytes {
+	if len(payload) == 0 || len(payload) > memoryv1.MaxHTTPBodyBytes {
 		return nil, store.ValidationErrorf("canonical operation payload size is invalid")
 	}
 	if len(payload) <= maxMemoryOperationPayloadBytes {
@@ -2145,7 +2145,7 @@ func encodeDurableMemoryOperationPayload(payload []byte) ([]byte, error) {
 
 func decodeDurableMemoryOperationPayload(payload []byte) ([]byte, error) {
 	if !bytes.HasPrefix(payload, []byte(durablePayloadCompressionPrefix)) {
-		if len(payload) > omsprotocol.MaxHTTPBodyBytes {
+		if len(payload) > memoryv1.MaxHTTPBodyBytes {
 			return nil, store.ValidationErrorf("stored operation payload exceeds the wire limit")
 		}
 		return append([]byte(nil), payload...), nil
@@ -2154,7 +2154,7 @@ func decodeDurableMemoryOperationPayload(payload []byte) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open compressed memory operation payload: %w", err)
 	}
-	decoded, readErr := io.ReadAll(io.LimitReader(reader, omsprotocol.MaxHTTPBodyBytes+1))
+	decoded, readErr := io.ReadAll(io.LimitReader(reader, memoryv1.MaxHTTPBodyBytes+1))
 	closeErr := reader.Close()
 	if readErr != nil {
 		return nil, fmt.Errorf("read compressed memory operation payload: %w", readErr)
@@ -2162,7 +2162,7 @@ func decodeDurableMemoryOperationPayload(payload []byte) ([]byte, error) {
 	if closeErr != nil {
 		return nil, fmt.Errorf("close compressed memory operation payload: %w", closeErr)
 	}
-	if len(decoded) == 0 || len(decoded) > omsprotocol.MaxHTTPBodyBytes {
+	if len(decoded) == 0 || len(decoded) > memoryv1.MaxHTTPBodyBytes {
 		return nil, store.ValidationErrorf("decompressed operation payload size is invalid")
 	}
 	return decoded, nil
@@ -2326,7 +2326,7 @@ func encodeMemoryIdempotencySnapshot(
 	}
 	var content []byte
 	if len(payload) > 0 {
-		envelope, err := omsprotocol.DecodeMutationEnvelope(payload)
+		envelope, err := memoryv1.DecodeMutationEnvelope(payload)
 		if err != nil {
 			return nil, fmt.Errorf("decode memory idempotency payload: %w", err)
 		}
@@ -3676,7 +3676,7 @@ func memoryBackendBindingDigest(binding *store.MemoryBackendBinding) string {
 	if binding == nil {
 		return ""
 	}
-	return omsprotocol.BindingDigest(omsprotocol.Binding{
+	return memoryv1.BindingDigest(memoryv1.Binding{
 		ClusterID: binding.ClusterID, NamespaceUID: binding.NamespaceUID, BackendUID: binding.BackendUID,
 		AuthorityEpoch: uint64(binding.AuthorityEpoch), RoutingEpoch: uint64(binding.RoutingEpoch),
 		TenantID: binding.TenantID, StoreUUID: binding.StoreUUID,

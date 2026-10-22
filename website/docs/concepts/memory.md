@@ -16,7 +16,7 @@ auditable, bounded, and subject to an explicit content authority.
 
 | Concept | Purpose | Authority and persistence |
 |---------|---------|---------------------------|
-| **Durable memory** | Project facts, decisions, conventions, or reusable context for future tasks | SQLite content for namespaces that have never activated a remote backend; after cutover, the OMS provider is content-authoritative while Orka retains governance and audit state |
+| **Durable memory** | Project facts, decisions, conventions, or reusable context for future tasks | SQLite content for namespaces that have never activated a remote backend; after cutover, the memory protocol provider is content-authoritative while Orka retains governance and audit state |
 | **Memory proposal** | Worker- or user-submitted suggestion for memory, policy, workflow, or skill changes | Orka's durable governance store; review does not apply the proposal |
 | **Memory operation** | Durable create, replace, delete, or proposal-apply work against a remote backend | Orka's operation and idempotency ledgers, with provider receipts and retry state |
 | **Transcript search** | Compact search over prior session messages | SQLite session transcript tables |
@@ -25,7 +25,7 @@ A namespace has exactly one effective memory content authority:
 
 - **Legacy authority:** if a remote backend has never been activated, existing SQLite memory behavior is preserved.
 - **Staged backend:** `MemoryBackend/default` may validate endpoint, Secret, store, identity, and capabilities without changing SQLite authority.
-- **Remote authority:** activation performs a durable cutover. The remote OMS store becomes authoritative for content; Orka remains authoritative for canonical IDs, trust, provenance, tags, generations, tombstones, operations, and audit state.
+- **Remote authority:** activation performs a durable cutover. The remote memory backend becomes authoritative for content; Orka remains authoritative for canonical IDs, trust, provenance, tags, generations, tombstones, operations, and audit state.
 - **No automatic fallback:** after activation, backend deletion, invalid configuration, identity mismatch, or an outage fails closed. SQLite does not silently become authoritative again.
 - **Explicit restore:** legacy SQLite can resurface only through the audited `restore-legacy` workflow after a clean decommission. `force-orphan` leaves the namespace in fail-closed `Removed` state.
 
@@ -37,10 +37,10 @@ A namespace has exactly one effective memory content authority:
 |-----------------|-------------------|----------------|----------------------|
 | `Staged` | SQLite | Available from legacy SQLite | Legacy behavior only; no remote cutover |
 | `Validating` | Previous authority | Fail closed for a pending remote cutover | Blocked until validation and binding commit |
-| `Active` | Remote OMS backend | Available when binding validation is fresh | Create, update, delete, and proposal apply allowed |
-| `Draining` | Remote OMS backend | Depends on the requested transition | New work blocked while admitted operations settle |
-| `ReadOnly` | Remote OMS backend | Available | Create, update, and proposal apply blocked; safety controls remain available |
-| `Disabled` | Remote OMS backend remains selected | Suppressed | Blocked and routing-fenced |
+| `Active` | Remote memory backend | Available when binding validation is fresh | Create, update, delete, and proposal apply allowed |
+| `Draining` | Remote memory backend | Depends on the requested transition | New work blocked while admitted operations settle |
+| `ReadOnly` | Remote memory backend | Available | Create, update, and proposal apply blocked; safety controls remain available |
+| `Disabled` | Remote memory backend remains selected | Suppressed | Blocked and routing-fenced |
 | `Recovering`, `IdentityMismatch`, `IdentityConflict`, `Diverged` | Remote binding retained | Fail closed or locally suppressed | Blocked until audited recovery succeeds |
 | `Decommissioning` | Remote binding retained during convergence | Fail closed | Blocked |
 | `Decommissioned` | No active remote service | Unavailable until an explicit next action | Blocked; clean `restore-legacy` may be previewed/applied |

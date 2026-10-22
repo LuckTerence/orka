@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/orka-agents/orka/pkg/oms/conformance"
+	"github.com/orka-agents/orka/pkg/memory/v1/conformance"
 )
 
 func TestWriteResultRedactsRawTokenAndAuthorizationValue(t *testing.T) {
@@ -33,8 +33,8 @@ func TestRunSendsOneCompleteBearerAuthorizationValue(t *testing.T) {
 		writer.Header().Set("Content-Type", "application/json")
 		writer.WriteHeader(http.StatusUnauthorized)
 		_, _ = writer.Write([]byte(
-			`{"protocolVersion":"orka.oms.v0alpha1","binding":null,` +
-				`"code":"OMS_UNAUTHORIZED","message":"unauthorized",` +
+			`{"protocolVersion":"orka.memory.v1","binding":null,` +
+				`"code":"MEMORY_ADAPTER_UNAUTHORIZED","message":"unauthorized",` +
 				`"retryable":false,"retryAfterSeconds":0}`,
 		))
 	}))
@@ -52,7 +52,7 @@ func TestRunSendsOneCompleteBearerAuthorizationValue(t *testing.T) {
 		&stdout,
 		&stderr,
 		func(name string) string {
-			if name == "ORKA_OMS_BEARER_TOKEN" {
+			if name == "ORKA_MEMORY_ADAPTER_BEARER_TOKEN" {
 				return rawToken
 			}
 			return ""
@@ -112,7 +112,7 @@ func TestRunRejectsPlaintextHTTPWithoutExplicitLoopbackFlag(t *testing.T) {
 		&stdout,
 		&stderr,
 		func(name string) string {
-			if name == "ORKA_OMS_BEARER_TOKEN" {
+			if name == "ORKA_MEMORY_ADAPTER_BEARER_TOKEN" {
 				return "test-token"
 			}
 			return ""

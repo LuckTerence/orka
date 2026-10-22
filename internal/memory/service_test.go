@@ -13,7 +13,7 @@ import (
 	"github.com/orka-agents/orka/internal/apierror"
 	"github.com/orka-agents/orka/internal/store"
 	storesqlite "github.com/orka-agents/orka/internal/store/sqlite"
-	"github.com/orka-agents/orka/pkg/oms/protocol"
+	memoryv1 "github.com/orka-agents/orka/pkg/memory/v1"
 )
 
 type staticAuthorityResolver struct{ authority *ResolvedAuthority }
@@ -76,7 +76,7 @@ func TestServiceLegacySearchPaginatesWithOpaqueCursor(t *testing.T) {
 		Legacy: storeImpl, Governed: storeImpl, Resolver: staticAuthorityResolver{authority: authority},
 		Now: func() time.Time { return now },
 	}
-	request := SearchRequest{Query: "legacy", Limit: 1, Mode: protocol.SearchModeKeyword}
+	request := SearchRequest{Query: "legacy", Limit: 1, Mode: memoryv1.SearchModeKeyword}
 	searchContext := SearchContext{PreserveEmptyTrust: true}
 	seen := make(map[string]struct{})
 	pages := make([]*SearchResponse, 0, 3)
@@ -115,7 +115,7 @@ func TestServiceLegacySearchPaginatesWithOpaqueCursor(t *testing.T) {
 	if _, included := seen["mem-legacy-page-inserted"]; included {
 		t.Fatal("legacy continuation included a record created after the first page")
 	}
-	replayRequest := SearchRequest{Query: "legacy", Limit: 1, Mode: protocol.SearchModeKeyword, Cursor: pages[0].Cursor}
+	replayRequest := SearchRequest{Query: "legacy", Limit: 1, Mode: memoryv1.SearchModeKeyword, Cursor: pages[0].Cursor}
 	replayed, err := service.Search(t.Context(), authority.Namespace, replayRequest, searchContext)
 	if err != nil {
 		t.Fatal(err)
@@ -148,13 +148,13 @@ func TestServiceLegacySearchContinuationHonorsSmallerLimit(t *testing.T) {
 		Now: func() time.Time { return now },
 	}
 	first, err := service.Search(t.Context(), authority.Namespace, SearchRequest{
-		Query: "legacy", Limit: 2, Mode: protocol.SearchModeKeyword,
+		Query: "legacy", Limit: 2, Mode: memoryv1.SearchModeKeyword,
 	}, SearchContext{PreserveEmptyTrust: true})
 	if err != nil || len(first.Items) != 2 || first.Cursor == "" {
 		t.Fatalf("first page = %#v, %v", first, err)
 	}
 	second, err := service.Search(t.Context(), authority.Namespace, SearchRequest{
-		Query: "legacy", Limit: 1, Mode: protocol.SearchModeKeyword, Cursor: first.Cursor,
+		Query: "legacy", Limit: 1, Mode: memoryv1.SearchModeKeyword, Cursor: first.Cursor,
 	}, SearchContext{PreserveEmptyTrust: true})
 	if err != nil || len(second.Items) != 1 {
 		t.Fatalf("smaller continuation page = %#v, %v", second, err)
@@ -220,16 +220,16 @@ func activateServiceTestBinding(t *testing.T, governed store.GovernedMemoryStore
 		ResolvedAddressDigest: digestString("addresses"), ServerCertificateDigest: digestString("certificate"),
 		SecretName: "memory-auth", SecretKey: "token",
 		SecretUID: "33333333-3333-4333-8333-333333333333", SecretResourceVersion: "1",
-		TenantID:  protocol.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
+		TenantID:  memoryv1.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
 		StoreName: "store-a", StoreUUID: "44444444-4444-4444-8444-444444444444",
-		OwnershipClaim: "claim-a", CapabilityRevision: "cap-a", Protocol: "orka.oms.v0alpha1",
+		OwnershipClaim: "claim-a", CapabilityRevision: "cap-a", Protocol: "orka.memory.v1",
 		State: store.MemoryBackendBindingAccepting, ActivationEpoch: 1, MinimumFeatureEpoch: 0,
 		ValidationExpiresAt: now.Add(time.Hour),
 	}
 	if _, err := governed.RecordMemoryActivationRecoveryReceipt(context.Background(), store.MemoryActivationRecoveryReceipt{
 		Namespace: binding.Namespace, NamespaceUID: binding.NamespaceUID, BackendUID: binding.BackendUID,
 		RouteDigest: binding.RecoveryRouteIdentity().Digest(), StoreUUID: binding.StoreUUID,
-		ManifestDigest: protocol.ContentDigest("service test recovery manifest"),
+		ManifestDigest: memoryv1.ContentDigest("service test recovery manifest"),
 		Actor:          "test", Reason: "test recovery prerequisite", VerifiedAt: now,
 	}); err != nil {
 		t.Fatal(err)
@@ -489,7 +489,7 @@ func TestRemoteListExcludesPendingCreateWithoutHydration(t *testing.T) {
 	backend.Status.Ready = true
 	authority := &ResolvedAuthority{
 		Namespace: binding.Namespace, NamespaceUID: binding.NamespaceUID, Binding: &binding, Backend: backend,
-		Adapter: &fakeOMSAdapter{},
+		Adapter: &fakeProtocolAdapter{},
 	}
 	service := &Service{Governed: storeImpl, Resolver: staticAuthorityResolver{authority: authority}, Now: func() time.Time { return now.Add(time.Minute) }}
 	created, err := service.CreateMemory(context.Background(), binding.Namespace, CreateRequest{Content: "pending"}, MutationContext{

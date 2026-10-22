@@ -1,4 +1,4 @@
-package protocol
+package v1
 
 import (
 	"bytes"
@@ -62,7 +62,7 @@ func TestDecodeMutationEnvelopeRejectsClosedProfileViolations(t *testing.T) {
 	}
 	tests := map[string][]byte{
 		"unknown field":      append([]byte(`{"extra":true,`), valid[1:]...),
-		"duplicate field":    append([]byte(`{"protocolVersion":"orka.oms.v0alpha1",`), valid[1:]...),
+		"duplicate field":    append([]byte(`{"protocolVersion":"orka.memory.v1",`), valid[1:]...),
 		"trailing JSON":      append(append([]byte(nil), valid...), []byte(` {}`)...),
 		"oversized":          append(append([]byte(nil), atLimit...), ' '),
 		"invalid UTF-8":      append(append([]byte(nil), valid[:len(valid)-1]...), 0xff, '}'),
@@ -375,7 +375,7 @@ func TestValidateErrorResponseUsesClosedProfileCodes(t *testing.T) {
 	}
 
 	unknown := ErrorResponse{
-		ProtocolVersion: Version, Code: "OMS_FUTURE_ERROR", Message: "bounded error",
+		ProtocolVersion: Version, Code: "MEMORY_ADAPTER_FUTURE_ERROR", Message: "bounded error",
 		Retryable: false, RetryAfterSeconds: 0,
 	}
 	if err := ValidateErrorResponse(&unknown); err == nil {
@@ -443,7 +443,7 @@ func TestSearchResponseRequiresExplicitExhaustionMarker(t *testing.T) {
 func validSearchResponseForTest(now time.Time, exhausted bool) SearchResponse {
 	nextPageToken := ""
 	if !exhausted {
-		nextPageToken = "oms-page-v1." + strings.Repeat("a", 32) + ".1"
+		nextPageToken = "memory-page-v1." + strings.Repeat("a", 32) + ".1"
 	}
 	return SearchResponse{
 		ProtocolVersion: Version, Binding: testBinding(), RequestedMode: SearchModeAuto,
@@ -651,7 +651,7 @@ func TestClosedJSONRejectsNullForNonNullableTypedValues(t *testing.T) {
 	}
 }
 
-func TestMaximumContentFitsBoundedOMSRequestEncoding(t *testing.T) {
+func TestMaximumContentFitsBoundedProtocolRequestEncoding(t *testing.T) {
 	mutation := MutationEnvelope{
 		ProtocolVersion: Version, OperationID: "mop-max-html-escaped-content", Binding: testBinding(),
 		MemoryID: "mem-max-html-escaped-content", Kind: MutationKindCreate, Generation: 1,

@@ -1,6 +1,6 @@
 # Memory backends: operation, recovery, and rollout
 
-Remote namespace memory is controlled by `core.orka.ai/v1alpha1 MemoryBackend/default` and the strict `orka.oms.v0alpha1` profile. The feature is default-off and uses an explicit two-gate rollout:
+Remote namespace memory is controlled by `core.orka.ai/v1alpha1 MemoryBackend/default` and the strict `orka.memory.v1` adapter contract. The feature is default-off and uses an explicit two-gate rollout:
 
 - `--memory-backend-enabled` enables CRD reconciliation, staging, and dispatch support.
 - `--memory-remote-activation-enabled` permits the explicit `Active` cutover only

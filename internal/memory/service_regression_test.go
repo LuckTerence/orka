@@ -20,7 +20,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/apierror"
 	"github.com/orka-agents/orka/internal/store"
-	"github.com/orka-agents/orka/pkg/oms/protocol"
+	memoryv1 "github.com/orka-agents/orka/pkg/memory/v1"
 )
 
 const testRemoteCreateRoute = "createMemory"
@@ -190,10 +190,10 @@ func (s *governedSearchStore) MarkRemoteMemoriesRecalled(context.Context, string
 }
 
 type pagedSearchAdapter struct {
-	fakeOMSAdapter
-	binding           protocol.Binding
-	records           []protocol.MemoryRecord
-	byUpsertKey       map[string]protocol.MemoryRecord
+	fakeProtocolAdapter
+	binding           memoryv1.Binding
+	records           []memoryv1.MemoryRecord
+	byUpsertKey       map[string]memoryv1.MemoryRecord
 	searchCalls       int
 	getCalls          int
 	pageSizes         []int
@@ -208,8 +208,8 @@ type pagedSearchAdapter struct {
 	releaseGets   <-chan struct{}
 }
 
-func newPagedSearchAdapter(binding protocol.Binding, records []protocol.MemoryRecord) *pagedSearchAdapter {
-	byUpsertKey := make(map[string]protocol.MemoryRecord, len(records))
+func newPagedSearchAdapter(binding memoryv1.Binding, records []memoryv1.MemoryRecord) *pagedSearchAdapter {
+	byUpsertKey := make(map[string]memoryv1.MemoryRecord, len(records))
 	for _, record := range records {
 		byUpsertKey[record.UpsertKey] = record
 	}
@@ -219,7 +219,7 @@ func newPagedSearchAdapter(binding protocol.Binding, records []protocol.MemoryRe
 	}
 }
 
-func (a *pagedSearchAdapter) Search(_ context.Context, request protocol.SearchRequest) (*protocol.SearchResponse, error) {
+func (a *pagedSearchAdapter) Search(_ context.Context, request memoryv1.SearchRequest) (*memoryv1.SearchResponse, error) {
 	call := a.searchCalls
 	a.searchCalls++
 	a.pageSizes = append(a.pageSizes, request.PageSize)
@@ -227,7 +227,7 @@ func (a *pagedSearchAdapter) Search(_ context.Context, request protocol.SearchRe
 	offset := 0
 	if request.PageToken != "" {
 		parts := strings.Split(request.PageToken, ".")
-		if len(parts) != 3 || parts[0] != "oms-page-v1" || parts[1] != "0123456789abcdef0123456789abcdef" {
+		if len(parts) != 3 || parts[0] != "memory-page-v1" || parts[1] != "0123456789abcdef0123456789abcdef" {
 			return nil, errors.New("invalid test page token")
 		}
 		parsed, err := strconv.Atoi(parts[2])
@@ -237,26 +237,26 @@ func (a *pagedSearchAdapter) Search(_ context.Context, request protocol.SearchRe
 		offset = parsed
 	}
 	end := min(offset+request.PageSize, len(a.records))
-	records := append([]protocol.MemoryRecord{}, a.records[offset:end]...)
+	records := append([]memoryv1.MemoryRecord{}, a.records[offset:end]...)
 	next := ""
 	if end < len(a.records) {
-		next = fmt.Sprintf("oms-page-v1.0123456789abcdef0123456789abcdef.%d", end)
+		next = fmt.Sprintf("memory-page-v1.0123456789abcdef0123456789abcdef.%d", end)
 	}
 	actualMode := request.Mode
-	if actualMode == protocol.SearchModeAuto {
-		actualMode = protocol.SearchModeKeyword
+	if actualMode == memoryv1.SearchModeAuto {
+		actualMode = memoryv1.SearchModeKeyword
 	}
 	if call < len(a.actualModes) {
 		actualMode = a.actualModes[call]
 	}
-	return &protocol.SearchResponse{
-		ProtocolVersion: protocol.Version, Binding: request.Binding,
+	return &memoryv1.SearchResponse{
+		ProtocolVersion: memoryv1.Version, Binding: request.Binding,
 		RequestedMode: request.Mode, ActualMode: actualMode, Records: records,
 		NextPageToken: next, Exhausted: next == "", SnapshotExpiresAt: a.snapshotExpiresAt,
 	}, nil
 }
 
-func (a *pagedSearchAdapter) Get(ctx context.Context, request protocol.GetRequest) (*protocol.GetResponse, error) {
+func (a *pagedSearchAdapter) Get(ctx context.Context, request memoryv1.GetRequest) (*memoryv1.GetResponse, error) {
 	a.getMu.Lock()
 	a.getCalls++
 	a.activeGets++
@@ -285,10 +285,10 @@ func (a *pagedSearchAdapter) Get(ctx context.Context, request protocol.GetReques
 		}
 	}
 	if !ok {
-		return &protocol.GetResponse{ProtocolVersion: protocol.Version, Binding: request.Binding, Found: false}, nil
+		return &memoryv1.GetResponse{ProtocolVersion: memoryv1.Version, Binding: request.Binding, Found: false}, nil
 	}
 	copy := record
-	return &protocol.GetResponse{ProtocolVersion: protocol.Version, Binding: request.Binding, Found: true, Record: &copy}, nil
+	return &memoryv1.GetResponse{ProtocolVersion: memoryv1.Version, Binding: request.Binding, Found: true, Record: &copy}, nil
 }
 
 func (a *pagedSearchAdapter) getStats() (calls, maxActive int) {
@@ -298,15 +298,15 @@ func (a *pagedSearchAdapter) getStats() (calls, maxActive int) {
 }
 
 type countingGetAdapter struct {
-	fakeOMSAdapter
+	fakeProtocolAdapter
 	getCalls int
 }
 
-func (a *countingGetAdapter) Get(ctx context.Context, request protocol.GetRequest) (*protocol.GetResponse, error) {
+func (a *countingGetAdapter) Get(ctx context.Context, request memoryv1.GetRequest) (*memoryv1.GetResponse, error) {
 	a.mu.Lock()
 	a.getCalls++
 	a.mu.Unlock()
-	return a.fakeOMSAdapter.Get(ctx, request)
+	return a.fakeProtocolAdapter.Get(ctx, request)
 }
 
 func (a *countingGetAdapter) getCount() int {
@@ -350,12 +350,12 @@ func remoteSearchFixture(
 	updatedAt time.Time,
 	content string,
 	trust store.MemoryTrust,
-) (store.RemoteMemoryCatalogEntry, protocol.MemoryRecord) {
+) (store.RemoteMemoryCatalogEntry, memoryv1.MemoryRecord) {
 	protocolIdentity, err := protocolBinding(&binding)
 	if err != nil {
 		panic(err)
 	}
-	digest := protocol.ContentDigest(content)
+	digest := memoryv1.ContentDigest(content)
 	entry := store.RemoteMemoryCatalogEntry{
 		ID: id, Namespace: binding.Namespace, NamespaceUID: binding.NamespaceUID,
 		ClusterID: binding.ClusterID, BackendUID: binding.BackendUID, AuthorityEpoch: binding.AuthorityEpoch,
@@ -367,8 +367,8 @@ func remoteSearchFixture(
 		BackendVersion: "version-" + id, BackendMemoryID: "backend-" + id,
 		ContentDigest: digest, CreatedAt: updatedAt, UpdatedAt: updatedAt,
 	}
-	record := protocol.MemoryRecord{
-		MemoryID: id, UpsertKey: protocol.CanonicalUpsertKey(protocolIdentity, id), State: protocol.RecordStateLive,
+	record := memoryv1.MemoryRecord{
+		MemoryID: id, UpsertKey: memoryv1.CanonicalUpsertKey(protocolIdentity, id), State: memoryv1.RecordStateLive,
 		Generation: 1, BackendVersion: entry.BackendVersion, BackendMemoryID: entry.BackendMemoryID,
 		ContentDigest: digest, Content: content, Tags: append([]string(nil), entry.Tags...),
 		Metadata: remoteRecordMetadataFixture(entry, content), UpdatedAt: updatedAt,
@@ -377,7 +377,7 @@ func remoteSearchFixture(
 }
 
 func remoteRecordMetadataFixture(entry store.RemoteMemoryCatalogEntry, content string) map[string]string {
-	metadata, err := protocol.NormalizeMetadata(memoryMetadataFromStore(remoteEntryToMemory(&entry, content)))
+	metadata, err := memoryv1.NormalizeMetadata(memoryMetadataFromStore(remoteEntryToMemory(&entry, content)))
 	if err != nil {
 		panic(err)
 	}
@@ -390,26 +390,26 @@ func TestRemoteHydrationRejectsCanonicalTagAndMetadataDrift(t *testing.T) {
 		Namespace: "team-remote", NamespaceUID: "11111111-1111-4111-8111-111111111111",
 		ClusterID: "cluster-a", BackendUID: "22222222-2222-4222-8222-222222222222",
 		AuthorityEpoch: 1, RoutingEpoch: 1,
-		TenantID:  protocol.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
+		TenantID:  memoryv1.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
 		StoreUUID: "44444444-4444-4444-8444-444444444444",
 	}
 	tests := []struct {
 		name   string
-		mutate func(*protocol.MemoryRecord)
+		mutate func(*memoryv1.MemoryRecord)
 	}{
-		{name: "altered tags", mutate: func(record *protocol.MemoryRecord) { record.Tags = []string{"other"} }},
-		{name: "dropped tags", mutate: func(record *protocol.MemoryRecord) { record.Tags = []string{} }},
-		{name: "null tags", mutate: func(record *protocol.MemoryRecord) { record.Tags = nil }},
-		{name: "altered metadata", mutate: func(record *protocol.MemoryRecord) { record.Metadata["source"] = "cli" }},
-		{name: "dropped metadata", mutate: func(record *protocol.MemoryRecord) { delete(record.Metadata, "sessionname") }},
-		{name: "null metadata", mutate: func(record *protocol.MemoryRecord) { record.Metadata = nil }},
+		{name: "altered tags", mutate: func(record *memoryv1.MemoryRecord) { record.Tags = []string{"other"} }},
+		{name: "dropped tags", mutate: func(record *memoryv1.MemoryRecord) { record.Tags = []string{} }},
+		{name: "null tags", mutate: func(record *memoryv1.MemoryRecord) { record.Tags = nil }},
+		{name: "altered metadata", mutate: func(record *memoryv1.MemoryRecord) { record.Metadata["source"] = "cli" }},
+		{name: "dropped metadata", mutate: func(record *memoryv1.MemoryRecord) { delete(record.Metadata, "sessionname") }},
+		{name: "null metadata", mutate: func(record *memoryv1.MemoryRecord) { record.Metadata = nil }},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			entry, record := remoteSearchFixture(binding, "mem-hydrate", now, "durable guidance", store.MemoryTrustReviewed)
 			test.mutate(&record)
 			service, _, activeBinding, governed := remoteSearchService(
-				t, []store.RemoteMemoryCatalogEntry{entry}, []protocol.MemoryRecord{record},
+				t, []store.RemoteMemoryCatalogEntry{entry}, []memoryv1.MemoryRecord{record},
 			)
 			recordingStore := &recordingMaterializationStore{governedSearchStore: governed}
 			service.Governed = recordingStore
@@ -434,26 +434,26 @@ func TestRemoteSearchRejectsCanonicalTagAndMetadataDrift(t *testing.T) {
 		Namespace: "team-remote", NamespaceUID: "11111111-1111-4111-8111-111111111111",
 		ClusterID: "cluster-a", BackendUID: "22222222-2222-4222-8222-222222222222",
 		AuthorityEpoch: 1, RoutingEpoch: 1,
-		TenantID:  protocol.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
+		TenantID:  memoryv1.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
 		StoreUUID: "44444444-4444-4444-8444-444444444444",
 	}
 	tests := []struct {
 		name   string
-		mutate func(*protocol.MemoryRecord)
+		mutate func(*memoryv1.MemoryRecord)
 	}{
-		{name: "altered tags", mutate: func(record *protocol.MemoryRecord) { record.Tags = []string{"other"} }},
-		{name: "dropped tags", mutate: func(record *protocol.MemoryRecord) { record.Tags = []string{} }},
-		{name: "null tags", mutate: func(record *protocol.MemoryRecord) { record.Tags = nil }},
-		{name: "altered metadata", mutate: func(record *protocol.MemoryRecord) { record.Metadata["source"] = "cli" }},
-		{name: "dropped metadata", mutate: func(record *protocol.MemoryRecord) { delete(record.Metadata, "sessionname") }},
-		{name: "null metadata", mutate: func(record *protocol.MemoryRecord) { record.Metadata = nil }},
+		{name: "altered tags", mutate: func(record *memoryv1.MemoryRecord) { record.Tags = []string{"other"} }},
+		{name: "dropped tags", mutate: func(record *memoryv1.MemoryRecord) { record.Tags = []string{} }},
+		{name: "null tags", mutate: func(record *memoryv1.MemoryRecord) { record.Tags = nil }},
+		{name: "altered metadata", mutate: func(record *memoryv1.MemoryRecord) { record.Metadata["source"] = "cli" }},
+		{name: "dropped metadata", mutate: func(record *memoryv1.MemoryRecord) { delete(record.Metadata, "sessionname") }},
+		{name: "null metadata", mutate: func(record *memoryv1.MemoryRecord) { record.Metadata = nil }},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			entry, record := remoteSearchFixture(binding, "mem-search", now, "needle", store.MemoryTrustReviewed)
 			test.mutate(&record)
 			service, adapter, activeBinding, _ := remoteSearchService(
-				t, []store.RemoteMemoryCatalogEntry{entry}, []protocol.MemoryRecord{record},
+				t, []store.RemoteMemoryCatalogEntry{entry}, []memoryv1.MemoryRecord{record},
 			)
 
 			response, err := service.Search(context.Background(), activeBinding.Namespace, SearchRequest{
@@ -474,14 +474,14 @@ func TestRemoteSearchRejectsCanonicalTagAndMetadataDrift(t *testing.T) {
 func remoteSearchService(
 	t *testing.T,
 	entries []store.RemoteMemoryCatalogEntry,
-	records []protocol.MemoryRecord,
+	records []memoryv1.MemoryRecord,
 ) (*Service, *pagedSearchAdapter, store.MemoryBackendBinding, *governedSearchStore) {
 	t.Helper()
 	binding := store.MemoryBackendBinding{
 		Namespace: "team-remote", NamespaceUID: "11111111-1111-4111-8111-111111111111",
 		ClusterID: "cluster-a", Mode: store.MemoryBackendModeRemote,
 		BackendUID: "22222222-2222-4222-8222-222222222222", AuthorityEpoch: 1, RoutingEpoch: 1,
-		TenantID:  protocol.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
+		TenantID:  memoryv1.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
 		StoreUUID: "44444444-4444-4444-8444-444444444444", State: store.MemoryBackendBindingAccepting,
 	}
 	for i := range entries {
@@ -504,7 +504,7 @@ func remoteSearchService(
 	backend.Status.ObservedCapabilities = &corev1alpha1.MemoryBackendObservedCapabilities{
 		Effective: []corev1alpha1.MemoryBackendCapability{corev1alpha1.MemoryBackendCapabilityKeywordSearch},
 		Limits: corev1alpha1.MemoryBackendCapabilityLimits{
-			MaxPageSize: protocol.MaxPageSize, MaxSnapshotRecords: protocol.MaxSnapshotRecords,
+			MaxPageSize: memoryv1.MaxPageSize, MaxSnapshotRecords: memoryv1.MaxSnapshotRecords,
 			SnapshotTTLSeconds: 60,
 		},
 	}
@@ -629,12 +629,12 @@ func TestRemoteDisabledMemoryHydratesForExplicitInspection(t *testing.T) {
 		Namespace: "team-remote", NamespaceUID: "11111111-1111-4111-8111-111111111111",
 		ClusterID: "cluster-a", BackendUID: "22222222-2222-4222-8222-222222222222",
 		AuthorityEpoch: 1, RoutingEpoch: 1,
-		TenantID:  protocol.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
+		TenantID:  memoryv1.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
 		StoreUUID: "44444444-4444-4444-8444-444444444444",
 	}
 	entry, record := remoteSearchFixture(binding, "mem-disabled", now, "disabled guidance", store.MemoryTrustReviewed)
 	entry.Disabled = true
-	service, adapter, activeBinding, _ := remoteSearchService(t, []store.RemoteMemoryCatalogEntry{entry}, []protocol.MemoryRecord{record})
+	service, adapter, activeBinding, _ := remoteSearchService(t, []store.RemoteMemoryCatalogEntry{entry}, []memoryv1.MemoryRecord{record})
 
 	listed, err := service.ListMemories(context.Background(), store.MemoryFilter{Namespace: activeBinding.Namespace, Limit: 10})
 	if err != nil || len(listed) != 0 {
@@ -691,7 +691,7 @@ func TestRemoteMutationAdmissionHonorsAdvertisedLimits(t *testing.T) {
 	}
 	resolver := staticAuthorityResolver{authority: authority}
 	service := &Service{
-		Legacy: storeImpl, Proposals: storeImpl, Governed: storeImpl, Resolver: resolver, ContentLimit: protocol.MaxContentBytes,
+		Legacy: storeImpl, Proposals: storeImpl, Governed: storeImpl, Resolver: resolver, ContentLimit: memoryv1.MaxContentBytes,
 		Dispatcher: &Dispatcher{Store: storeImpl, Resolver: resolver, LeaseOwner: "content-limit-test", Now: func() time.Time { return now.Add(time.Minute) }},
 		Now:        func() time.Time { return now.Add(time.Minute) },
 	}
@@ -824,18 +824,18 @@ func TestRemoteDeleteAdmissionRejectsAdvertisedRequestLimitBeforeAdmissionAndEgr
 	if err != nil {
 		t.Fatal(err)
 	}
-	envelope := protocol.MutationEnvelope{
-		ProtocolVersion:        protocol.Version,
+	envelope := memoryv1.MutationEnvelope{
+		ProtocolVersion:        memoryv1.Version,
 		OperationID:            "mop-00000000-0000-4000-8000-000000000000",
 		Binding:                protocolIdentity,
 		MemoryID:               entry.ID,
-		Kind:                   protocol.MutationKindDelete,
+		Kind:                   memoryv1.MutationKindDelete,
 		Generation:             uint64(max(entry.Generation, entry.DesiredGeneration) + 1),
 		ExpectedGeneration:     uint64(entry.Generation),
 		ExpectedBackendVersion: entry.BackendVersion,
 		State:                  nil,
 	}
-	if err := protocol.PrepareMutation(&envelope); err != nil {
+	if err := memoryv1.PrepareMutation(&envelope); err != nil {
 		t.Fatal(err)
 	}
 	payload, err := json.Marshal(envelope)
@@ -896,7 +896,7 @@ func TestRemoteMutationAdmissionPublicLocationIncludesEncodedNamespace(t *testin
 	}
 	admission := (&Service{}).mutationAdmission(
 		MutationContext{LocationBase: "/api/v1/memory-operations/"}, authority,
-		"memory-a", "operation-a", "", "request-digest", protocol.MutationEnvelope{}, nil, time.Now(),
+		"memory-a", "operation-a", "", "request-digest", memoryv1.MutationEnvelope{}, nil, time.Now(),
 	)
 	const want = "/api/v1/memory-operations/operation-a?namespace=team+blue%2Fchild"
 	if admission.Location != want {
@@ -910,11 +910,11 @@ func TestRemoteSearchRequiresAuthorizationAtEgress(t *testing.T) {
 		Namespace: "team-remote", NamespaceUID: "11111111-1111-4111-8111-111111111111",
 		ClusterID: "cluster-a", BackendUID: "22222222-2222-4222-8222-222222222222",
 		AuthorityEpoch: 1, RoutingEpoch: 1,
-		TenantID:  protocol.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
+		TenantID:  memoryv1.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
 		StoreUUID: "44444444-4444-4444-8444-444444444444",
 	}
 	entry, record := remoteSearchFixture(binding, "mem-1", now, "needle", store.MemoryTrustReviewed)
-	service, adapter, activeBinding, _ := remoteSearchService(t, []store.RemoteMemoryCatalogEntry{entry}, []protocol.MemoryRecord{record})
+	service, adapter, activeBinding, _ := remoteSearchService(t, []store.RemoteMemoryCatalogEntry{entry}, []memoryv1.MemoryRecord{record})
 	_, err := service.Search(context.Background(), activeBinding.Namespace, SearchRequest{Query: "needle", Limit: 1}, SearchContext{})
 	var structured *apierror.Error
 	if !errors.As(err, &structured) || structured.Status != http.StatusForbidden || structured.Reason != ReasonSearchRemoteAuth {
@@ -938,11 +938,11 @@ func TestRemoteListQueryWithoutEgressAuthorizationFailsClosed(t *testing.T) {
 		Namespace: "team-remote", NamespaceUID: "11111111-1111-4111-8111-111111111111",
 		ClusterID: "cluster-a", BackendUID: "22222222-2222-4222-8222-222222222222",
 		AuthorityEpoch: 1, RoutingEpoch: 1,
-		TenantID:  protocol.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
+		TenantID:  memoryv1.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
 		StoreUUID: "44444444-4444-4444-8444-444444444444",
 	}
 	entry, record := remoteSearchFixture(binding, "mem-1", now, "needle", store.MemoryTrustReviewed)
-	service, adapter, activeBinding, _ := remoteSearchService(t, []store.RemoteMemoryCatalogEntry{entry}, []protocol.MemoryRecord{record})
+	service, adapter, activeBinding, _ := remoteSearchService(t, []store.RemoteMemoryCatalogEntry{entry}, []memoryv1.MemoryRecord{record})
 	_, err := service.ListMemories(context.Background(), store.MemoryFilter{Namespace: activeBinding.Namespace, Query: "needle", Limit: 1})
 	var structured *apierror.Error
 	if !errors.As(err, &structured) || structured.Reason != ReasonSearchRemoteAuth {
@@ -959,7 +959,7 @@ func TestRemoteListQueryPreservesEveryFilterBeforeLimit(t *testing.T) {
 		Namespace: "team-remote", NamespaceUID: "11111111-1111-4111-8111-111111111111",
 		ClusterID: "cluster-a", BackendUID: "22222222-2222-4222-8222-222222222222",
 		AuthorityEpoch: 1, RoutingEpoch: 1,
-		TenantID:  protocol.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
+		TenantID:  memoryv1.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
 		StoreUUID: "44444444-4444-4444-8444-444444444444",
 	}
 	firstEntry, firstRecord := remoteSearchFixture(binding, "mem-first", now, "needle", store.MemoryTrustReviewed)
@@ -967,7 +967,7 @@ func TestRemoteListQueryPreservesEveryFilterBeforeLimit(t *testing.T) {
 	firstRecord.Metadata = remoteRecordMetadataFixture(firstEntry, firstRecord.Content)
 	secondEntry, secondRecord := remoteSearchFixture(binding, "mem-match", now.Add(-time.Second), "needle", store.MemoryTrustUntrusted)
 	service, _, activeBinding, _ := remoteSearchService(t,
-		[]store.RemoteMemoryCatalogEntry{firstEntry, secondEntry}, []protocol.MemoryRecord{firstRecord, secondRecord})
+		[]store.RemoteMemoryCatalogEntry{firstEntry, secondEntry}, []memoryv1.MemoryRecord{firstRecord, secondRecord})
 	memories, err := service.ListMemoriesWithSearchContext(context.Background(), store.MemoryFilter{
 		Namespace: activeBinding.Namespace, Query: "needle", IDs: []string{"mem-match"},
 		SessionName: "session-a", AgentName: "agent-a", TaskName: "task-a", ParentTask: "parent-a",
@@ -984,11 +984,11 @@ func TestRemoteListRetiresConsumedCursorsAndPreservesReplay(t *testing.T) {
 		Namespace: "team-remote", NamespaceUID: "11111111-1111-4111-8111-111111111111",
 		ClusterID: "cluster-a", BackendUID: "22222222-2222-4222-8222-222222222222",
 		AuthorityEpoch: 1, RoutingEpoch: 1,
-		TenantID:  protocol.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
+		TenantID:  memoryv1.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
 		StoreUUID: "44444444-4444-4444-8444-444444444444",
 	}
 	entries := make([]store.RemoteMemoryCatalogEntry, 0, 3)
-	records := make([]protocol.MemoryRecord, 0, 3)
+	records := make([]memoryv1.MemoryRecord, 0, 3)
 	for i := range 3 {
 		entry, record := remoteSearchFixture(
 			binding, fmt.Sprintf("mem-list-replay-%d", i), now.Add(-time.Duration(i)*time.Second),
@@ -1043,11 +1043,11 @@ func TestRemoteListReplaySuccessorTracksChangedBoundary(t *testing.T) {
 		Namespace: "team-remote", NamespaceUID: "11111111-1111-4111-8111-111111111111",
 		ClusterID: "cluster-a", BackendUID: "22222222-2222-4222-8222-222222222222",
 		AuthorityEpoch: 1, RoutingEpoch: 1,
-		TenantID:  protocol.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
+		TenantID:  memoryv1.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
 		StoreUUID: "44444444-4444-4444-8444-444444444444",
 	}
 	entries := make([]store.RemoteMemoryCatalogEntry, 0, 3)
-	records := make([]protocol.MemoryRecord, 0, 3)
+	records := make([]memoryv1.MemoryRecord, 0, 3)
 	for i := range 3 {
 		entry, record := remoteSearchFixture(
 			binding, fmt.Sprintf("mem-list-changing-%d", i), now.Add(-time.Duration(i)*time.Second),
@@ -1089,11 +1089,11 @@ func TestRemoteListCursorRetirementAllowsPaginationBeyondActiveQuota(t *testing.
 		Namespace: "team-remote", NamespaceUID: "11111111-1111-4111-8111-111111111111",
 		ClusterID: "cluster-a", BackendUID: "22222222-2222-4222-8222-222222222222",
 		AuthorityEpoch: 1, RoutingEpoch: 1,
-		TenantID:  protocol.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
+		TenantID:  memoryv1.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
 		StoreUUID: "44444444-4444-4444-8444-444444444444",
 	}
 	entries := make([]store.RemoteMemoryCatalogEntry, 0, recordCount)
-	records := make([]protocol.MemoryRecord, 0, recordCount)
+	records := make([]memoryv1.MemoryRecord, 0, recordCount)
 	for i := range recordCount {
 		entry, record := remoteSearchFixture(
 			binding, fmt.Sprintf("mem-list-quota-%03d", i), now.Add(-time.Duration(i)*time.Second),
@@ -1148,11 +1148,11 @@ func TestRemoteCatalogFiltersBeforeLimitAcrossPages(t *testing.T) {
 		Namespace: "team-remote", NamespaceUID: "11111111-1111-4111-8111-111111111111",
 		ClusterID: "cluster-a", BackendUID: "22222222-2222-4222-8222-222222222222",
 		AuthorityEpoch: 1, RoutingEpoch: 1,
-		TenantID:  protocol.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
+		TenantID:  memoryv1.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
 		StoreUUID: "44444444-4444-4444-8444-444444444444",
 	}
 	entries := make([]store.RemoteMemoryCatalogEntry, 0, maxRemoteCatalogLimit+1)
-	records := make([]protocol.MemoryRecord, 0, maxRemoteCatalogLimit+1)
+	records := make([]memoryv1.MemoryRecord, 0, maxRemoteCatalogLimit+1)
 	for i := 0; i <= maxRemoteCatalogLimit; i++ {
 		entry, record := remoteSearchFixture(binding, fmt.Sprintf("mem-%04d", maxRemoteCatalogLimit-i), now.Add(-time.Duration(i)*time.Second), "content", store.MemoryTrustReviewed)
 		entry.AgentName = "other"
@@ -1181,12 +1181,12 @@ func TestRemoteCatalogHydratesConcurrentlyWithinFixedBoundAndPreservesOrder(t *t
 		Namespace: "team-remote", NamespaceUID: "11111111-1111-4111-8111-111111111111",
 		ClusterID: "cluster-a", BackendUID: "22222222-2222-4222-8222-222222222222",
 		AuthorityEpoch: 1, RoutingEpoch: 1,
-		TenantID:  protocol.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
+		TenantID:  memoryv1.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
 		StoreUUID: "44444444-4444-4444-8444-444444444444",
 	}
 	count := maxRemoteListHydrationConcurrency + 3
 	entries := make([]store.RemoteMemoryCatalogEntry, 0, count)
-	records := make([]protocol.MemoryRecord, 0, count)
+	records := make([]memoryv1.MemoryRecord, 0, count)
 	for i := range count {
 		entry, record := remoteSearchFixture(binding, fmt.Sprintf("mem-%02d", i), now.Add(-time.Duration(i)*time.Second), "content", store.MemoryTrustReviewed)
 		entries = append(entries, entry)
@@ -1246,13 +1246,13 @@ func TestRemoteCatalogHTTP1HydrationRespectsTransportConnectionCap(t *testing.T)
 		Namespace: "team-remote", NamespaceUID: "11111111-1111-4111-8111-111111111111",
 		ClusterID: "cluster-a", BackendUID: "22222222-2222-4222-8222-222222222222",
 		AuthorityEpoch: 1, RoutingEpoch: 1,
-		TenantID:  protocol.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
+		TenantID:  memoryv1.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
 		StoreUUID: "44444444-4444-4444-8444-444444444444",
 	}
-	count := omsHTTPMaxConnsPerHost * 2
+	count := adapterHTTPMaxConnsPerHost * 2
 	entries := make([]store.RemoteMemoryCatalogEntry, 0, count)
-	records := make([]protocol.MemoryRecord, 0, count)
-	byUpsertKey := make(map[string]protocol.MemoryRecord, count)
+	records := make([]memoryv1.MemoryRecord, 0, count)
+	byUpsertKey := make(map[string]memoryv1.MemoryRecord, count)
 	for i := range count {
 		entry, record := remoteSearchFixture(
 			binding, fmt.Sprintf("mem-http1-%02d", i), now.Add(-time.Duration(i)*time.Second), "slow content", store.MemoryTrustReviewed,
@@ -1272,8 +1272,8 @@ func TestRemoteCatalogHTTP1HydrationRespectsTransportConnectionCap(t *testing.T)
 			http.Error(writer, "invalid body", http.StatusBadRequest)
 			return
 		}
-		decoded, err := protocol.DecodeGetRequest(body)
-		if err != nil || request.URL.Path != protocol.PathRecordsGet {
+		decoded, err := memoryv1.DecodeGetRequest(body)
+		if err != nil || request.URL.Path != memoryv1.PathRecordsGet {
 			http.Error(writer, "invalid request", http.StatusBadRequest)
 			return
 		}
@@ -1289,14 +1289,14 @@ func TestRemoteCatalogHTTP1HydrationRespectsTransportConnectionCap(t *testing.T)
 		}()
 		time.Sleep(requestDelay)
 		record, found := byUpsertKey[decoded.UpsertKey]
-		response := protocol.GetResponse{
-			ProtocolVersion: protocol.Version, Binding: decoded.Binding, Found: found,
+		response := memoryv1.GetResponse{
+			ProtocolVersion: memoryv1.Version, Binding: decoded.Binding, Found: found,
 		}
 		if found {
 			copy := record
 			response.Record = &copy
 		}
-		encoded, err := protocol.EncodeJSON(response)
+		encoded, err := memoryv1.EncodeJSON(response)
 		if err != nil {
 			http.Error(writer, "encode response", http.StatusInternalServerError)
 			return
@@ -1309,8 +1309,8 @@ func TestRemoteCatalogHTTP1HydrationRespectsTransportConnectionCap(t *testing.T)
 	defer server.Close()
 
 	transport := server.Client().Transport.(*http.Transport).Clone()
-	transport.MaxConnsPerHost = omsHTTPMaxConnsPerHost
-	client := &OMSClient{
+	transport.MaxConnsPerHost = adapterHTTPMaxConnsPerHost
+	client := &ProtocolClient{
 		baseURL: server.URL, token: "test-token",
 		client: &http.Client{Transport: transport, Timeout: 500 * time.Millisecond},
 	}
@@ -1327,9 +1327,9 @@ func TestRemoteCatalogHTTP1HydrationRespectsTransportConnectionCap(t *testing.T)
 	concurrencyMu.Lock()
 	gotMaxActive, gotProtocolMajor := maxActive, protocolMajor
 	concurrencyMu.Unlock()
-	if gotProtocolMajor != 1 || gotMaxActive != omsHTTPMaxConnsPerHost {
+	if gotProtocolMajor != 1 || gotMaxActive != adapterHTTPMaxConnsPerHost {
 		t.Fatalf("HTTP protocol=%d max active=%d, want HTTP/1.1 and %d",
-			gotProtocolMajor, gotMaxActive, omsHTTPMaxConnsPerHost)
+			gotProtocolMajor, gotMaxActive, adapterHTTPMaxConnsPerHost)
 	}
 }
 
@@ -1339,14 +1339,14 @@ func TestRemoteCatalogConcurrentHydrationStillRejectsDivergence(t *testing.T) {
 		Namespace: "team-remote", NamespaceUID: "11111111-1111-4111-8111-111111111111",
 		ClusterID: "cluster-a", BackendUID: "22222222-2222-4222-8222-222222222222",
 		AuthorityEpoch: 1, RoutingEpoch: 1,
-		TenantID:  protocol.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
+		TenantID:  memoryv1.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
 		StoreUUID: "44444444-4444-4444-8444-444444444444",
 	}
 	firstEntry, firstRecord := remoteSearchFixture(binding, "mem-1", now, "first", store.MemoryTrustReviewed)
 	secondEntry, secondRecord := remoteSearchFixture(binding, "mem-2", now.Add(-time.Second), "second", store.MemoryTrustReviewed)
 	secondRecord.Content = "tampered"
 	service, _, activeBinding, governed := remoteSearchService(t,
-		[]store.RemoteMemoryCatalogEntry{firstEntry, secondEntry}, []protocol.MemoryRecord{firstRecord, secondRecord})
+		[]store.RemoteMemoryCatalogEntry{firstEntry, secondEntry}, []memoryv1.MemoryRecord{firstRecord, secondRecord})
 	recordingStore := &recordingMaterializationStore{governedSearchStore: governed}
 	service.Governed = recordingStore
 
@@ -1369,11 +1369,11 @@ func TestRemoteSearchPersistsAdvertisedMaximumPageSize(t *testing.T) {
 		Namespace: "team-remote", NamespaceUID: "11111111-1111-4111-8111-111111111111",
 		ClusterID: "cluster-a", BackendUID: "22222222-2222-4222-8222-222222222222",
 		AuthorityEpoch: 1, RoutingEpoch: 1,
-		TenantID:  protocol.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
+		TenantID:  memoryv1.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
 		StoreUUID: "44444444-4444-4444-8444-444444444444",
 	}
 	entries := make([]store.RemoteMemoryCatalogEntry, 0, 4)
-	records := make([]protocol.MemoryRecord, 0, 4)
+	records := make([]memoryv1.MemoryRecord, 0, 4)
 	for i := 1; i <= 4; i++ {
 		entry, record := remoteSearchFixture(
 			binding, fmt.Sprintf("mem-page-%d", i), now.Add(-time.Duration(i)*time.Second), "needle", store.MemoryTrustReviewed,
@@ -1427,11 +1427,11 @@ func TestRemoteSearchPendingReplayRejectsChangedConsumedPrefix(t *testing.T) {
 		Namespace: "team-remote", NamespaceUID: "11111111-1111-4111-8111-111111111111",
 		ClusterID: "cluster-a", BackendUID: "22222222-2222-4222-8222-222222222222",
 		AuthorityEpoch: 1, RoutingEpoch: 1,
-		TenantID:  protocol.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
+		TenantID:  memoryv1.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
 		StoreUUID: "44444444-4444-4444-8444-444444444444",
 	}
 	entries := make([]store.RemoteMemoryCatalogEntry, 0, 16)
-	records := make([]protocol.MemoryRecord, 0, 16)
+	records := make([]memoryv1.MemoryRecord, 0, 16)
 	for i := range 16 {
 		entry, record := remoteSearchFixture(
 			binding, fmt.Sprintf("mem-prefix-%02d", i), now.Add(-time.Duration(i)*time.Second),
@@ -1488,11 +1488,11 @@ func TestRemoteSearchReplaySuccessorsAreKeyedByNormalizedPageLimit(t *testing.T)
 		Namespace: "team-remote", NamespaceUID: "11111111-1111-4111-8111-111111111111",
 		ClusterID: "cluster-a", BackendUID: "22222222-2222-4222-8222-222222222222",
 		AuthorityEpoch: 1, RoutingEpoch: 1,
-		TenantID:  protocol.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
+		TenantID:  memoryv1.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
 		StoreUUID: "44444444-4444-4444-8444-444444444444",
 	}
 	entries := make([]store.RemoteMemoryCatalogEntry, 0, 25)
-	records := make([]protocol.MemoryRecord, 0, 25)
+	records := make([]memoryv1.MemoryRecord, 0, 25)
 	for i := 1; i <= 25; i++ {
 		entry, record := remoteSearchFixture(
 			binding, fmt.Sprintf("mem-shape-%02d", i), now.Add(-time.Duration(i)*time.Second), "needle", store.MemoryTrustReviewed,
@@ -1558,11 +1558,11 @@ func TestRemoteSearchCursorPreservesUnconsumedProviderRecords(t *testing.T) {
 		Namespace: "team-remote", NamespaceUID: "11111111-1111-4111-8111-111111111111",
 		ClusterID: "cluster-a", BackendUID: "22222222-2222-4222-8222-222222222222",
 		AuthorityEpoch: 1, RoutingEpoch: 1,
-		TenantID:  protocol.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
+		TenantID:  memoryv1.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
 		StoreUUID: "44444444-4444-4444-8444-444444444444",
 	}
 	entries := make([]store.RemoteMemoryCatalogEntry, 0, 5)
-	records := make([]protocol.MemoryRecord, 0, 5)
+	records := make([]memoryv1.MemoryRecord, 0, 5)
 	for i := 1; i <= 5; i++ {
 		trust := store.MemoryTrustReviewed
 		if i == 1 {
@@ -1587,7 +1587,7 @@ func TestRemoteSearchCursorPreservesUnconsumedProviderRecords(t *testing.T) {
 		t.Fatal(err)
 	}
 	adapter.getMu.Lock()
-	delete(adapter.byUpsertKey, protocol.CanonicalUpsertKey(protocolIdentity, "mem-5"))
+	delete(adapter.byUpsertKey, memoryv1.CanonicalUpsertKey(protocolIdentity, "mem-5"))
 	adapter.getMu.Unlock()
 
 	second, err := service.Search(context.Background(), activeBinding.Namespace, SearchRequest{
@@ -1612,11 +1612,11 @@ func TestRemoteSearchContinuationRemainsBoundToQueryAndAuthority(t *testing.T) {
 		Namespace: "team-remote", NamespaceUID: "11111111-1111-4111-8111-111111111111",
 		ClusterID: "cluster-a", BackendUID: "22222222-2222-4222-8222-222222222222",
 		AuthorityEpoch: 1, RoutingEpoch: 1,
-		TenantID:  protocol.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
+		TenantID:  memoryv1.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
 		StoreUUID: "44444444-4444-4444-8444-444444444444",
 	}
 	entries := make([]store.RemoteMemoryCatalogEntry, 0, 5)
-	records := make([]protocol.MemoryRecord, 0, 5)
+	records := make([]memoryv1.MemoryRecord, 0, 5)
 	for i := 1; i <= 5; i++ {
 		trust := store.MemoryTrustReviewed
 		if i == 1 {
@@ -1664,11 +1664,11 @@ func TestRemoteSearchContinuationRejectsChangedReplayedSnapshot(t *testing.T) {
 		Namespace: "team-remote", NamespaceUID: "11111111-1111-4111-8111-111111111111",
 		ClusterID: "cluster-a", BackendUID: "22222222-2222-4222-8222-222222222222",
 		AuthorityEpoch: 1, RoutingEpoch: 1,
-		TenantID:  protocol.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
+		TenantID:  memoryv1.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
 		StoreUUID: "44444444-4444-4444-8444-444444444444",
 	}
 	entries := make([]store.RemoteMemoryCatalogEntry, 0, 5)
-	records := make([]protocol.MemoryRecord, 0, 5)
+	records := make([]memoryv1.MemoryRecord, 0, 5)
 	for i := 1; i <= 5; i++ {
 		trust := store.MemoryTrustReviewed
 		if i == 1 {
@@ -1704,11 +1704,11 @@ func TestRemoteSearchCursorExpiresWithProviderSnapshot(t *testing.T) {
 		Namespace: "team-remote", NamespaceUID: "11111111-1111-4111-8111-111111111111",
 		ClusterID: "cluster-a", BackendUID: "22222222-2222-4222-8222-222222222222",
 		AuthorityEpoch: 1, RoutingEpoch: 1,
-		TenantID:  protocol.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
+		TenantID:  memoryv1.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
 		StoreUUID: "44444444-4444-4444-8444-444444444444",
 	}
 	entries := make([]store.RemoteMemoryCatalogEntry, 0, 5)
-	records := make([]protocol.MemoryRecord, 0, 5)
+	records := make([]memoryv1.MemoryRecord, 0, 5)
 	for i := 1; i <= 5; i++ {
 		trust := store.MemoryTrustReviewed
 		if i == 1 {
@@ -1752,13 +1752,13 @@ func TestRemoteSearchRejectsAlreadyExpiredContinuationSnapshot(t *testing.T) {
 		Namespace: "team-remote", NamespaceUID: "11111111-1111-4111-8111-111111111111",
 		ClusterID: "cluster-a", BackendUID: "22222222-2222-4222-8222-222222222222",
 		AuthorityEpoch: 1, RoutingEpoch: 1,
-		TenantID:  protocol.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
+		TenantID:  memoryv1.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
 		StoreUUID: "44444444-4444-4444-8444-444444444444",
 	}
 	firstEntry, firstRecord := remoteSearchFixture(binding, "mem-1", now, "needle", store.MemoryTrustReviewed)
 	secondEntry, secondRecord := remoteSearchFixture(binding, "mem-2", now.Add(-time.Second), "needle", store.MemoryTrustReviewed)
 	service, adapter, activeBinding, _ := remoteSearchService(t,
-		[]store.RemoteMemoryCatalogEntry{firstEntry, secondEntry}, []protocol.MemoryRecord{firstRecord, secondRecord})
+		[]store.RemoteMemoryCatalogEntry{firstEntry, secondEntry}, []memoryv1.MemoryRecord{firstRecord, secondRecord})
 	service.Now = func() time.Time { return now }
 	adapter.snapshotExpiresAt = now
 	_, err := service.Search(context.Background(), activeBinding.Namespace, SearchRequest{
@@ -1777,11 +1777,11 @@ func TestRemoteSearchAcceptsExpiredTerminalSnapshotWithoutCursor(t *testing.T) {
 		Namespace: "team-remote", NamespaceUID: "11111111-1111-4111-8111-111111111111",
 		ClusterID: "cluster-a", BackendUID: "22222222-2222-4222-8222-222222222222",
 		AuthorityEpoch: 1, RoutingEpoch: 1,
-		TenantID:  protocol.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
+		TenantID:  memoryv1.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
 		StoreUUID: "44444444-4444-4444-8444-444444444444",
 	}
 	entry, record := remoteSearchFixture(binding, "mem-1", now, "needle", store.MemoryTrustReviewed)
-	service, adapter, activeBinding, _ := remoteSearchService(t, []store.RemoteMemoryCatalogEntry{entry}, []protocol.MemoryRecord{record})
+	service, adapter, activeBinding, _ := remoteSearchService(t, []store.RemoteMemoryCatalogEntry{entry}, []memoryv1.MemoryRecord{record})
 	service.Now = func() time.Time { return now }
 	adapter.snapshotExpiresAt = now.Add(-time.Minute)
 	response, err := service.Search(context.Background(), activeBinding.Namespace, SearchRequest{
@@ -1798,23 +1798,23 @@ func TestRemoteSearchRejectsResolvedModeChangeAcrossPages(t *testing.T) {
 		Namespace: "team-remote", NamespaceUID: "11111111-1111-4111-8111-111111111111",
 		ClusterID: "cluster-a", BackendUID: "22222222-2222-4222-8222-222222222222",
 		AuthorityEpoch: 1, RoutingEpoch: 1,
-		TenantID:  protocol.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
+		TenantID:  memoryv1.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
 		StoreUUID: "44444444-4444-4444-8444-444444444444",
 	}
 	firstEntry, firstRecord := remoteSearchFixture(binding, "mem-1", now, "needle", store.MemoryTrustReviewed)
 	secondEntry, secondRecord := remoteSearchFixture(binding, "mem-2", now.Add(-time.Second), "needle", store.MemoryTrustReviewed)
 	service, adapter, activeBinding, _ := remoteSearchService(t,
-		[]store.RemoteMemoryCatalogEntry{firstEntry, secondEntry}, []protocol.MemoryRecord{firstRecord, secondRecord})
-	adapter.actualModes = []string{protocol.SearchModeKeyword, protocol.SearchModeSemantic}
+		[]store.RemoteMemoryCatalogEntry{firstEntry, secondEntry}, []memoryv1.MemoryRecord{firstRecord, secondRecord})
+	adapter.actualModes = []string{memoryv1.SearchModeKeyword, memoryv1.SearchModeSemantic}
 
 	first, err := service.Search(context.Background(), activeBinding.Namespace, SearchRequest{
-		Query: "needle", Mode: protocol.SearchModeAuto, Limit: 1,
+		Query: "needle", Mode: memoryv1.SearchModeAuto, Limit: 1,
 	}, SearchContext{RemoteAuthorized: true})
-	if err != nil || first.Cursor == "" || first.ActualMode != protocol.SearchModeKeyword {
+	if err != nil || first.Cursor == "" || first.ActualMode != memoryv1.SearchModeKeyword {
 		t.Fatalf("first Search() = %#v, err=%v", first, err)
 	}
 	_, err = service.Search(context.Background(), activeBinding.Namespace, SearchRequest{
-		Query: "needle", Mode: protocol.SearchModeAuto, Limit: 1, Cursor: first.Cursor,
+		Query: "needle", Mode: memoryv1.SearchModeAuto, Limit: 1, Cursor: first.Cursor,
 	}, SearchContext{RemoteAuthorized: true})
 	var structured *apierror.Error
 	if !errors.As(err, &structured) || structured.Status != http.StatusServiceUnavailable || structured.Reason != ReasonBackendUnavailable {
@@ -1826,7 +1826,7 @@ func TestRemoteSearchRejectsResolvedModeChangeAcrossPages(t *testing.T) {
 }
 
 func TestKeywordRecordMatchesContentAndLocalCatalogMetadata(t *testing.T) {
-	record := &protocol.MemoryRecord{
+	record := &memoryv1.MemoryRecord{
 		Content: "durable guidance", Tags: []string{"provider-only"},
 		Metadata: map[string]string{"providerOwner": "Mallory"},
 	}
@@ -1955,11 +1955,11 @@ func TestRemoteSearchRedactsQueryAndRequiresDurableAuditBeforeEgress(t *testing.
 		Namespace: "team-remote", NamespaceUID: "11111111-1111-4111-8111-111111111111",
 		ClusterID: "cluster-a", BackendUID: "22222222-2222-4222-8222-222222222222",
 		AuthorityEpoch: 1, RoutingEpoch: 1,
-		TenantID:  protocol.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
+		TenantID:  memoryv1.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
 		StoreUUID: "44444444-4444-4444-8444-444444444444",
 	}
 	entry, record := remoteSearchFixture(binding, "mem-1", now, "token is [REDACTED]", store.MemoryTrustReviewed)
-	service, adapter, activeBinding, governed := remoteSearchService(t, []store.RemoteMemoryCatalogEntry{entry}, []protocol.MemoryRecord{record})
+	service, adapter, activeBinding, governed := remoteSearchService(t, []store.RemoteMemoryCatalogEntry{entry}, []memoryv1.MemoryRecord{record})
 	governed.auditErr = errors.New("audit unavailable")
 	_, err := service.Search(context.Background(), activeBinding.Namespace, SearchRequest{
 		Query: "token is supersecret", Limit: 1,
@@ -2006,15 +2006,15 @@ func TestRemoteSearchRejectsAdvertisedInputLimitsBeforeAuditAndEgress(t *testing
 		if err != nil {
 			t.Fatal(err)
 		}
-		payload, err := json.Marshal(protocol.SearchRequest{
-			ProtocolVersion: protocol.Version, Binding: binding, Mode: protocol.SearchModeKeyword,
+		payload, err := json.Marshal(memoryv1.SearchRequest{
+			ProtocolVersion: memoryv1.Version, Binding: binding, Mode: memoryv1.SearchModeKeyword,
 			Query: "q", PageSize: 1, PageToken: "",
 		})
 		if err != nil {
 			t.Fatal(err)
 		}
 		limits := &service.Resolver.(staticAuthorityResolver).authority.Backend.Status.ObservedCapabilities.Limits
-		limits.MaxQueryBytes = protocol.MaxQueryBytes
+		limits.MaxQueryBytes = memoryv1.MaxQueryBytes
 		limits.MaxRequestBytes = int64(len(payload) - 1)
 
 		_, err = service.Search(context.Background(), activeBinding.Namespace, SearchRequest{
@@ -2047,11 +2047,11 @@ func TestRemoteSearchNormalPageBoundaryIsCompleteAndBudgetExhaustionReturnsCurso
 		Namespace: "team-remote", NamespaceUID: "11111111-1111-4111-8111-111111111111",
 		ClusterID: "cluster-a", BackendUID: "22222222-2222-4222-8222-222222222222",
 		AuthorityEpoch: 1, RoutingEpoch: 1,
-		TenantID:  protocol.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
+		TenantID:  memoryv1.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
 		StoreUUID: "44444444-4444-4444-8444-444444444444",
 	}
 	entries := make([]store.RemoteMemoryCatalogEntry, 0, maxRemoteSearchPages+2)
-	records := make([]protocol.MemoryRecord, 0, maxRemoteSearchPages+2)
+	records := make([]memoryv1.MemoryRecord, 0, maxRemoteSearchPages+2)
 	for i := range maxRemoteSearchPages + 2 {
 		entry, record := remoteSearchFixture(binding, fmt.Sprintf("mem-%02d", i), now.Add(-time.Duration(i)*time.Second), "needle", store.MemoryTrustUntrusted)
 		entries = append(entries, entry)
@@ -2231,7 +2231,7 @@ func (s *generationWatermarkAdmissionStore) AdmitRemoteMemoryCreate(
 ) (*store.MemoryMutationAdmissionResult, error) {
 	copy := admission
 	s.admission = &copy
-	envelope, err := protocol.DecodeMutationEnvelope(admission.Mutation.Payload)
+	envelope, err := memoryv1.DecodeMutationEnvelope(admission.Mutation.Payload)
 	if err != nil {
 		return nil, err
 	}
@@ -2295,7 +2295,7 @@ func TestCreateMemoryRejectsReservedProposalSource(t *testing.T) {
 
 func TestRemoteReplacementDemotesChangedProposalMetadata(t *testing.T) {
 	entry := store.RemoteMemoryCatalogEntry{
-		ContentDigest: protocol.ContentDigest("original"), Tags: []string{"reviewed"},
+		ContentDigest: memoryv1.ContentDigest("original"), Tags: []string{"reviewed"},
 		SessionName: "session-a", AgentName: "agent-a", TaskName: "task-a", ParentTask: "parent-a",
 		Source: memorySourceProposal, SourceProposalID: "proposal-a",
 	}
@@ -2315,7 +2315,7 @@ func TestRemoteCreateRedactsCatalogProvenanceAndTags(t *testing.T) {
 	binding := &store.MemoryBackendBinding{
 		Namespace: "team-a", NamespaceUID: "11111111-1111-4111-8111-111111111111", Mode: store.MemoryBackendModeRemote,
 		ClusterID: "cluster-a", BackendUID: "22222222-2222-4222-8222-222222222222", AuthorityEpoch: 1, RoutingEpoch: 3,
-		TenantID: protocol.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"), StoreUUID: "44444444-4444-4444-8444-444444444444",
+		TenantID: memoryv1.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"), StoreUUID: "44444444-4444-4444-8444-444444444444",
 		State: store.MemoryBackendBindingAccepting,
 	}
 	backend := &corev1alpha1.MemoryBackend{}
@@ -2337,7 +2337,7 @@ func TestRemoteCreateRedactsCatalogProvenanceAndTags(t *testing.T) {
 	if err != nil || result == nil || governed.admission == nil {
 		t.Fatalf("CreateMemory() = %#v, admission=%#v, err=%v", result, governed.admission, err)
 	}
-	envelope, err := protocol.DecodeMutationEnvelope(governed.admission.Mutation.Payload)
+	envelope, err := memoryv1.DecodeMutationEnvelope(governed.admission.Mutation.Payload)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2372,7 +2372,7 @@ func TestRemoteCreateUsesRetainedGenerationWatermark(t *testing.T) {
 	binding := &store.MemoryBackendBinding{
 		Namespace: "team-a", NamespaceUID: "11111111-1111-4111-8111-111111111111", Mode: store.MemoryBackendModeRemote,
 		ClusterID: "cluster-a", BackendUID: "22222222-2222-4222-8222-222222222222", AuthorityEpoch: 1, RoutingEpoch: 3,
-		TenantID: protocol.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"), StoreUUID: "44444444-4444-4444-8444-444444444444",
+		TenantID: memoryv1.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"), StoreUUID: "44444444-4444-4444-8444-444444444444",
 		State: store.MemoryBackendBindingAccepting,
 	}
 	backend := &corev1alpha1.MemoryBackend{}
@@ -2394,7 +2394,7 @@ func TestRemoteCreateUsesRetainedGenerationWatermark(t *testing.T) {
 	if governed.admission == nil {
 		t.Fatal("CreateMemory() did not reach durable admission")
 	}
-	envelope, err := protocol.DecodeMutationEnvelope(governed.admission.Mutation.Payload)
+	envelope, err := memoryv1.DecodeMutationEnvelope(governed.admission.Mutation.Payload)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2448,7 +2448,7 @@ func TestSuccessfulMemoryIdempotencyReplayUsesImmutableBodyWithoutProvider(t *te
 		BackendUID: binding.BackendUID, AuthorityEpoch: binding.AuthorityEpoch, RoutingEpoch: binding.RoutingEpoch,
 		Generation: 1, DesiredGeneration: 1, GovernanceRevision: 1,
 		MaterializationState: store.MemoryMaterializationActive, Trust: store.MemoryTrustReviewed,
-		ContentDigest: protocol.ContentDigest(request.Content), ContentAvailable: true,
+		ContentDigest: memoryv1.ContentDigest(request.Content), ContentAvailable: true,
 	}
 	operation := store.MemoryOperation{
 		ID: "mop-1", Namespace: binding.Namespace, NamespaceUID: binding.NamespaceUID,
@@ -2492,7 +2492,7 @@ func TestRemoteListIncludeDeletedSkipsLiveDisabledBeforeLimitAcrossPages(t *test
 		Namespace: "team-remote", NamespaceUID: "11111111-1111-4111-8111-111111111111",
 		ClusterID: "cluster-a", BackendUID: "22222222-2222-4222-8222-222222222222",
 		AuthorityEpoch: 1, RoutingEpoch: 1,
-		TenantID:  protocol.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
+		TenantID:  memoryv1.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
 		StoreUUID: "44444444-4444-4444-8444-444444444444",
 	}
 	entries := make([]store.RemoteMemoryCatalogEntry, 0, maxRemoteCatalogLimit+1)
@@ -2537,7 +2537,7 @@ func TestRemoteListIncludeDeletedIncludesDisabledTombstone(t *testing.T) {
 		Namespace: "team-remote", NamespaceUID: "11111111-1111-4111-8111-111111111111",
 		ClusterID: "cluster-a", BackendUID: "22222222-2222-4222-8222-222222222222",
 		AuthorityEpoch: 1, RoutingEpoch: 1,
-		TenantID:  protocol.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
+		TenantID:  memoryv1.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
 		StoreUUID: "44444444-4444-4444-8444-444444444444",
 	}
 	entry, record := remoteSearchFixture(binding, "mem-deleted", now, "deleted content", store.MemoryTrustReviewed)
@@ -2545,7 +2545,7 @@ func TestRemoteListIncludeDeletedIncludesDisabledTombstone(t *testing.T) {
 	entry.Deleted = true
 	entry.MaterializationState = store.MemoryMaterializationDeleted
 	entry.ContentAvailable = false
-	service, _, activeBinding, _ := remoteSearchService(t, []store.RemoteMemoryCatalogEntry{entry}, []protocol.MemoryRecord{record})
+	service, _, activeBinding, _ := remoteSearchService(t, []store.RemoteMemoryCatalogEntry{entry}, []memoryv1.MemoryRecord{record})
 
 	memories, err := service.ListMemories(context.Background(), store.MemoryFilter{
 		Namespace: activeBinding.Namespace, IncludeDeleted: true,
@@ -2562,7 +2562,7 @@ func TestRemoteSearchIncludeDeletedMergesCompletedTombstonesWithoutHydration(t *
 		Namespace: "team-remote", NamespaceUID: "11111111-1111-4111-8111-111111111111",
 		ClusterID: "cluster-a", BackendUID: "22222222-2222-4222-8222-222222222222",
 		AuthorityEpoch: 1, RoutingEpoch: 1,
-		TenantID:  protocol.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
+		TenantID:  memoryv1.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
 		StoreUUID: "44444444-4444-4444-8444-444444444444",
 	}
 	liveEntry, liveRecord := remoteSearchFixture(binding, liveMemoryID, now, "needle live", store.MemoryTrustReviewed)
@@ -2592,7 +2592,7 @@ func TestRemoteSearchIncludeDeletedMergesCompletedTombstonesWithoutHydration(t *
 		t.Run(test.name, func(t *testing.T) {
 			service, adapter, activeBinding, governed := remoteSearchService(t,
 				[]store.RemoteMemoryCatalogEntry{foreignEntry, liveEntry, disabledEntry, deletedEntry},
-				[]protocol.MemoryRecord{foreignRecord, deletedRecord, liveRecord, disabledRecord})
+				[]memoryv1.MemoryRecord{foreignRecord, deletedRecord, liveRecord, disabledRecord})
 			governed.entries[0].ClusterID = "foreign-cluster"
 			governed.byID[foreignEntry.ID] = governed.entries[0]
 
@@ -2631,7 +2631,7 @@ func TestRemoteQueriedListIncludeDeletedReturnsCompletedTombstone(t *testing.T) 
 		Namespace: "team-remote", NamespaceUID: "11111111-1111-4111-8111-111111111111",
 		ClusterID: "cluster-a", BackendUID: "22222222-2222-4222-8222-222222222222",
 		AuthorityEpoch: 1, RoutingEpoch: 1,
-		TenantID:  protocol.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
+		TenantID:  memoryv1.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
 		StoreUUID: "44444444-4444-4444-8444-444444444444",
 	}
 	entry, _ := remoteSearchFixture(binding, "mem-deleted", now, "unavailable content", store.MemoryTrustReviewed)
@@ -2660,7 +2660,7 @@ func TestRemoteSearchIncludeDeletedContinuationKeepsStableTombstoneOrder(t *test
 		Namespace: "team-remote", NamespaceUID: "11111111-1111-4111-8111-111111111111",
 		ClusterID: "cluster-a", BackendUID: "22222222-2222-4222-8222-222222222222",
 		AuthorityEpoch: 1, RoutingEpoch: 1,
-		TenantID:  protocol.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
+		TenantID:  memoryv1.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
 		StoreUUID: "44444444-4444-4444-8444-444444444444",
 	}
 	liveEntry, liveRecord := remoteSearchFixture(binding, "mem-live", now.Add(time.Second), "needle live", store.MemoryTrustReviewed)
@@ -2674,7 +2674,7 @@ func TestRemoteSearchIncludeDeletedContinuationKeepsStableTombstoneOrder(t *test
 		entry.Tags = []string{"needle"}
 	}
 	service, adapter, activeBinding, governed := remoteSearchService(t,
-		[]store.RemoteMemoryCatalogEntry{liveEntry, tombstoneB, tombstoneA}, []protocol.MemoryRecord{liveRecord})
+		[]store.RemoteMemoryCatalogEntry{liveEntry, tombstoneB, tombstoneA}, []memoryv1.MemoryRecord{liveRecord})
 
 	cursor := ""
 	wantIDs := []string{"mem-live", "mem-tomb-b", "mem-tomb-a"}
@@ -2718,7 +2718,7 @@ func TestRemoteSearchIncludeDeletedPreservesCompletenessAcrossCatalogBudget(t *t
 		Namespace: "team-remote", NamespaceUID: "11111111-1111-4111-8111-111111111111",
 		ClusterID: "cluster-a", BackendUID: "22222222-2222-4222-8222-222222222222",
 		AuthorityEpoch: 1, RoutingEpoch: 1,
-		TenantID:  protocol.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
+		TenantID:  memoryv1.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
 		StoreUUID: "44444444-4444-4444-8444-444444444444",
 	}
 	entries := make([]store.RemoteMemoryCatalogEntry, 0, maxRemoteSearchCandidates+1)
@@ -2872,7 +2872,7 @@ func TestRemoteSearchDoesNotMatchTombstoneByMemoryID(t *testing.T) {
 		Namespace: "team-remote", NamespaceUID: "11111111-1111-4111-8111-111111111111",
 		ClusterID: "cluster-a", BackendUID: "22222222-2222-4222-8222-222222222222",
 		AuthorityEpoch: 1, RoutingEpoch: 1,
-		TenantID:  protocol.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
+		TenantID:  memoryv1.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
 		StoreUUID: "44444444-4444-4444-8444-444444444444",
 	}
 	entry, _ := remoteSearchFixture(
@@ -2895,7 +2895,7 @@ func TestRemoteSearchDoesNotMatchTombstoneByMemoryID(t *testing.T) {
 
 func TestSearchRejectsOversizedLegacyQueryBeforeResolution(t *testing.T) {
 	response, err := (&Service{}).Search(t.Context(), "team-legacy", SearchRequest{
-		Query: strings.Repeat("q", protocol.MaxQueryBytes+1), Limit: 1,
+		Query: strings.Repeat("q", memoryv1.MaxQueryBytes+1), Limit: 1,
 	}, SearchContext{})
 	var structured *apierror.Error
 	if response != nil || !errors.As(err, &structured) || structured.Status != http.StatusRequestEntityTooLarge {
@@ -2925,17 +2925,17 @@ func TestRemoteSearchRejectsUnadvertisedAutoResolvedMode(t *testing.T) {
 		Namespace: "team-remote", NamespaceUID: "11111111-1111-4111-8111-111111111111",
 		ClusterID: "cluster-a", BackendUID: "22222222-2222-4222-8222-222222222222",
 		AuthorityEpoch: 1, RoutingEpoch: 1,
-		TenantID:  protocol.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
+		TenantID:  memoryv1.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
 		StoreUUID: "44444444-4444-4444-8444-444444444444",
 	}
 	entry, record := remoteSearchFixture(binding, "mem-auto-mode", now, "needle", store.MemoryTrustReviewed)
-	service, adapter, activeBinding, _ := remoteSearchService(t, []store.RemoteMemoryCatalogEntry{entry}, []protocol.MemoryRecord{record})
+	service, adapter, activeBinding, _ := remoteSearchService(t, []store.RemoteMemoryCatalogEntry{entry}, []memoryv1.MemoryRecord{record})
 	service.Now = func() time.Time { return now }
 	adapter.snapshotExpiresAt = now.Add(time.Minute)
-	adapter.actualModes = []string{protocol.SearchModeSemantic}
+	adapter.actualModes = []string{memoryv1.SearchModeSemantic}
 
 	response, err := service.Search(t.Context(), activeBinding.Namespace, SearchRequest{
-		Query: "needle", Limit: 1, Mode: protocol.SearchModeAuto,
+		Query: "needle", Limit: 1, Mode: memoryv1.SearchModeAuto,
 	}, SearchContext{RemoteAuthorized: true})
 	var structured *apierror.Error
 	if response != nil || !errors.As(err, &structured) || structured.Status != http.StatusServiceUnavailable ||
@@ -2950,11 +2950,11 @@ func TestRemoteSearchRejectsSnapshotAboveAdvertisedTTL(t *testing.T) {
 		Namespace: "team-remote", NamespaceUID: "11111111-1111-4111-8111-111111111111",
 		ClusterID: "cluster-a", BackendUID: "22222222-2222-4222-8222-222222222222",
 		AuthorityEpoch: 1, RoutingEpoch: 1,
-		TenantID:  protocol.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
+		TenantID:  memoryv1.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
 		StoreUUID: "44444444-4444-4444-8444-444444444444",
 	}
 	entry, record := remoteSearchFixture(binding, "mem-snapshot-ttl", now, "needle", store.MemoryTrustReviewed)
-	service, adapter, activeBinding, _ := remoteSearchService(t, []store.RemoteMemoryCatalogEntry{entry}, []protocol.MemoryRecord{record})
+	service, adapter, activeBinding, _ := remoteSearchService(t, []store.RemoteMemoryCatalogEntry{entry}, []memoryv1.MemoryRecord{record})
 	service.Now = func() time.Time { return now }
 	adapter.snapshotExpiresAt = now.Add(2 * time.Minute)
 	authority := service.Resolver.(staticAuthorityResolver).authority
@@ -2974,11 +2974,11 @@ func TestRemoteSearchRejectsSnapshotAboveAdvertisedRecordLimit(t *testing.T) {
 		Namespace: "team-remote", NamespaceUID: "11111111-1111-4111-8111-111111111111",
 		ClusterID: "cluster-a", BackendUID: "22222222-2222-4222-8222-222222222222",
 		AuthorityEpoch: 1, RoutingEpoch: 1,
-		TenantID:  protocol.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
+		TenantID:  memoryv1.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
 		StoreUUID: "44444444-4444-4444-8444-444444444444",
 	}
 	entries := make([]store.RemoteMemoryCatalogEntry, 0, 3)
-	records := make([]protocol.MemoryRecord, 0, 3)
+	records := make([]memoryv1.MemoryRecord, 0, 3)
 	for i := range 3 {
 		entry, record := remoteSearchFixture(
 			binding, fmt.Sprintf("mem-advertised-limit-%d", i), now.Add(-time.Duration(i)*time.Second),
@@ -3013,11 +3013,11 @@ func TestRemoteSearchContinuationRejectsLegacyFormat(t *testing.T) {
 		Namespace: "team-remote", NamespaceUID: "11111111-1111-4111-8111-111111111111",
 		ClusterID: "cluster-a", BackendUID: "22222222-2222-4222-8222-222222222222",
 		AuthorityEpoch: 1, RoutingEpoch: 1,
-		TenantID:  protocol.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
+		TenantID:  memoryv1.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
 		StoreUUID: "44444444-4444-4444-8444-444444444444",
 	}
 	entry, record := remoteSearchFixture(binding, "mem-legacy-format", now, "needle", store.MemoryTrustReviewed)
-	service, _, activeBinding, _ := remoteSearchService(t, []store.RemoteMemoryCatalogEntry{entry}, []protocol.MemoryRecord{record})
+	service, _, activeBinding, _ := remoteSearchService(t, []store.RemoteMemoryCatalogEntry{entry}, []memoryv1.MemoryRecord{record})
 	service.Now = func() time.Time { return now }
 
 	response, err := service.Search(t.Context(), activeBinding.Namespace, SearchRequest{
@@ -3083,7 +3083,7 @@ func TestRemoteSearchContinuationRejectsRepeatedProviderRecordAcrossCursors(t *t
 		Namespace: "team-remote", NamespaceUID: "11111111-1111-4111-8111-111111111111",
 		ClusterID: "cluster-a", BackendUID: "22222222-2222-4222-8222-222222222222",
 		AuthorityEpoch: 1, RoutingEpoch: 1,
-		TenantID:  protocol.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
+		TenantID:  memoryv1.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
 		StoreUUID: "44444444-4444-4444-8444-444444444444",
 	}
 	firstEntry, firstRecord := remoteSearchFixture(
@@ -3094,7 +3094,7 @@ func TestRemoteSearchContinuationRejectsRepeatedProviderRecordAcrossCursors(t *t
 	)
 	service, adapter, activeBinding, governed := remoteSearchService(
 		t, []store.RemoteMemoryCatalogEntry{firstEntry, secondEntry},
-		[]protocol.MemoryRecord{firstRecord, secondRecord, firstRecord},
+		[]memoryv1.MemoryRecord{firstRecord, secondRecord, firstRecord},
 	)
 	service.Now = func() time.Time { return now }
 	adapter.snapshotExpiresAt = now.Add(time.Minute)
@@ -3144,12 +3144,12 @@ func TestRemoteSearchRejectsRepeatedProviderRecordWithinPage(t *testing.T) {
 		Namespace: "team-remote", NamespaceUID: "11111111-1111-4111-8111-111111111111",
 		ClusterID: "cluster-a", BackendUID: "22222222-2222-4222-8222-222222222222",
 		AuthorityEpoch: 1, RoutingEpoch: 1,
-		TenantID:  protocol.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
+		TenantID:  memoryv1.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
 		StoreUUID: "44444444-4444-4444-8444-444444444444",
 	}
 	entry, record := remoteSearchFixture(binding, "mem-repeat-page", now, "needle", store.MemoryTrustReviewed)
 	service, adapter, activeBinding, _ := remoteSearchService(
-		t, []store.RemoteMemoryCatalogEntry{entry}, []protocol.MemoryRecord{record, record},
+		t, []store.RemoteMemoryCatalogEntry{entry}, []memoryv1.MemoryRecord{record, record},
 	)
 	service.Now = func() time.Time { return now }
 	adapter.snapshotExpiresAt = now.Add(time.Minute)
@@ -3170,7 +3170,7 @@ func TestRemoteSearchContinuationFitsWorstCasePendingState(t *testing.T) {
 		Namespace: "team-remote", NamespaceUID: "11111111-1111-4111-8111-111111111111",
 		ClusterID: "cluster-a", BackendUID: "22222222-2222-4222-8222-222222222222",
 		AuthorityEpoch: 1, RoutingEpoch: 1,
-		TenantID:  protocol.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
+		TenantID:  memoryv1.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
 		StoreUUID: "44444444-4444-4444-8444-444444444444",
 	}
 	identity, err := protocolBinding(binding)
@@ -3178,23 +3178,23 @@ func TestRemoteSearchContinuationFitsWorstCasePendingState(t *testing.T) {
 		t.Fatal(err)
 	}
 	descriptor := func(prefix string) remoteSearchCursorRecord {
-		memoryID := prefix + strings.Repeat("m", protocol.MaxIdentityBytes-len(prefix))
+		memoryID := prefix + strings.Repeat("m", memoryv1.MaxIdentityBytes-len(prefix))
 		return remoteSearchCursorRecord{
-			MemoryID: memoryID, UpsertKey: protocol.CanonicalUpsertKey(identity, memoryID),
-			Generation: math.MaxInt64, BackendVersion: strings.Repeat("<", protocol.MaxIdentityBytes),
-			BackendMemoryID: strings.Repeat(">", protocol.MaxIdentityBytes),
-			ContentDigest:   protocol.ContentDigest("worst-case-cursor"), Score: math.MaxFloat64,
+			MemoryID: memoryID, UpsertKey: memoryv1.CanonicalUpsertKey(identity, memoryID),
+			Generation: math.MaxInt64, BackendVersion: strings.Repeat("<", memoryv1.MaxIdentityBytes),
+			BackendMemoryID: strings.Repeat(">", memoryv1.MaxIdentityBytes),
+			ContentDigest:   memoryv1.ContentDigest("worst-case-cursor"), Score: math.MaxFloat64,
 		}
 	}
-	pending := make([]remoteSearchCursorRecord, protocol.MaxPageSize-1)
+	pending := make([]remoteSearchCursorRecord, memoryv1.MaxPageSize-1)
 	for i := range pending {
 		pending[i] = descriptor(fmt.Sprintf("p%02d", i))
 	}
 	replayPrefix := []remoteSearchCursorRecord{descriptor("r00")}
 	seenState := newRemoteSearchSeenRecordState()
-	seenCount := protocol.MaxSnapshotRecords - len(pending)
+	seenCount := memoryv1.MaxSnapshotRecords - len(pending)
 	for i := range seenCount {
-		key := protocol.CanonicalUpsertKey(identity, fmt.Sprintf("seen-%04d", i))
+		key := memoryv1.CanonicalUpsertKey(identity, fmt.Sprintf("seen-%04d", i))
 		seen, rememberErr := rememberRemoteSearchRecordIdentity(&seenState, key)
 		if rememberErr != nil || seen {
 			t.Fatalf("remember seen identity %d: seen=%v err=%v", i, seen, rememberErr)
@@ -3204,11 +3204,11 @@ func TestRemoteSearchContinuationFitsWorstCasePendingState(t *testing.T) {
 	cursor, err := saveRemoteSearchContinuation(
 		t.Context(), governed, binding, "query-digest",
 		remoteSearchCursor{
-			ProviderToken: strings.Repeat("a", protocol.MaxPageTokenBytes),
-			PageSize:      protocol.MaxPageSize, ActualMode: protocol.SearchModeKeyword,
+			ProviderToken: strings.Repeat("a", memoryv1.MaxPageTokenBytes),
+			PageSize:      memoryv1.MaxPageSize, ActualMode: memoryv1.SearchModeKeyword,
 			Pending: pending, ReplayPrefix: replayPrefix, SeenRecordState: seenState,
 		},
-		strings.Repeat("b", protocol.MaxPageTokenBytes), now.Add(time.Minute), nil, "",
+		strings.Repeat("b", memoryv1.MaxPageTokenBytes), now.Add(time.Minute), nil, "",
 		maxRemoteCatalogLimit, now,
 	)
 	if err != nil || cursor == "" {

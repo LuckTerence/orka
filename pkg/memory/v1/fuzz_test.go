@@ -1,4 +1,4 @@
-package protocol
+package v1
 
 import (
 	"bytes"
@@ -19,7 +19,7 @@ func FuzzDecodeMutationEnvelope(f *testing.F) {
 	}
 	seed, _ := json.Marshal(request)
 	f.Add(seed)
-	f.Add([]byte(`{"protocolVersion":"orka.oms.v0alpha1"}`))
+	f.Add([]byte(`{"protocolVersion":"orka.memory.v1"}`))
 	f.Add([]byte{0xff, 0xfe})
 	f.Fuzz(func(t *testing.T, body []byte) {
 		decoded, err := DecodeMutationEnvelope(body)

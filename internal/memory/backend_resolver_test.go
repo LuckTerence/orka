@@ -135,7 +135,7 @@ func TestBackendResolverRemoteDisabledFailsClosed(t *testing.T) {
 	}
 }
 
-func TestBackendResolverConfiguresAdvertisedOMSResponseLimit(t *testing.T) {
+func TestBackendResolverConfiguresAdvertisedProtocolResponseLimit(t *testing.T) {
 	const (
 		namespace          = "team-a"
 		advertisedRequest  = int64(1024)
@@ -227,15 +227,15 @@ func TestBackendResolverConfiguresAdvertisedOMSResponseLimit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
-	client, ok := authority.Adapter.(*OMSClient)
+	client, ok := authority.Adapter.(*ProtocolClient)
 	if !ok {
-		t.Fatalf("Resolve() adapter = %T, want *OMSClient", authority.Adapter)
+		t.Fatalf("Resolve() adapter = %T, want *ProtocolClient", authority.Adapter)
 	}
 	if client.maxRequestBytes != advertisedRequest {
-		t.Fatalf("OMS maxRequestBytes = %d, want advertised %d", client.maxRequestBytes, advertisedRequest)
+		t.Fatalf("memory protocol maxRequestBytes = %d, want advertised %d", client.maxRequestBytes, advertisedRequest)
 	}
 	if client.maxResponseBytes != advertisedResponse {
-		t.Fatalf("OMS maxResponseBytes = %d, want advertised %d", client.maxResponseBytes, advertisedResponse)
+		t.Fatalf("memory protocol maxResponseBytes = %d, want advertised %d", client.maxResponseBytes, advertisedResponse)
 	}
 }
 

@@ -144,10 +144,7 @@ func newMemoryBackendAPITestStore(t *testing.T) store.GovernedMemoryStore {
 
 func memoryBackendAPITestSpec(endpoint string) corev1alpha1.MemoryBackendSpec {
 	return corev1alpha1.MemoryBackendSpec{
-		Protocol: corev1alpha1.MemoryBackendProtocol{
-			OMSVersion: corev1alpha1.MemoryBackendOMSVersionV01,
-			Profile:    corev1alpha1.MemoryBackendProfileV0Alpha1,
-		},
+		ContractVersion: corev1alpha1.MemoryBackendContractMemoryV1,
 		Deployment: corev1alpha1.MemoryBackendDeployment{
 			Mode: corev1alpha1.MemoryBackendDeploymentModeExternalEndpoint, Endpoint: endpoint,
 		},

@@ -4,7 +4,7 @@ Copyright (c) 2026.
 MIT License - see LICENSE file for details.
 */
 
-package protocol
+package v1
 
 import (
 	"bytes"
@@ -229,7 +229,7 @@ func canonicalJSON(value any) ([]byte, error) {
 	return EncodeJSON(value)
 }
 
-// EncodeJSON returns one compact JSON value with HTML escaping disabled. OMS
+// EncodeJSON returns one compact JSON value with HTML escaping disabled. memory protocol
 // digests, persisted receipts, and wire messages use the same representation
 // instead of encoding/json's larger HTML-safe form. Callers still enforce the
 // operation-specific MaxHTTPBodyBytes or MaxAdapterResponseBytes hard bound.

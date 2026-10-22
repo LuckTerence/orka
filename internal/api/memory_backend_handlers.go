@@ -301,7 +301,7 @@ func validatedMemoryRecoveryRouteIdentity(
 		SecretUID:               backend.Status.SecretUID, SecretResourceVersion: backend.Status.SecretResourceVersion,
 		StoreName: backend.Spec.Store.Name, StoreUUID: backend.Status.StoreUUID,
 		CapabilityRevision: backend.Status.ObservedCapabilities.Revision,
-		Protocol:           string(backend.Spec.Protocol.Profile),
+		Protocol:           string(backend.Spec.ContractVersion),
 	}
 	if !validMemoryBackendManifestDigest(identity.ClusterIdentityDigest) ||
 		!validMemoryBackendManifestDigest(identity.EndpointDigest) ||

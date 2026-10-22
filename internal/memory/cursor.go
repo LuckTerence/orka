@@ -15,7 +15,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/orka-agents/orka/internal/store"
-	"github.com/orka-agents/orka/pkg/oms/protocol"
+	memoryv1 "github.com/orka-agents/orka/pkg/memory/v1"
 )
 
 const (
@@ -23,7 +23,7 @@ const (
 	maxRemoteSearchCursorBytes          = store.MaxMemorySearchCursorStateBytes
 	remoteSearchSeenRecordStateVersion  = byte(1)
 	remoteSearchSeenRecordDigestBytes   = sha256.Size
-	remoteSearchSeenRecordDigestMaximum = protocol.MaxSnapshotRecords
+	remoteSearchSeenRecordDigestMaximum = memoryv1.MaxSnapshotRecords
 	remoteSearchCursorPrefix            = "msc1-"
 	legacyRemoteSearchCursorPrefix      = "msc-"
 	legacySearchCursorPrefix            = "lsc-"
@@ -431,7 +431,7 @@ func saveRemoteSearchCursor(
 	id := remoteSearchCursorPrefix + uuid.NewString()
 	err = governed.SaveMemorySearchCursor(ctx, store.MemorySearchCursorState{
 		ID: id, NamespaceUID: binding.NamespaceUID,
-		BindingDigest: protocol.BindingDigest(identity), QueryDigest: queryDigest,
+		BindingDigest: memoryv1.BindingDigest(identity), QueryDigest: queryDigest,
 		State: payload, CreatedAt: now, ExpiresAt: now.Add(remoteSearchCursorTTL),
 	})
 	if err != nil {
@@ -465,16 +465,16 @@ func loadRemoteSearchCursor(
 	if err != nil {
 		return remoteSearchCursor{}, err
 	}
-	if stored.BindingDigest != protocol.BindingDigest(identity) || stored.QueryDigest != queryDigest ||
+	if stored.BindingDigest != memoryv1.BindingDigest(identity) || stored.QueryDigest != queryDigest ||
 		len(stored.State) == 0 || len(stored.State) > maxRemoteSearchCursorBytes {
 		return remoteSearchCursor{}, errors.New("mismatched memory search cursor")
 	}
 	var cursor remoteSearchCursor
 	if err := json.Unmarshal(stored.State, &cursor); err != nil || cursor.PageSize <= 0 ||
-		cursor.PageSize > protocol.MaxPageSize ||
-		(cursor.ActualMode != protocol.SearchModeKeyword && cursor.ActualMode != protocol.SearchModeSemantic &&
-			cursor.ActualMode != protocol.SearchModeHybrid) ||
-		(cursor.ProviderToken == "" && len(cursor.Pending) == 0) || len(cursor.Pending) > protocol.MaxPageSize ||
+		cursor.PageSize > memoryv1.MaxPageSize ||
+		(cursor.ActualMode != memoryv1.SearchModeKeyword && cursor.ActualMode != memoryv1.SearchModeSemantic &&
+			cursor.ActualMode != memoryv1.SearchModeHybrid) ||
+		(cursor.ProviderToken == "" && len(cursor.Pending) == 0) || len(cursor.Pending) > memoryv1.MaxPageSize ||
 		!validRemoteSearchSeenRecordState(cursor.SeenRecordState) ||
 		!remoteSearchSeenRecordStatePresent(cursor.SeenRecordState) {
 		return remoteSearchCursor{}, errors.New("invalid memory search cursor state")

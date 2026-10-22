@@ -9,10 +9,10 @@ import (
 	"time"
 
 	"github.com/orka-agents/orka/internal/store"
-	"github.com/orka-agents/orka/pkg/oms/protocol"
+	memoryv1 "github.com/orka-agents/orka/pkg/memory/v1"
 )
 
-func mustProtocolBinding(t *testing.T, binding *store.MemoryBackendBinding) protocol.Binding {
+func mustProtocolBinding(t *testing.T, binding *store.MemoryBackendBinding) memoryv1.Binding {
 	t.Helper()
 	identity, err := protocolBinding(binding)
 	if err != nil {
@@ -28,16 +28,16 @@ func TestRemoteSearchCursorIsOpaqueAndBoundToQueryAndAuthority(t *testing.T) {
 		ClusterID: "cluster-a", NamespaceUID: "namespace-a",
 		BackendUID:     "22222222-2222-4222-8222-222222222222",
 		AuthorityEpoch: 1, RoutingEpoch: 2,
-		TenantID:  protocol.DeriveTenantID("cluster-a", "namespace-a"),
+		TenantID:  memoryv1.DeriveTenantID("cluster-a", "namespace-a"),
 		StoreUUID: "44444444-4444-4444-8444-444444444444",
 	}
 	state := remoteSearchCursor{
-		ProviderToken: "placeholder", PageSize: 4, ActualMode: protocol.SearchModeKeyword,
+		ProviderToken: "placeholder", PageSize: 4, ActualMode: memoryv1.SearchModeKeyword,
 		SeenRecordState: newRemoteSearchSeenRecordState(),
 		Pending: []remoteSearchCursorRecord{{
-			MemoryID: "mem-2", UpsertKey: protocol.CanonicalUpsertKey(mustProtocolBinding(t, binding), "mem-2"),
+			MemoryID: "mem-2", UpsertKey: memoryv1.CanonicalUpsertKey(mustProtocolBinding(t, binding), "mem-2"),
 			Generation: 2, BackendMemoryID: "backend-record-id",
-			ContentDigest: protocol.ContentDigest("two"),
+			ContentDigest: memoryv1.ContentDigest("two"),
 		}},
 	}
 	cursor, err := saveRemoteSearchCursor(context.Background(), governed, binding, "query-a", state, now)
@@ -75,7 +75,7 @@ func TestRemoteSearchCursorRejectsLegacyFormat(t *testing.T) {
 		ClusterID: "cluster-a", NamespaceUID: "namespace-a",
 		BackendUID:     "22222222-2222-4222-8222-222222222222",
 		AuthorityEpoch: 1, RoutingEpoch: 2,
-		TenantID:  protocol.DeriveTenantID("cluster-a", "namespace-a"),
+		TenantID:  memoryv1.DeriveTenantID("cluster-a", "namespace-a"),
 		StoreUUID: "44444444-4444-4444-8444-444444444444",
 	}
 	_, err := loadRemoteSearchCursor(

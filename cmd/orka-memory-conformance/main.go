@@ -19,8 +19,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/orka-agents/orka/pkg/oms/conformance"
-	"github.com/orka-agents/orka/pkg/oms/protocol"
+	memoryv1 "github.com/orka-agents/orka/pkg/memory/v1"
+	"github.com/orka-agents/orka/pkg/memory/v1/conformance"
 )
 
 const (
@@ -36,10 +36,11 @@ func main() {
 
 func run(args []string, stdout, stderr io.Writer, getenv func(string) string) int {
 	defaults := conformance.DefaultBinding()
-	flags := flag.NewFlagSet("orka-oms-conformance", flag.ContinueOnError)
+	flags := flag.NewFlagSet("orka-memory-conformance", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	endpoint := flags.String("endpoint", "", "OMS adapter base URL")
-	tokenEnv := flags.String("token-env", "ORKA_OMS_BEARER_TOKEN", "environment variable containing the bearer token")
+	endpoint := flags.String("endpoint", "", "memory adapter base URL")
+	tokenEnv := flags.String("token-env", "ORKA_MEMORY_ADAPTER_BEARER_TOKEN",
+		"environment variable containing the bearer token")
 	phase := flags.String("phase", phaseCheck, "conformance phase: check, prepare, or verify")
 	stateFile := flags.String("state-file", "", "checkpoint path required for prepare/verify")
 	timeout := flags.Duration("timeout", 15*time.Second, "per-request timeout")
@@ -80,12 +81,12 @@ func run(args []string, stdout, stderr io.Writer, getenv func(string) string) in
 		_, _ = fmt.Fprintf(stderr, "%s is required\n", *tokenEnv)
 		return 2
 	}
-	binding := protocol.Binding{
+	binding := memoryv1.Binding{
 		ClusterID: strings.TrimSpace(*clusterID), NamespaceUID: strings.TrimSpace(*namespaceUID),
 		BackendUID: strings.TrimSpace(*backendUID), AuthorityEpoch: *authorityEpoch,
 		RoutingEpoch: *routingEpoch, StoreUUID: defaults.StoreUUID,
 	}
-	binding.TenantID = protocol.DeriveTenantID(binding.ClusterID, binding.NamespaceUID)
+	binding.TenantID = memoryv1.DeriveTenantID(binding.ClusterID, binding.NamespaceUID)
 	authorizationValue := "Bearer " + token
 	target := conformance.Target{
 		BaseURL: *endpoint, AuthorizationValue: authorizationValue, Binding: binding,
@@ -147,7 +148,7 @@ func writeCheckpoint(path string, checkpoint conformance.Checkpoint) error {
 	if err := os.MkdirAll(filepath.Dir(cleanPath), 0o750); err != nil {
 		return err
 	}
-	temporary, err := os.CreateTemp(filepath.Dir(cleanPath), ".oms-checkpoint-*")
+	temporary, err := os.CreateTemp(filepath.Dir(cleanPath), ".memory-conformance-checkpoint-*")
 	if err != nil {
 		return err
 	}

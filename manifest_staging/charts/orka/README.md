@@ -129,10 +129,9 @@ controller:
     crdsReadyOverride: true # only after separately applying/verifying target CRDs
 ```
 
-Orka ships the provider-neutral `orka.oms.v0alpha1` protocol and conformance
-harness, but provider adapters are maintained and deployed independently. The
-KD6 adapter, its Helm chart, image lifecycle, and live provider release gate
-live in [`orka-agents/orka-oms-kd6-adapter`](https://github.com/orka-agents/orka-oms-kd6-adapter).
+Orka ships the provider-neutral `orka.memory.v1` protocol and conformance
+harness, but provider adapters, their Helm charts, image lifecycles, and live
+provider release gates are maintained and deployed independently.
 The Orka chart never creates an adapter or a `MemoryBackend`. Install the chosen
 adapter separately, expose it through a public HTTPS endpoint, bind an
 operator-managed client-auth Secret, and stage/activate the backend explicitly.

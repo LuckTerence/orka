@@ -9,7 +9,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	omsprotocol "github.com/orka-agents/orka/pkg/oms/protocol"
+	memoryv1 "github.com/orka-agents/orka/pkg/memory/v1"
 )
 
 func TestMemoryBackendRequestedLifecycleDefaultsToStaged(t *testing.T) {
@@ -76,11 +76,11 @@ func TestMemoryBackendSchemaMarkersRemainPresent(t *testing.T) {
 	for _, marker := range []string{
 		`+kubebuilder:metadata:annotations=memory.orka.ai/schema-version=v1alpha1`,
 		`self.metadata.name == 'default'`,
-		`self.protocol == oldSelf.protocol`,
+		`self.contractVersion == oldSelf.contractVersion`,
 		`self.store.name == oldSelf.store.name`,
 		`+kubebuilder:subresource:status`,
 		`+kubebuilder:default:=Staged`,
-		`+kubebuilder:validation:Maximum=` + strconv.Itoa(omsprotocol.MaxHTTPBodyBytes),
+		`+kubebuilder:validation:Maximum=` + strconv.Itoa(memoryv1.MaxHTTPBodyBytes),
 	} {
 		if !strings.Contains(text, marker) {
 			t.Errorf("memory_backend_types.go is missing schema marker %q", marker)

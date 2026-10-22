@@ -4,14 +4,14 @@ Copyright (c) 2026.
 MIT License - see LICENSE file for details.
 */
 
-// Package protocol defines the closed orka.oms.v0alpha1 HTTP wire contract.
-package protocol
+// Package protocol defines the closed orka.memory.v1 HTTP wire contract.
+package v1
 
 import "time"
 
 const (
-	// Version is the frozen OMS profile version.
-	Version = "orka.oms.v0alpha1"
+	// Version is the frozen memory protocol version.
+	Version = "orka.memory.v1"
 
 	PathHealth         = "/v1/health"
 	PathStoreResolve   = "/v1/stores/resolve"
@@ -43,18 +43,18 @@ const (
 	SearchModeHybrid   = "hybrid"
 	SearchModeAuto     = "auto"
 
-	ErrorCodeUnauthorized          = "OMS_UNAUTHORIZED"
-	ErrorCodeInvalidRequest        = "OMS_INVALID_REQUEST"
-	ErrorCodeMethodNotAllowed      = "OMS_METHOD_NOT_ALLOWED"
-	ErrorCodeNotFound              = "OMS_ENDPOINT_NOT_FOUND"
-	ErrorCodeInternal              = "OMS_INTERNAL_ERROR"
-	ErrorCodeResponseTooLarge      = "OMS_RESPONSE_TOO_LARGE"
+	ErrorCodeUnauthorized          = "MEMORY_ADAPTER_UNAUTHORIZED"
+	ErrorCodeInvalidRequest        = "MEMORY_ADAPTER_INVALID_REQUEST"
+	ErrorCodeMethodNotAllowed      = "MEMORY_ADAPTER_METHOD_NOT_ALLOWED"
+	ErrorCodeNotFound              = "MEMORY_ADAPTER_ENDPOINT_NOT_FOUND"
+	ErrorCodeInternal              = "MEMORY_ADAPTER_INTERNAL_ERROR"
+	ErrorCodeResponseTooLarge      = "MEMORY_ADAPTER_RESPONSE_TOO_LARGE"
 	ErrorCodeSearchModeUnsupported = "MEMORY_SEARCH_MODE_UNSUPPORTED"
-	ErrorCodeIdentityConflict      = "OMS_IDENTITY_CONFLICT"
-	ErrorCodeRoutingFenced         = "OMS_ROUTING_EPOCH_FENCED"
-	ErrorCodePageTokenInvalid      = "OMS_PAGE_TOKEN_INVALID"
-	ErrorCodePageTokenExpired      = "OMS_PAGE_TOKEN_EXPIRED"
-	ErrorCodeSnapshotCapacity      = "OMS_SNAPSHOT_CAPACITY_EXCEEDED"
+	ErrorCodeIdentityConflict      = "MEMORY_ADAPTER_IDENTITY_CONFLICT"
+	ErrorCodeRoutingFenced         = "MEMORY_ADAPTER_ROUTING_EPOCH_FENCED"
+	ErrorCodePageTokenInvalid      = "MEMORY_ADAPTER_PAGE_TOKEN_INVALID"
+	ErrorCodePageTokenExpired      = "MEMORY_ADAPTER_PAGE_TOKEN_EXPIRED"
+	ErrorCodeSnapshotCapacity      = "MEMORY_ADAPTER_SNAPSHOT_CAPACITY_EXCEEDED"
 
 	// MaxHTTPBodyBytes is the exact normative request-body hard maximum. It
 	// accommodates the worst-case encoding/json representation of
@@ -79,7 +79,7 @@ const (
 	MaxErrorMessageBytes    = 512
 )
 
-// Binding is the complete identity and routing fence carried by every OMS
+// Binding is the complete identity and routing fence carried by every memory protocol
 // profile operation. TenantID is deterministically derived from ClusterID and
 // NamespaceUID.
 type Binding struct {
@@ -145,7 +145,7 @@ type CapabilitiesResponse struct {
 	Limits          CapabilityLimits `json:"limits"`
 }
 
-// Capabilities are the provider-neutral semantics required by the OMS profile.
+// Capabilities are the provider-neutral semantics required by the memory protocol.
 type Capabilities struct {
 	DurableIdempotency         bool `json:"durableIdempotency"`
 	IdempotencyDigestConflicts bool `json:"idempotencyDigestConflicts"`

@@ -28,30 +28,21 @@ const (
 	MemoryBackendValidationCandidateAnnotation = "memory.orka.ai/validation-candidate"
 )
 
-// MemoryBackendOMSVersion identifies the OMS API version selected by a backend.
-// +kubebuilder:validation:Enum="0.1"
-type MemoryBackendOMSVersion string
+// MemoryBackendContractVersion identifies the Orka memory adapter contract.
+// +kubebuilder:validation:Enum=orka.memory.v1
+type MemoryBackendContractVersion string
 
 const (
-	// MemoryBackendOMSVersionV01 is the initial OMS API version.
-	MemoryBackendOMSVersionV01 MemoryBackendOMSVersion = "0.1"
+	// MemoryBackendContractMemoryV1 is the strict orka.memory.v1 adapter contract.
+	MemoryBackendContractMemoryV1 MemoryBackendContractVersion = "orka.memory.v1"
 )
 
-// MemoryBackendProfile identifies the closed Orka OMS profile.
-// +kubebuilder:validation:Enum=orka.oms.v0alpha1
-type MemoryBackendProfile string
-
-const (
-	// MemoryBackendProfileV0Alpha1 is the initial strict Orka OMS profile.
-	MemoryBackendProfileV0Alpha1 MemoryBackendProfile = "orka.oms.v0alpha1"
-)
-
-// MemoryBackendDeploymentMode selects how Orka reaches the OMS adapter.
+// MemoryBackendDeploymentMode selects how Orka reaches the memory adapter.
 // +kubebuilder:validation:Enum=external-endpoint
 type MemoryBackendDeploymentMode string
 
 const (
-	// MemoryBackendDeploymentModeExternalEndpoint points at a public HTTPS OMS endpoint.
+	// MemoryBackendDeploymentModeExternalEndpoint points at a public HTTPS memory adapter endpoint.
 	MemoryBackendDeploymentModeExternalEndpoint MemoryBackendDeploymentMode = "external-endpoint"
 )
 
@@ -92,7 +83,7 @@ const (
 	MemoryBackendEffectiveLifecycleDecommissioned   MemoryBackendEffectiveLifecycleState = "Decommissioned"
 )
 
-// MemoryBackendCapability is a closed capability advertised by the Orka OMS profile.
+// MemoryBackendCapability is a closed capability advertised by the Orka memory protocol.
 // +kubebuilder:validation:Enum=durableIdempotency;idempotencyDigestConflicts;createIfAbsent;conditionalMutation;monotonicGenerations;deleteHighWatermark;durableRoutingFence;operationLookup;exactGet;stablePagination;exclusiveOwnership;keywordSearch;auditVersionVisibility;semanticSearch;hybridSearch
 type MemoryBackendCapability string
 
@@ -128,16 +119,7 @@ const (
 	MemoryBackendConditionDeletionSafe           MemoryBackendConditionType = "DeletionSafe"
 )
 
-// MemoryBackendProtocol selects the exact OMS wire contract.
-type MemoryBackendProtocol struct {
-	// OMSVersion is the adapter API version.
-	OMSVersion MemoryBackendOMSVersion `json:"omsVersion"`
-
-	// Profile is the closed Orka OMS profile implemented by the adapter.
-	Profile MemoryBackendProfile `json:"profile"`
-}
-
-// MemoryBackendDeployment configures the external OMS adapter endpoint.
+// MemoryBackendDeployment configures the external memory adapter endpoint.
 type MemoryBackendDeployment struct {
 	// Mode is the endpoint deployment mode.
 	Mode MemoryBackendDeploymentMode `json:"mode"`
@@ -150,7 +132,7 @@ type MemoryBackendDeployment struct {
 	Endpoint string `json:"endpoint"`
 }
 
-// MemoryBackendBearerTokenSecretReference identifies the Secret key containing the OMS bearer token.
+// MemoryBackendBearerTokenSecretReference identifies the Secret key containing the memory adapter bearer token.
 type MemoryBackendBearerTokenSecretReference struct {
 	// Name is the same-namespace Secret name.
 	// +kubebuilder:validation:MinLength=1
@@ -181,12 +163,14 @@ type MemoryBackendStore struct {
 	Name string `json:"name"`
 }
 
-// +kubebuilder:validation:XValidation:rule="self.protocol == oldSelf.protocol",message="spec.protocol is immutable"
+// +kubebuilder:validation:XValidation:rule="self.contractVersion == oldSelf.contractVersion",message="spec.contractVersion is immutable"
 // +kubebuilder:validation:XValidation:rule="self.store.name == oldSelf.store.name",message="spec.store.name is immutable"
 
 // MemoryBackendSpec defines a namespace's requested external memory backend.
 type MemoryBackendSpec struct {
-	Protocol   MemoryBackendProtocol   `json:"protocol"`
+	// ContractVersion is the immutable Orka memory adapter contract.
+	ContractVersion MemoryBackendContractVersion `json:"contractVersion"`
+
 	Deployment MemoryBackendDeployment `json:"deployment"`
 	ClientAuth MemoryBackendClientAuth `json:"clientAuth"`
 	Store      MemoryBackendStore      `json:"store"`
@@ -246,7 +230,7 @@ type MemoryBackendCapabilityLimits struct {
 	SnapshotTTLSeconds int32 `json:"snapshotTtlSeconds"`
 }
 
-// MemoryBackendObservedCapabilities records strict, non-secret OMS capability metadata.
+// MemoryBackendObservedCapabilities records strict, non-secret memory adapter capability metadata.
 type MemoryBackendObservedCapabilities struct {
 	// AdapterName is the bounded adapter implementation identity.
 	// +kubebuilder:validation:MaxLength=256
@@ -285,7 +269,7 @@ type MemoryBackendStatus struct {
 	Protected bool `json:"protected,omitempty"`
 	// ResolvedRefs reports whether the namespace and bound Secret were freshly resolved.
 	ResolvedRefs bool `json:"resolvedRefs,omitempty"`
-	// Connected reports whether strict OMS store, capability, and ownership probes succeeded.
+	// Connected reports whether strict memory protocol store, capability, and ownership probes succeeded.
 	Connected bool `json:"connected,omitempty"`
 	// Ready reports whether the requested lifecycle is safely usable. Staged readiness
 	// means validation succeeded while legacy SQLite remains authoritative.
@@ -362,7 +346,7 @@ type MemoryBackendStatus struct {
 // +kubebuilder:printcolumn:name="Store",type=string,JSONPath=`.spec.store.name`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
-// MemoryBackend is the namespaced control-plane binding for external OMS memory.
+// MemoryBackend is the namespaced control-plane binding for external memory.
 type MemoryBackend struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

@@ -4,7 +4,7 @@ Copyright (c) 2026.
 MIT License - see LICENSE file for details.
 */
 
-// Package conformance probes the closed orka.oms.v0alpha1 contract. Prepare and
+// Package conformance probes the closed orka.memory.v1 contract. Prepare and
 // VerifyAfterRestart are deliberately separate so release automation can prove
 // durable receipts, fences, records, tombstones, ownership, and snapshots.
 package conformance
@@ -27,12 +27,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/orka-agents/orka/pkg/oms/protocol"
+	memoryv1 "github.com/orka-agents/orka/pkg/memory/v1"
 )
 
 const (
-	checkpointVersion                 = "orka.oms.conformance.checkpoint.v2"
-	conformanceFailpointHeader        = "X-Orka-OMS-Conformance-Failpoint"
+	checkpointVersion                 = "orka.memory.v1.conformance.checkpoint.v2"
+	conformanceFailpointHeader        = "X-Orka-Memory-Conformance-Failpoint"
 	conformanceProviderCommitGapValue = "provider-commit-before-receipt-v1"
 	conformanceTag                    = "conformance"
 
@@ -62,21 +62,21 @@ type Checkpoint struct {
 	ProtocolVersion           string                     `json:"protocolVersion"`
 	RunID                     string                     `json:"runId"`
 	StoreName                 string                     `json:"storeName"`
-	Binding                   protocol.Binding           `json:"binding"`
+	Binding                   memoryv1.Binding           `json:"binding"`
 	CapabilitiesRevision      string                     `json:"capabilitiesRevision"`
-	ReplayMutation            protocol.MutationEnvelope  `json:"replayMutation"`
-	ReplayReceipt             protocol.MutationReceipt   `json:"replayReceipt"`
-	LiveRecord                protocol.MemoryRecord      `json:"liveRecord"`
-	TombstoneRecord           protocol.MemoryRecord      `json:"tombstoneRecord"`
-	PaginationRequest         protocol.SearchRequest     `json:"paginationRequest"`
+	ReplayMutation            memoryv1.MutationEnvelope  `json:"replayMutation"`
+	ReplayReceipt             memoryv1.MutationReceipt   `json:"replayReceipt"`
+	LiveRecord                memoryv1.MemoryRecord      `json:"liveRecord"`
+	TombstoneRecord           memoryv1.MemoryRecord      `json:"tombstoneRecord"`
+	PaginationRequest         memoryv1.SearchRequest     `json:"paginationRequest"`
 	PaginationExpectedKeys    []string                   `json:"paginationExpectedKeys"`
 	PaginationExpectedDigests []string                   `json:"paginationExpectedDigests"`
 	PaginationActualMode      string                     `json:"paginationActualMode"`
 	PaginationSnapshotExpiry  time.Time                  `json:"paginationSnapshotExpiry"`
 	SnapshotExcludedKey       string                     `json:"snapshotExcludedKey"`
-	StaleMutation             protocol.MutationEnvelope  `json:"staleMutation"`
-	StaleReceipt              protocol.MutationReceipt   `json:"staleReceipt"`
-	ProviderCommitGapMutation *protocol.MutationEnvelope `json:"providerCommitGapMutation,omitempty"`
+	StaleMutation             memoryv1.MutationEnvelope  `json:"staleMutation"`
+	StaleReceipt              memoryv1.MutationReceipt   `json:"staleReceipt"`
+	ProviderCommitGapMutation *memoryv1.MutationEnvelope `json:"providerCommitGapMutation,omitempty"`
 }
 
 // CheckResult is the sanitized outcome of one conformance phase.
@@ -84,20 +84,20 @@ type CheckResult struct {
 	Passed       bool                           `json:"passed"`
 	Phase        string                         `json:"phase"`
 	Message      string                         `json:"message"`
-	Capabilities *protocol.CapabilitiesResponse `json:"capabilities,omitempty"`
+	Capabilities *memoryv1.CapabilitiesResponse `json:"capabilities,omitempty"`
 }
 
 type fixturePlan struct {
-	limits    protocol.CapabilityLimits
+	limits    memoryv1.CapabilityLimits
 	namespace string
 	query     string
 }
 
-func newFixturePlan(runID string, limits protocol.CapabilityLimits) (fixturePlan, error) {
+func newFixturePlan(runID string, limits memoryv1.CapabilityLimits) (fixturePlan, error) {
 	if limits.MaxSnapshotRecords < 2 {
 		return fixturePlan{}, fmt.Errorf(
 			"adapter advertises maxSnapshotRecords=%d; "+
-				"OMS conformance requires at least 2 records to prove stable multi-page pagination",
+				"memory protocol conformance requires at least 2 records to prove stable multi-page pagination",
 			limits.MaxSnapshotRecords,
 		)
 	}
@@ -108,7 +108,7 @@ func newFixturePlan(runID string, limits protocol.CapabilityLimits) (fixturePlan
 	if queryBytes < len(querySeed) {
 		return fixturePlan{}, fmt.Errorf(
 			"adapter advertises maxContentBytes=%d and maxQueryBytes=%d; "+
-				"OMS conformance requires at least %d shared keyword bytes for run isolation",
+				"memory protocol conformance requires at least %d shared keyword bytes for run isolation",
 			limits.MaxContentBytes,
 			limits.MaxQueryBytes,
 			len(querySeed),
@@ -116,7 +116,7 @@ func newFixturePlan(runID string, limits protocol.CapabilityLimits) (fixturePlan
 	}
 	query := querySeed
 	plan := fixturePlan{limits: limits, namespace: namespace, query: query}
-	for name, state := range map[string]*protocol.MutationState{
+	for name, state := range map[string]*memoryv1.MutationState{
 		"minimal": plan.state("a"),
 		"search":  plan.state(plan.query),
 	} {
@@ -124,7 +124,7 @@ func newFixturePlan(runID string, limits protocol.CapabilityLimits) (fixturePlan
 			return fixturePlan{}, fmt.Errorf("adapter limits cannot encode the %s conformance state: %w", name, err)
 		}
 	}
-	request, err := plan.searchRequest(DefaultBinding(), protocol.SearchModeKeyword)
+	request, err := plan.searchRequest(DefaultBinding(), memoryv1.SearchModeKeyword)
 	if err != nil {
 		return fixturePlan{}, err
 	}
@@ -146,12 +146,12 @@ func (p fixturePlan) conflictBackendUID(role string) string {
 	return "conflict-" + p.namespace + "-" + role
 }
 
-func (p fixturePlan) state(content string, markers ...string) *protocol.MutationState {
+func (p fixturePlan) state(content string, markers ...string) *memoryv1.MutationState {
 	marker := "t"
 	if len(markers) > 0 && markers[0] != "" {
 		marker = markers[0]
 	}
-	return &protocol.MutationState{
+	return &memoryv1.MutationState{
 		Content: content,
 		Tags:    []string{marker},
 		Metadata: map[string]string{
@@ -161,15 +161,15 @@ func (p fixturePlan) state(content string, markers ...string) *protocol.Mutation
 }
 
 func (p fixturePlan) mutation(
-	binding protocol.Binding,
+	binding memoryv1.Binding,
 	operationRole string,
 	memoryID string,
 	kind string,
 	generation uint64,
 	expectedGeneration uint64,
 	expectedVersion string,
-	state *protocol.MutationState,
-) (protocol.MutationEnvelope, error) {
+	state *memoryv1.MutationState,
+) (memoryv1.MutationEnvelope, error) {
 	request, err := makeMutation(
 		binding,
 		p.operationID(operationRole),
@@ -181,20 +181,20 @@ func (p fixturePlan) mutation(
 		state,
 	)
 	if err != nil {
-		return protocol.MutationEnvelope{}, err
+		return memoryv1.MutationEnvelope{}, err
 	}
 	if err := validateFixtureMutation(p.limits, &request); err != nil {
-		return protocol.MutationEnvelope{}, err
+		return memoryv1.MutationEnvelope{}, err
 	}
 	return request, nil
 }
 
 func (p fixturePlan) searchRequest(
-	binding protocol.Binding,
+	binding memoryv1.Binding,
 	mode string,
-) (protocol.SearchRequest, error) {
-	request := protocol.SearchRequest{
-		ProtocolVersion: protocol.Version,
+) (memoryv1.SearchRequest, error) {
+	request := memoryv1.SearchRequest{
+		ProtocolVersion: memoryv1.Version,
 		Binding:         binding,
 		Mode:            mode,
 		Query:           p.query,
@@ -202,12 +202,12 @@ func (p fixturePlan) searchRequest(
 		PageToken:       "",
 	}
 	if err := validateFixtureSearch(p.limits, &request); err != nil {
-		return protocol.SearchRequest{}, err
+		return memoryv1.SearchRequest{}, err
 	}
 	return request, nil
 }
 
-func validateFixtureMutation(limits protocol.CapabilityLimits, request *protocol.MutationEnvelope) error {
+func validateFixtureMutation(limits memoryv1.CapabilityLimits, request *memoryv1.MutationEnvelope) error {
 	if request == nil || request.State == nil {
 		return nil
 	}
@@ -217,7 +217,7 @@ func validateFixtureMutation(limits protocol.CapabilityLimits, request *protocol
 	return nil
 }
 
-func validateFixtureState(limits protocol.CapabilityLimits, state *protocol.MutationState) error {
+func validateFixtureState(limits memoryv1.CapabilityLimits, state *memoryv1.MutationState) error {
 	if state == nil {
 		return nil
 	}
@@ -254,7 +254,7 @@ func validateFixtureState(limits protocol.CapabilityLimits, state *protocol.Muta
 	return nil
 }
 
-func validateFixtureSearch(limits protocol.CapabilityLimits, request *protocol.SearchRequest) error {
+func validateFixtureSearch(limits memoryv1.CapabilityLimits, request *memoryv1.SearchRequest) error {
 	if request == nil {
 		return errors.New("search fixture is required")
 	}
@@ -280,7 +280,7 @@ func Check(ctx context.Context, target Target) (result CheckResult) {
 		return verified
 	}
 	verified.Phase = "check"
-	verified.Message = "adapter conforms to orka.oms.v0alpha1 (restart durability not independently exercised)"
+	verified.Message = "adapter conforms to orka.memory.v1 (restart durability not independently exercised)"
 	return SanitizeCheckResult(verified, target.AuthorizationValue)
 }
 
@@ -298,14 +298,14 @@ func Prepare(ctx context.Context, target Target) (checkpoint Checkpoint, result 
 		return checkpoint, result
 	}
 	binding := target.Binding
-	if binding == (protocol.Binding{}) {
+	if binding == (memoryv1.Binding{}) {
 		binding = DefaultBinding()
 	}
 	storeName := strings.TrimSpace(target.StoreName)
 	if storeName == "" {
 		storeName = "conformance-store"
 	}
-	storeBinding := protocol.StoreResolutionBinding{
+	storeBinding := memoryv1.StoreResolutionBinding{
 		ClusterID: binding.ClusterID, NamespaceUID: binding.NamespaceUID,
 		BackendUID: binding.BackendUID, TenantID: binding.TenantID,
 	}
@@ -320,7 +320,7 @@ func Prepare(ctx context.Context, target Target) (checkpoint Checkpoint, result 
 		return checkpoint, result
 	}
 	binding.StoreUUID = resolved.StoreUUID
-	if err := protocol.ValidateBinding(binding); err != nil {
+	if err := memoryv1.ValidateBinding(binding); err != nil {
 		result.Message = safeError("resolved conformance binding is invalid", err)
 		return checkpoint, result
 	}
@@ -366,7 +366,7 @@ func Prepare(ctx context.Context, target Target) (checkpoint Checkpoint, result 
 		result.Message = err.Error()
 		return checkpoint, result
 	}
-	if claim.Result != protocol.ResultApplied {
+	if claim.Result != memoryv1.ResultApplied {
 		result.Message = "ownership claim was not applied"
 		return checkpoint, result
 	}
@@ -390,7 +390,7 @@ func Prepare(ctx context.Context, target Target) (checkpoint Checkpoint, result 
 		binding,
 		fixtureRoleMain,
 		fixtures.memoryID(fixtureRoleMain),
-		protocol.MutationKindCreate,
+		memoryv1.MutationKindCreate,
 		1,
 		0,
 		"",
@@ -400,12 +400,12 @@ func Prepare(ctx context.Context, target Target) (checkpoint Checkpoint, result 
 		result.Message = safeError("could not construct create mutation", err)
 		return checkpoint, result
 	}
-	createReceipt, createBody, err := mutation(ctx, client, mainMutation, protocol.ResultApplied)
+	createReceipt, createBody, err := mutation(ctx, client, mainMutation, memoryv1.ResultApplied)
 	if err != nil {
 		result.Message = err.Error()
 		return checkpoint, result
 	}
-	replayReceipt, replayBody, err := mutation(ctx, client, mainMutation, protocol.ResultApplied)
+	replayReceipt, replayBody, err := mutation(ctx, client, mainMutation, memoryv1.ResultApplied)
 	if err != nil {
 		result.Message = err.Error()
 		return checkpoint, result
@@ -418,7 +418,7 @@ func Prepare(ctx context.Context, target Target) (checkpoint Checkpoint, result 
 	conflicting := mainMutation
 	conflicting.State = fixtures.state("b")
 	conflicting.MutationDigest = ""
-	if err := protocol.PrepareMutation(&conflicting); err != nil {
+	if err := memoryv1.PrepareMutation(&conflicting); err != nil {
 		result.Message = safeError("could not construct idempotency conflict", err)
 		return checkpoint, result
 	}
@@ -426,7 +426,7 @@ func Prepare(ctx context.Context, target Target) (checkpoint Checkpoint, result 
 		result.Message = err.Error()
 		return checkpoint, result
 	}
-	if _, _, err := mutation(ctx, client, conflicting, protocol.ResultIdempotencyConflict); err != nil {
+	if _, _, err := mutation(ctx, client, conflicting, memoryv1.ResultIdempotencyConflict); err != nil {
 		result.Message = err.Error()
 		return checkpoint, result
 	}
@@ -435,7 +435,7 @@ func Prepare(ctx context.Context, target Target) (checkpoint Checkpoint, result 
 		binding,
 		fixtureRoleDuplicateCreate,
 		mainMutation.MemoryID,
-		protocol.MutationKindCreate,
+		memoryv1.MutationKindCreate,
 		1,
 		0,
 		"",
@@ -445,7 +445,7 @@ func Prepare(ctx context.Context, target Target) (checkpoint Checkpoint, result 
 		result.Message = err.Error()
 		return checkpoint, result
 	}
-	if _, _, err := mutation(ctx, client, duplicateCreate, protocol.ResultPreconditionFailed); err != nil {
+	if _, _, err := mutation(ctx, client, duplicateCreate, memoryv1.ResultPreconditionFailed); err != nil {
 		result.Message = err.Error()
 		return checkpoint, result
 	}
@@ -465,7 +465,7 @@ func Prepare(ctx context.Context, target Target) (checkpoint Checkpoint, result 
 		binding,
 		fixtureRoleWrongCAS,
 		mainMutation.MemoryID,
-		protocol.MutationKindReplace,
+		memoryv1.MutationKindReplace,
 		3,
 		2,
 		"",
@@ -475,7 +475,7 @@ func Prepare(ctx context.Context, target Target) (checkpoint Checkpoint, result 
 		result.Message = err.Error()
 		return checkpoint, result
 	}
-	if _, _, err := mutation(ctx, client, wrongReplace, protocol.ResultPreconditionFailed); err != nil {
+	if _, _, err := mutation(ctx, client, wrongReplace, memoryv1.ResultPreconditionFailed); err != nil {
 		result.Message = err.Error()
 		return checkpoint, result
 	}
@@ -484,7 +484,7 @@ func Prepare(ctx context.Context, target Target) (checkpoint Checkpoint, result 
 		binding,
 		fixtureRoleReplace,
 		mainMutation.MemoryID,
-		protocol.MutationKindReplace,
+		memoryv1.MutationKindReplace,
 		2,
 		1,
 		createReceipt.BackendVersion,
@@ -494,7 +494,7 @@ func Prepare(ctx context.Context, target Target) (checkpoint Checkpoint, result 
 		result.Message = err.Error()
 		return checkpoint, result
 	}
-	if _, _, err := mutation(ctx, client, replaceMutation, protocol.ResultApplied); err != nil {
+	if _, _, err := mutation(ctx, client, replaceMutation, memoryv1.ResultApplied); err != nil {
 		result.Message = err.Error()
 		return checkpoint, result
 	}
@@ -508,14 +508,14 @@ func Prepare(ctx context.Context, target Target) (checkpoint Checkpoint, result 
 		result.Message = "conditional replace did not materialize the complete generation 2 state"
 		return checkpoint, result
 	}
-	expectedSnapshotRecords := make([]protocol.MemoryRecord, 0, 2)
+	expectedSnapshotRecords := make([]memoryv1.MemoryRecord, 0, 2)
 	expectedSnapshotRecords = append(expectedSnapshotRecords, *liveRecord)
 
 	searchFixture, err := fixtures.mutation(
 		binding,
 		fixtureRoleSearch,
 		fixtures.memoryID(fixtureRoleSearch),
-		protocol.MutationKindCreate,
+		memoryv1.MutationKindCreate,
 		1,
 		0,
 		"",
@@ -525,7 +525,7 @@ func Prepare(ctx context.Context, target Target) (checkpoint Checkpoint, result 
 		result.Message = err.Error()
 		return checkpoint, result
 	}
-	if _, _, err := mutation(ctx, client, searchFixture, protocol.ResultApplied); err != nil {
+	if _, _, err := mutation(ctx, client, searchFixture, memoryv1.ResultApplied); err != nil {
 		result.Message = err.Error()
 		return checkpoint, result
 	}
@@ -547,7 +547,7 @@ func Prepare(ctx context.Context, target Target) (checkpoint Checkpoint, result 
 		return checkpoint, result
 	}
 
-	searchRequest, err := fixtures.searchRequest(binding, protocol.SearchModeKeyword)
+	searchRequest, err := fixtures.searchRequest(binding, memoryv1.SearchModeKeyword)
 	if err != nil {
 		result.Message = err.Error()
 		return checkpoint, result
@@ -557,7 +557,7 @@ func Prepare(ctx context.Context, target Target) (checkpoint Checkpoint, result 
 		result.Message = err.Error()
 		return checkpoint, result
 	}
-	if firstPage.ActualMode != protocol.SearchModeKeyword || firstPage.Exhausted || firstPage.NextPageToken == "" {
+	if firstPage.ActualMode != memoryv1.SearchModeKeyword || firstPage.Exhausted || firstPage.NextPageToken == "" {
 		result.Message = "explicit keyword search did not produce the required pagination fixture"
 		return checkpoint, result
 	}
@@ -575,7 +575,7 @@ func Prepare(ctx context.Context, target Target) (checkpoint Checkpoint, result 
 		result.Message = err.Error()
 		return checkpoint, result
 	}
-	if checkpointFirstPage.ActualMode != protocol.SearchModeKeyword ||
+	if checkpointFirstPage.ActualMode != memoryv1.SearchModeKeyword ||
 		checkpointFirstPage.Exhausted || checkpointFirstPage.NextPageToken == "" ||
 		!reflect.DeepEqual(checkpointFirstPage.Records, firstPage.Records) {
 		result.Message = "durable pagination checkpoint did not reproduce the verified first page"
@@ -597,7 +597,7 @@ func Prepare(ctx context.Context, target Target) (checkpoint Checkpoint, result 
 		binding,
 		fixtureRolePostSnapshot,
 		fixtures.memoryID(fixtureRolePostSnapshot),
-		protocol.MutationKindCreate,
+		memoryv1.MutationKindCreate,
 		1,
 		0,
 		"",
@@ -607,7 +607,7 @@ func Prepare(ctx context.Context, target Target) (checkpoint Checkpoint, result 
 		result.Message = err.Error()
 		return checkpoint, result
 	}
-	if _, _, err := mutation(ctx, client, postSnapshot, protocol.ResultApplied); err != nil {
+	if _, _, err := mutation(ctx, client, postSnapshot, memoryv1.ResultApplied); err != nil {
 		result.Message = err.Error()
 		return checkpoint, result
 	}
@@ -622,7 +622,7 @@ func Prepare(ctx context.Context, target Target) (checkpoint Checkpoint, result 
 		binding,
 		fixtureRoleDeleteSnapshot,
 		toDelete.MemoryID,
-		protocol.MutationKindDelete,
+		memoryv1.MutationKindDelete,
 		toDelete.Generation+1,
 		toDelete.Generation,
 		toDelete.BackendVersion,
@@ -632,7 +632,7 @@ func Prepare(ctx context.Context, target Target) (checkpoint Checkpoint, result 
 		result.Message = err.Error()
 		return checkpoint, result
 	}
-	if _, _, err := mutation(ctx, client, deleteSnapshotRecord, protocol.ResultApplied); err != nil {
+	if _, _, err := mutation(ctx, client, deleteSnapshotRecord, memoryv1.ResultApplied); err != nil {
 		result.Message = err.Error()
 		return checkpoint, result
 	}
@@ -641,7 +641,7 @@ func Prepare(ctx context.Context, target Target) (checkpoint Checkpoint, result 
 		binding,
 		fixtureRoleAbsentDelete,
 		fixtures.memoryID(fixtureRoleAbsentDelete),
-		protocol.MutationKindDelete,
+		memoryv1.MutationKindDelete,
 		1,
 		0,
 		"",
@@ -651,14 +651,14 @@ func Prepare(ctx context.Context, target Target) (checkpoint Checkpoint, result 
 		result.Message = err.Error()
 		return checkpoint, result
 	}
-	if _, _, err := mutation(ctx, client, absentDelete, protocol.ResultNotFound); err != nil {
+	if _, _, err := mutation(ctx, client, absentDelete, memoryv1.ResultNotFound); err != nil {
 		result.Message = err.Error()
 		return checkpoint, result
 	}
 	tombstoneRecord, err := getRecord(ctx, client, binding, absentDelete.UpsertKey)
 	if err != nil ||
 		tombstoneRecord == nil ||
-		tombstoneRecord.State != protocol.RecordStateTombstone ||
+		tombstoneRecord.State != memoryv1.RecordStateTombstone ||
 		tombstoneRecord.Generation != 1 {
 		result.Message = "delete-if-absent did not persist a generation high-watermark tombstone"
 		return checkpoint, result
@@ -670,7 +670,7 @@ func Prepare(ctx context.Context, target Target) (checkpoint Checkpoint, result 
 	staleBinding := binding
 	binding.RoutingEpoch++
 	fence, err := advanceFence(ctx, client, binding)
-	if err != nil || fence.Result != protocol.ResultApplied || fence.MaximumRoutingEpoch != binding.RoutingEpoch {
+	if err != nil || fence.Result != memoryv1.ResultApplied || fence.MaximumRoutingEpoch != binding.RoutingEpoch {
 		result.Message = "routing fence did not advance durably"
 		return checkpoint, result
 	}
@@ -678,7 +678,7 @@ func Prepare(ctx context.Context, target Target) (checkpoint Checkpoint, result 
 		staleBinding,
 		fixtureRoleStaleRouting,
 		fixtures.memoryID(fixtureRoleStaleRouting),
-		protocol.MutationKindCreate,
+		memoryv1.MutationKindCreate,
 		1,
 		0,
 		"",
@@ -688,7 +688,7 @@ func Prepare(ctx context.Context, target Target) (checkpoint Checkpoint, result 
 		result.Message = err.Error()
 		return checkpoint, result
 	}
-	staleReceipt, _, err := mutation(ctx, client, staleMutation, protocol.ResultIdentityConflict)
+	staleReceipt, _, err := mutation(ctx, client, staleMutation, memoryv1.ResultIdentityConflict)
 	if err != nil {
 		result.Message = err.Error()
 		return checkpoint, result
@@ -708,13 +708,13 @@ func Prepare(ctx context.Context, target Target) (checkpoint Checkpoint, result 
 	searchRequest.Binding = binding
 	searchRequest.PageToken = firstPage.NextPageToken
 
-	var providerCommitGapMutation *protocol.MutationEnvelope
+	var providerCommitGapMutation *memoryv1.MutationEnvelope
 	if target.ProviderCommitGapProof {
 		gapMutation, gapErr := fixtures.mutation(
 			binding,
 			fixtureRoleProviderCommitGap,
 			fixtures.memoryID(fixtureRoleProviderCommitGap),
-			protocol.MutationKindCreate,
+			memoryv1.MutationKindCreate,
 			1,
 			0,
 			"",
@@ -732,7 +732,7 @@ func Prepare(ctx context.Context, target Target) (checkpoint Checkpoint, result 
 	}
 
 	checkpoint = Checkpoint{
-		CheckpointVersion: checkpointVersion, ProtocolVersion: protocol.Version, RunID: runID,
+		CheckpointVersion: checkpointVersion, ProtocolVersion: memoryv1.Version, RunID: runID,
 		StoreName: storeName, Binding: binding, CapabilitiesRevision: caps.Revision,
 		ReplayMutation: mainMutation, ReplayReceipt: createReceipt, LiveRecord: *currentLive,
 		TombstoneRecord: *tombstoneRecord, PaginationRequest: searchRequest,
@@ -747,13 +747,13 @@ func Prepare(ctx context.Context, target Target) (checkpoint Checkpoint, result 
 		return Checkpoint{}, result
 	}
 	result.Passed = true
-	result.Message = "OMS conformance prepare phase passed; restart the adapter before verify"
+	result.Message = "memory protocol conformance prepare phase passed; restart the adapter before verify"
 	return checkpoint, result
 }
 
 // VerifyAfterRestart proves that the state created by Prepare remained durable.
 //
-//nolint:gocyclo // Restart verification checks every persisted OMS safety property.
+//nolint:gocyclo // Restart verification checks every persisted memory protocol safety property.
 func VerifyAfterRestart(ctx context.Context, target Target, checkpoint Checkpoint) (result CheckResult) {
 	result.Phase = "verify"
 	defer func() { result = SanitizeCheckResult(result, target.AuthorizationValue) }()
@@ -766,7 +766,7 @@ func VerifyAfterRestart(ctx context.Context, target Target, checkpoint Checkpoin
 		result.Message = err.Error()
 		return result
 	}
-	storeBinding := protocol.StoreResolutionBinding{
+	storeBinding := memoryv1.StoreResolutionBinding{
 		ClusterID: checkpoint.Binding.ClusterID, NamespaceUID: checkpoint.Binding.NamespaceUID,
 		BackendUID: checkpoint.Binding.BackendUID, TenantID: checkpoint.Binding.TenantID,
 	}
@@ -792,7 +792,7 @@ func VerifyAfterRestart(ctx context.Context, target Target, checkpoint Checkpoin
 	}
 	claim, err := claimOwnership(ctx, client, checkpoint.Binding)
 	if err != nil ||
-		claim.Result != protocol.ResultApplied ||
+		claim.Result != memoryv1.ResultApplied ||
 		claim.MaximumRoutingEpoch < checkpoint.Binding.RoutingEpoch {
 		result.Message = "exclusive ownership claim or routing fence did not survive restart"
 		return result
@@ -802,7 +802,7 @@ func VerifyAfterRestart(ctx context.Context, target Target, checkpoint Checkpoin
 		return result
 	}
 	if checkpoint.ProviderCommitGapMutation != nil {
-		gapReceipt, _, gapErr := mutation(ctx, client, *checkpoint.ProviderCommitGapMutation, protocol.ResultApplied)
+		gapReceipt, _, gapErr := mutation(ctx, client, *checkpoint.ProviderCommitGapMutation, memoryv1.ResultApplied)
 		if gapErr != nil {
 			result.Message = "provider-commit gap did not recover through operation lookup after restart"
 			return result
@@ -852,7 +852,7 @@ func VerifyAfterRestart(ctx context.Context, target Target, checkpoint Checkpoin
 		checkpoint.Binding,
 		fixtureRoleStaleResurrection,
 		checkpoint.TombstoneRecord.MemoryID,
-		protocol.MutationKindCreate,
+		memoryv1.MutationKindCreate,
 		checkpoint.TombstoneRecord.Generation,
 		0,
 		"",
@@ -862,7 +862,7 @@ func VerifyAfterRestart(ctx context.Context, target Target, checkpoint Checkpoin
 		result.Message = err.Error()
 		return result
 	}
-	if _, _, err := mutation(ctx, client, staleCreate, protocol.ResultPreconditionFailed); err != nil {
+	if _, _, err := mutation(ctx, client, staleCreate, memoryv1.ResultPreconditionFailed); err != nil {
 		result.Message = "delete high-watermark did not reject stale resurrection after restart"
 		return result
 	}
@@ -881,7 +881,7 @@ func VerifyAfterRestart(ctx context.Context, target Target, checkpoint Checkpoin
 		return result
 	}
 
-	staleReplay, _, err := mutation(ctx, client, checkpoint.StaleMutation, protocol.ResultIdentityConflict)
+	staleReplay, _, err := mutation(ctx, client, checkpoint.StaleMutation, memoryv1.ResultIdentityConflict)
 	if err != nil || !reflect.DeepEqual(staleReplay, checkpoint.StaleReceipt) {
 		result.Message = "stale routing-fence receipt did not survive restart"
 		return result
@@ -890,7 +890,7 @@ func VerifyAfterRestart(ctx context.Context, target Target, checkpoint Checkpoin
 		checkpoint.StaleMutation.Binding,
 		fixtureRoleSecondStaleRouting,
 		fixtures.memoryID(fixtureRoleSecondStaleRouting),
-		protocol.MutationKindCreate,
+		memoryv1.MutationKindCreate,
 		1,
 		0,
 		"",
@@ -900,7 +900,7 @@ func VerifyAfterRestart(ctx context.Context, target Target, checkpoint Checkpoin
 		result.Message = err.Error()
 		return result
 	}
-	if _, _, err := mutation(ctx, client, secondStale, protocol.ResultIdentityConflict); err != nil {
+	if _, _, err := mutation(ctx, client, secondStale, memoryv1.ResultIdentityConflict); err != nil {
 		result.Message = "durable routing fence accepted a new stale mutation after restart"
 		return result
 	}
@@ -912,53 +912,53 @@ func VerifyAfterRestart(ctx context.Context, target Target, checkpoint Checkpoin
 	}
 
 	result.Passed = true
-	result.Message = "adapter conforms to orka.oms.v0alpha1 including restart durability"
+	result.Message = "adapter conforms to orka.memory.v1 including restart durability"
 	return result
 }
 
 // ValidateCheckpoint rejects malformed or cross-profile checkpoint files.
 func ValidateCheckpoint(checkpoint Checkpoint) error {
-	if checkpoint.CheckpointVersion != checkpointVersion || checkpoint.ProtocolVersion != protocol.Version {
+	if checkpoint.CheckpointVersion != checkpointVersion || checkpoint.ProtocolVersion != memoryv1.Version {
 		return errors.New("checkpoint version is unsupported")
 	}
 	if !isSafeRunID(checkpoint.RunID) {
 		return errors.New("checkpoint runId is invalid")
 	}
-	if err := protocol.ValidateBinding(checkpoint.Binding); err != nil {
+	if err := memoryv1.ValidateBinding(checkpoint.Binding); err != nil {
 		return err
 	}
-	storeBinding := protocol.StoreResolutionBinding{
+	storeBinding := memoryv1.StoreResolutionBinding{
 		ClusterID: checkpoint.Binding.ClusterID, NamespaceUID: checkpoint.Binding.NamespaceUID,
 		BackendUID: checkpoint.Binding.BackendUID, TenantID: checkpoint.Binding.TenantID,
 	}
-	if err := protocol.ValidateStoreResolveRequest(&protocol.StoreResolveRequest{
-		ProtocolVersion: protocol.Version, Binding: storeBinding, StoreName: checkpoint.StoreName,
+	if err := memoryv1.ValidateStoreResolveRequest(&memoryv1.StoreResolveRequest{
+		ProtocolVersion: memoryv1.Version, Binding: storeBinding, StoreName: checkpoint.StoreName,
 	}); err != nil {
 		return err
 	}
 	if checkpoint.CapabilitiesRevision == "" {
 		return errors.New("capabilitiesRevision is required")
 	}
-	if err := protocol.ValidateMutationEnvelope(&checkpoint.ReplayMutation); err != nil {
+	if err := memoryv1.ValidateMutationEnvelope(&checkpoint.ReplayMutation); err != nil {
 		return err
 	}
-	if err := protocol.ValidateMutationReceipt(&checkpoint.ReplayReceipt); err != nil {
+	if err := memoryv1.ValidateMutationReceipt(&checkpoint.ReplayReceipt); err != nil {
 		return err
 	}
-	if !protocol.AuthorityEqual(checkpoint.Binding, checkpoint.ReplayMutation.Binding) ||
-		!protocol.AuthorityEqual(checkpoint.Binding, checkpoint.ReplayReceipt.Binding) {
+	if !memoryv1.AuthorityEqual(checkpoint.Binding, checkpoint.ReplayMutation.Binding) ||
+		!memoryv1.AuthorityEqual(checkpoint.Binding, checkpoint.ReplayReceipt.Binding) {
 		return errors.New("replay authority does not match checkpoint binding")
 	}
-	if err := protocol.ValidateMemoryRecord(&checkpoint.LiveRecord, checkpoint.Binding); err != nil {
+	if err := memoryv1.ValidateMemoryRecord(&checkpoint.LiveRecord, checkpoint.Binding); err != nil {
 		return err
 	}
-	if checkpoint.LiveRecord.State != protocol.RecordStateLive {
+	if checkpoint.LiveRecord.State != memoryv1.RecordStateLive {
 		return errors.New("liveRecord is not live")
 	}
-	if err := protocol.ValidateMemoryRecord(&checkpoint.TombstoneRecord, checkpoint.Binding); err != nil {
+	if err := memoryv1.ValidateMemoryRecord(&checkpoint.TombstoneRecord, checkpoint.Binding); err != nil {
 		return err
 	}
-	if checkpoint.TombstoneRecord.State != protocol.RecordStateTombstone {
+	if checkpoint.TombstoneRecord.State != memoryv1.RecordStateTombstone {
 		return errors.New("tombstoneRecord is not a tombstone")
 	}
 	if err := validateCheckpointPagination(checkpoint); err != nil {
@@ -967,20 +967,20 @@ func ValidateCheckpoint(checkpoint Checkpoint) error {
 	if checkpoint.SnapshotExcludedKey == "" {
 		return errors.New("snapshotExcludedKey is required")
 	}
-	if err := protocol.ValidateMutationEnvelope(&checkpoint.StaleMutation); err != nil {
+	if err := memoryv1.ValidateMutationEnvelope(&checkpoint.StaleMutation); err != nil {
 		return err
 	}
-	if err := protocol.ValidateMutationReceipt(&checkpoint.StaleReceipt); err != nil {
+	if err := memoryv1.ValidateMutationReceipt(&checkpoint.StaleReceipt); err != nil {
 		return err
 	}
 	if checkpoint.StaleMutation.Binding.RoutingEpoch >= checkpoint.Binding.RoutingEpoch {
 		return errors.New("stale mutation is not below the checkpoint routing fence")
 	}
 	if checkpoint.ProviderCommitGapMutation != nil {
-		if err := protocol.ValidateMutationEnvelope(checkpoint.ProviderCommitGapMutation); err != nil {
+		if err := memoryv1.ValidateMutationEnvelope(checkpoint.ProviderCommitGapMutation); err != nil {
 			return err
 		}
-		if !protocol.BindingEqual(checkpoint.ProviderCommitGapMutation.Binding, checkpoint.Binding) {
+		if !memoryv1.BindingEqual(checkpoint.ProviderCommitGapMutation.Binding, checkpoint.Binding) {
 			return errors.New("provider-commit gap mutation binding does not match checkpoint binding")
 		}
 	}
@@ -988,15 +988,15 @@ func ValidateCheckpoint(checkpoint Checkpoint) error {
 }
 
 func validateCheckpointPagination(checkpoint Checkpoint) error {
-	if err := protocol.ValidateSearchRequest(&checkpoint.PaginationRequest); err != nil {
+	if err := memoryv1.ValidateSearchRequest(&checkpoint.PaginationRequest); err != nil {
 		return err
 	}
 	if checkpoint.PaginationRequest.PageToken == "" ||
-		!protocol.BindingEqual(checkpoint.PaginationRequest.Binding, checkpoint.Binding) {
+		!memoryv1.BindingEqual(checkpoint.PaginationRequest.Binding, checkpoint.Binding) {
 		return errors.New("pagination continuation is not bound to the checkpoint")
 	}
-	if checkpoint.PaginationRequest.Mode != protocol.SearchModeKeyword ||
-		checkpoint.PaginationActualMode != protocol.SearchModeKeyword {
+	if checkpoint.PaginationRequest.Mode != memoryv1.SearchModeKeyword ||
+		checkpoint.PaginationActualMode != memoryv1.SearchModeKeyword {
 		return errors.New("pagination proof must use explicit keyword mode")
 	}
 	if checkpoint.PaginationSnapshotExpiry.IsZero() {
@@ -1004,13 +1004,13 @@ func validateCheckpointPagination(checkpoint Checkpoint) error {
 	}
 	if len(checkpoint.PaginationExpectedKeys) == 0 ||
 		len(checkpoint.PaginationExpectedKeys) != len(checkpoint.PaginationExpectedDigests) ||
-		len(checkpoint.PaginationExpectedKeys) > protocol.MaxSnapshotRecords {
+		len(checkpoint.PaginationExpectedKeys) > memoryv1.MaxSnapshotRecords {
 		return errors.New("pagination record proofs are missing or inconsistent")
 	}
 	seenKeys := make(map[string]struct{}, len(checkpoint.PaginationExpectedKeys))
 	for index, key := range checkpoint.PaginationExpectedKeys {
-		request := protocol.GetRequest{ProtocolVersion: protocol.Version, Binding: checkpoint.Binding, UpsertKey: key}
-		if err := protocol.ValidateGetRequest(&request); err != nil {
+		request := memoryv1.GetRequest{ProtocolVersion: memoryv1.Version, Binding: checkpoint.Binding, UpsertKey: key}
+		if err := memoryv1.ValidateGetRequest(&request); err != nil {
 			return err
 		}
 		if _, duplicate := seenKeys[key]; duplicate {
@@ -1027,9 +1027,9 @@ func validateCheckpointPagination(checkpoint Checkpoint) error {
 func probe(
 	ctx context.Context,
 	client *contractClient,
-	binding protocol.Binding,
-) (*protocol.CapabilitiesResponse, error) {
-	healthBody, status, err := client.do(ctx, http.MethodGet, protocol.PathHealth, client.authorizationValue, nil)
+	binding memoryv1.Binding,
+) (*memoryv1.CapabilitiesResponse, error) {
+	healthBody, status, err := client.do(ctx, http.MethodGet, memoryv1.PathHealth, client.authorizationValue, nil)
 	if err != nil {
 		return nil, fmt.Errorf("health probe failed: %w", err)
 	}
@@ -1039,13 +1039,13 @@ func probe(
 	if containsCredential(healthBody, client.authorizationValue) {
 		return nil, errors.New("health response contained the bearer token")
 	}
-	if _, err := protocol.DecodeHealthResponse(healthBody); err != nil {
+	if _, err := memoryv1.DecodeHealthResponse(healthBody); err != nil {
 		return nil, err
 	}
 	body, status, err := client.postJSON(
 		ctx,
-		protocol.PathCapabilities,
-		protocol.CapabilitiesRequest{ProtocolVersion: protocol.Version, Binding: binding},
+		memoryv1.PathCapabilities,
+		memoryv1.CapabilitiesRequest{ProtocolVersion: memoryv1.Version, Binding: binding},
 	)
 	if err != nil {
 		return nil, fmt.Errorf("capability probe failed: %w", err)
@@ -1056,18 +1056,18 @@ func probe(
 	if containsCredential(body, client.authorizationValue) {
 		return nil, errors.New("capability response contained the bearer token")
 	}
-	caps, err := protocol.DecodeCapabilitiesResponse(body)
+	caps, err := memoryv1.DecodeCapabilitiesResponse(body)
 	if err != nil {
 		return nil, err
 	}
-	if !protocol.BindingEqual(caps.Binding, binding) {
+	if !memoryv1.BindingEqual(caps.Binding, binding) {
 		return nil, errors.New("capability response did not echo the exact binding")
 	}
 	client.configureLimits(caps.Limits)
-	if err := client.validateResponseBytes(protocol.PathCapabilities, body); err != nil {
+	if err := client.validateResponseBytes(memoryv1.PathCapabilities, body); err != nil {
 		return nil, err
 	}
-	if err := client.validateResponseBytes(protocol.PathHealth, healthBody); err != nil {
+	if err := client.validateResponseBytes(memoryv1.PathHealth, healthBody); err != nil {
 		return nil, err
 	}
 	return caps, nil
@@ -1076,7 +1076,7 @@ func probe(
 type errorExpectation struct {
 	status            int
 	code              string
-	binding           *protocol.Binding
+	binding           *memoryv1.Binding
 	retryable         bool
 	retryAfterSeconds int
 }
@@ -1085,7 +1085,7 @@ func validateErrorVariant(response contractResponse, expected errorExpectation) 
 	if response.StatusCode != expected.status {
 		return fmt.Errorf("HTTP status = %d, want %d", response.StatusCode, expected.status)
 	}
-	decoded, err := protocol.DecodeErrorResponse(response.Body)
+	decoded, err := memoryv1.DecodeErrorResponse(response.Body)
 	if err != nil {
 		return fmt.Errorf("response is not a closed bounded error: %w", err)
 	}
@@ -1097,7 +1097,7 @@ func validateErrorVariant(response contractResponse, expected errorExpectation) 
 		if decoded.Binding != nil {
 			return errors.New("response unexpectedly included a binding")
 		}
-	} else if decoded.Binding == nil || !protocol.BindingEqual(*decoded.Binding, *expected.binding) {
+	} else if decoded.Binding == nil || !memoryv1.BindingEqual(*decoded.Binding, *expected.binding) {
 		return errors.New("response did not echo the expected binding")
 	}
 	if _, present := response.Header[http.CanonicalHeaderKey("Retry-After")]; !expected.retryable && present {
@@ -1109,16 +1109,16 @@ func validateErrorVariant(response contractResponse, expected errorExpectation) 
 func verifyAuthentication(
 	ctx context.Context,
 	client *contractClient,
-	storeBinding protocol.StoreResolutionBinding,
+	storeBinding memoryv1.StoreResolutionBinding,
 	storeName string,
-	binding protocol.Binding,
+	binding memoryv1.Binding,
 	fixtures fixturePlan,
 ) error {
 	mutationRequest, err := fixtures.mutation(
 		binding,
 		fixtureRoleAuthentication,
 		fixtures.memoryID(fixtureRoleAuthentication),
-		protocol.MutationKindCreate,
+		memoryv1.MutationKindCreate,
 		1,
 		0,
 		"",
@@ -1127,7 +1127,7 @@ func verifyAuthentication(
 	if err != nil {
 		return err
 	}
-	searchRequest, err := fixtures.searchRequest(binding, protocol.SearchModeKeyword)
+	searchRequest, err := fixtures.searchRequest(binding, memoryv1.SearchModeKeyword)
 	if err != nil {
 		return err
 	}
@@ -1136,54 +1136,54 @@ func verifyAuthentication(
 		value              any
 		body               []byte
 	}{
-		{name: "health", method: http.MethodGet, path: protocol.PathHealth},
+		{name: "health", method: http.MethodGet, path: memoryv1.PathHealth},
 		{
-			name: "store resolution", method: http.MethodPost, path: protocol.PathStoreResolve,
-			value: protocol.StoreResolveRequest{
-				ProtocolVersion: protocol.Version,
+			name: "store resolution", method: http.MethodPost, path: memoryv1.PathStoreResolve,
+			value: memoryv1.StoreResolveRequest{
+				ProtocolVersion: memoryv1.Version,
 				Binding:         storeBinding,
 				StoreName:       storeName,
 			},
 		},
 		{
-			name: "capabilities", method: http.MethodPost, path: protocol.PathCapabilities,
-			value: protocol.CapabilitiesRequest{
-				ProtocolVersion: protocol.Version,
+			name: "capabilities", method: http.MethodPost, path: memoryv1.PathCapabilities,
+			value: memoryv1.CapabilitiesRequest{
+				ProtocolVersion: memoryv1.Version,
 				Binding:         binding,
 			},
 		},
 		{
-			name: "ownership claim", method: http.MethodPost, path: protocol.PathOwnershipClaim,
-			value: protocol.OwnershipClaimRequest{
-				ProtocolVersion: protocol.Version,
+			name: "ownership claim", method: http.MethodPost, path: memoryv1.PathOwnershipClaim,
+			value: memoryv1.OwnershipClaimRequest{
+				ProtocolVersion: memoryv1.Version,
 				Binding:         binding,
 			},
 		},
 		{
-			name: "routing fence", method: http.MethodPost, path: protocol.PathRoutingFence,
-			value: protocol.RoutingFenceRequest{
-				ProtocolVersion: protocol.Version,
+			name: "routing fence", method: http.MethodPost, path: memoryv1.PathRoutingFence,
+			value: memoryv1.RoutingFenceRequest{
+				ProtocolVersion: memoryv1.Version,
 				Binding:         binding,
 			},
 		},
-		{name: "mutation", method: http.MethodPost, path: protocol.PathMutations, value: mutationRequest},
+		{name: "mutation", method: http.MethodPost, path: memoryv1.PathMutations, value: mutationRequest},
 		{
-			name: "exact get", method: http.MethodPost, path: protocol.PathRecordsGet,
-			value: protocol.GetRequest{
-				ProtocolVersion: protocol.Version,
+			name: "exact get", method: http.MethodPost, path: memoryv1.PathRecordsGet,
+			value: memoryv1.GetRequest{
+				ProtocolVersion: memoryv1.Version,
 				Binding:         binding,
 				UpsertKey:       mutationRequest.UpsertKey,
 			},
 		},
 		{
-			name: "operation lookup", method: http.MethodPost, path: protocol.PathOperationsGet,
-			value: protocol.OperationLookupRequest{
-				ProtocolVersion: protocol.Version,
+			name: "operation lookup", method: http.MethodPost, path: memoryv1.PathOperationsGet,
+			value: memoryv1.OperationLookupRequest{
+				ProtocolVersion: memoryv1.Version,
 				Binding:         binding,
 				OperationID:     mutationRequest.OperationID,
 			},
 		},
-		{name: "search", method: http.MethodPost, path: protocol.PathSearch, value: searchRequest},
+		{name: "search", method: http.MethodPost, path: memoryv1.PathSearch, value: searchRequest},
 	}
 	for index := range probes {
 		if probes[index].value == nil {
@@ -1205,7 +1205,7 @@ func verifyAuthentication(
 				return fmt.Errorf("%s authentication response contained the bearer token", probe.name)
 			}
 			if err := validateErrorVariant(response, errorExpectation{
-				status: http.StatusUnauthorized, code: protocol.ErrorCodeUnauthorized,
+				status: http.StatusUnauthorized, code: memoryv1.ErrorCodeUnauthorized,
 				retryable: false, retryAfterSeconds: 0,
 			}); err != nil {
 				return fmt.Errorf("%s authentication error response is not the exact unauthorized variant: %w", probe.name, err)
@@ -1215,18 +1215,18 @@ func verifyAuthentication(
 	return nil
 }
 
-func verifyStrictCapabilityCodec(ctx context.Context, client *contractClient, binding protocol.Binding) error {
+func verifyStrictCapabilityCodec(ctx context.Context, client *contractClient, binding memoryv1.Binding) error {
 	valid, err := client.marshalJSONRequest(
 		"capabilities codec baseline",
-		protocol.CapabilitiesRequest{ProtocolVersion: protocol.Version, Binding: binding},
+		memoryv1.CapabilitiesRequest{ProtocolVersion: memoryv1.Version, Binding: binding},
 	)
 	if err != nil {
 		return err
 	}
 	unknown := append([]byte(`{"x":0,`), valid[1:]...)
-	duplicate := append([]byte(`{"protocolVersion":"orka.oms.v0alpha1",`), valid[1:]...)
+	duplicate := append([]byte(`{"protocolVersion":"orka.memory.v1",`), valid[1:]...)
 	trailing := append(append([]byte(nil), valid...), []byte(` 0`)...)
-	unsafeRequest := protocol.CapabilitiesRequest{ProtocolVersion: protocol.Version, Binding: binding}
+	unsafeRequest := memoryv1.CapabilitiesRequest{ProtocolVersion: memoryv1.Version, Binding: binding}
 	unsafeRequest.Binding.ClusterID = "unsafe\ncluster"
 	unsafeBody, err := client.marshalJSONRequest("unsafe capabilities codec", unsafeRequest)
 	if err != nil {
@@ -1234,7 +1234,7 @@ func verifyStrictCapabilityCodec(ctx context.Context, client *contractClient, bi
 	}
 	oversized := append(
 		append([]byte(nil), valid...),
-		bytes.Repeat([]byte(" "), protocol.MaxHTTPBodyBytes+1-len(valid))...,
+		bytes.Repeat([]byte(" "), memoryv1.MaxHTTPBodyBytes+1-len(valid))...,
 	)
 	probes := []struct {
 		name   string
@@ -1254,7 +1254,7 @@ func verifyStrictCapabilityCodec(ctx context.Context, client *contractClient, bi
 			}
 		}
 		if err := expectCodecRejection(
-			ctx, client, protocol.PathCapabilities, probe.name, probe.status, probe.body,
+			ctx, client, memoryv1.PathCapabilities, probe.name, probe.status, probe.body,
 		); err != nil {
 			return err
 		}
@@ -1265,14 +1265,14 @@ func verifyStrictCapabilityCodec(ctx context.Context, client *contractClient, bi
 func verifyStrictMutationCodec(
 	ctx context.Context,
 	client *contractClient,
-	binding protocol.Binding,
+	binding memoryv1.Binding,
 	fixtures fixturePlan,
 ) error {
 	request, err := fixtures.mutation(
 		binding,
 		fixtureRoleStrictCodec,
 		fixtures.memoryID(fixtureRoleStrictCodec),
-		protocol.MutationKindCreate,
+		memoryv1.MutationKindCreate,
 		1,
 		0,
 		"",
@@ -1291,7 +1291,7 @@ func verifyStrictMutationCodec(
 		if err := client.validateRequestBytes(name, body); err != nil {
 			return err
 		}
-		if err := expectCodecRejection(ctx, client, protocol.PathMutations, name, http.StatusBadRequest, body); err != nil {
+		if err := expectCodecRejection(ctx, client, memoryv1.PathMutations, name, http.StatusBadRequest, body); err != nil {
 			return err
 		}
 	}
@@ -1317,7 +1317,7 @@ func expectCodecRejection(
 		return fmt.Errorf("%s response contained the bearer token", name)
 	}
 	if err := validateErrorVariant(response, errorExpectation{
-		status: expectedStatus, code: protocol.ErrorCodeInvalidRequest,
+		status: expectedStatus, code: memoryv1.ErrorCodeInvalidRequest,
 		retryable: false, retryAfterSeconds: 0,
 	}); err != nil {
 		return fmt.Errorf("%s response is not the exact invalid-request variant: %w", name, err)
@@ -1328,11 +1328,11 @@ func expectCodecRejection(
 func resolveStore(
 	ctx context.Context,
 	client *contractClient,
-	binding protocol.StoreResolutionBinding,
+	binding memoryv1.StoreResolutionBinding,
 	storeName string,
-) (*protocol.StoreResolveResponse, error) {
-	body, status, err := client.postJSON(ctx, protocol.PathStoreResolve, protocol.StoreResolveRequest{
-		ProtocolVersion: protocol.Version, Binding: binding, StoreName: storeName,
+) (*memoryv1.StoreResolveResponse, error) {
+	body, status, err := client.postJSON(ctx, memoryv1.PathStoreResolve, memoryv1.StoreResolveRequest{
+		ProtocolVersion: memoryv1.Version, Binding: binding, StoreName: storeName,
 	})
 	if err != nil {
 		return nil, err
@@ -1340,11 +1340,11 @@ func resolveStore(
 	if status != http.StatusOK {
 		return nil, fmt.Errorf("store resolution returned HTTP %d", status)
 	}
-	response, err := protocol.DecodeStoreResolveResponse(body)
+	response, err := memoryv1.DecodeStoreResolveResponse(body)
 	if err != nil {
 		return nil, err
 	}
-	if !protocol.StoreResolutionBindingEqual(response.Binding, binding) || response.StoreName != storeName {
+	if !memoryv1.StoreResolutionBindingEqual(response.Binding, binding) || response.StoreName != storeName {
 		return nil, errors.New("store resolution did not echo the exact pre-authority identity and store name")
 	}
 	return response, nil
@@ -1353,11 +1353,11 @@ func resolveStore(
 func verifyStrictStoreCodec(
 	ctx context.Context,
 	client *contractClient,
-	binding protocol.StoreResolutionBinding,
+	binding memoryv1.StoreResolutionBinding,
 	storeName string,
 ) error {
-	valid, err := client.marshalJSONRequest("store codec baseline", protocol.StoreResolveRequest{
-		ProtocolVersion: protocol.Version, Binding: binding, StoreName: storeName,
+	valid, err := client.marshalJSONRequest("store codec baseline", memoryv1.StoreResolveRequest{
+		ProtocolVersion: memoryv1.Version, Binding: binding, StoreName: storeName,
 	})
 	if err != nil {
 		return err
@@ -1369,7 +1369,7 @@ func verifyStrictStoreCodec(
 			return err
 		}
 		if err := expectCodecRejection(
-			ctx, client, protocol.PathStoreResolve, name, http.StatusBadRequest, body,
+			ctx, client, memoryv1.PathStoreResolve, name, http.StatusBadRequest, body,
 		); err != nil {
 			return err
 		}
@@ -1380,12 +1380,12 @@ func verifyStrictStoreCodec(
 func claimOwnership(
 	ctx context.Context,
 	client *contractClient,
-	binding protocol.Binding,
-) (*protocol.OwnershipClaimResponse, error) {
+	binding memoryv1.Binding,
+) (*memoryv1.OwnershipClaimResponse, error) {
 	body, status, err := client.postJSON(
 		ctx,
-		protocol.PathOwnershipClaim,
-		protocol.OwnershipClaimRequest{ProtocolVersion: protocol.Version, Binding: binding},
+		memoryv1.PathOwnershipClaim,
+		memoryv1.OwnershipClaimRequest{ProtocolVersion: memoryv1.Version, Binding: binding},
 	)
 	if err != nil {
 		return nil, err
@@ -1393,11 +1393,11 @@ func claimOwnership(
 	if status != http.StatusOK && status != http.StatusConflict {
 		return nil, fmt.Errorf("ownership claim returned HTTP %d", status)
 	}
-	response, err := protocol.DecodeOwnershipClaimResponse(body)
+	response, err := memoryv1.DecodeOwnershipClaimResponse(body)
 	if err != nil {
 		return nil, err
 	}
-	if !protocol.BindingEqual(response.Binding, binding) {
+	if !memoryv1.BindingEqual(response.Binding, binding) {
 		return nil, errors.New("ownership response did not echo the exact binding")
 	}
 	return response, nil
@@ -1406,7 +1406,7 @@ func claimOwnership(
 func verifyExclusiveOwnership(
 	ctx context.Context,
 	client *contractClient,
-	binding protocol.Binding,
+	binding memoryv1.Binding,
 	conflictBackendUID string,
 ) error {
 	conflict := binding
@@ -1418,13 +1418,13 @@ func verifyExclusiveOwnership(
 	if err != nil {
 		return err
 	}
-	if response.Result != protocol.ResultIdentityConflict {
+	if response.Result != memoryv1.ResultIdentityConflict {
 		return errors.New("adapter allowed a second writer claim for the same authority scope")
 	}
 	return nil
 }
 
-func induceProviderCommitGap(ctx context.Context, client *contractClient, request protocol.MutationEnvelope) error {
+func induceProviderCommitGap(ctx context.Context, client *contractClient, request memoryv1.MutationEnvelope) error {
 	if client.limitsConfigured {
 		if err := validateFixtureMutation(client.limits, &request); err != nil {
 			return err
@@ -1435,7 +1435,7 @@ func induceProviderCommitGap(ctx context.Context, client *contractClient, reques
 		return err
 	}
 	response, err := client.doResponse(
-		ctx, http.MethodPost, protocol.PathMutations, client.authorizationValue, body,
+		ctx, http.MethodPost, memoryv1.PathMutations, client.authorizationValue, body,
 		http.Header{conformanceFailpointHeader: []string{conformanceProviderCommitGapValue}},
 	)
 	if err != nil {
@@ -1445,9 +1445,9 @@ func induceProviderCommitGap(ctx context.Context, client *contractClient, reques
 		response.Header.Get(conformanceFailpointHeader) != conformanceProviderCommitGapValue {
 		return errors.New("adapter did not acknowledge the opt-in provider-commit gap failpoint")
 	}
-	failure, err := protocol.DecodeErrorResponse(response.Body)
-	if err != nil || failure.Code != protocol.ErrorCodeInternal || !failure.Retryable || failure.Binding == nil ||
-		!protocol.BindingEqual(*failure.Binding, request.Binding) {
+	failure, err := memoryv1.DecodeErrorResponse(response.Body)
+	if err != nil || failure.Code != memoryv1.ErrorCodeInternal || !failure.Retryable || failure.Binding == nil ||
+		!memoryv1.BindingEqual(*failure.Binding, request.Binding) {
 		return errors.New("provider-commit gap failpoint did not return the closed retryable error variant")
 	}
 	record, err := getRecord(ctx, client, request.Binding, request.UpsertKey)
@@ -1463,14 +1463,14 @@ func induceProviderCommitGap(ctx context.Context, client *contractClient, reques
 func verifyConcurrentCAS(
 	ctx context.Context,
 	client *contractClient,
-	binding protocol.Binding,
+	binding memoryv1.Binding,
 	fixtures fixturePlan,
 ) error {
 	base, err := fixtures.mutation(
 		binding,
 		fixtureRoleCASBase,
 		fixtures.memoryID(fixtureRoleCASBase),
-		protocol.MutationKindCreate,
+		memoryv1.MutationKindCreate,
 		1,
 		0,
 		"",
@@ -1479,11 +1479,11 @@ func verifyConcurrentCAS(
 	if err != nil {
 		return err
 	}
-	baseReceipt, _, err := mutation(ctx, client, base, protocol.ResultApplied)
+	baseReceipt, _, err := mutation(ctx, client, base, memoryv1.ResultApplied)
 	if err != nil {
 		return err
 	}
-	replacements := make([]protocol.MutationEnvelope, 2)
+	replacements := make([]memoryv1.MutationEnvelope, 2)
 	for index, replacement := range []struct {
 		role    string
 		content string
@@ -1495,7 +1495,7 @@ func verifyConcurrentCAS(
 			binding,
 			replacement.role,
 			base.MemoryID,
-			protocol.MutationKindReplace,
+			memoryv1.MutationKindReplace,
 			2,
 			1,
 			baseReceipt.BackendVersion,
@@ -1506,7 +1506,7 @@ func verifyConcurrentCAS(
 		}
 	}
 	type response struct {
-		receipt protocol.MutationReceipt
+		receipt memoryv1.MutationReceipt
 		err     error
 	}
 	start := make(chan struct{})
@@ -1514,17 +1514,17 @@ func verifyConcurrentCAS(
 	for _, replacement := range replacements {
 		go func() {
 			<-start
-			body, status, requestErr := client.postJSON(ctx, protocol.PathMutations, replacement)
+			body, status, requestErr := client.postJSON(ctx, memoryv1.PathMutations, replacement)
 			if requestErr != nil {
 				results <- response{err: requestErr}
 				return
 			}
-			receipt, decodeErr := protocol.DecodeMutationReceipt(body)
+			receipt, decodeErr := memoryv1.DecodeMutationReceipt(body)
 			if decodeErr != nil {
 				results <- response{err: decodeErr}
 				return
 			}
-			if !protocol.BindingEqual(receipt.Binding, replacement.Binding) || receipt.OperationID != replacement.OperationID ||
+			if !memoryv1.BindingEqual(receipt.Binding, replacement.Binding) || receipt.OperationID != replacement.OperationID ||
 				receipt.MutationDigest != replacement.MutationDigest || status != resultHTTPStatus(receipt.Result) {
 				results <- response{err: errors.New("concurrent CAS receipt did not match its request")}
 				return
@@ -1541,7 +1541,7 @@ func verifyConcurrentCAS(
 		}
 		counts[result.receipt.Result]++
 	}
-	if counts[protocol.ResultApplied] != 1 || counts[protocol.ResultPreconditionFailed] != 1 || len(counts) != 2 {
+	if counts[memoryv1.ResultApplied] != 1 || counts[memoryv1.ResultPreconditionFailed] != 1 || len(counts) != 2 {
 		return fmt.Errorf(
 			"concurrent same-generation replacements produced results %#v, want one applied and one preconditionFailed",
 			counts,
@@ -1558,12 +1558,12 @@ func verifyConcurrentCAS(
 func advanceFence(
 	ctx context.Context,
 	client *contractClient,
-	binding protocol.Binding,
-) (*protocol.RoutingFenceResponse, error) {
+	binding memoryv1.Binding,
+) (*memoryv1.RoutingFenceResponse, error) {
 	body, status, err := client.postJSON(
 		ctx,
-		protocol.PathRoutingFence,
-		protocol.RoutingFenceRequest{ProtocolVersion: protocol.Version, Binding: binding},
+		memoryv1.PathRoutingFence,
+		memoryv1.RoutingFenceRequest{ProtocolVersion: memoryv1.Version, Binding: binding},
 	)
 	if err != nil {
 		return nil, err
@@ -1571,11 +1571,11 @@ func advanceFence(
 	if status != http.StatusOK && status != http.StatusConflict {
 		return nil, fmt.Errorf("routing fence returned HTTP %d", status)
 	}
-	response, err := protocol.DecodeRoutingFenceResponse(body)
+	response, err := memoryv1.DecodeRoutingFenceResponse(body)
 	if err != nil {
 		return nil, err
 	}
-	if !protocol.BindingEqual(response.Binding, binding) {
+	if !memoryv1.BindingEqual(response.Binding, binding) {
 		return nil, errors.New("routing fence response did not echo the exact binding")
 	}
 	return response, nil
@@ -1584,41 +1584,41 @@ func advanceFence(
 func mutation(
 	ctx context.Context,
 	client *contractClient,
-	request protocol.MutationEnvelope,
+	request memoryv1.MutationEnvelope,
 	expectedResult string,
-) (protocol.MutationReceipt, []byte, error) {
+) (memoryv1.MutationReceipt, []byte, error) {
 	if client.limitsConfigured {
 		if err := validateFixtureMutation(client.limits, &request); err != nil {
-			return protocol.MutationReceipt{}, nil, err
+			return memoryv1.MutationReceipt{}, nil, err
 		}
 	}
-	body, status, err := client.postJSON(ctx, protocol.PathMutations, request)
+	body, status, err := client.postJSON(ctx, memoryv1.PathMutations, request)
 	if err != nil {
-		return protocol.MutationReceipt{}, nil, err
+		return memoryv1.MutationReceipt{}, nil, err
 	}
 	if containsCredential(body, client.authorizationValue) {
-		return protocol.MutationReceipt{}, nil, errors.New("mutation response contained the bearer token")
+		return memoryv1.MutationReceipt{}, nil, errors.New("mutation response contained the bearer token")
 	}
-	receipt, err := protocol.DecodeMutationReceipt(body)
+	receipt, err := memoryv1.DecodeMutationReceipt(body)
 	if err != nil {
-		return protocol.MutationReceipt{}, nil, err
+		return memoryv1.MutationReceipt{}, nil, err
 	}
 	if receipt.Result != expectedResult {
-		return protocol.MutationReceipt{}, nil, fmt.Errorf(
+		return memoryv1.MutationReceipt{}, nil, fmt.Errorf(
 			"mutation %s result = %s, want %s",
 			request.OperationID,
 			receipt.Result,
 			expectedResult,
 		)
 	}
-	if !protocol.BindingEqual(receipt.Binding, request.Binding) ||
+	if !memoryv1.BindingEqual(receipt.Binding, request.Binding) ||
 		receipt.OperationID != request.OperationID ||
 		receipt.MutationDigest != request.MutationDigest {
-		return protocol.MutationReceipt{}, nil, errors.New("mutation receipt did not echo the request identity")
+		return memoryv1.MutationReceipt{}, nil, errors.New("mutation receipt did not echo the request identity")
 	}
 	wantStatus := resultHTTPStatus(expectedResult)
 	if status != wantStatus {
-		return protocol.MutationReceipt{}, nil, fmt.Errorf(
+		return memoryv1.MutationReceipt{}, nil, fmt.Errorf(
 			"mutation result %s returned HTTP %d, want %d",
 			expectedResult,
 			status,
@@ -1631,14 +1631,14 @@ func mutation(
 func getRecord(
 	ctx context.Context,
 	client *contractClient,
-	binding protocol.Binding,
+	binding memoryv1.Binding,
 	upsertKey string,
-) (*protocol.MemoryRecord, error) {
+) (*memoryv1.MemoryRecord, error) {
 	body, status, err := client.postJSON(
 		ctx,
-		protocol.PathRecordsGet,
-		protocol.GetRequest{
-			ProtocolVersion: protocol.Version,
+		memoryv1.PathRecordsGet,
+		memoryv1.GetRequest{
+			ProtocolVersion: memoryv1.Version,
 			Binding:         binding,
 			UpsertKey:       upsertKey,
 		},
@@ -1649,11 +1649,11 @@ func getRecord(
 	if status != http.StatusOK {
 		return nil, fmt.Errorf("exact get returned HTTP %d", status)
 	}
-	response, err := protocol.DecodeGetResponse(body)
+	response, err := memoryv1.DecodeGetResponse(body)
 	if err != nil {
 		return nil, err
 	}
-	if !protocol.BindingEqual(response.Binding, binding) {
+	if !memoryv1.BindingEqual(response.Binding, binding) {
 		return nil, errors.New("exact get did not echo the binding")
 	}
 	return response.Record, nil
@@ -1662,11 +1662,11 @@ func getRecord(
 func lookupOperation(
 	ctx context.Context,
 	client *contractClient,
-	binding protocol.Binding,
+	binding memoryv1.Binding,
 	operationID string,
-) (*protocol.MutationReceipt, error) {
-	body, status, err := client.postJSON(ctx, protocol.PathOperationsGet, protocol.OperationLookupRequest{
-		ProtocolVersion: protocol.Version, Binding: binding, OperationID: operationID,
+) (*memoryv1.MutationReceipt, error) {
+	body, status, err := client.postJSON(ctx, memoryv1.PathOperationsGet, memoryv1.OperationLookupRequest{
+		ProtocolVersion: memoryv1.Version, Binding: binding, OperationID: operationID,
 	})
 	if err != nil {
 		return nil, err
@@ -1674,11 +1674,11 @@ func lookupOperation(
 	if status != http.StatusOK {
 		return nil, fmt.Errorf("operation lookup returned HTTP %d", status)
 	}
-	response, err := protocol.DecodeOperationLookupResponse(body)
+	response, err := memoryv1.DecodeOperationLookupResponse(body)
 	if err != nil {
 		return nil, err
 	}
-	if !protocol.BindingEqual(response.Binding, binding) {
+	if !memoryv1.BindingEqual(response.Binding, binding) {
 		return nil, errors.New("operation lookup did not echo the binding")
 	}
 	return response.Receipt, nil
@@ -1687,14 +1687,14 @@ func lookupOperation(
 func search(
 	ctx context.Context,
 	client *contractClient,
-	request protocol.SearchRequest,
-) (*protocol.SearchResponse, error) {
+	request memoryv1.SearchRequest,
+) (*memoryv1.SearchResponse, error) {
 	if client.limitsConfigured {
 		if err := validateFixtureSearch(client.limits, &request); err != nil {
 			return nil, fmt.Errorf("search fixture exceeds advertised limits: %w", err)
 		}
 	}
-	body, status, err := client.postJSON(ctx, protocol.PathSearch, request)
+	body, status, err := client.postJSON(ctx, memoryv1.PathSearch, request)
 	receivedAt := time.Now().UTC()
 	if err != nil {
 		return nil, err
@@ -1702,17 +1702,17 @@ func search(
 	if status != http.StatusOK {
 		return nil, fmt.Errorf("search returned HTTP %d", status)
 	}
-	response, err := protocol.DecodeSearchResponse(body)
+	response, err := memoryv1.DecodeSearchResponse(body)
 	if err != nil {
 		return nil, err
 	}
-	if !protocol.BindingEqual(response.Binding, request.Binding) {
+	if !memoryv1.BindingEqual(response.Binding, request.Binding) {
 		return nil, errors.New("search did not echo the binding")
 	}
 	if response.RequestedMode != request.Mode {
 		return nil, errors.New("search did not echo the requested mode")
 	}
-	if request.Mode != protocol.SearchModeAuto && response.ActualMode != request.Mode {
+	if request.Mode != memoryv1.SearchModeAuto && response.ActualMode != request.Mode {
 		return nil, errors.New("search changed an explicit requested mode")
 	}
 	if client.limitsConfigured && request.PageToken == "" {
@@ -1751,11 +1751,11 @@ func nextPageTokenFollows(current, next string) bool {
 func verifySearchModeCapabilities(
 	ctx context.Context,
 	client *contractClient,
-	binding protocol.Binding,
-	capabilities protocol.Capabilities,
+	binding memoryv1.Binding,
+	capabilities memoryv1.Capabilities,
 	fixtures fixturePlan,
 ) error {
-	autoRequest, err := fixtures.searchRequest(binding, protocol.SearchModeAuto)
+	autoRequest, err := fixtures.searchRequest(binding, memoryv1.SearchModeAuto)
 	if err != nil {
 		return err
 	}
@@ -1771,8 +1771,8 @@ func verifySearchModeCapabilities(
 		mode       string
 		advertised bool
 	}{
-		{mode: protocol.SearchModeSemantic, advertised: capabilities.SemanticSearch},
-		{mode: protocol.SearchModeHybrid, advertised: capabilities.HybridSearch},
+		{mode: memoryv1.SearchModeSemantic, advertised: capabilities.SemanticSearch},
+		{mode: memoryv1.SearchModeHybrid, advertised: capabilities.HybridSearch},
 	} {
 		request, requestErr := fixtures.searchRequest(binding, probe.mode)
 		if requestErr != nil {
@@ -1789,12 +1789,12 @@ func verifySearchModeCapabilities(
 		if err != nil {
 			return err
 		}
-		response, err := client.doResponse(ctx, http.MethodPost, protocol.PathSearch, client.authorizationValue, body, nil)
+		response, err := client.doResponse(ctx, http.MethodPost, memoryv1.PathSearch, client.authorizationValue, body, nil)
 		if err != nil {
 			return err
 		}
 		if err := validateErrorVariant(response, errorExpectation{
-			status: http.StatusUnprocessableEntity, code: protocol.ErrorCodeSearchModeUnsupported,
+			status: http.StatusUnprocessableEntity, code: memoryv1.ErrorCodeSearchModeUnsupported,
 			binding: &binding, retryable: false, retryAfterSeconds: 0,
 		}); err != nil {
 			return fmt.Errorf("unadvertised explicit %s search returned the wrong error variant: %w", probe.mode, err)
@@ -1806,8 +1806,8 @@ func verifySearchModeCapabilities(
 func consumeSearchProbe(
 	ctx context.Context,
 	client *contractClient,
-	request protocol.SearchRequest,
-) (*protocol.SearchResponse, error) {
+	request memoryv1.SearchRequest,
+) (*memoryv1.SearchResponse, error) {
 	first, err := search(ctx, client, request)
 	if err != nil {
 		return nil, err
@@ -1821,13 +1821,13 @@ func consumeSearchProbe(
 	return first, nil
 }
 
-func searchModeAdvertised(capabilities protocol.Capabilities, mode string) bool {
+func searchModeAdvertised(capabilities memoryv1.Capabilities, mode string) bool {
 	switch mode {
-	case protocol.SearchModeKeyword:
+	case memoryv1.SearchModeKeyword:
 		return capabilities.KeywordSearch
-	case protocol.SearchModeSemantic:
+	case memoryv1.SearchModeSemantic:
 		return capabilities.SemanticSearch
-	case protocol.SearchModeHybrid:
+	case memoryv1.SearchModeHybrid:
 		return capabilities.HybridSearch
 	default:
 		return false
@@ -1837,10 +1837,10 @@ func searchModeAdvertised(capabilities protocol.Capabilities, mode string) bool 
 func collectSnapshot(
 	ctx context.Context,
 	client *contractClient,
-	request protocol.SearchRequest,
-	first *protocol.SearchResponse,
-) ([]protocol.MemoryRecord, error) {
-	result := make([]protocol.MemoryRecord, 0, len(first.Records))
+	request memoryv1.SearchRequest,
+	first *memoryv1.SearchResponse,
+) ([]memoryv1.MemoryRecord, error) {
+	result := make([]memoryv1.MemoryRecord, 0, len(first.Records))
 	seenRecords := make(map[string]struct{}, len(first.Records))
 	if err := appendUniqueSnapshotRecords(&result, seenRecords, first.Records); err != nil {
 		return nil, err
@@ -1848,7 +1848,7 @@ func collectSnapshot(
 	response := first
 	seenTokens := map[string]struct{}{}
 	for pages := 0; !response.Exhausted; pages++ {
-		if pages > protocol.MaxSnapshotRecords {
+		if pages > memoryv1.MaxSnapshotRecords {
 			return nil, errors.New("pagination did not exhaust within the profile bound")
 		}
 		if _, duplicate := seenTokens[response.NextPageToken]; duplicate {
@@ -1872,7 +1872,7 @@ func collectSnapshot(
 }
 
 type snapshotContinuation struct {
-	Records           []protocol.MemoryRecord
+	Records           []memoryv1.MemoryRecord
 	ActualMode        string
 	SnapshotExpiresAt time.Time
 }
@@ -1880,15 +1880,15 @@ type snapshotContinuation struct {
 func collectContinuation(
 	ctx context.Context,
 	client *contractClient,
-	request protocol.SearchRequest,
+	request memoryv1.SearchRequest,
 ) (snapshotContinuation, error) {
-	result := make([]protocol.MemoryRecord, 0)
+	result := make([]memoryv1.MemoryRecord, 0)
 	seenTokens := map[string]struct{}{request.PageToken: {}}
 	seenRecords := make(map[string]struct{})
 	var snapshotExpiry time.Time
 	var actualMode string
 	for pages := 0; ; pages++ {
-		if pages > protocol.MaxSnapshotRecords {
+		if pages > memoryv1.MaxSnapshotRecords {
 			return snapshotContinuation{}, errors.New("pagination continuation did not exhaust")
 		}
 		response, err := search(ctx, client, request)
@@ -1920,9 +1920,9 @@ func collectContinuation(
 }
 
 func appendUniqueSnapshotRecords(
-	destination *[]protocol.MemoryRecord,
+	destination *[]memoryv1.MemoryRecord,
 	seen map[string]struct{},
-	records []protocol.MemoryRecord,
+	records []memoryv1.MemoryRecord,
 ) error {
 	for _, record := range records {
 		if _, duplicate := seen[record.UpsertKey]; duplicate {
@@ -1935,42 +1935,42 @@ func appendUniqueSnapshotRecords(
 }
 
 func makeMutation(
-	binding protocol.Binding,
+	binding memoryv1.Binding,
 	operationID string,
 	memoryID string,
 	kind string,
 	generation uint64,
 	expectedGeneration uint64,
 	expectedVersion string,
-	state *protocol.MutationState,
-) (protocol.MutationEnvelope, error) {
-	request := protocol.MutationEnvelope{
-		ProtocolVersion: protocol.Version, OperationID: operationID, Binding: binding,
+	state *memoryv1.MutationState,
+) (memoryv1.MutationEnvelope, error) {
+	request := memoryv1.MutationEnvelope{
+		ProtocolVersion: memoryv1.Version, OperationID: operationID, Binding: binding,
 		MemoryID: memoryID, Kind: kind, Generation: generation, ExpectedGeneration: expectedGeneration,
 		ExpectedBackendVersion: expectedVersion, State: state,
 	}
-	if err := protocol.PrepareMutation(&request); err != nil {
-		return protocol.MutationEnvelope{}, err
+	if err := memoryv1.PrepareMutation(&request); err != nil {
+		return memoryv1.MutationEnvelope{}, err
 	}
 	return request, nil
 }
 
 func resultHTTPStatus(result string) int {
 	switch result {
-	case protocol.ResultApplied, protocol.ResultNotFound:
+	case memoryv1.ResultApplied, memoryv1.ResultNotFound:
 		return http.StatusOK
-	case protocol.ResultPreconditionFailed, protocol.ResultIdempotencyConflict, protocol.ResultIdentityConflict:
+	case memoryv1.ResultPreconditionFailed, memoryv1.ResultIdempotencyConflict, memoryv1.ResultIdentityConflict:
 		return http.StatusConflict
-	case protocol.ResultRetryableError:
+	case memoryv1.ResultRetryableError:
 		return http.StatusServiceUnavailable
-	case protocol.ResultNonRetryableError:
+	case memoryv1.ResultNonRetryableError:
 		return http.StatusUnprocessableEntity
 	default:
 		return 0
 	}
 }
 
-func recordProofs(binding protocol.Binding, records []protocol.MemoryRecord) ([]string, []string, error) {
+func recordProofs(binding memoryv1.Binding, records []memoryv1.MemoryRecord) ([]string, []string, error) {
 	keys := make([]string, 0, len(records))
 	digests := make([]string, 0, len(records))
 	seen := make(map[string]struct{}, len(records))
@@ -1979,7 +1979,7 @@ func recordProofs(binding protocol.Binding, records []protocol.MemoryRecord) ([]
 		if _, duplicate := seen[record.UpsertKey]; duplicate {
 			return nil, nil, errors.New("record proof contains a duplicate upsert key")
 		}
-		digest, err := protocol.MemoryRecordDigest(record, binding)
+		digest, err := memoryv1.MemoryRecordDigest(record, binding)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -1990,7 +1990,7 @@ func recordProofs(binding protocol.Binding, records []protocol.MemoryRecord) ([]
 	return keys, digests, nil
 }
 
-func recordDigestByKey(binding protocol.Binding, records []protocol.MemoryRecord) (map[string]string, error) {
+func recordDigestByKey(binding memoryv1.Binding, records []memoryv1.MemoryRecord) (map[string]string, error) {
 	keys, digests, err := recordProofs(binding, records)
 	if err != nil {
 		return nil, err
@@ -2003,8 +2003,8 @@ func recordDigestByKey(binding protocol.Binding, records []protocol.MemoryRecord
 }
 
 func verifySnapshotFixture(
-	binding protocol.Binding,
-	records []protocol.MemoryRecord,
+	binding memoryv1.Binding,
+	records []memoryv1.MemoryRecord,
 	expectedDigests map[string]string,
 ) error {
 	actualDigests, err := recordDigestByKey(binding, records)
@@ -2027,7 +2027,7 @@ func verifySnapshotFixture(
 }
 
 func verifyContinuationProof(
-	binding protocol.Binding,
+	binding memoryv1.Binding,
 	continuation snapshotContinuation,
 	checkpoint Checkpoint,
 ) error {
@@ -2057,11 +2057,11 @@ func isCanonicalDigest(value string) bool {
 	return err == nil && len(decoded) == 32
 }
 
-func cloneState(state *protocol.MutationState) *protocol.MutationState {
+func cloneState(state *memoryv1.MutationState) *memoryv1.MutationState {
 	if state == nil {
 		return nil
 	}
-	return &protocol.MutationState{
+	return &memoryv1.MutationState{
 		Content:  state.Content,
 		Tags:     append([]string(nil), state.Tags...),
 		Metadata: cloneMap(state.Metadata),
@@ -2099,9 +2099,9 @@ func SanitizeCheckResult(result CheckResult, authorizationValue string) CheckRes
 	result.Message = sanitizeOutputText(result.Message, authorizationValue, conformanceMessageLimit)
 	if result.Capabilities != nil {
 		copy := *result.Capabilities
-		copy.AdapterName = sanitizeOutputText(copy.AdapterName, authorizationValue, protocol.MaxIdentityBytes)
-		copy.AdapterVersion = sanitizeOutputText(copy.AdapterVersion, authorizationValue, protocol.MaxIdentityBytes)
-		copy.Revision = sanitizeOutputText(copy.Revision, authorizationValue, protocol.MaxIdentityBytes)
+		copy.AdapterName = sanitizeOutputText(copy.AdapterName, authorizationValue, memoryv1.MaxIdentityBytes)
+		copy.AdapterVersion = sanitizeOutputText(copy.AdapterVersion, authorizationValue, memoryv1.MaxIdentityBytes)
+		copy.Revision = sanitizeOutputText(copy.Revision, authorizationValue, memoryv1.MaxIdentityBytes)
 		result.Capabilities = &copy
 	}
 	return result

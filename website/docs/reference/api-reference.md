@@ -116,7 +116,7 @@ Retrieve the autonomous plan state for a task.
 
 Memory APIs manage namespace-scoped durable content, explicit search, remote-operation state, trust, proposals, and the fixed-name `MemoryBackend/default`. See [Memory](../concepts/memory.md) for the authority model, lifecycle matrix, worker behavior, and examples.
 
-A namespace that has never activated a remote backend continues to use SQLite. After explicit activation, the OMS backend is content-authoritative and Orka fails closed instead of falling back to SQLite. Memory data routes support the configured API authentication and context-token memory scopes. Backend configuration/lifecycle routes require a TokenReview-authenticated Kubernetes identity plus `memorybackends` RBAC.
+A namespace that has never activated a remote backend continues to use SQLite. After explicit activation, the remote memory backend is content-authoritative and Orka fails closed instead of falling back to SQLite. Memory data routes support the configured API authentication and context-token memory scopes. Backend configuration/lifecycle routes require a TokenReview-authenticated Kubernetes identity plus `memorybackends` RBAC.
 
 ### Durable memories and search
 

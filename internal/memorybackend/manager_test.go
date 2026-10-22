@@ -16,7 +16,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/store"
-	"github.com/orka-agents/orka/pkg/oms/protocol"
+	memoryv1 "github.com/orka-agents/orka/pkg/memory/v1"
 )
 
 func TestForceOrphanRetryTreatsRemovedAsTerminal(t *testing.T) {
@@ -40,13 +40,13 @@ func TestForceOrphanRetryTreatsRemovedAsTerminal(t *testing.T) {
 		SpecDigest: "sha256:spec", EndpointDigest: "sha256:endpoint", ResolvedAddressDigest: "sha256:addresses", ServerCertificateDigest: "sha256:certificate", SecretName: "memory-auth", SecretKey: "token",
 		SecretUID: "secret-a", SecretResourceVersion: "1",
 		TenantID: "tenant-a", StoreName: "store-a", StoreUUID: "store-a-uuid", OwnershipClaim: "claim-a",
-		CapabilityRevision: "cap-a", Protocol: "orka.oms.v0alpha1", State: store.MemoryBackendBindingAccepting,
+		CapabilityRevision: "cap-a", Protocol: "orka.memory.v1", State: store.MemoryBackendBindingAccepting,
 		ActivationEpoch: 1, MinimumFeatureEpoch: ActivationFeatureEpoch, ValidationExpiresAt: now.Add(time.Hour),
 	}
 	if _, err := governed.RecordMemoryActivationRecoveryReceipt(context.Background(), store.MemoryActivationRecoveryReceipt{
 		Namespace: binding.Namespace, NamespaceUID: binding.NamespaceUID, BackendUID: binding.BackendUID,
 		RouteDigest: binding.RecoveryRouteIdentity().Digest(), StoreUUID: binding.StoreUUID,
-		ManifestDigest: protocol.ContentDigest("manager test recovery manifest"),
+		ManifestDigest: memoryv1.ContentDigest("manager test recovery manifest"),
 		Actor:          "test", Reason: "test recovery prerequisite", VerifiedAt: now,
 	}); err != nil {
 		t.Fatal(err)

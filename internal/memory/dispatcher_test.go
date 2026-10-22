@@ -11,7 +11,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/store"
-	"github.com/orka-agents/orka/pkg/oms/protocol"
+	memoryv1 "github.com/orka-agents/orka/pkg/memory/v1"
 )
 
 type exactClaimTestStore struct {
@@ -39,25 +39,25 @@ func (s *exactClaimTestStore) ClaimMemoryOperation(
 	return dispatch, nil
 }
 
-type fakeOMSAdapter struct {
+type fakeProtocolAdapter struct {
 	mu                sync.Mutex
 	mutations         int
 	failFirst         bool
 	failuresRemaining int
-	record            *protocol.MemoryRecord
-	receipt           *protocol.MutationReceipt
+	record            *memoryv1.MemoryRecord
+	receipt           *memoryv1.MutationReceipt
 }
 
-func (f *fakeOMSAdapter) Capabilities(context.Context, protocol.CapabilitiesRequest) (*protocol.CapabilitiesResponse, error) {
+func (f *fakeProtocolAdapter) Capabilities(context.Context, memoryv1.CapabilitiesRequest) (*memoryv1.CapabilitiesResponse, error) {
 	return nil, errors.New("unused")
 }
-func (f *fakeOMSAdapter) ClaimOwnership(context.Context, protocol.OwnershipClaimRequest) (*protocol.OwnershipClaimResponse, error) {
+func (f *fakeProtocolAdapter) ClaimOwnership(context.Context, memoryv1.OwnershipClaimRequest) (*memoryv1.OwnershipClaimResponse, error) {
 	return nil, errors.New("unused")
 }
-func (f *fakeOMSAdapter) AdvanceRoutingFence(context.Context, protocol.RoutingFenceRequest) (*protocol.RoutingFenceResponse, error) {
+func (f *fakeProtocolAdapter) AdvanceRoutingFence(context.Context, memoryv1.RoutingFenceRequest) (*memoryv1.RoutingFenceResponse, error) {
 	return nil, errors.New("unused")
 }
-func (f *fakeOMSAdapter) Mutate(_ context.Context, envelope protocol.MutationEnvelope) (*protocol.MutationReceipt, error) {
+func (f *fakeProtocolAdapter) Mutate(_ context.Context, envelope memoryv1.MutationEnvelope) (*memoryv1.MutationReceipt, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.mutations++
@@ -68,17 +68,17 @@ func (f *fakeOMSAdapter) Mutate(_ context.Context, envelope protocol.MutationEnv
 	if f.failFirst && f.mutations == 1 {
 		return nil, errors.New("lost acknowledgement")
 	}
-	receipt := &protocol.MutationReceipt{
-		ProtocolVersion: protocol.Version, Binding: envelope.Binding, Result: protocol.ResultApplied,
-		OperationID: envelope.OperationID, BindingDigest: protocol.BindingDigest(envelope.Binding),
+	receipt := &memoryv1.MutationReceipt{
+		ProtocolVersion: memoryv1.Version, Binding: envelope.Binding, Result: memoryv1.ResultApplied,
+		OperationID: envelope.OperationID, BindingDigest: memoryv1.BindingDigest(envelope.Binding),
 		AppliedGeneration: envelope.Generation, BackendVersion: "v1", BackendMemoryID: "backend-1",
 		ContentDigest: envelope.ContentDigest, MutationDigest: envelope.MutationDigest,
 		CompletedAt: time.Date(2026, 7, 28, 12, 1, 0, 0, time.UTC),
 	}
 	f.receipt = receipt
 	if envelope.State != nil {
-		f.record = &protocol.MemoryRecord{
-			MemoryID: envelope.MemoryID, UpsertKey: envelope.UpsertKey, State: protocol.RecordStateLive,
+		f.record = &memoryv1.MemoryRecord{
+			MemoryID: envelope.MemoryID, UpsertKey: envelope.UpsertKey, State: memoryv1.RecordStateLive,
 			Generation: envelope.Generation, BackendVersion: receipt.BackendVersion, BackendMemoryID: receipt.BackendMemoryID,
 			ContentDigest: envelope.ContentDigest, Content: envelope.State.Content,
 			Tags: envelope.State.Tags, Metadata: envelope.State.Metadata, UpdatedAt: receipt.CompletedAt,
@@ -86,52 +86,52 @@ func (f *fakeOMSAdapter) Mutate(_ context.Context, envelope protocol.MutationEnv
 	}
 	return receipt, nil
 }
-func (f *fakeOMSAdapter) Get(_ context.Context, request protocol.GetRequest) (*protocol.GetResponse, error) {
+func (f *fakeProtocolAdapter) Get(_ context.Context, request memoryv1.GetRequest) (*memoryv1.GetResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return &protocol.GetResponse{ProtocolVersion: protocol.Version, Binding: request.Binding, Found: f.record != nil, Record: f.record}, nil
+	return &memoryv1.GetResponse{ProtocolVersion: memoryv1.Version, Binding: request.Binding, Found: f.record != nil, Record: f.record}, nil
 }
-func (f *fakeOMSAdapter) LookupOperation(context.Context, protocol.OperationLookupRequest) (*protocol.OperationLookupResponse, error) {
+func (f *fakeProtocolAdapter) LookupOperation(context.Context, memoryv1.OperationLookupRequest) (*memoryv1.OperationLookupResponse, error) {
 	return nil, errors.New("unused")
 }
-func (f *fakeOMSAdapter) Search(context.Context, protocol.SearchRequest) (*protocol.SearchResponse, error) {
+func (f *fakeProtocolAdapter) Search(context.Context, memoryv1.SearchRequest) (*memoryv1.SearchResponse, error) {
 	return nil, errors.New("unused")
 }
 
 func TestMutationReceiptMatchesEnvelopeCorrelatesGenerationAndContentDigest(t *testing.T) {
-	liveDigest := protocol.ContentDigest("remember this")
+	liveDigest := memoryv1.ContentDigest("remember this")
 	tests := []struct {
 		name     string
-		envelope protocol.MutationEnvelope
-		receipt  protocol.MutationReceipt
+		envelope memoryv1.MutationEnvelope
+		receipt  memoryv1.MutationReceipt
 		want     bool
 	}{
 		{
 			name:     "live match",
-			envelope: protocol.MutationEnvelope{Kind: protocol.MutationKindReplace, Generation: 3, ContentDigest: liveDigest},
-			receipt:  protocol.MutationReceipt{Result: protocol.ResultApplied, AppliedGeneration: 3, ContentDigest: liveDigest},
+			envelope: memoryv1.MutationEnvelope{Kind: memoryv1.MutationKindReplace, Generation: 3, ContentDigest: liveDigest},
+			receipt:  memoryv1.MutationReceipt{Result: memoryv1.ResultApplied, AppliedGeneration: 3, ContentDigest: liveDigest},
 			want:     true,
 		},
 		{
 			name:     "generation mismatch",
-			envelope: protocol.MutationEnvelope{Kind: protocol.MutationKindReplace, Generation: 3, ContentDigest: liveDigest},
-			receipt:  protocol.MutationReceipt{Result: protocol.ResultApplied, AppliedGeneration: 2, ContentDigest: liveDigest},
+			envelope: memoryv1.MutationEnvelope{Kind: memoryv1.MutationKindReplace, Generation: 3, ContentDigest: liveDigest},
+			receipt:  memoryv1.MutationReceipt{Result: memoryv1.ResultApplied, AppliedGeneration: 2, ContentDigest: liveDigest},
 		},
 		{
 			name:     "content mismatch",
-			envelope: protocol.MutationEnvelope{Kind: protocol.MutationKindReplace, Generation: 3, ContentDigest: liveDigest},
-			receipt:  protocol.MutationReceipt{Result: protocol.ResultApplied, AppliedGeneration: 3, ContentDigest: protocol.ContentDigest("other")},
+			envelope: memoryv1.MutationEnvelope{Kind: memoryv1.MutationKindReplace, Generation: 3, ContentDigest: liveDigest},
+			receipt:  memoryv1.MutationReceipt{Result: memoryv1.ResultApplied, AppliedGeneration: 3, ContentDigest: memoryv1.ContentDigest("other")},
 		},
 		{
 			name:     "delete empty digest",
-			envelope: protocol.MutationEnvelope{Kind: protocol.MutationKindDelete, Generation: 4, ContentDigest: protocol.EmptyContentDigest()},
-			receipt:  protocol.MutationReceipt{Result: protocol.ResultNotFound, AppliedGeneration: 4, ContentDigest: protocol.EmptyContentDigest()},
+			envelope: memoryv1.MutationEnvelope{Kind: memoryv1.MutationKindDelete, Generation: 4, ContentDigest: memoryv1.EmptyContentDigest()},
+			receipt:  memoryv1.MutationReceipt{Result: memoryv1.ResultNotFound, AppliedGeneration: 4, ContentDigest: memoryv1.EmptyContentDigest()},
 			want:     true,
 		},
 		{
 			name:     "delete nonempty digest",
-			envelope: protocol.MutationEnvelope{Kind: protocol.MutationKindDelete, Generation: 4, ContentDigest: protocol.EmptyContentDigest()},
-			receipt:  protocol.MutationReceipt{Result: protocol.ResultApplied, AppliedGeneration: 4, ContentDigest: liveDigest},
+			envelope: memoryv1.MutationEnvelope{Kind: memoryv1.MutationKindDelete, Generation: 4, ContentDigest: memoryv1.EmptyContentDigest()},
+			receipt:  memoryv1.MutationReceipt{Result: memoryv1.ResultApplied, AppliedGeneration: 4, ContentDigest: liveDigest},
 		},
 	}
 	for _, test := range tests {
@@ -150,7 +150,7 @@ func TestDispatcherImmediateMaterializationAndReplay(t *testing.T) {
 	backend := &corev1alpha1.MemoryBackend{}
 	backend.Status.EffectiveLifecycleState = corev1alpha1.MemoryBackendEffectiveLifecycleActive
 	backend.Status.Ready = true
-	adapter := &fakeOMSAdapter{}
+	adapter := &fakeProtocolAdapter{}
 	authority := &ResolvedAuthority{Namespace: binding.Namespace, NamespaceUID: binding.NamespaceUID, Binding: &binding, Backend: backend, Adapter: adapter}
 	resolver := staticAuthorityResolver{authority: authority}
 	exactStore := &exactClaimTestStore{GovernedMemoryStore: governed}
@@ -191,7 +191,7 @@ func TestDispatcherLostAcknowledgementReplaysSameOperationAndPreservesDeferredOu
 	backend := &corev1alpha1.MemoryBackend{}
 	backend.Status.EffectiveLifecycleState = corev1alpha1.MemoryBackendEffectiveLifecycleActive
 	backend.Status.Ready = true
-	adapter := &fakeOMSAdapter{failFirst: true}
+	adapter := &fakeProtocolAdapter{failFirst: true}
 	authority := &ResolvedAuthority{Namespace: binding.Namespace, NamespaceUID: binding.NamespaceUID, Binding: &binding, Backend: backend, Adapter: adapter}
 	resolver := staticAuthorityResolver{authority: authority}
 	current := base.Add(time.Minute)
@@ -232,7 +232,7 @@ func TestDispatcherImmediateRequiresExactClaimSupport(t *testing.T) {
 	backend := &corev1alpha1.MemoryBackend{}
 	backend.Status.EffectiveLifecycleState = corev1alpha1.MemoryBackendEffectiveLifecycleActive
 	backend.Status.Ready = true
-	adapter := &fakeOMSAdapter{}
+	adapter := &fakeProtocolAdapter{}
 	authority := &ResolvedAuthority{
 		Namespace: binding.Namespace, NamespaceUID: binding.NamespaceUID,
 		Binding: &binding, Backend: backend, Adapter: adapter,
@@ -265,7 +265,7 @@ func TestRunnerCircuitOpenBacklogExpiresAndRunsHalfOpenProbe(t *testing.T) {
 	backend := &corev1alpha1.MemoryBackend{}
 	backend.Status.EffectiveLifecycleState = corev1alpha1.MemoryBackendEffectiveLifecycleActive
 	backend.Status.Ready = true
-	adapter := &fakeOMSAdapter{failuresRemaining: 6}
+	adapter := &fakeProtocolAdapter{failuresRemaining: 6}
 	authority := &ResolvedAuthority{
 		Namespace: binding.Namespace, NamespaceUID: binding.NamespaceUID,
 		Binding: &binding, Backend: backend, Adapter: adapter,
@@ -581,12 +581,12 @@ func (r *advancingDispatchResolver) Resolve(context.Context, string) (*ResolvedA
 	return r.fresh, nil
 }
 
-type invalidReceiptOMSAdapter struct{ fakeOMSAdapter }
+type invalidReceiptProtocolAdapter struct{ fakeProtocolAdapter }
 
-func (a *invalidReceiptOMSAdapter) Mutate(_ context.Context, envelope protocol.MutationEnvelope) (*protocol.MutationReceipt, error) {
-	return &protocol.MutationReceipt{
-		ProtocolVersion: protocol.Version, Binding: envelope.Binding, Result: protocol.ResultApplied,
-		OperationID: "mop-wrong", BindingDigest: protocol.BindingDigest(envelope.Binding),
+func (a *invalidReceiptProtocolAdapter) Mutate(_ context.Context, envelope memoryv1.MutationEnvelope) (*memoryv1.MutationReceipt, error) {
+	return &memoryv1.MutationReceipt{
+		ProtocolVersion: memoryv1.Version, Binding: envelope.Binding, Result: memoryv1.ResultApplied,
+		OperationID: "mop-wrong", BindingDigest: memoryv1.BindingDigest(envelope.Binding),
 		AppliedGeneration: envelope.Generation, BackendVersion: "v1", BackendMemoryID: "backend-1",
 		ContentDigest: envelope.ContentDigest, MutationDigest: envelope.MutationDigest,
 		CompletedAt: time.Date(2026, 7, 30, 12, 0, 10, 0, time.UTC),
@@ -601,7 +601,7 @@ func TestDispatcherRefreshesSendTimeAfterResolutionAndKeepsInvalidReceiptAmbiguo
 		Namespace: "team-a", NamespaceUID: "11111111-1111-4111-8111-111111111111",
 		ClusterID: "cluster-a", Mode: store.MemoryBackendModeRemote,
 		BackendUID: "22222222-2222-4222-8222-222222222222", AuthorityEpoch: 1, RoutingEpoch: 1,
-		TenantID:  protocol.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
+		TenantID:  memoryv1.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
 		StoreUUID: "44444444-4444-4444-8444-444444444444", State: store.MemoryBackendBindingAccepting,
 		ValidationExpiresAt: claimTime.Add(time.Hour),
 	}
@@ -609,15 +609,15 @@ func TestDispatcherRefreshesSendTimeAfterResolutionAndKeepsInvalidReceiptAmbiguo
 	if err != nil {
 		t.Fatal(err)
 	}
-	envelope := protocol.MutationEnvelope{
-		ProtocolVersion: protocol.Version, OperationID: "mop-valid", Binding: protocolIdentity,
-		MemoryID: "mem-valid", Kind: protocol.MutationKindCreate, Generation: 1, ExpectedGeneration: 0,
-		State: &protocol.MutationState{Content: "remember", Tags: []string{}, Metadata: map[string]string{}},
+	envelope := memoryv1.MutationEnvelope{
+		ProtocolVersion: memoryv1.Version, OperationID: "mop-valid", Binding: protocolIdentity,
+		MemoryID: "mem-valid", Kind: memoryv1.MutationKindCreate, Generation: 1, ExpectedGeneration: 0,
+		State: &memoryv1.MutationState{Content: "remember", Tags: []string{}, Metadata: map[string]string{}},
 	}
-	if err := protocol.PrepareMutation(&envelope); err != nil {
+	if err := memoryv1.PrepareMutation(&envelope); err != nil {
 		t.Fatal(err)
 	}
-	payload, err := protocol.EncodeJSON(envelope)
+	payload, err := memoryv1.EncodeJSON(envelope)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -634,7 +634,7 @@ func TestDispatcherRefreshesSendTimeAfterResolutionAndKeepsInvalidReceiptAmbiguo
 	backend.Status.Ready = true
 	authority := &ResolvedAuthority{
 		Namespace: binding.Namespace, NamespaceUID: binding.NamespaceUID, Binding: &binding,
-		Backend: backend, Adapter: &invalidReceiptOMSAdapter{},
+		Backend: backend, Adapter: &invalidReceiptProtocolAdapter{},
 	}
 	resolver := &advancingDispatchResolver{local: authority, fresh: authority, clock: &clock, freshTime: freshTime}
 	dispatcher := &Dispatcher{
@@ -671,17 +671,17 @@ func (s *abandonmentTestStore) AbandonMemoryOperation(_ context.Context, abandon
 	return &copy, nil
 }
 
-type abandonmentOMSAdapter struct {
-	fakeOMSAdapter
-	fence  *protocol.RoutingFenceResponse
-	lookup *protocol.OperationLookupResponse
+type abandonmentProtocolAdapter struct {
+	fakeProtocolAdapter
+	fence  *memoryv1.RoutingFenceResponse
+	lookup *memoryv1.OperationLookupResponse
 }
 
-func (a *abandonmentOMSAdapter) AdvanceRoutingFence(context.Context, protocol.RoutingFenceRequest) (*protocol.RoutingFenceResponse, error) {
+func (a *abandonmentProtocolAdapter) AdvanceRoutingFence(context.Context, memoryv1.RoutingFenceRequest) (*memoryv1.RoutingFenceResponse, error) {
 	return a.fence, nil
 }
 
-func (a *abandonmentOMSAdapter) LookupOperation(context.Context, protocol.OperationLookupRequest) (*protocol.OperationLookupResponse, error) {
+func (a *abandonmentProtocolAdapter) LookupOperation(context.Context, memoryv1.OperationLookupRequest) (*memoryv1.OperationLookupResponse, error) {
 	return a.lookup, nil
 }
 
@@ -691,7 +691,7 @@ func TestAbandonMemoryOperationDerivesProviderProofAndFence(t *testing.T) {
 		Namespace: "team-a", NamespaceUID: "11111111-1111-4111-8111-111111111111",
 		ClusterID: "cluster-a", Mode: store.MemoryBackendModeRemote,
 		BackendUID: "22222222-2222-4222-8222-222222222222", AuthorityEpoch: 1, RoutingEpoch: 2,
-		TenantID:  protocol.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
+		TenantID:  memoryv1.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
 		StoreUUID: "44444444-4444-4444-8444-444444444444", State: store.MemoryBackendBindingDraining,
 	}
 	identity, err := protocolBinding(&binding)
@@ -702,15 +702,15 @@ func TestAbandonMemoryOperationDerivesProviderProofAndFence(t *testing.T) {
 	storeImpl := &abandonmentTestStore{operation: store.MemoryOperation{
 		ID: "mop-dead", Namespace: binding.Namespace, NamespaceUID: binding.NamespaceUID,
 		BackendUID: binding.BackendUID, AuthorityEpoch: binding.AuthorityEpoch, RoutingEpoch: 1,
-		MutationDigest: protocol.ContentDigest("mutation"), State: store.MemoryOperationDeadLettered,
+		MutationDigest: memoryv1.ContentDigest("mutation"), State: store.MemoryOperationDeadLettered,
 		SendStartedAt: &sentAt,
 	}}
-	adapter := &abandonmentOMSAdapter{
-		fence: &protocol.RoutingFenceResponse{
-			ProtocolVersion: protocol.Version, Binding: identity, Result: protocol.ResultApplied,
-			BindingDigest: protocol.BindingDigest(identity), MaximumRoutingEpoch: identity.RoutingEpoch, CompletedAt: now,
+	adapter := &abandonmentProtocolAdapter{
+		fence: &memoryv1.RoutingFenceResponse{
+			ProtocolVersion: memoryv1.Version, Binding: identity, Result: memoryv1.ResultApplied,
+			BindingDigest: memoryv1.BindingDigest(identity), MaximumRoutingEpoch: identity.RoutingEpoch, CompletedAt: now,
 		},
-		lookup: &protocol.OperationLookupResponse{ProtocolVersion: protocol.Version, Binding: identity, Found: false},
+		lookup: &memoryv1.OperationLookupResponse{ProtocolVersion: memoryv1.Version, Binding: identity, Found: false},
 	}
 	authority := &ResolvedAuthority{
 		Namespace: binding.Namespace, NamespaceUID: binding.NamespaceUID, Binding: &binding, Adapter: adapter,
@@ -806,8 +806,8 @@ func TestDispatcherKeepsAuthenticationFailuresRetryable(t *testing.T) {
 	binding := &store.MemoryBackendBinding{EndpointDigest: "endpoint", BackendUID: operation.BackendUID,
 		SecretUID: "secret", SecretResourceVersion: "1"}
 	if _, err := dispatcher.handleSendError(context.Background(), operation, binding, &AdapterError{
-		StatusCode: http.StatusUnauthorized, Code: protocol.ErrorCodeUnauthorized,
-		Message: "OMS adapter authentication failed", Retryable: false,
+		StatusCode: http.StatusUnauthorized, Code: memoryv1.ErrorCodeUnauthorized,
+		Message: "memory adapter authentication failed", Retryable: false,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -843,14 +843,14 @@ func TestDispatcherValidatesStoredEnvelopeBeforeSendBoundary(t *testing.T) {
 		Namespace: "team-a", NamespaceUID: "11111111-1111-4111-8111-111111111111",
 		ClusterID: "cluster-a", Mode: store.MemoryBackendModeRemote,
 		BackendUID: "22222222-2222-4222-8222-222222222222", AuthorityEpoch: 1, RoutingEpoch: 1,
-		TenantID:  protocol.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
+		TenantID:  memoryv1.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
 		StoreUUID: "44444444-4444-4444-8444-444444444444", State: store.MemoryBackendBindingAccepting,
 		ValidationExpiresAt: now.Add(time.Hour),
 	}
 	operation := store.MemoryOperation{
 		ID: "mop-invalid", Namespace: binding.Namespace, NamespaceUID: binding.NamespaceUID,
 		BackendUID: binding.BackendUID, AuthorityEpoch: binding.AuthorityEpoch, RoutingEpoch: binding.RoutingEpoch,
-		DesiredGeneration: 1, MutationDigest: protocol.ContentDigest("mutation"),
+		DesiredGeneration: 1, MutationDigest: memoryv1.ContentDigest("mutation"),
 		State: store.MemoryOperationLeased, LeaseOwner: "dispatcher-a", LeaseEpoch: 1,
 		MaxAgeAt: now.Add(time.Hour),
 	}
@@ -862,7 +862,7 @@ func TestDispatcherValidatesStoredEnvelopeBeforeSendBoundary(t *testing.T) {
 	backend.Status.Ready = true
 	authority := &ResolvedAuthority{
 		Namespace: binding.Namespace, NamespaceUID: binding.NamespaceUID, Binding: &binding,
-		Backend: backend, Adapter: &fakeOMSAdapter{},
+		Backend: backend, Adapter: &fakeProtocolAdapter{},
 	}
 	dispatcher := &Dispatcher{
 		Store: storeImpl, Resolver: staticAuthorityResolver{authority: authority},

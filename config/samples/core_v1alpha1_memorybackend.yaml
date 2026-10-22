@@ -6,9 +6,7 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: default
 spec:
-  protocol:
-    omsVersion: "0.1"
-    profile: orka.oms.v0alpha1
+  contractVersion: orka.memory.v1
   deployment:
     mode: external-endpoint
     endpoint: https://memory.example.com

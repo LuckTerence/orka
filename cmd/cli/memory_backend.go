@@ -235,11 +235,11 @@ func newMemoryBackendCreateCmd() *cobra.Command {
 						"namespace": client.Namespace,
 					},
 					"spec": map[string]any{
-						"protocol":       map[string]any{"omsVersion": "0.1", "profile": "orka.oms.v0alpha1"},
-						"deployment":     map[string]any{"mode": "external-endpoint", "endpoint": endpoint},
-						"clientAuth":     map[string]any{"bearerTokenSecretRef": map[string]any{"name": secretName, "key": secretKey}},
-						"store":          map[string]any{"name": storeName},
-						"lifecycleState": "Staged",
+						"contractVersion": corev1alpha1.MemoryBackendContractMemoryV1,
+						"deployment":      map[string]any{"mode": "external-endpoint", "endpoint": endpoint},
+						"clientAuth":      map[string]any{"bearerTokenSecretRef": map[string]any{"name": secretName, "key": secretKey}},
+						"store":           map[string]any{"name": storeName},
+						"lifecycleState":  "Staged",
 					},
 				})
 			}
@@ -261,7 +261,7 @@ func newMemoryBackendCreateCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVarP(&file, "file", "f", "", "Path to MemoryBackend JSON/YAML")
-	cmd.Flags().StringVar(&endpoint, "endpoint", "", "External HTTPS OMS adapter endpoint")
+	cmd.Flags().StringVar(&endpoint, "endpoint", "", "External HTTPS memory adapter endpoint")
 	cmd.Flags().StringVar(&secretName, "secret", "", "Bearer token Secret name")
 	cmd.Flags().StringVar(&secretKey, "secret-key", "token", "Bearer token Secret key")
 	cmd.Flags().StringVar(&storeName, "store", "", "Pre-created provider store name")

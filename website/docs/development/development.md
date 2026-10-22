@@ -262,14 +262,12 @@ make docker-push-workspace-publisher
 make docker-push-all
 ```
 
-### Out-of-tree OMS adapters
+### Out-of-tree memory adapters
 
-Provider-specific OMS adapters are intentionally outside the Orka repository.
-The KD6 implementation, container image, Helm chart, and provider release gate
-are maintained in
-[`orka-agents/orka-oms-kd6-adapter`](https://github.com/orka-agents/orka-oms-kd6-adapter).
-This repository retains the canonical `pkg/oms/protocol` contract,
-`pkg/oms/conformance` library, and `cmd/orka-oms-conformance` command used by
+Provider-specific memory adapters, their container images, Helm charts, and
+provider release gates are intentionally outside the Orka repository.
+This repository retains the canonical `pkg/memory/v1` contract,
+`pkg/memory/v1/conformance` library, and `cmd/orka-memory-conformance` command used by
 all adapters.
 
 ## Local development with Kind

@@ -20,7 +20,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/orka-agents/orka/pkg/oms/protocol"
+	memoryv1 "github.com/orka-agents/orka/pkg/memory/v1"
 )
 
 const (
@@ -31,11 +31,11 @@ const (
 	jsonMediaType                 = "application/json"
 )
 
-// Target describes one authenticated OMS endpoint and exact binding fixture.
+// Target describes one authenticated memory adapter endpoint and exact binding fixture.
 type Target struct {
 	BaseURL                string
 	AuthorizationValue     string
-	Binding                protocol.Binding
+	Binding                memoryv1.Binding
 	StoreName              string
 	RunID                  string
 	HTTPClient             *http.Client
@@ -47,13 +47,13 @@ type Target struct {
 
 // DefaultBinding is safe for an isolated conformance adapter. Production
 // adapters should pass their configured binding explicitly.
-func DefaultBinding() protocol.Binding {
-	binding := protocol.Binding{
+func DefaultBinding() memoryv1.Binding {
+	binding := memoryv1.Binding{
 		ClusterID: "conformance-cluster", NamespaceUID: "conformance-namespace-uid",
 		BackendUID: "conformance-backend-uid", AuthorityEpoch: 1, RoutingEpoch: 1,
 		StoreUUID: "11111111-1111-4111-8111-111111111111",
 	}
-	binding.TenantID = protocol.DeriveTenantID(binding.ClusterID, binding.NamespaceUID)
+	binding.TenantID = memoryv1.DeriveTenantID(binding.ClusterID, binding.NamespaceUID)
 	return binding
 }
 
@@ -62,7 +62,7 @@ type contractClient struct {
 	rawBearerToken     string
 	authorizationValue string
 	http               *http.Client
-	limits             protocol.CapabilityLimits
+	limits             memoryv1.CapabilityLimits
 	limitsConfigured   bool
 }
 
@@ -192,7 +192,7 @@ func (c *contractClient) doResponse(
 	}
 	defer response.Body.Close() //nolint:errcheck
 	result := contractResponse{StatusCode: response.StatusCode, Header: response.Header.Clone()}
-	responseBody, err := io.ReadAll(io.LimitReader(response.Body, protocol.MaxAdapterResponseBytes+1))
+	responseBody, err := io.ReadAll(io.LimitReader(response.Body, memoryv1.MaxAdapterResponseBytes+1))
 	if err != nil {
 		return result, err
 	}
@@ -229,17 +229,17 @@ func (c *contractClient) postJSON(ctx context.Context, path string, value any) (
 	return c.do(ctx, http.MethodPost, path, c.authorizationValue, body)
 }
 
-func (c *contractClient) configureLimits(limits protocol.CapabilityLimits) {
+func (c *contractClient) configureLimits(limits memoryv1.CapabilityLimits) {
 	c.limits = limits
 	c.limitsConfigured = true
 }
 
 func (c *contractClient) validateResponseBytes(path string, body []byte) error {
-	if len(body) > protocol.MaxAdapterResponseBytes {
+	if len(body) > memoryv1.MaxAdapterResponseBytes {
 		return fmt.Errorf(
 			"adapter response from %s exceeded hard maxResponseBytes=%d bytes",
 			strings.TrimSpace(path),
-			protocol.MaxAdapterResponseBytes,
+			memoryv1.MaxAdapterResponseBytes,
 		)
 	}
 	if c.limitsConfigured && len(body) > c.limits.MaxResponseBytes {
@@ -334,12 +334,12 @@ func sanitizeOutputText(value, authorizationValue string, limit int) string {
 	for _, credential := range credentialVariants(authorizationValue) {
 		value = strings.ReplaceAll(value, credential, redactedValue)
 	}
-	return protocol.SanitizeMessage(value, limit)
+	return memoryv1.SanitizeMessage(value, limit)
 }
 
 func safeError(prefix string, err error) string {
 	if err == nil {
 		return prefix
 	}
-	return protocol.SanitizeMessage(prefix+": "+err.Error(), conformanceMessageLimit)
+	return memoryv1.SanitizeMessage(prefix+": "+err.Error(), conformanceMessageLimit)
 }

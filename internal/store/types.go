@@ -280,7 +280,7 @@ const (
 )
 
 // MaxMemoryOperationPayloadBytes is the immutable hard cap for the canonical
-// OMS request retained in the durable operation ledger. The wire request may
+// memory protocol request retained in the durable operation ledger. The wire request may
 // be larger before canonical JSON normalization (for example, due to HTML
 // escaping), but the stored canonical representation may not exceed 512 KiB.
 const MaxMemoryOperationPayloadBytes = 512 << 10

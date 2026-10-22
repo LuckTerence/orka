@@ -1285,7 +1285,7 @@ Usage:
   orka memory backend create [flags]
 
 Flags:
-      --endpoint string     External HTTPS OMS adapter endpoint
+      --endpoint string     External HTTPS memory adapter endpoint
   -f, --file string         Path to MemoryBackend JSON/YAML
   -h, --help                help for create
   -o, --output string       Output format: table, json, yaml (default "table")

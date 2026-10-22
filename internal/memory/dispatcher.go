@@ -16,7 +16,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/store"
-	"github.com/orka-agents/orka/pkg/oms/protocol"
+	memoryv1 "github.com/orka-agents/orka/pkg/memory/v1"
 )
 
 const (
@@ -30,7 +30,7 @@ const (
 	memoryOperationRejectedCode  = "MEMORY_ADAPTER_REJECTED"
 )
 
-// Dispatcher durably advances one operation at a time through the OMS send boundary.
+// Dispatcher durably advances one operation at a time through the memory protocol send boundary.
 type Dispatcher struct {
 	Store                store.GovernedMemoryStore
 	Resolver             AuthorityResolver
@@ -154,7 +154,7 @@ func (d *Dispatcher) dispatchOne(ctx context.Context, namespace, operationID str
 		return d.releaseUnsentClaimWithoutCircuitFailure(ctx, operation, authority.Binding, store.ErrNotReady)
 	}
 
-	envelope, err := protocol.DecodeMutationEnvelope(claim.Payload)
+	envelope, err := memoryv1.DecodeMutationEnvelope(claim.Payload)
 	if err != nil {
 		return d.retry(ctx, operation, true, false, memoryOperationRejectedCode,
 			"stored mutation envelope failed strict validation", time.Time{})
@@ -191,43 +191,43 @@ func (d *Dispatcher) dispatchOne(ctx context.Context, namespace, operationID str
 	if receipt.Binding != binding || receipt.OperationID != operation.ID || receipt.MutationDigest != operation.MutationDigest ||
 		!mutationReceiptMatchesEnvelope(*envelope, receipt) {
 		return d.retry(ctx, operation, false, true, ReasonIdentityMismatch,
-			"OMS receipt identity did not match the dispatched operation", d.nextRetry(operation, 0))
+			"memory adapter receipt identity did not match the dispatched operation", d.nextRetry(operation, 0))
 	}
 
 	switch receipt.Result {
-	case protocol.ResultApplied:
+	case memoryv1.ResultApplied:
 		d.recordCircuitSuccess(endpointCircuitKey)
 		d.recordCircuitSuccess(credentialCircuitKey)
 		return d.complete(ctx, operation, receipt, finalizeImmediate)
-	case protocol.ResultNotFound:
+	case memoryv1.ResultNotFound:
 		if operation.Kind != store.MemoryOperationDelete {
 			return d.retry(ctx, operation, false, true, memoryOperationRejectedCode,
-				"OMS returned notFound for a non-delete mutation", d.nextRetry(operation, 0))
+				"memory adapter returned notFound for a non-delete mutation", d.nextRetry(operation, 0))
 		}
 		d.recordCircuitSuccess(endpointCircuitKey)
 		d.recordCircuitSuccess(credentialCircuitKey)
 		return d.complete(ctx, operation, receipt, finalizeImmediate)
-	case protocol.ResultRetryableError:
-		return d.retry(ctx, operation, false, false, memoryOperationRetryableCode, "OMS returned a retryable operation result", d.nextRetry(operation, 0))
-	case protocol.ResultPreconditionFailed, protocol.ResultIdempotencyConflict,
-		protocol.ResultIdentityConflict, protocol.ResultNonRetryableError:
-		return d.retry(ctx, operation, true, false, memoryOperationRejectedCode, "OMS rejected the operation", time.Time{})
+	case memoryv1.ResultRetryableError:
+		return d.retry(ctx, operation, false, false, memoryOperationRetryableCode, "memory adapter returned a retryable operation result", d.nextRetry(operation, 0))
+	case memoryv1.ResultPreconditionFailed, memoryv1.ResultIdempotencyConflict,
+		memoryv1.ResultIdentityConflict, memoryv1.ResultNonRetryableError:
+		return d.retry(ctx, operation, true, false, memoryOperationRejectedCode, "memory adapter rejected the operation", time.Time{})
 	default:
 		return d.retry(ctx, operation, false, true, memoryOperationRejectedCode,
-			"OMS returned an unknown result", d.nextRetry(operation, 0))
+			"memory adapter returned an unknown result", d.nextRetry(operation, 0))
 	}
 }
 
-func mutationReceiptMatchesEnvelope(envelope protocol.MutationEnvelope, receipt *protocol.MutationReceipt) bool {
+func mutationReceiptMatchesEnvelope(envelope memoryv1.MutationEnvelope, receipt *memoryv1.MutationReceipt) bool {
 	if receipt == nil {
 		return false
 	}
-	if receipt.Result != protocol.ResultApplied && receipt.Result != protocol.ResultNotFound {
+	if receipt.Result != memoryv1.ResultApplied && receipt.Result != memoryv1.ResultNotFound {
 		return true
 	}
 	expectedContentDigest := envelope.ContentDigest
-	if envelope.Kind == protocol.MutationKindDelete {
-		expectedContentDigest = protocol.EmptyContentDigest()
+	if envelope.Kind == memoryv1.MutationKindDelete {
+		expectedContentDigest = memoryv1.EmptyContentDigest()
 	}
 	return receipt.AppliedGeneration == envelope.Generation && receipt.ContentDigest == expectedContentDigest
 }
@@ -235,7 +235,7 @@ func mutationReceiptMatchesEnvelope(envelope protocol.MutationEnvelope, receipt 
 func (d *Dispatcher) complete(
 	ctx context.Context,
 	operation store.MemoryOperation,
-	receipt *protocol.MutationReceipt,
+	receipt *memoryv1.MutationReceipt,
 	finalizeImmediate bool,
 ) (*store.MemoryOperation, error) {
 	outcome := store.MemoryIdempotencyOutcome{}
@@ -267,11 +267,11 @@ func (d *Dispatcher) complete(
 		IdempotencyOutcome:         outcome,
 		Now:                        d.now(),
 		Actor:                      memoryDispatcherActor,
-		Reason:                     "OMS operation materialized",
+		Reason:                     "remote memory operation materialized",
 	})
 }
 
-func immediateIdempotencyOutcome(operation store.MemoryOperation, receipt *protocol.MutationReceipt) store.MemoryIdempotencyOutcome {
+func immediateIdempotencyOutcome(operation store.MemoryOperation, receipt *memoryv1.MutationReceipt) store.MemoryIdempotencyOutcome {
 	status := http.StatusOK
 	responseType := store.MemoryIdempotencyMemory
 	switch operation.Kind {
@@ -373,7 +373,7 @@ func (d *Dispatcher) handleSendError(
 	// the same operation ID is safe, but the local state must remain ambiguous.
 	d.recordCircuitFailure(endpointKey, d.now())
 	return d.retry(ctx, operation, false, true, memoryOperationRetryableCode,
-		"OMS acknowledgement was ambiguous", d.nextRetry(operation, 0), true)
+		"memory adapter acknowledgement was ambiguous", d.nextRetry(operation, 0), true)
 }
 
 func adapterDependencyFailure(err *AdapterError) bool {

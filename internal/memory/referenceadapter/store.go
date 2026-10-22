@@ -25,14 +25,14 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/orka-agents/orka/pkg/oms/protocol"
+	memoryv1 "github.com/orka-agents/orka/pkg/memory/v1"
 	"golang.org/x/sys/unix"
 	_ "modernc.org/sqlite" // pure-Go SQLite driver registration
 )
 
 const (
 	schemaVersion                          = 2
-	maxSearchSnapshotBytes                 = protocol.MaxAdapterResponseBytes
+	maxSearchSnapshotBytes                 = memoryv1.MaxAdapterResponseBytes
 	maxActiveSearchSnapshotsPerAuthority   = 8
 	maxActiveSearchSnapshotsGlobal         = 64
 	maxRetainedSearchSnapshotsPerAuthority = 8
@@ -71,12 +71,12 @@ type ownershipDecision struct {
 }
 
 type storedRecord struct {
-	record protocol.MemoryRecord
+	record memoryv1.MemoryRecord
 }
 
 type searchPage struct {
 	actualMode string
-	records    []protocol.MemoryRecord
+	records    []memoryv1.MemoryRecord
 	nextToken  string
 	exhausted  bool
 	expiresAt  time.Time
@@ -175,7 +175,7 @@ func openCanonicalProcessLock(info os.FileInfo) (*os.File, error) {
 	if !ok {
 		return nil, errors.New("resolve process lock inode identity")
 	}
-	directory := filepath.Join(os.TempDir(), "orka-oms-process-locks")
+	directory := filepath.Join(os.TempDir(), "orka-memory-adapter-process-locks")
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		return nil, fmt.Errorf("create canonical process lock directory: %w", err)
 	}
@@ -246,15 +246,15 @@ func (d *database) close() error {
 func (d *database) migrate(ctx context.Context) error {
 	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("begin OMS migration: %w", err)
+		return fmt.Errorf("begin reference adapter migration: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck
 	statements := []string{
-		`CREATE TABLE IF NOT EXISTS oms_schema (
+		`CREATE TABLE IF NOT EXISTS adapter_schema (
 			id INTEGER PRIMARY KEY CHECK (id = 1),
 			version INTEGER NOT NULL
 		)`,
-		`INSERT INTO oms_schema(id, version) VALUES(1, 2)
+		`INSERT INTO adapter_schema(id, version) VALUES(1, 2)
 			ON CONFLICT(id) DO NOTHING`,
 		`CREATE TABLE IF NOT EXISTS store_resolutions (
 			tenant_id TEXT NOT NULL,
@@ -340,33 +340,33 @@ func (d *database) migrate(ctx context.Context) error {
 	}
 	for _, statement := range statements {
 		if _, err := tx.ExecContext(ctx, statement); err != nil {
-			return fmt.Errorf("run OMS migration: %w", err)
+			return fmt.Errorf("run reference adapter migration: %w", err)
 		}
 	}
 	var version int
-	if err := tx.QueryRowContext(ctx, `SELECT version FROM oms_schema WHERE id = 1`).Scan(&version); err != nil {
-		return fmt.Errorf("read OMS schema version: %w", err)
+	if err := tx.QueryRowContext(ctx, `SELECT version FROM adapter_schema WHERE id = 1`).Scan(&version); err != nil {
+		return fmt.Errorf("read reference adapter schema version: %w", err)
 	}
 	if version == 1 {
 		if _, err := tx.ExecContext(ctx, `ALTER TABLE pagination_snapshots
 			ADD COLUMN terminal INTEGER NOT NULL DEFAULT 0 CHECK (terminal IN (0, 1))`); err != nil {
-			return fmt.Errorf("upgrade OMS pagination schema: %w", err)
+			return fmt.Errorf("upgrade reference adapter pagination schema: %w", err)
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE oms_schema SET version = ? WHERE id = 1`, schemaVersion); err != nil {
-			return fmt.Errorf("record OMS schema upgrade: %w", err)
+		if _, err := tx.ExecContext(ctx, `UPDATE adapter_schema SET version = ? WHERE id = 1`, schemaVersion); err != nil {
+			return fmt.Errorf("record reference adapter schema upgrade: %w", err)
 		}
 		version = schemaVersion
 	}
 	if version != schemaVersion {
-		return fmt.Errorf("unsupported OMS schema version %d", version)
+		return fmt.Errorf("unsupported reference adapter schema version %d", version)
 	}
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit OMS migration: %w", err)
+		return fmt.Errorf("commit reference adapter migration: %w", err)
 	}
 	return nil
 }
 
-func (d *database) resolveStore(ctx context.Context, binding protocol.StoreResolutionBinding, storeName string, now time.Time) (string, error) {
+func (d *database) resolveStore(ctx context.Context, binding memoryv1.StoreResolutionBinding, storeName string, now time.Time) (string, error) {
 	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
 		return "", err
@@ -393,18 +393,18 @@ func (d *database) resolveStore(ctx context.Context, binding protocol.StoreResol
 	return storeUUID, nil
 }
 
-func (d *database) claimOwnership(ctx context.Context, binding protocol.Binding, now time.Time) (ownershipDecision, error) {
+func (d *database) claimOwnership(ctx context.Context, binding memoryv1.Binding, now time.Time) (ownershipDecision, error) {
 	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
 		return ownershipDecision{}, err
 	}
 	defer tx.Rollback() //nolint:errcheck
-	scope := protocol.ClaimScopeDigest(binding)
-	authority := protocol.AuthorityDigest(binding)
+	scope := memoryv1.ClaimScopeDigest(binding)
+	authority := memoryv1.AuthorityDigest(binding)
 	var resolvedStore int
 	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM store_resolutions WHERE tenant_id = ? AND store_uuid = ?`,
 		binding.TenantID, binding.StoreUUID).Scan(&resolvedStore); errors.Is(err, sql.ErrNoRows) {
-		return ownershipDecision{result: protocol.ResultIdentityConflict, maxRouting: 0, claimedAt: now}, nil
+		return ownershipDecision{result: memoryv1.ResultIdentityConflict, maxRouting: 0, claimedAt: now}, nil
 	} else if err != nil {
 		return ownershipDecision{}, err
 	}
@@ -431,7 +431,7 @@ func (d *database) claimOwnership(ctx context.Context, binding protocol.Binding,
 		if parseErr != nil {
 			return ownershipDecision{}, parseErr
 		}
-		return ownershipDecision{result: protocol.ResultIdentityConflict, claimIdentity: existingAuthority, maxRouting: uint64(maxRouting), claimedAt: claimedAt}, nil
+		return ownershipDecision{result: memoryv1.ResultIdentityConflict, claimIdentity: existingAuthority, maxRouting: uint64(maxRouting), claimedAt: claimedAt}, nil
 	}
 	claimedAt, err := parseTime(claimedAtRaw)
 	if err != nil {
@@ -440,10 +440,10 @@ func (d *database) claimOwnership(ctx context.Context, binding protocol.Binding,
 	if err := tx.Commit(); err != nil {
 		return ownershipDecision{}, err
 	}
-	return ownershipDecision{result: protocol.ResultApplied, claimIdentity: authority, maxRouting: uint64(maxRouting), claimedAt: claimedAt}, nil
+	return ownershipDecision{result: memoryv1.ResultApplied, claimIdentity: authority, maxRouting: uint64(maxRouting), claimedAt: claimedAt}, nil
 }
 
-func (d *database) advanceRoutingFence(ctx context.Context, binding protocol.Binding, now time.Time) (ownershipDecision, error) {
+func (d *database) advanceRoutingFence(ctx context.Context, binding memoryv1.Binding, now time.Time) (ownershipDecision, error) {
 	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
 		return ownershipDecision{}, err
@@ -453,19 +453,19 @@ func (d *database) advanceRoutingFence(ctx context.Context, binding protocol.Bin
 	if err != nil {
 		return ownershipDecision{}, err
 	}
-	decision := ownershipDecision{result: protocol.ResultApplied, claimIdentity: protocol.AuthorityDigest(binding), maxRouting: maxRouting, claimedAt: claimedAt}
+	decision := ownershipDecision{result: memoryv1.ResultApplied, claimIdentity: memoryv1.AuthorityDigest(binding), maxRouting: maxRouting, claimedAt: claimedAt}
 	if !owner {
-		decision.result = protocol.ResultIdentityConflict
+		decision.result = memoryv1.ResultIdentityConflict
 		return decision, nil
 	}
 	if binding.RoutingEpoch < maxRouting {
-		decision.result = protocol.ResultPreconditionFailed
+		decision.result = memoryv1.ResultPreconditionFailed
 		return decision, nil
 	}
 	if binding.RoutingEpoch > maxRouting {
 		_, err = tx.ExecContext(ctx, `UPDATE ownership_claims
 			SET max_routing_epoch = ?, updated_at = ? WHERE claim_scope_digest = ?`,
-			binding.RoutingEpoch, formatTime(now), protocol.ClaimScopeDigest(binding))
+			binding.RoutingEpoch, formatTime(now), memoryv1.ClaimScopeDigest(binding))
 		if err != nil {
 			return ownershipDecision{}, err
 		}
@@ -477,11 +477,11 @@ func (d *database) advanceRoutingFence(ctx context.Context, binding protocol.Bin
 	return decision, nil
 }
 
-func ownershipInTx(ctx context.Context, tx *sql.Tx, binding protocol.Binding) (bool, uint64, time.Time, error) {
+func ownershipInTx(ctx context.Context, tx *sql.Tx, binding memoryv1.Binding) (bool, uint64, time.Time, error) {
 	var authority, claimedAtRaw string
 	var maxRouting int64
 	err := tx.QueryRowContext(ctx, `SELECT authority_digest, max_routing_epoch, claimed_at
-		FROM ownership_claims WHERE claim_scope_digest = ?`, protocol.ClaimScopeDigest(binding)).
+		FROM ownership_claims WHERE claim_scope_digest = ?`, memoryv1.ClaimScopeDigest(binding)).
 		Scan(&authority, &maxRouting, &claimedAtRaw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, 0, time.Time{}, nil
@@ -493,10 +493,10 @@ func ownershipInTx(ctx context.Context, tx *sql.Tx, binding protocol.Binding) (b
 	if err != nil {
 		return false, 0, time.Time{}, err
 	}
-	return authority == protocol.AuthorityDigest(binding), uint64(maxRouting), claimedAt, nil
+	return authority == memoryv1.AuthorityDigest(binding), uint64(maxRouting), claimedAt, nil
 }
 
-func ensureOwnedInTx(ctx context.Context, tx *sql.Tx, binding protocol.Binding) error {
+func ensureOwnedInTx(ctx context.Context, tx *sql.Tx, binding memoryv1.Binding) error {
 	owner, maxRouting, _, err := ownershipInTx(ctx, tx, binding)
 	if err != nil {
 		return err
@@ -511,158 +511,158 @@ func ensureOwnedInTx(ctx context.Context, tx *sql.Tx, binding protocol.Binding) 
 }
 
 //nolint:gocyclo // Mutation semantics are kept together to preserve transactional fencing guarantees.
-func (d *database) applyMutation(ctx context.Context, request *protocol.MutationEnvelope, now time.Time) (protocol.MutationReceipt, error) {
+func (d *database) applyMutation(ctx context.Context, request *memoryv1.MutationEnvelope, now time.Time) (memoryv1.MutationReceipt, error) {
 	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
-		return protocol.MutationReceipt{}, err
+		return memoryv1.MutationReceipt{}, err
 	}
 	defer tx.Rollback() //nolint:errcheck
-	authority := protocol.AuthorityDigest(request.Binding)
+	authority := memoryv1.AuthorityDigest(request.Binding)
 	if existing, digest, found, lookupErr := lookupReceiptInTx(ctx, tx, authority, request.OperationID); lookupErr != nil {
-		return protocol.MutationReceipt{}, lookupErr
+		return memoryv1.MutationReceipt{}, lookupErr
 	} else if found {
 		if digest == request.MutationDigest {
 			return existing, nil
 		}
-		return conflictReceipt(request, protocol.ResultIdempotencyConflict, now), nil
+		return conflictReceipt(request, memoryv1.ResultIdempotencyConflict, now), nil
 	}
 	owner, maxRouting, _, err := ownershipInTx(ctx, tx, request.Binding)
 	if err != nil {
-		return protocol.MutationReceipt{}, err
+		return memoryv1.MutationReceipt{}, err
 	}
 	if !owner {
-		receipt := conflictReceipt(request, protocol.ResultIdentityConflict, now)
+		receipt := conflictReceipt(request, memoryv1.ResultIdentityConflict, now)
 		if err := persistReceiptInTx(ctx, tx, request, receipt); err != nil {
-			return protocol.MutationReceipt{}, err
+			return memoryv1.MutationReceipt{}, err
 		}
 		if err := tx.Commit(); err != nil {
-			return protocol.MutationReceipt{}, err
+			return memoryv1.MutationReceipt{}, err
 		}
 		return receipt, nil
 	}
 	if request.Binding.RoutingEpoch != maxRouting {
 		if request.Binding.RoutingEpoch > maxRouting {
-			return protocol.MutationReceipt{}, errRoutingFuture
+			return memoryv1.MutationReceipt{}, errRoutingFuture
 		}
-		receipt := conflictReceipt(request, protocol.ResultIdentityConflict, now)
+		receipt := conflictReceipt(request, memoryv1.ResultIdentityConflict, now)
 		if err := persistReceiptInTx(ctx, tx, request, receipt); err != nil {
-			return protocol.MutationReceipt{}, err
+			return memoryv1.MutationReceipt{}, err
 		}
 		if err := tx.Commit(); err != nil {
-			return protocol.MutationReceipt{}, err
+			return memoryv1.MutationReceipt{}, err
 		}
 		return receipt, nil
 	}
 
 	record, found, err := lookupRecordInTx(ctx, tx, authority, request.UpsertKey)
 	if err != nil {
-		return protocol.MutationReceipt{}, err
+		return memoryv1.MutationReceipt{}, err
 	}
-	result := protocol.ResultApplied
+	result := memoryv1.ResultApplied
 	currentGeneration := uint64(0)
 	currentVersion := ""
-	live := found && record.record.State == protocol.RecordStateLive
+	live := found && record.record.State == memoryv1.RecordStateLive
 	if found {
 		currentGeneration = record.record.Generation
 		currentVersion = record.record.BackendVersion
 	}
 
-	preconditionFailed := func() (protocol.MutationReceipt, error) {
-		receipt := conflictReceipt(request, protocol.ResultPreconditionFailed, now)
+	preconditionFailed := func() (memoryv1.MutationReceipt, error) {
+		receipt := conflictReceipt(request, memoryv1.ResultPreconditionFailed, now)
 		if err := persistReceiptInTx(ctx, tx, request, receipt); err != nil {
-			return protocol.MutationReceipt{}, err
+			return memoryv1.MutationReceipt{}, err
 		}
 		if err := tx.Commit(); err != nil {
-			return protocol.MutationReceipt{}, err
+			return memoryv1.MutationReceipt{}, err
 		}
 		return receipt, nil
 	}
 
 	switch request.Kind {
-	case protocol.MutationKindCreate:
+	case memoryv1.MutationKindCreate:
 		if live || request.ExpectedGeneration != currentGeneration || request.Generation <= currentGeneration {
 			return preconditionFailed()
 		}
-	case protocol.MutationKindReplace:
+	case memoryv1.MutationKindReplace:
 		if !live || request.ExpectedGeneration != currentGeneration || request.Generation <= currentGeneration ||
 			(request.ExpectedBackendVersion != "" && request.ExpectedBackendVersion != currentVersion) {
 			return preconditionFailed()
 		}
-	case protocol.MutationKindDelete:
+	case memoryv1.MutationKindDelete:
 		if request.ExpectedGeneration != currentGeneration || request.Generation <= currentGeneration ||
 			(request.ExpectedBackendVersion != "" && request.ExpectedBackendVersion != currentVersion) {
 			return preconditionFailed()
 		}
 		if !live {
-			result = protocol.ResultNotFound
+			result = memoryv1.ResultNotFound
 		}
 	}
 
 	backendVersion := "ref-v" + strconv.FormatUint(request.Generation, 10)
 	backendMemoryID := backendMemoryID(request.UpsertKey)
-	recordValue := protocol.MemoryRecord{
+	recordValue := memoryv1.MemoryRecord{
 		MemoryID: request.MemoryID, UpsertKey: request.UpsertKey,
 		Generation: request.Generation, BackendVersion: backendVersion,
 		BackendMemoryID: backendMemoryID, ContentDigest: request.ContentDigest, UpdatedAt: now,
 		Tags: []string{}, Metadata: map[string]string{},
 	}
-	if request.Kind == protocol.MutationKindDelete {
-		recordValue.State = protocol.RecordStateTombstone
+	if request.Kind == memoryv1.MutationKindDelete {
+		recordValue.State = memoryv1.RecordStateTombstone
 	} else {
-		recordValue.State = protocol.RecordStateLive
+		recordValue.State = memoryv1.RecordStateLive
 		recordValue.Content = request.State.Content
 		recordValue.Tags = append([]string(nil), request.State.Tags...)
 		recordValue.Metadata = cloneMap(request.State.Metadata)
 	}
 	if err := upsertRecordInTx(ctx, tx, authority, recordValue); err != nil {
-		return protocol.MutationReceipt{}, err
+		return memoryv1.MutationReceipt{}, err
 	}
-	receipt := protocol.MutationReceipt{
-		ProtocolVersion: protocol.Version, Binding: request.Binding, Result: result,
-		OperationID: request.OperationID, BindingDigest: protocol.BindingDigest(request.Binding),
+	receipt := memoryv1.MutationReceipt{
+		ProtocolVersion: memoryv1.Version, Binding: request.Binding, Result: result,
+		OperationID: request.OperationID, BindingDigest: memoryv1.BindingDigest(request.Binding),
 		AppliedGeneration: request.Generation, BackendVersion: backendVersion,
 		BackendMemoryID: backendMemoryID, ContentDigest: request.ContentDigest,
 		MutationDigest: request.MutationDigest, CompletedAt: now,
 	}
 	if err := persistVersionInTx(ctx, tx, authority, request.OperationID, recordValue); err != nil {
-		return protocol.MutationReceipt{}, err
+		return memoryv1.MutationReceipt{}, err
 	}
 	if err := persistReceiptInTx(ctx, tx, request, receipt); err != nil {
-		return protocol.MutationReceipt{}, err
+		return memoryv1.MutationReceipt{}, err
 	}
 	if err := tx.Commit(); err != nil {
-		return protocol.MutationReceipt{}, err
+		return memoryv1.MutationReceipt{}, err
 	}
 	return receipt, nil
 }
 
-func conflictReceipt(request *protocol.MutationEnvelope, result string, now time.Time) protocol.MutationReceipt {
-	return protocol.MutationReceipt{
-		ProtocolVersion: protocol.Version, Binding: request.Binding, Result: result,
-		OperationID: request.OperationID, BindingDigest: protocol.BindingDigest(request.Binding),
+func conflictReceipt(request *memoryv1.MutationEnvelope, result string, now time.Time) memoryv1.MutationReceipt {
+	return memoryv1.MutationReceipt{
+		ProtocolVersion: memoryv1.Version, Binding: request.Binding, Result: result,
+		OperationID: request.OperationID, BindingDigest: memoryv1.BindingDigest(request.Binding),
 		ContentDigest: request.ContentDigest, MutationDigest: request.MutationDigest, CompletedAt: now,
 	}
 }
 
-func lookupReceiptInTx(ctx context.Context, tx *sql.Tx, authority, operationID string) (protocol.MutationReceipt, string, bool, error) {
+func lookupReceiptInTx(ctx context.Context, tx *sql.Tx, authority, operationID string) (memoryv1.MutationReceipt, string, bool, error) {
 	var digest string
 	var data []byte
 	err := tx.QueryRowContext(ctx, `SELECT mutation_digest, receipt_json FROM operation_receipts
 		WHERE authority_digest = ? AND operation_id = ?`, authority, operationID).Scan(&digest, &data)
 	if errors.Is(err, sql.ErrNoRows) {
-		return protocol.MutationReceipt{}, "", false, nil
+		return memoryv1.MutationReceipt{}, "", false, nil
 	}
 	if err != nil {
-		return protocol.MutationReceipt{}, "", false, err
+		return memoryv1.MutationReceipt{}, "", false, err
 	}
-	receipt, err := protocol.DecodeMutationReceipt(data)
+	receipt, err := memoryv1.DecodeMutationReceipt(data)
 	if err != nil {
-		return protocol.MutationReceipt{}, "", false, fmt.Errorf("stored mutation receipt is invalid: %w", err)
+		return memoryv1.MutationReceipt{}, "", false, fmt.Errorf("stored mutation receipt is invalid: %w", err)
 	}
 	return *receipt, digest, true, nil
 }
 
-func persistReceiptInTx(ctx context.Context, tx *sql.Tx, request *protocol.MutationEnvelope, receipt protocol.MutationReceipt) error {
+func persistReceiptInTx(ctx context.Context, tx *sql.Tx, request *memoryv1.MutationEnvelope, receipt memoryv1.MutationReceipt) error {
 	requestJSON, err := json.Marshal(request)
 	if err != nil {
 		return err
@@ -673,7 +673,7 @@ func persistReceiptInTx(ctx context.Context, tx *sql.Tx, request *protocol.Mutat
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO operation_receipts(
 		authority_digest, operation_id, mutation_digest, request_json, receipt_json, completed_at
-	) VALUES(?, ?, ?, ?, ?, ?)`, protocol.AuthorityDigest(request.Binding), request.OperationID,
+	) VALUES(?, ?, ?, ?, ?, ?)`, memoryv1.AuthorityDigest(request.Binding), request.OperationID,
 		request.MutationDigest, requestJSON, receiptJSON, formatTime(receipt.CompletedAt))
 	return err
 }
@@ -692,66 +692,66 @@ func lookupRecordInTx(ctx context.Context, tx *sql.Tx, authority, upsertKey stri
 	return storedRecord{record: record}, true, nil
 }
 
-func (d *database) lookupRecord(ctx context.Context, binding protocol.Binding, upsertKey string) (protocol.MemoryRecord, bool, error) {
+func (d *database) lookupRecord(ctx context.Context, binding memoryv1.Binding, upsertKey string) (memoryv1.MemoryRecord, bool, error) {
 	tx, err := d.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
-		return protocol.MemoryRecord{}, false, err
+		return memoryv1.MemoryRecord{}, false, err
 	}
 	defer tx.Rollback() //nolint:errcheck
 	if err := ensureOwnedInTx(ctx, tx, binding); err != nil {
-		return protocol.MemoryRecord{}, false, err
+		return memoryv1.MemoryRecord{}, false, err
 	}
 	row := tx.QueryRowContext(ctx, `SELECT memory_id, upsert_key, state, generation, backend_version,
 		backend_memory_id, content_digest, content, tags_json, metadata_json, updated_at
-		FROM memory_records WHERE authority_digest = ? AND upsert_key = ?`, protocol.AuthorityDigest(binding), upsertKey)
+		FROM memory_records WHERE authority_digest = ? AND upsert_key = ?`, memoryv1.AuthorityDigest(binding), upsertKey)
 	record, err := scanRecord(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		if err := tx.Commit(); err != nil {
-			return protocol.MemoryRecord{}, false, err
+			return memoryv1.MemoryRecord{}, false, err
 		}
-		return protocol.MemoryRecord{}, false, nil
+		return memoryv1.MemoryRecord{}, false, nil
 	}
 	if err != nil {
-		return protocol.MemoryRecord{}, false, err
+		return memoryv1.MemoryRecord{}, false, err
 	}
 	if err := tx.Commit(); err != nil {
-		return protocol.MemoryRecord{}, false, err
+		return memoryv1.MemoryRecord{}, false, err
 	}
 	return record, true, nil
 }
 
-func (d *database) lookupOperation(ctx context.Context, binding protocol.Binding, operationID string) (protocol.MutationReceipt, bool, error) {
+func (d *database) lookupOperation(ctx context.Context, binding memoryv1.Binding, operationID string) (memoryv1.MutationReceipt, bool, error) {
 	tx, err := d.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
-		return protocol.MutationReceipt{}, false, err
+		return memoryv1.MutationReceipt{}, false, err
 	}
 	defer tx.Rollback() //nolint:errcheck
 	if err := ensureOwnedInTx(ctx, tx, binding); err != nil {
-		return protocol.MutationReceipt{}, false, err
+		return memoryv1.MutationReceipt{}, false, err
 	}
 	var data []byte
 	err = tx.QueryRowContext(ctx, `SELECT receipt_json FROM operation_receipts
-		WHERE authority_digest = ? AND operation_id = ?`, protocol.AuthorityDigest(binding), operationID).Scan(&data)
+		WHERE authority_digest = ? AND operation_id = ?`, memoryv1.AuthorityDigest(binding), operationID).Scan(&data)
 	if errors.Is(err, sql.ErrNoRows) {
 		if err := tx.Commit(); err != nil {
-			return protocol.MutationReceipt{}, false, err
+			return memoryv1.MutationReceipt{}, false, err
 		}
-		return protocol.MutationReceipt{}, false, nil
+		return memoryv1.MutationReceipt{}, false, nil
 	}
 	if err != nil {
-		return protocol.MutationReceipt{}, false, err
+		return memoryv1.MutationReceipt{}, false, err
 	}
-	receipt, err := protocol.DecodeMutationReceipt(data)
+	receipt, err := memoryv1.DecodeMutationReceipt(data)
 	if err != nil {
-		return protocol.MutationReceipt{}, false, fmt.Errorf("stored mutation receipt is invalid: %w", err)
+		return memoryv1.MutationReceipt{}, false, fmt.Errorf("stored mutation receipt is invalid: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
-		return protocol.MutationReceipt{}, false, err
+		return memoryv1.MutationReceipt{}, false, err
 	}
 	return *receipt, true, nil
 }
 
-func upsertRecordInTx(ctx context.Context, tx *sql.Tx, authority string, record protocol.MemoryRecord) error {
+func upsertRecordInTx(ctx context.Context, tx *sql.Tx, authority string, record memoryv1.MemoryRecord) error {
 	tags, err := json.Marshal(record.Tags)
 	if err != nil {
 		return err
@@ -775,7 +775,7 @@ func upsertRecordInTx(ctx context.Context, tx *sql.Tx, authority string, record 
 	return err
 }
 
-func persistVersionInTx(ctx context.Context, tx *sql.Tx, authority, operationID string, record protocol.MemoryRecord) error {
+func persistVersionInTx(ctx context.Context, tx *sql.Tx, authority, operationID string, record memoryv1.MemoryRecord) error {
 	data, err := json.Marshal(record)
 	if err != nil {
 		return err
@@ -791,42 +791,42 @@ type rowScanner interface {
 	Scan(dest ...any) error
 }
 
-func scanRecord(row rowScanner) (protocol.MemoryRecord, error) {
-	var record protocol.MemoryRecord
+func scanRecord(row rowScanner) (memoryv1.MemoryRecord, error) {
+	var record memoryv1.MemoryRecord
 	var generation int64
 	var tagsJSON, metadataJSON []byte
 	var updatedAtRaw string
 	if err := row.Scan(&record.MemoryID, &record.UpsertKey, &record.State, &generation,
 		&record.BackendVersion, &record.BackendMemoryID, &record.ContentDigest, &record.Content,
 		&tagsJSON, &metadataJSON, &updatedAtRaw); err != nil {
-		return protocol.MemoryRecord{}, err
+		return memoryv1.MemoryRecord{}, err
 	}
 	record.Generation = uint64(generation)
 	if err := json.Unmarshal(tagsJSON, &record.Tags); err != nil {
-		return protocol.MemoryRecord{}, err
+		return memoryv1.MemoryRecord{}, err
 	}
 	if err := json.Unmarshal(metadataJSON, &record.Metadata); err != nil {
-		return protocol.MemoryRecord{}, err
+		return memoryv1.MemoryRecord{}, err
 	}
 	updatedAt, err := parseTime(updatedAtRaw)
 	if err != nil {
-		return protocol.MemoryRecord{}, err
+		return memoryv1.MemoryRecord{}, err
 	}
 	record.UpdatedAt = updatedAt
 	return record, nil
 }
 
-func (d *database) search(ctx context.Context, request *protocol.SearchRequest, now time.Time, ttl time.Duration, maxRecords int) (searchPage, error) {
+func (d *database) search(ctx context.Context, request *memoryv1.SearchRequest, now time.Time, ttl time.Duration, maxRecords int) (searchPage, error) {
 	if request.PageToken == "" {
 		return d.createSnapshot(ctx, request, now, ttl, maxRecords)
 	}
 	return d.readSnapshotPage(ctx, request, now)
 }
 
-func (d *database) createSnapshot(ctx context.Context, request *protocol.SearchRequest, now time.Time, ttl time.Duration, maxRecords int) (searchPage, error) {
+func (d *database) createSnapshot(ctx context.Context, request *memoryv1.SearchRequest, now time.Time, ttl time.Duration, maxRecords int) (searchPage, error) {
 	actualMode := request.Mode
-	if actualMode == protocol.SearchModeAuto {
-		actualMode = protocol.SearchModeKeyword
+	if actualMode == memoryv1.SearchModeAuto {
+		actualMode = memoryv1.SearchModeKeyword
 	}
 	fingerprint := searchFingerprint(request)
 	expiresAt := now.Add(ttl)
@@ -844,13 +844,13 @@ func (d *database) createSnapshot(ctx context.Context, request *protocol.SearchR
 	rows, err := tx.QueryContext(ctx, `SELECT memory_id, upsert_key, state, generation, backend_version,
 		backend_memory_id, content_digest, content, tags_json, metadata_json, updated_at
 		FROM memory_records WHERE authority_digest = ? AND state = ? ORDER BY upsert_key ASC`,
-		protocol.AuthorityDigest(request.Binding), protocol.RecordStateLive)
+		memoryv1.AuthorityDigest(request.Binding), memoryv1.RecordStateLive)
 	if err != nil {
 		return searchPage{}, err
 	}
 	defer rows.Close() //nolint:errcheck
 	query := strings.ToLower(strings.TrimSpace(request.Query))
-	records := make([]protocol.MemoryRecord, 0)
+	records := make([]memoryv1.MemoryRecord, 0)
 	encodedRecords := make([][]byte, 0)
 	snapshotBytes := 0
 	for rows.Next() {
@@ -886,7 +886,7 @@ func (d *database) createSnapshot(ctx context.Context, request *protocol.SearchR
 		return searchPage{}, err
 	}
 	firstEnd := min(request.PageSize, len(records))
-	firstPageRecords := append([]protocol.MemoryRecord(nil), records[:firstEnd]...)
+	firstPageRecords := append([]memoryv1.MemoryRecord(nil), records[:firstEnd]...)
 	firstPage := pageFromRecords(snapshotID, 0, len(records), actualMode, expiresAt, firstPageRecords)
 	if firstPage.exhausted {
 		if err := tx.Commit(); err != nil {
@@ -894,13 +894,13 @@ func (d *database) createSnapshot(ctx context.Context, request *protocol.SearchR
 		}
 		return firstPage, nil
 	}
-	if err := ensureSearchSnapshotCountCapacityInTx(ctx, tx, protocol.AuthorityDigest(request.Binding)); err != nil {
+	if err := ensureSearchSnapshotCountCapacityInTx(ctx, tx, memoryv1.AuthorityDigest(request.Binding)); err != nil {
 		return searchPage{}, err
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO pagination_snapshots(
 		snapshot_id, authority_digest, request_fingerprint, requested_mode, actual_mode, page_size,
 		entry_count, created_at, expires_at
-	) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)`, snapshotID, protocol.AuthorityDigest(request.Binding),
+	) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)`, snapshotID, memoryv1.AuthorityDigest(request.Binding),
 		fingerprint, request.Mode, actualMode, request.PageSize, len(records), formatTime(now), formatTime(expiresAt))
 	if err != nil {
 		return searchPage{}, err
@@ -946,7 +946,7 @@ func ensureSearchSnapshotCountCapacityInTx(ctx context.Context, tx *sql.Tx, auth
 	return nil
 }
 
-func (d *database) readSnapshotPage(ctx context.Context, request *protocol.SearchRequest, now time.Time) (searchPage, error) {
+func (d *database) readSnapshotPage(ctx context.Context, request *memoryv1.SearchRequest, now time.Time) (searchPage, error) {
 	snapshotID, offset, err := parsePageToken(request.PageToken)
 	if err != nil {
 		return searchPage{}, errSnapshotInvalid
@@ -977,7 +977,7 @@ func (d *database) readSnapshotPage(ctx context.Context, request *protocol.Searc
 	if !expiresAt.After(now) {
 		return searchPage{}, errSnapshotExpired
 	}
-	if authority != protocol.AuthorityDigest(request.Binding) || fingerprint != searchFingerprint(request) || pageSize != request.PageSize || offset < 0 || offset > entryCount {
+	if authority != memoryv1.AuthorityDigest(request.Binding) || fingerprint != searchFingerprint(request) || pageSize != request.PageSize || offset < 0 || offset > entryCount {
 		return searchPage{}, errSnapshotInvalid
 	}
 	rows, err := tx.QueryContext(ctx, `SELECT record_json FROM pagination_entries
@@ -987,13 +987,13 @@ func (d *database) readSnapshotPage(ctx context.Context, request *protocol.Searc
 		return searchPage{}, err
 	}
 	defer rows.Close() //nolint:errcheck
-	records := make([]protocol.MemoryRecord, 0, pageSize)
+	records := make([]memoryv1.MemoryRecord, 0, pageSize)
 	for rows.Next() {
 		var data []byte
 		if err := rows.Scan(&data); err != nil {
 			return searchPage{}, err
 		}
-		var record protocol.MemoryRecord
+		var record memoryv1.MemoryRecord
 		if err := json.Unmarshal(data, &record); err != nil {
 			return searchPage{}, err
 		}
@@ -1017,7 +1017,7 @@ func (d *database) readSnapshotPage(ctx context.Context, request *protocol.Searc
 	return page, nil
 }
 
-func pageFromRecords(snapshotID string, offset, total int, actualMode string, expiresAt time.Time, records []protocol.MemoryRecord) searchPage {
+func pageFromRecords(snapshotID string, offset, total int, actualMode string, expiresAt time.Time, records []memoryv1.MemoryRecord) searchPage {
 	records = boundPageRecords(records)
 	nextOffset := offset + len(records)
 	exhausted := nextOffset >= total
@@ -1026,14 +1026,14 @@ func pageFromRecords(snapshotID string, offset, total int, actualMode string, ex
 		next = formatPageToken(snapshotID, nextOffset)
 	}
 	if records == nil {
-		records = []protocol.MemoryRecord{}
+		records = []memoryv1.MemoryRecord{}
 	}
 	return searchPage{actualMode: actualMode, records: records, nextToken: next, exhausted: exhausted, expiresAt: expiresAt}
 }
 
-func boundPageRecords(records []protocol.MemoryRecord) []protocol.MemoryRecord {
+func boundPageRecords(records []memoryv1.MemoryRecord) []memoryv1.MemoryRecord {
 	const responseEnvelopeReserve = 64 << 10
-	budget := protocol.MaxAdapterResponseBytes - responseEnvelopeReserve
+	budget := memoryv1.MaxAdapterResponseBytes - responseEnvelopeReserve
 	used := 0
 	count := 0
 	for index := range records {
@@ -1050,7 +1050,7 @@ func boundPageRecords(records []protocol.MemoryRecord) []protocol.MemoryRecord {
 	return records[:count]
 }
 
-func recordMatchesKeyword(record protocol.MemoryRecord, query string) bool {
+func recordMatchesKeyword(record memoryv1.MemoryRecord, query string) bool {
 	if strings.Contains(strings.ToLower(record.Content), query) {
 		return true
 	}
@@ -1067,14 +1067,14 @@ func recordMatchesKeyword(record protocol.MemoryRecord, query string) bool {
 	return false
 }
 
-func searchFingerprint(request *protocol.SearchRequest) string {
+func searchFingerprint(request *memoryv1.SearchRequest) string {
 	data, _ := json.Marshal(struct {
 		Authority string `json:"authority"`
 		Mode      string `json:"mode"`
 		Query     string `json:"query"`
 		PageSize  int    `json:"pageSize"`
-	}{Authority: protocol.AuthorityDigest(request.Binding), Mode: request.Mode, Query: request.Query, PageSize: request.PageSize})
-	return protocol.ContentDigest(string(data))
+	}{Authority: memoryv1.AuthorityDigest(request.Binding), Mode: request.Mode, Query: request.Query, PageSize: request.PageSize})
+	return memoryv1.ContentDigest(string(data))
 }
 
 func randomSnapshotID() (string, error) {
@@ -1086,12 +1086,12 @@ func randomSnapshotID() (string, error) {
 }
 
 func formatPageToken(snapshotID string, offset int) string {
-	return "oms-page-v1." + snapshotID + "." + strconv.Itoa(offset)
+	return "memory-page-v1." + snapshotID + "." + strconv.Itoa(offset)
 }
 
 func parsePageToken(token string) (string, int, error) {
 	parts := strings.Split(token, ".")
-	if len(parts) != 3 || parts[0] != "oms-page-v1" || len(parts[1]) != 32 {
+	if len(parts) != 3 || parts[0] != "memory-page-v1" || len(parts[1]) != 32 {
 		return "", 0, errSnapshotInvalid
 	}
 	if _, err := hex.DecodeString(parts[1]); err != nil {
@@ -1105,7 +1105,7 @@ func parsePageToken(token string) (string, int, error) {
 }
 
 func backendMemoryID(upsertKey string) string {
-	digest := protocol.ContentDigest(upsertKey)
+	digest := memoryv1.ContentDigest(upsertKey)
 	return "ref-" + strings.TrimPrefix(digest, "sha256:")[:32]
 }
 

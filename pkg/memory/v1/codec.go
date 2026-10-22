@@ -4,7 +4,7 @@ Copyright (c) 2026.
 MIT License - see LICENSE file for details.
 */
 
-package protocol
+package v1
 
 import (
 	"bytes"

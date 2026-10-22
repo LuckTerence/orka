@@ -7,13 +7,13 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/orka-agents/orka/pkg/oms/protocol"
+	memoryv1 "github.com/orka-agents/orka/pkg/memory/v1"
 )
 
 func TestProbeAcceptsReferenceCompatibleShortBearerToken(t *testing.T) {
 	shortValue := strings.Repeat("a", 1)
 	binding := DefaultBinding()
-	healthBody := encodeTestJSON(t, protocol.HealthResponse{ProtocolVersion: protocol.Version, Status: "ok"})
+	healthBody := encodeTestJSON(t, memoryv1.HealthResponse{ProtocolVersion: memoryv1.Version, Status: "ok"})
 	capabilityBody := encodeTestJSON(t, testCapabilitiesResponse(binding))
 
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -24,9 +24,9 @@ func TestProbeAcceptsReferenceCompatibleShortBearerToken(t *testing.T) {
 			return
 		}
 		switch request.URL.Path {
-		case protocol.PathHealth:
+		case memoryv1.PathHealth:
 			_, _ = writer.Write(healthBody)
-		case protocol.PathCapabilities:
+		case memoryv1.PathCapabilities:
 			_, _ = writer.Write(capabilityBody)
 		default:
 			http.NotFound(writer, request)

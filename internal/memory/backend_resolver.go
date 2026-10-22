@@ -19,7 +19,7 @@ import (
 	"github.com/orka-agents/orka/internal/apierror"
 	"github.com/orka-agents/orka/internal/endpointpolicy"
 	"github.com/orka-agents/orka/internal/store"
-	"github.com/orka-agents/orka/pkg/oms/protocol"
+	memoryv1 "github.com/orka-agents/orka/pkg/memory/v1"
 )
 
 const (
@@ -39,7 +39,7 @@ type ResolvedAuthority struct {
 	NamespaceUID string
 	Binding      *store.MemoryBackendBinding
 	Backend      *corev1alpha1.MemoryBackend
-	Adapter      OMSAdapter
+	Adapter      ProtocolAdapter
 }
 
 // Remote reports whether this namespace has durably activated remote authority.
@@ -178,7 +178,7 @@ func (r *BackendResolver) Resolve(ctx context.Context, namespace string) (*Resol
 	if err != nil {
 		return nil, err
 	}
-	adapter, err := NewOMSClient(
+	adapter, err := NewProtocolClient(
 		r.Policy,
 		r.HTTPClient,
 		resolution,
@@ -329,19 +329,19 @@ func (r *BackendResolver) requestTimeout() time.Duration {
 	return defaultBackendResolveRequestTimeout
 }
 
-func protocolBinding(binding *store.MemoryBackendBinding) (protocol.Binding, error) {
+func protocolBinding(binding *store.MemoryBackendBinding) (memoryv1.Binding, error) {
 	if binding == nil {
-		return protocol.Binding{}, fmt.Errorf("memory backend binding is required")
+		return memoryv1.Binding{}, fmt.Errorf("memory backend binding is required")
 	}
-	result := protocol.Binding{
+	result := memoryv1.Binding{
 		ClusterID: binding.ClusterID, NamespaceUID: binding.NamespaceUID, BackendUID: binding.BackendUID,
 		AuthorityEpoch: uint64(binding.AuthorityEpoch), RoutingEpoch: uint64(binding.RoutingEpoch),
 		TenantID: binding.TenantID, StoreUUID: binding.StoreUUID,
 	}
 	if result.TenantID == "" {
-		result.TenantID = protocol.DeriveTenantID(result.ClusterID, result.NamespaceUID)
+		result.TenantID = memoryv1.DeriveTenantID(result.ClusterID, result.NamespaceUID)
 	}
-	return result, protocol.ValidateBinding(result)
+	return result, memoryv1.ValidateBinding(result)
 }
 
 func digestString(value string) string {

@@ -1,21 +1,21 @@
-# Orka Memory Service profile `orka.oms.v0alpha1`
+# Memory protocol `orka.memory.v1`
 
 ## Status and scope
 
-This document is the normative wire contract for the initial Orka Memory
-Service (OMS) adapter profile. The profile string is exactly:
+This document is the normative wire contract between Orka and a remote memory
+adapter. The contract version string is exactly:
 
 ```text
-orka.oms.v0alpha1
+orka.memory.v1
 ```
 
 The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, and **MAY** are
-to be interpreted as requirements. The profile is closed: implementations MUST
+to be interpreted as requirements. The contract is closed: implementations MUST
 reject unknown versions, unknown or duplicate JSON fields, missing required
 fields, trailing JSON values, oversized bodies, invalid UTF-8, unsafe control
 characters, invalid identities, and non-canonical mutation envelopes.
 
-The profile supplies the provider-side semantics required by an activated Orka
+The contract supplies the provider-side semantics required by an activated Orka
 memory backend:
 
 - exact binding identity echo;
@@ -29,9 +29,9 @@ memory backend:
 - stable, bounded, restart-safe keyword pagination;
 - explicit behavior for optional semantic and hybrid search.
 
-This profile does not define Orka's public memory API, governance catalog,
-admission ledger, or a provider's native API. It is the boundary between Orka and an
-OMS adapter.
+This contract does not define Orka's public memory API, governance catalog,
+admission ledger, or a provider's native API. It is the boundary between Orka and a
+memory adapter.
 
 ## Transport and authentication
 
@@ -44,20 +44,20 @@ or invalid authentication returns `401` and MUST NOT echo the configured value.
 
 Every POST request uses `Content-Type: application/json`. A charset parameter is
 allowed by the media-type parser, but the JSON bytes themselves MUST be valid
-UTF-8. Redirects are not part of the profile and clients MUST NOT follow them.
+UTF-8. Redirects are not part of the contract and clients MUST NOT follow them.
 Responses use `application/json`, `Cache-Control: no-store`, and are bounded by
-the advertised and hard profile response limits.
+the advertised and hard contract response limits.
 
 `GET /v1/health` is an authenticated transport-liveness exception. It does not
 read or mutate authority state and therefore carries no binding.
 `POST /v1/stores/resolve` carries a pre-authority store-resolution binding that
 has cluster, namespace, backend, and tenant identity but intentionally has no
-authority/routing epochs or store UUID. Every post-resolution profile request
+authority/routing epochs or store UUID. Every post-resolution contract request
 carries a complete authority `binding`, and every semantic response echoes the
 exact request binding. An error produced before a binding can be decoded has
 `"binding": null`.
 
-## Hard profile limits
+## Hard contract limits
 
 These are maxima, not defaults. A capability response MAY advertise smaller
 positive values and MUST never advertise larger values.
@@ -176,7 +176,7 @@ Authenticated transport liveness only.
 
 ```json
 {
-  "protocolVersion": "orka.oms.v0alpha1",
+  "protocolVersion": "orka.memory.v1",
   "status": "ok"
 }
 ```
@@ -190,7 +190,7 @@ Request:
 
 ```json
 {
-  "protocolVersion": "orka.oms.v0alpha1",
+  "protocolVersion": "orka.memory.v1",
   "binding": {
     "clusterId": "cluster-1",
     "namespaceUid": "namespace-uid-1",
@@ -205,7 +205,7 @@ Response:
 
 ```json
 {
-  "protocolVersion": "orka.oms.v0alpha1",
+  "protocolVersion": "orka.memory.v1",
   "binding": {
     "clusterId": "cluster-1",
     "namespaceUid": "namespace-uid-1",
@@ -234,7 +234,7 @@ Request:
 
 ```json
 {
-  "protocolVersion": "orka.oms.v0alpha1",
+  "protocolVersion": "orka.memory.v1",
   "binding": { "...": "complete binding" }
 }
 ```
@@ -243,7 +243,7 @@ Response:
 
 ```json
 {
-  "protocolVersion": "orka.oms.v0alpha1",
+  "protocolVersion": "orka.memory.v1",
   "binding": { "...": "exact request binding" },
   "adapterName": "adapter-name",
   "adapterVersion": "adapter-version",
@@ -288,7 +288,7 @@ activation. `semanticSearch` and `hybridSearch` are optional. `revision` MUST be
 stable for one effective behavior/configuration revision. `expiresAt` MUST be in
 the future; Orka fences admission and dispatch after expiry or revision change.
 
-`auditVersionVisibility` in v0alpha1 means current backend version visibility on
+`auditVersionVisibility` in `orka.memory.v1` means current backend version visibility on
 exact get plus durable terminal audit lookup by operation ID. An implementation
 MAY retain richer internal history, but no history-list endpoint is defined by
 this version.
@@ -299,7 +299,7 @@ Request:
 
 ```json
 {
-  "protocolVersion": "orka.oms.v0alpha1",
+  "protocolVersion": "orka.memory.v1",
   "binding": { "...": "complete binding" }
 }
 ```
@@ -308,7 +308,7 @@ Response:
 
 ```json
 {
-  "protocolVersion": "orka.oms.v0alpha1",
+  "protocolVersion": "orka.memory.v1",
   "binding": { "...": "exact request binding" },
   "result": "applied|identityConflict",
   "bindingDigest": "sha256:<64 lowercase hex>",
@@ -336,7 +336,7 @@ Response:
 
 ```json
 {
-  "protocolVersion": "orka.oms.v0alpha1",
+  "protocolVersion": "orka.memory.v1",
   "binding": { "...": "exact request binding" },
   "result": "applied|preconditionFailed|identityConflict",
   "bindingDigest": "sha256:<64 lowercase hex>",
@@ -357,7 +357,7 @@ Create, replace, and delete use one envelope:
 
 ```json
 {
-  "protocolVersion": "orka.oms.v0alpha1",
+  "protocolVersion": "orka.memory.v1",
   "operationId": "mop-example-1",
   "binding": {
     "clusterId": "cluster-1",
@@ -428,7 +428,7 @@ with no insignificant whitespace and with `mutationDigest` itself excluded:
 }
 ```
 
-Canonical JSON rules for this profile are:
+Canonical JSON rules for this contract are:
 
 1. object fields appear in the order shown above;
 2. metadata map keys are sorted lexicographically by UTF-8 bytes;
@@ -475,7 +475,7 @@ The adapter durably stores the first terminal receipt for an accepted
 
 ```json
 {
-  "protocolVersion": "orka.oms.v0alpha1",
+  "protocolVersion": "orka.memory.v1",
   "binding": { "...": "exact mutation binding" },
   "result": "applied|notFound|preconditionFailed|idempotencyConflict|identityConflict|retryableError|nonRetryableError",
   "operationId": "mop-example-1",
@@ -500,7 +500,7 @@ Request:
 
 ```json
 {
-  "protocolVersion": "orka.oms.v0alpha1",
+  "protocolVersion": "orka.memory.v1",
   "binding": { "...": "complete binding" },
   "upsertKey": "orka:cluster-1:namespace-uid-1:3:mem-example-1"
 }
@@ -510,7 +510,7 @@ Response:
 
 ```json
 {
-  "protocolVersion": "orka.oms.v0alpha1",
+  "protocolVersion": "orka.memory.v1",
   "binding": { "...": "exact request binding" },
   "found": true,
   "record": {
@@ -538,7 +538,7 @@ Request:
 
 ```json
 {
-  "protocolVersion": "orka.oms.v0alpha1",
+  "protocolVersion": "orka.memory.v1",
   "binding": { "...": "current binding" },
   "operationId": "mop-example-1"
 }
@@ -548,7 +548,7 @@ Response:
 
 ```json
 {
-  "protocolVersion": "orka.oms.v0alpha1",
+  "protocolVersion": "orka.memory.v1",
   "binding": { "...": "exact current request binding" },
   "found": true,
   "receipt": { "...": "original terminal receipt" }
@@ -565,7 +565,7 @@ Request:
 
 ```json
 {
-  "protocolVersion": "orka.oms.v0alpha1",
+  "protocolVersion": "orka.memory.v1",
   "binding": { "...": "complete current binding" },
   "mode": "keyword|semantic|hybrid|auto",
   "query": "search text",
@@ -578,7 +578,7 @@ Response:
 
 ```json
 {
-  "protocolVersion": "orka.oms.v0alpha1",
+  "protocolVersion": "orka.memory.v1",
   "binding": { "...": "exact request binding" },
   "requestedMode": "auto",
   "actualMode": "keyword",
@@ -611,14 +611,14 @@ unsupported they return HTTP `422` with code
 
 ## Error representation and HTTP status
 
-Codec, authentication, transport-profile, unsupported-mode, and bounded
+Codec, authentication, transport-contract, unsupported-mode, and bounded
 capacity errors use:
 
 ```json
 {
-  "protocolVersion": "orka.oms.v0alpha1",
+  "protocolVersion": "orka.memory.v1",
   "binding": null,
-  "code": "OMS_INVALID_REQUEST",
+  "code": "MEMORY_ADAPTER_INVALID_REQUEST",
   "message": "bounded sanitized message",
   "retryable": false,
   "retryAfterSeconds": 0
@@ -635,7 +635,7 @@ HTTP `Retry-After` header.
 | Mutation `applied` or delete `notFound` | 200 |
 | Mutation/claim/fence identity, idempotency, or precondition conflict | 409 |
 | Unsupported explicit semantic/hybrid mode | 422 |
-| Closed-codec/profile validation failure | 400 (or 413/415 where applicable) |
+| Closed-codec/contract validation failure | 400 (or 413/415 where applicable) |
 | Missing/invalid bearer token | 401 |
 | Retryable adapter/storage failure | 503 |
 
@@ -644,7 +644,7 @@ is authoritative.
 
 ## Durable reference adapter
 
-`internal/oms/referenceadapter` is the normative deterministic fixture. It is
+`internal/memory/referenceadapter` is the normative deterministic fixture. It is
 not a provider bridge. It uses its own SQLite database and persists:
 
 - schema version;
@@ -659,12 +659,12 @@ not a provider bridge. It uses its own SQLite database and persists:
 The database uses WAL, full synchronous durability, foreign keys, and one local
 writer connection. A separate SQLite lock file holds an exclusive transaction
 for the process lifetime. A second active process cannot open the same adapter
-database; an OS/process crash releases the lock. The initial profile supports
+database; an OS/process crash releases the lock. The initial contract supports
 one active adapter process only.
 
 ## Conformance harness
 
-The reusable library is `pkg/oms/conformance`.
+The reusable library is `pkg/memory/v1/conformance`.
 
 - `conformance.Check` runs the complete semantic suite in one adapter process.
 - `conformance.Prepare` returns a credential-free checkpoint after creating
@@ -678,16 +678,16 @@ The reusable library is `pkg/oms/conformance`.
 The command is:
 
 ```bash
-# ORKA_OMS_BEARER_TOKEN must already be set in the environment.
-  go run ./cmd/orka-oms-conformance \
+# ORKA_MEMORY_ADAPTER_BEARER_TOKEN must already be set in the environment.
+  go run ./cmd/orka-memory-conformance \
   --endpoint https://adapter.example \
   --phase prepare \
   --state-file /tmp/oms-checkpoint.json
 
 # Restart the adapter, preserving its durable DB/PVC.
 
-# ORKA_OMS_BEARER_TOKEN must already be set in the environment.
-  go run ./cmd/orka-oms-conformance \
+# ORKA_MEMORY_ADAPTER_BEARER_TOKEN must already be set in the environment.
+  go run ./cmd/orka-memory-conformance \
   --endpoint https://adapter.example \
   --phase verify \
   --state-file /tmp/oms-checkpoint.json
@@ -716,12 +716,11 @@ The suite verifies, at minimum:
 
 Provider-specific transport, credential handling, deployment manifests, image
 publication, and live-provider release gates are maintained outside this
-repository. The KD6 implementation lives in
-[`orka-agents/orka-oms-kd6-adapter`](https://github.com/orka-agents/orka-oms-kd6-adapter).
+repository.
 
-External adapters should import the canonical `pkg/oms/protocol` package and
-must pass the `pkg/oms/conformance` prepare/restart/verify sequence against the
-exact image digest before release. The provider and durable adapter control
+External adapters should import the canonical `pkg/memory/v1` package and
+must pass the `pkg/memory/v1/conformance` prepare/restart/verify sequence against
+the exact image digest before release. The provider and durable adapter control
 state form one matched recovery set; restoring provider content without the
 corresponding receipts, claims, fences, tombstones, and snapshot metadata is
 non-conformant.

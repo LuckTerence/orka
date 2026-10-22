@@ -21,7 +21,7 @@ import (
 	"github.com/orka-agents/orka/internal/apierror"
 	"github.com/orka-agents/orka/internal/redact"
 	"github.com/orka-agents/orka/internal/store"
-	"github.com/orka-agents/orka/pkg/oms/protocol"
+	memoryv1 "github.com/orka-agents/orka/pkg/memory/v1"
 )
 
 const (
@@ -35,7 +35,7 @@ const (
 	maxRemoteSearchPages              = 20
 	maxRemoteListCandidates           = 1000
 	maxRemoteListPages                = 20
-	maxRemoteListHydrationConcurrency = omsHTTPMaxConnsPerHost
+	maxRemoteListHydrationConcurrency = adapterHTTPMaxConnsPerHost
 	remoteListCursorTTL               = 5 * time.Minute
 	maxRemoteListCursorBytes          = 4 << 10
 	legacyMemoryDisableAuditAction    = "memory.disable"
@@ -173,7 +173,7 @@ func (s *Service) listMemoriesPage(
 				SessionName: filter.SessionName, TaskName: filter.TaskName, ParentTask: filter.ParentTask, AgentName: filter.AgentName,
 				Trust: filter.Trust, Limit: filter.Limit, Cursor: filter.Cursor,
 				IncludeDisabled: filter.IncludeDisabled, IncludeDeleted: filter.IncludeDeleted, AllowIncomplete: true,
-			}, protocol.SearchModeKeyword)
+			}, memoryv1.SearchModeKeyword)
 			if searchErr != nil {
 				return nil, searchErr
 			}
@@ -207,7 +207,7 @@ func (s *Service) listMemoriesPage(
 			TaskName: filter.TaskName, ParentTask: filter.ParentTask, AgentName: filter.AgentName,
 			Trust: filter.Trust, Limit: filter.Limit, Cursor: filter.Cursor,
 			IncludeDisabled: filter.IncludeDisabled, IncludeDeleted: filter.IncludeDeleted,
-			Mode: protocol.SearchModeKeyword,
+			Mode: memoryv1.SearchModeKeyword,
 		}, searchContext)
 		if searchErr != nil {
 			return nil, searchErr
@@ -414,7 +414,7 @@ func saveRemoteListCursor(
 		}
 	}
 	if err := governed.SaveMemorySearchCursor(ctx, store.MemorySearchCursorState{
-		ID: id, NamespaceUID: binding.NamespaceUID, BindingDigest: protocol.BindingDigest(identity),
+		ID: id, NamespaceUID: binding.NamespaceUID, BindingDigest: memoryv1.BindingDigest(identity),
 		QueryDigest: queryDigest, State: payload, CreatedAt: now, ExpiresAt: now.Add(remoteListCursorTTL),
 	}); err != nil {
 		return "", err
@@ -452,7 +452,7 @@ func loadRemoteListCursor(
 	if err != nil {
 		return remoteListCursor{}, err
 	}
-	if stored.BindingDigest != protocol.BindingDigest(identity) || stored.QueryDigest != queryDigest ||
+	if stored.BindingDigest != memoryv1.BindingDigest(identity) || stored.QueryDigest != queryDigest ||
 		len(stored.State) == 0 || len(stored.State) > maxRemoteListCursorBytes {
 		return remoteListCursor{}, errors.New("mismatched memory list cursor")
 	}
@@ -577,18 +577,18 @@ func (s *Service) CreateMemory(
 	now := s.now()
 	operationID := "mop-" + uuid.NewString()
 	metadata := memoryMetadata(request)
-	envelope := protocol.MutationEnvelope{
-		ProtocolVersion:        protocol.Version,
+	envelope := memoryv1.MutationEnvelope{
+		ProtocolVersion:        memoryv1.Version,
 		OperationID:            operationID,
 		Binding:                binding,
 		MemoryID:               memoryID,
-		Kind:                   protocol.MutationKindCreate,
+		Kind:                   memoryv1.MutationKindCreate,
 		Generation:             uint64(desiredGeneration),
 		ExpectedGeneration:     uint64(expectedGeneration),
 		ExpectedBackendVersion: "",
-		State:                  &protocol.MutationState{Content: content, Tags: tags, Metadata: metadata},
+		State:                  &memoryv1.MutationState{Content: content, Tags: tags, Metadata: metadata},
 	}
-	if err := protocol.PrepareMutation(&envelope); err != nil {
+	if err := memoryv1.PrepareMutation(&envelope); err != nil {
 		return nil, apierror.New(http.StatusBadRequest, "", "invalid memory mutation")
 	}
 	payload, _ := json.Marshal(envelope)
@@ -699,13 +699,13 @@ func (s *Service) UpdateMemory(
 	desired := max(entry.Generation, entry.DesiredGeneration) + 1
 	operationID := "mop-" + uuid.NewString()
 	metadata := replacementMemoryMetadata(entry, *current, content, tags)
-	envelope := protocol.MutationEnvelope{
-		ProtocolVersion: protocol.Version, OperationID: operationID, Binding: binding,
-		MemoryID: id, Kind: protocol.MutationKindReplace, Generation: uint64(desired),
+	envelope := memoryv1.MutationEnvelope{
+		ProtocolVersion: memoryv1.Version, OperationID: operationID, Binding: binding,
+		MemoryID: id, Kind: memoryv1.MutationKindReplace, Generation: uint64(desired),
 		ExpectedGeneration: uint64(entry.Generation), ExpectedBackendVersion: entry.BackendVersion,
-		State: &protocol.MutationState{Content: content, Tags: tags, Metadata: metadata},
+		State: &memoryv1.MutationState{Content: content, Tags: tags, Metadata: metadata},
 	}
-	if err := protocol.PrepareMutation(&envelope); err != nil {
+	if err := memoryv1.PrepareMutation(&envelope); err != nil {
 		return nil, apierror.New(http.StatusBadRequest, "", "invalid memory mutation")
 	}
 	payload, _ := json.Marshal(envelope)
@@ -782,12 +782,12 @@ func (s *Service) DeleteMemory(
 	now := s.now()
 	desired := max(entry.Generation, entry.DesiredGeneration) + 1
 	operationID := "mop-" + uuid.NewString()
-	envelope := protocol.MutationEnvelope{
-		ProtocolVersion: protocol.Version, OperationID: operationID, Binding: binding,
-		MemoryID: id, Kind: protocol.MutationKindDelete, Generation: uint64(desired),
+	envelope := memoryv1.MutationEnvelope{
+		ProtocolVersion: memoryv1.Version, OperationID: operationID, Binding: binding,
+		MemoryID: id, Kind: memoryv1.MutationKindDelete, Generation: uint64(desired),
 		ExpectedGeneration: uint64(entry.Generation), ExpectedBackendVersion: entry.BackendVersion, State: nil,
 	}
-	if err := protocol.PrepareMutation(&envelope); err != nil {
+	if err := memoryv1.PrepareMutation(&envelope); err != nil {
 		return nil, apierror.New(http.StatusBadRequest, "", "invalid memory delete")
 	}
 	payload, _ := json.Marshal(envelope)
@@ -1070,7 +1070,7 @@ func (s *Service) mutationAdmission(
 	mutationContext MutationContext,
 	authority *ResolvedAuthority,
 	memoryID, operationID, proposalID, requestDigest string,
-	envelope protocol.MutationEnvelope,
+	envelope memoryv1.MutationEnvelope,
 	payload []byte,
 	now time.Time,
 ) store.MemoryMutationAdmission {
@@ -1181,9 +1181,9 @@ func (s *Service) hydrate(
 	if err != nil {
 		return nil, identityError()
 	}
-	response, err := authority.Adapter.Get(ctx, protocol.GetRequest{
-		ProtocolVersion: protocol.Version, Binding: binding,
-		UpsertKey: protocol.CanonicalUpsertKey(binding, entry.ID),
+	response, err := authority.Adapter.Get(ctx, memoryv1.GetRequest{
+		ProtocolVersion: memoryv1.Version, Binding: binding,
+		UpsertKey: memoryv1.CanonicalUpsertKey(binding, entry.ID),
 	})
 	if err != nil {
 		return nil, apierror.New(http.StatusServiceUnavailable, ReasonBackendUnavailable, "memory backend content is unavailable")
@@ -1197,10 +1197,10 @@ func (s *Service) hydrate(
 		return nil, apierror.New(http.StatusConflict, ReasonDiverged, "memory backend materialization is missing")
 	}
 	record := response.Record
-	if record.MemoryID != entry.ID || record.UpsertKey != protocol.CanonicalUpsertKey(binding, entry.ID) ||
+	if record.MemoryID != entry.ID || record.UpsertKey != memoryv1.CanonicalUpsertKey(binding, entry.ID) ||
 		int64(record.Generation) != entry.Generation || record.BackendVersion != entry.BackendVersion ||
 		record.BackendMemoryID != entry.BackendMemoryID || record.ContentDigest != entry.ContentDigest ||
-		protocol.ContentDigest(record.Content) != entry.ContentDigest || record.State != protocol.RecordStateLive ||
+		memoryv1.ContentDigest(record.Content) != entry.ContentDigest || record.State != memoryv1.RecordStateLive ||
 		!remoteRecordCollectionsMatchCatalog(record, entry) {
 		s.markMaterializationIssue(ctx, entry, store.MemoryMaterializationDiverged, "provider materialization verification failed")
 		return nil, apierror.New(http.StatusConflict, ReasonDiverged, "memory backend materialization failed verification")
@@ -1261,14 +1261,14 @@ func (s *Service) normalizeContent(content string, tags []string) (string, []str
 		return "", nil, apierror.New(http.StatusBadRequest, "", "content is required")
 	}
 	limit := s.ContentLimit
-	if limit <= 0 || limit > protocol.MaxContentBytes {
+	if limit <= 0 || limit > memoryv1.MaxContentBytes {
 		limit = defaultMemoryContentBytes
 	}
 	if len([]byte(content)) > limit {
 		return "", nil, apierror.New(http.StatusRequestEntityTooLarge, "", "memory content exceeds the configured limit")
 	}
 	safeTags := redact.SensitiveStringSlice(append([]string{}, nonNilStrings(tags)...))
-	normalized, err := protocol.NormalizeTags(safeTags)
+	normalized, err := memoryv1.NormalizeTags(safeTags)
 	if err != nil {
 		return "", nil, apierror.New(http.StatusBadRequest, "", "invalid memory tags")
 	}
@@ -1277,7 +1277,7 @@ func (s *Service) normalizeContent(content string, tags []string) (string, []str
 
 func validateRemoteMutationLimits(
 	authority *ResolvedAuthority,
-	state *protocol.MutationState,
+	state *memoryv1.MutationState,
 	payload []byte,
 ) error {
 	if authority == nil || authority.Backend == nil || authority.Backend.Status.ObservedCapabilities == nil {
@@ -1309,7 +1309,7 @@ func validateRemoteSearchQueryLimit(authority *ResolvedAuthority, query string) 
 		return apierror.New(http.StatusServiceUnavailable, ReasonBackendUnavailable,
 			"memory search capabilities are unavailable")
 	}
-	maxQueryBytes := protocol.MaxQueryBytes
+	maxQueryBytes := memoryv1.MaxQueryBytes
 	if advertised := authority.Backend.Status.ObservedCapabilities.Limits.MaxQueryBytes; advertised > 0 {
 		maxQueryBytes = min(maxQueryBytes, int(advertised))
 	}
@@ -1320,14 +1320,14 @@ func validateRemoteSearchQueryLimit(authority *ResolvedAuthority, query string) 
 	return nil
 }
 
-func validateRemoteSearchLimits(authority *ResolvedAuthority, request *protocol.SearchRequest) error {
-	if err := protocol.ValidateSearchRequest(request); err != nil {
+func validateRemoteSearchLimits(authority *ResolvedAuthority, request *memoryv1.SearchRequest) error {
+	if err := memoryv1.ValidateSearchRequest(request); err != nil {
 		return apierror.New(http.StatusBadRequest, "", "memory search query is invalid")
 	}
 	if err := validateRemoteSearchQueryLimit(authority, request.Query); err != nil {
 		return err
 	}
-	maxRequestBytes := int64(protocol.MaxHTTPBodyBytes)
+	maxRequestBytes := int64(memoryv1.MaxHTTPBodyBytes)
 	if advertised := authority.Backend.Status.ObservedCapabilities.Limits.MaxRequestBytes; advertised > 0 {
 		maxRequestBytes = min(maxRequestBytes, advertised)
 	}
@@ -1566,7 +1566,7 @@ func replacementMemoryMetadata(
 	if entry == nil {
 		return metadata
 	}
-	changed := entry.ContentDigest != protocol.ContentDigest(content) || !slices.Equal(entry.Tags, tags) ||
+	changed := entry.ContentDigest != memoryv1.ContentDigest(content) || !slices.Equal(entry.Tags, tags) ||
 		entry.SessionName != metadata[metadataSessionName] || entry.AgentName != metadata[metadataAgentName] ||
 		entry.TaskName != metadata[metadataTaskName] || entry.ParentTask != metadata[metadataParentTask] ||
 		normalizeSource(entry.Source) != metadata[metadataSource] || entry.SourceProposalID != metadata[metadataSourceProposalID]
@@ -1604,23 +1604,23 @@ func memoryMetadataFromStore(memory store.Memory) map[string]string {
 	})
 }
 
-func remoteRecordCollectionsMatchCatalog(record *protocol.MemoryRecord, entry *store.RemoteMemoryCatalogEntry) bool {
+func remoteRecordCollectionsMatchCatalog(record *memoryv1.MemoryRecord, entry *store.RemoteMemoryCatalogEntry) bool {
 	if record == nil || entry == nil {
 		return false
 	}
-	expectedTags, err := protocol.NormalizeTags(nonNilStrings(entry.Tags))
+	expectedTags, err := memoryv1.NormalizeTags(nonNilStrings(entry.Tags))
 	if err != nil {
 		return false
 	}
-	actualTags, err := protocol.NormalizeTags(record.Tags)
+	actualTags, err := memoryv1.NormalizeTags(record.Tags)
 	if err != nil || !slices.Equal(actualTags, record.Tags) || !slices.Equal(actualTags, expectedTags) {
 		return false
 	}
-	expectedMetadata, err := protocol.NormalizeMetadata(memoryMetadataFromStore(remoteEntryToMemory(entry, "")))
+	expectedMetadata, err := memoryv1.NormalizeMetadata(memoryMetadataFromStore(remoteEntryToMemory(entry, "")))
 	if err != nil {
 		return false
 	}
-	actualMetadata, err := protocol.NormalizeMetadata(record.Metadata)
+	actualMetadata, err := memoryv1.NormalizeMetadata(record.Metadata)
 	return err == nil && maps.Equal(actualMetadata, record.Metadata) && maps.Equal(actualMetadata, expectedMetadata)
 }
 
@@ -1675,10 +1675,10 @@ func ensureResolvedSearchCapability(backend *corev1alpha1.MemoryBackend, actualM
 	}
 	capability := corev1alpha1.MemoryBackendCapabilityKeywordSearch
 	switch actualMode {
-	case protocol.SearchModeKeyword:
-	case protocol.SearchModeSemantic:
+	case memoryv1.SearchModeKeyword:
+	case memoryv1.SearchModeSemantic:
 		capability = corev1alpha1.MemoryBackendCapabilitySemanticSearch
-	case protocol.SearchModeHybrid:
+	case memoryv1.SearchModeHybrid:
 		capability = corev1alpha1.MemoryBackendCapabilityHybridSearch
 	default:
 		return apierror.New(http.StatusServiceUnavailable, ReasonBackendUnavailable,
@@ -1749,14 +1749,14 @@ func (s *Service) search(
 	}
 	mode := strings.ToLower(strings.TrimSpace(request.Mode))
 	if mode == "" {
-		mode = protocol.SearchModeKeyword
+		mode = memoryv1.SearchModeKeyword
 	}
-	if mode != protocol.SearchModeKeyword && mode != protocol.SearchModeSemantic &&
-		mode != protocol.SearchModeHybrid && mode != protocol.SearchModeAuto {
+	if mode != memoryv1.SearchModeKeyword && mode != memoryv1.SearchModeSemantic &&
+		mode != memoryv1.SearchModeHybrid && mode != memoryv1.SearchModeAuto {
 		return nil, apierror.New(http.StatusBadRequest, "", "invalid memory search mode")
 	}
 	request.Query = strings.TrimSpace(redact.SensitiveText(request.Query))
-	if len(request.Query) > protocol.MaxQueryBytes {
+	if len(request.Query) > memoryv1.MaxQueryBytes {
 		return nil, apierror.New(http.StatusRequestEntityTooLarge, "", "memory search exceeds the protocol query limit")
 	}
 	authority, err := s.resolve(ctx, namespace, true)
@@ -1824,15 +1824,15 @@ func (s *Service) search(
 		return nil, apierror.New(http.StatusServiceUnavailable, ReasonBackendUnavailable,
 			"memory search page size exceeds the active backend capability")
 	}
-	var firstOutbound *protocol.SearchRequest
+	var firstOutbound *memoryv1.SearchRequest
 	if len(cursorState.Pending) > 0 {
-		firstOutbound = &protocol.SearchRequest{
-			ProtocolVersion: protocol.Version, Binding: binding, Mode: mode,
+		firstOutbound = &memoryv1.SearchRequest{
+			ProtocolVersion: memoryv1.Version, Binding: binding, Mode: mode,
 			Query: request.Query, PageSize: cursorState.PageSize, PageToken: replayPageToken,
 		}
 	} else if !cursorState.ProviderExhausted {
-		firstOutbound = &protocol.SearchRequest{
-			ProtocolVersion: protocol.Version, Binding: binding, Mode: mode,
+		firstOutbound = &memoryv1.SearchRequest{
+			ProtocolVersion: memoryv1.Version, Binding: binding, Mode: mode,
 			Query: request.Query, PageSize: cursorState.PageSize, PageToken: cursorState.ProviderToken,
 		}
 	}
@@ -1864,8 +1864,8 @@ func (s *Service) search(
 	pages := 0
 
 	if len(cursorState.Pending) > 0 && len(items) < target && candidates < maxRemoteSearchCandidates {
-		outbound := protocol.SearchRequest{
-			ProtocolVersion: protocol.Version, Binding: binding, Mode: mode,
+		outbound := memoryv1.SearchRequest{
+			ProtocolVersion: memoryv1.Version, Binding: binding, Mode: mode,
 			Query: request.Query, PageSize: cursorState.PageSize, PageToken: replayPageToken,
 		}
 		if err := validateRemoteSearchLimits(authority, &outbound); err != nil {
@@ -1875,7 +1875,7 @@ func (s *Service) search(
 		pages++
 		if searchErr != nil {
 			var adapterErr *AdapterError
-			if errors.As(searchErr, &adapterErr) && adapterErr.Code == protocol.ErrorCodeSearchModeUnsupported {
+			if errors.As(searchErr, &adapterErr) && adapterErr.Code == memoryv1.ErrorCodeSearchModeUnsupported {
 				return nil, apierror.New(http.StatusUnprocessableEntity, ReasonSearchModeUnsupported, "memory search mode is unsupported")
 			}
 			return nil, apierror.New(http.StatusServiceUnavailable, ReasonBackendUnavailable, "memory search backend is unavailable")
@@ -1947,8 +1947,8 @@ func (s *Service) search(
 	for pages < maxRemoteSearchPages && len(items) < target && candidates < maxRemoteSearchCandidates &&
 		len(cursorState.Pending) == 0 && !cursorState.ProviderExhausted {
 		requestPageToken := cursorState.ProviderToken
-		outbound := protocol.SearchRequest{
-			ProtocolVersion: protocol.Version, Binding: binding, Mode: mode,
+		outbound := memoryv1.SearchRequest{
+			ProtocolVersion: memoryv1.Version, Binding: binding, Mode: mode,
 			Query: request.Query, PageSize: cursorState.PageSize, PageToken: requestPageToken,
 		}
 		if err := validateRemoteSearchLimits(authority, &outbound); err != nil {
@@ -1958,7 +1958,7 @@ func (s *Service) search(
 		pages++
 		if searchErr != nil {
 			var adapterErr *AdapterError
-			if errors.As(searchErr, &adapterErr) && adapterErr.Code == protocol.ErrorCodeSearchModeUnsupported {
+			if errors.As(searchErr, &adapterErr) && adapterErr.Code == memoryv1.ErrorCodeSearchModeUnsupported {
 				return nil, apierror.New(http.StatusUnprocessableEntity, ReasonSearchModeUnsupported, "memory search mode is unsupported")
 			}
 			return nil, apierror.New(http.StatusServiceUnavailable, ReasonBackendUnavailable, "memory search backend is unavailable")
@@ -2151,15 +2151,15 @@ func (s *Service) searchLegacy(
 	request SearchRequest,
 	mode string,
 ) (*SearchResponse, error) {
-	if mode == protocol.SearchModeSemantic || mode == protocol.SearchModeHybrid {
-		return nil, apierror.New(http.StatusUnprocessableEntity, protocol.ErrorCodeSearchModeUnsupported,
+	if mode == memoryv1.SearchModeSemantic || mode == memoryv1.SearchModeHybrid {
+		return nil, apierror.New(http.StatusUnprocessableEntity, memoryv1.ErrorCodeSearchModeUnsupported,
 			"memory search mode is unavailable for the legacy backend")
 	}
 	if s.Legacy == nil {
 		return nil, apierror.New(http.StatusNotImplemented, ReasonBackendUnavailable, "memory store is not configured")
 	}
 	request.Query = strings.TrimSpace(redact.SensitiveText(request.Query))
-	queryDigest := memorySearchQueryDigest(request, protocol.SearchModeKeyword)
+	queryDigest := memorySearchQueryDigest(request, memoryv1.SearchModeKeyword)
 	cursorStore := s.legacySearchCursorStore()
 	cursor, err := loadLegacySearchCursor(ctx, cursorStore, authority, queryDigest, request.Cursor, s.now())
 	if err != nil {
@@ -2220,7 +2220,7 @@ func (s *Service) searchLegacy(
 		return nil, legacySearchIncompleteError(next)
 	}
 	return &SearchResponse{
-		Items: items, ActualMode: protocol.SearchModeKeyword, Cursor: next, Exhausted: !hasMore, Complete: complete,
+		Items: items, ActualMode: memoryv1.SearchModeKeyword, Cursor: next, Exhausted: !hasMore, Complete: complete,
 	}, nil
 }
 
@@ -2489,7 +2489,7 @@ func remoteSearchPageSize(authority *ResolvedAuthority) (int, error) {
 			"memory search capabilities are unavailable")
 	}
 	pageSize := int(authority.Backend.Status.ObservedCapabilities.Limits.MaxPageSize)
-	if pageSize <= 0 || pageSize > protocol.MaxPageSize {
+	if pageSize <= 0 || pageSize > memoryv1.MaxPageSize {
 		return 0, apierror.New(http.StatusServiceUnavailable, ReasonBackendUnavailable,
 			"memory search page size capability is invalid")
 	}
@@ -2502,7 +2502,7 @@ func remoteSearchSnapshotRecordLimit(authority *ResolvedAuthority) (int, error) 
 			"memory search capabilities are unavailable")
 	}
 	limit := int(authority.Backend.Status.ObservedCapabilities.Limits.MaxSnapshotRecords)
-	if limit <= 0 || limit > protocol.MaxSnapshotRecords {
+	if limit <= 0 || limit > memoryv1.MaxSnapshotRecords {
 		return 0, apierror.New(http.StatusServiceUnavailable, ReasonBackendUnavailable,
 			"memory search snapshot record capability is invalid")
 	}
@@ -2515,7 +2515,7 @@ func remoteSearchSnapshotTTL(authority *ResolvedAuthority) (time.Duration, error
 			"memory search capabilities are unavailable")
 	}
 	seconds := authority.Backend.Status.ObservedCapabilities.Limits.SnapshotTTLSeconds
-	if seconds <= 0 || seconds > protocol.MaxSnapshotTTLSeconds {
+	if seconds <= 0 || seconds > memoryv1.MaxSnapshotTTLSeconds {
 		return 0, apierror.New(http.StatusServiceUnavailable, ReasonBackendUnavailable,
 			"memory search snapshot TTL capability is invalid")
 	}
@@ -2531,19 +2531,19 @@ func ensureSearchCapability(backend *corev1alpha1.MemoryBackend, mode string) er
 		return slices.Contains(capabilities, capability)
 	}
 	switch mode {
-	case protocol.SearchModeKeyword:
+	case memoryv1.SearchModeKeyword:
 		if !has(corev1alpha1.MemoryBackendCapabilityKeywordSearch) {
 			return apierror.New(http.StatusUnprocessableEntity, ReasonSearchModeUnsupported, "keyword memory search is unsupported")
 		}
-	case protocol.SearchModeSemantic:
+	case memoryv1.SearchModeSemantic:
 		if !has(corev1alpha1.MemoryBackendCapabilitySemanticSearch) {
 			return apierror.New(http.StatusUnprocessableEntity, ReasonSearchModeUnsupported, "semantic memory search is unsupported")
 		}
-	case protocol.SearchModeHybrid:
+	case memoryv1.SearchModeHybrid:
 		if !has(corev1alpha1.MemoryBackendCapabilityHybridSearch) {
 			return apierror.New(http.StatusUnprocessableEntity, ReasonSearchModeUnsupported, "hybrid memory search is unsupported")
 		}
-	case protocol.SearchModeAuto:
+	case memoryv1.SearchModeAuto:
 		if !has(corev1alpha1.MemoryBackendCapabilityKeywordSearch) {
 			return apierror.New(http.StatusUnprocessableEntity, ReasonSearchModeUnsupported, "automatic memory search is unsupported")
 		}
@@ -2625,7 +2625,7 @@ func keywordCatalogEntryMatches(entry *store.RemoteMemoryCatalogEntry, query str
 	return false
 }
 
-func keywordRecordMatches(record *protocol.MemoryRecord, entry *store.RemoteMemoryCatalogEntry, query string) bool {
+func keywordRecordMatches(record *memoryv1.MemoryRecord, entry *store.RemoteMemoryCatalogEntry, query string) bool {
 	query = strings.ToLower(strings.TrimSpace(query))
 	if query == "" {
 		return true
@@ -2688,14 +2688,14 @@ func saveRemoteSearchContinuation(
 	tombstoneContinuation := tombstones != nil && !tombstones.Exhausted
 	if governed == nil || binding == nil || !providerContinuation && !tombstoneContinuation ||
 		normalizedPageLimit <= 0 || normalizedPageLimit > maxRemoteCatalogLimit ||
-		state.PageSize <= 0 || state.PageSize > protocol.MaxPageSize ||
-		(state.ActualMode != protocol.SearchModeKeyword && state.ActualMode != protocol.SearchModeSemantic &&
-			state.ActualMode != protocol.SearchModeHybrid) ||
-		len(state.Pending) > protocol.MaxPageSize || len(state.ReplayPrefix)+len(state.Pending) > protocol.MaxPageSize ||
+		state.PageSize <= 0 || state.PageSize > memoryv1.MaxPageSize ||
+		(state.ActualMode != memoryv1.SearchModeKeyword && state.ActualMode != memoryv1.SearchModeSemantic &&
+			state.ActualMode != memoryv1.SearchModeHybrid) ||
+		len(state.Pending) > memoryv1.MaxPageSize || len(state.ReplayPrefix)+len(state.Pending) > memoryv1.MaxPageSize ||
 		(len(state.Pending) > 0) != (replayPageToken != "") || (len(state.Pending) == 0 && len(state.ReplayPrefix) > 0) ||
 		state.ProviderExhausted != (state.ProviderToken == "") ||
 		(replayPageToken != "" && !state.ProviderExhausted && replayPageToken == state.ProviderToken) ||
-		len(state.ProviderToken) > protocol.MaxPageTokenBytes || len(replayPageToken) > protocol.MaxPageTokenBytes ||
+		len(state.ProviderToken) > memoryv1.MaxPageTokenBytes || len(replayPageToken) > memoryv1.MaxPageTokenBytes ||
 		tombstones != nil && !tombstones.valid() || !validRemoteSearchSeenRecordState(state.SeenRecordState) ||
 		providerContinuation && !remoteSearchSeenRecordStatePresent(state.SeenRecordState) {
 		return "", errors.New("memory search cursor state is unavailable")
@@ -2741,7 +2741,7 @@ func saveRemoteSearchContinuation(
 			continuationToken = replayPageToken
 		}
 		var ok bool
-		expiresAt, ok = (protocol.SearchResponse{
+		expiresAt, ok = (memoryv1.SearchResponse{
 			NextPageToken: continuationToken, SnapshotExpiresAt: snapshotExpiresAt,
 		}).ContinuationExpiresAt(expiresAt)
 		if !ok || !expiresAt.After(now) {
@@ -2757,7 +2757,7 @@ func saveRemoteSearchContinuation(
 	}
 	if err := governed.SaveMemorySearchCursor(ctx, store.MemorySearchCursorState{
 		ID: id, NamespaceUID: binding.NamespaceUID,
-		BindingDigest: protocol.BindingDigest(identity), QueryDigest: queryDigest,
+		BindingDigest: memoryv1.BindingDigest(identity), QueryDigest: queryDigest,
 		State: payload, CreatedAt: now, ExpiresAt: expiresAt,
 	}); err != nil {
 		return "", err
@@ -2801,7 +2801,7 @@ func loadRemoteSearchContinuation(
 		return remoteSearchCursor{}, "", time.Time{}, nil, err
 	}
 	if stored.ID != encoded || stored.NamespaceUID != binding.NamespaceUID ||
-		stored.BindingDigest != protocol.BindingDigest(identity) || stored.QueryDigest != queryDigest ||
+		stored.BindingDigest != memoryv1.BindingDigest(identity) || stored.QueryDigest != queryDigest ||
 		len(stored.State) == 0 || len(stored.State) > maxRemoteSearchCursorBytes {
 		return remoteSearchCursor{}, "", time.Time{}, nil, errors.New("mismatched memory search cursor")
 	}
@@ -2813,16 +2813,16 @@ func loadRemoteSearchContinuation(
 	providerContinuation := cursor.ProviderToken != "" || len(cursor.Pending) > 0
 	tombstoneContinuation := persisted.Tombstones != nil && !persisted.Tombstones.Exhausted
 	snapshotExpiresAt := persisted.SnapshotExpiresAt.UTC()
-	if cursor.PageSize <= 0 || cursor.PageSize > protocol.MaxPageSize ||
-		(cursor.ActualMode != protocol.SearchModeKeyword && cursor.ActualMode != protocol.SearchModeSemantic &&
-			cursor.ActualMode != protocol.SearchModeHybrid) ||
-		!providerContinuation && !tombstoneContinuation || len(cursor.Pending) > protocol.MaxPageSize ||
-		len(cursor.ReplayPrefix)+len(cursor.Pending) > protocol.MaxPageSize ||
+	if cursor.PageSize <= 0 || cursor.PageSize > memoryv1.MaxPageSize ||
+		(cursor.ActualMode != memoryv1.SearchModeKeyword && cursor.ActualMode != memoryv1.SearchModeSemantic &&
+			cursor.ActualMode != memoryv1.SearchModeHybrid) ||
+		!providerContinuation && !tombstoneContinuation || len(cursor.Pending) > memoryv1.MaxPageSize ||
+		len(cursor.ReplayPrefix)+len(cursor.Pending) > memoryv1.MaxPageSize ||
 		(len(cursor.Pending) > 0) != (persisted.ReplayPageToken != "") ||
 		(len(cursor.Pending) == 0 && len(cursor.ReplayPrefix) > 0) ||
 		cursor.ProviderExhausted != (cursor.ProviderToken == "") ||
 		(persisted.ReplayPageToken != "" && !cursor.ProviderExhausted && persisted.ReplayPageToken == cursor.ProviderToken) ||
-		len(cursor.ProviderToken) > protocol.MaxPageTokenBytes || len(persisted.ReplayPageToken) > protocol.MaxPageTokenBytes ||
+		len(cursor.ProviderToken) > memoryv1.MaxPageTokenBytes || len(persisted.ReplayPageToken) > memoryv1.MaxPageTokenBytes ||
 		persisted.Tombstones != nil && !persisted.Tombstones.valid() ||
 		!validRemoteSearchSeenRecordState(cursor.SeenRecordState) ||
 		providerContinuation != remoteSearchSeenRecordStatePresent(cursor.SeenRecordState) ||
@@ -2846,8 +2846,8 @@ func loadRemoteSearchContinuation(
 }
 
 func validateRemoteSearchPage(
-	response *protocol.SearchResponse,
-	binding protocol.Binding,
+	response *memoryv1.SearchResponse,
+	binding memoryv1.Binding,
 	requestedMode string,
 	pageSize int,
 	expectedActualMode string,
@@ -2863,10 +2863,10 @@ func validateRemoteSearchPage(
 		return time.Time{}, identityError()
 	}
 	if response.RequestedMode != requestedMode || len(response.Records) > pageSize ||
-		(response.ActualMode != protocol.SearchModeKeyword && response.ActualMode != protocol.SearchModeSemantic &&
-			response.ActualMode != protocol.SearchModeHybrid) ||
-		(requestedMode != protocol.SearchModeAuto && response.ActualMode != requestedMode) ||
-		response.Exhausted != (response.NextPageToken == "") || len(response.NextPageToken) > protocol.MaxPageTokenBytes {
+		(response.ActualMode != memoryv1.SearchModeKeyword && response.ActualMode != memoryv1.SearchModeSemantic &&
+			response.ActualMode != memoryv1.SearchModeHybrid) ||
+		(requestedMode != memoryv1.SearchModeAuto && response.ActualMode != requestedMode) ||
+		response.Exhausted != (response.NextPageToken == "") || len(response.NextPageToken) > memoryv1.MaxPageTokenBytes {
 		return time.Time{}, apierror.New(http.StatusServiceUnavailable, ReasonBackendUnavailable,
 			"memory search backend returned an invalid page")
 	}
@@ -2892,7 +2892,7 @@ func validateRemoteSearchPage(
 
 func validateRemoteSearchReplayPrefixIdentities(
 	seenRecordState []byte,
-	records []protocol.MemoryRecord,
+	records []memoryv1.MemoryRecord,
 ) error {
 	probe := cloneRemoteSearchSeenRecordState(seenRecordState)
 	for i := range records {
@@ -2907,7 +2907,7 @@ func validateRemoteSearchReplayPrefixIdentities(
 
 func validateRemoteSearchRecordIdentities(
 	seenRecordState []byte,
-	records []protocol.MemoryRecord,
+	records []memoryv1.MemoryRecord,
 	maximumRecords int,
 ) error {
 	candidateState := cloneRemoteSearchSeenRecordState(seenRecordState)
@@ -2942,7 +2942,7 @@ func trackRemoteSearchRecordIdentity(state *[]byte, upsertKey string) error {
 
 func appendSearchCursorRecords(
 	pending []remoteSearchCursorRecord,
-	records []protocol.MemoryRecord,
+	records []memoryv1.MemoryRecord,
 ) []remoteSearchCursorRecord {
 	for i := range records {
 		record := &records[i]
@@ -2955,7 +2955,7 @@ func appendSearchCursorRecords(
 	return pending
 }
 
-func searchCursorRecordMatches(descriptor remoteSearchCursorRecord, record *protocol.MemoryRecord) bool {
+func searchCursorRecordMatches(descriptor remoteSearchCursorRecord, record *memoryv1.MemoryRecord) bool {
 	return record != nil && record.MemoryID == descriptor.MemoryID && record.UpsertKey == descriptor.UpsertKey &&
 		record.Generation == descriptor.Generation &&
 		record.BackendVersion == descriptor.BackendVersion && record.BackendMemoryID == descriptor.BackendMemoryID &&
@@ -2965,8 +2965,8 @@ func searchCursorRecordMatches(descriptor remoteSearchCursorRecord, record *prot
 func (s *Service) searchHit(
 	ctx context.Context,
 	authority *ResolvedAuthority,
-	binding protocol.Binding,
-	record *protocol.MemoryRecord,
+	binding memoryv1.Binding,
+	record *memoryv1.MemoryRecord,
 	score float64,
 	request SearchRequest,
 	actualMode string,
@@ -2985,13 +2985,13 @@ func (s *Service) searchHit(
 		entry.MaterializationState != store.MemoryMaterializationActive || !searchEntryEligible(entry, request) {
 		return nil, false, nil
 	}
-	if record.State != protocol.RecordStateLive || record.UpsertKey != protocol.CanonicalUpsertKey(binding, entry.ID) ||
+	if record.State != memoryv1.RecordStateLive || record.UpsertKey != memoryv1.CanonicalUpsertKey(binding, entry.ID) ||
 		int64(record.Generation) != entry.Generation || record.BackendVersion != entry.BackendVersion ||
 		record.BackendMemoryID != entry.BackendMemoryID || record.ContentDigest != entry.ContentDigest ||
-		protocol.ContentDigest(record.Content) != entry.ContentDigest || !remoteRecordCollectionsMatchCatalog(record, entry) {
+		memoryv1.ContentDigest(record.Content) != entry.ContentDigest || !remoteRecordCollectionsMatchCatalog(record, entry) {
 		return nil, false, apierror.New(http.StatusConflict, ReasonDiverged, "memory search result failed materialization verification")
 	}
-	if actualMode == protocol.SearchModeKeyword && !keywordRecordMatches(record, entry, request.Query) {
+	if actualMode == memoryv1.SearchModeKeyword && !keywordRecordMatches(record, entry, request.Query) {
 		return nil, false, nil
 	}
 	memory := remoteEntryToMemory(entry, record.Content)
@@ -3094,13 +3094,13 @@ func (s *Service) ApplyMemoryProposal(
 		metadataAgentName: proposal.AgentName, metadataTaskName: proposal.TaskName,
 		metadataSource: memorySourceProposal, metadataSourceProposalID: proposal.ID,
 	})
-	envelope := protocol.MutationEnvelope{
-		ProtocolVersion: protocol.Version, OperationID: operationID, Binding: binding,
-		MemoryID: memoryID, Kind: protocol.MutationKindCreate,
+	envelope := memoryv1.MutationEnvelope{
+		ProtocolVersion: memoryv1.Version, OperationID: operationID, Binding: binding,
+		MemoryID: memoryID, Kind: memoryv1.MutationKindCreate,
 		Generation: uint64(desiredGeneration), ExpectedGeneration: uint64(expectedGeneration),
-		State: &protocol.MutationState{Content: content, Tags: tags, Metadata: metadata},
+		State: &memoryv1.MutationState{Content: content, Tags: tags, Metadata: metadata},
 	}
-	if err := protocol.PrepareMutation(&envelope); err != nil {
+	if err := memoryv1.PrepareMutation(&envelope); err != nil {
 		return nil, apierror.New(http.StatusBadRequest, "", "invalid proposal memory mutation")
 	}
 	payload, _ := json.Marshal(envelope)
@@ -3157,7 +3157,7 @@ func (s *Service) RetryMemoryOperation(ctx context.Context, namespace, id, actor
 }
 
 // AbandonMemoryOperation derives provider non-application and durable fencing
-// from authenticated OMS calls; callers supply only audited intent metadata.
+// from authenticated memory protocol calls; callers supply only audited intent metadata.
 func (s *Service) AbandonMemoryOperation(
 	ctx context.Context,
 	namespace, id, actor, reason, requestID string,
@@ -3195,16 +3195,16 @@ func (s *Service) AbandonMemoryOperation(
 	if err != nil {
 		return nil, identityError()
 	}
-	fence, err := authority.Adapter.AdvanceRoutingFence(ctx, protocol.RoutingFenceRequest{
-		ProtocolVersion: protocol.Version, Binding: binding,
+	fence, err := authority.Adapter.AdvanceRoutingFence(ctx, memoryv1.RoutingFenceRequest{
+		ProtocolVersion: memoryv1.Version, Binding: binding,
 	})
 	if err != nil {
 		return nil, apierror.New(http.StatusServiceUnavailable, ReasonBackendUnavailable,
 			"memory provider fence could not be verified")
 	}
-	if fence == nil || fence.Binding != binding || fence.BindingDigest != protocol.BindingDigest(binding) ||
+	if fence == nil || fence.Binding != binding || fence.BindingDigest != memoryv1.BindingDigest(binding) ||
 		fence.MaximumRoutingEpoch < binding.RoutingEpoch ||
-		(fence.Result != protocol.ResultApplied && fence.Result != protocol.ResultPreconditionFailed) {
+		(fence.Result != memoryv1.ResultApplied && fence.Result != memoryv1.ResultPreconditionFailed) {
 		return nil, apierror.New(http.StatusConflict, ReasonIdentityMismatch,
 			"memory provider returned an invalid routing fence acknowledgement")
 	}
@@ -3212,8 +3212,8 @@ func (s *Service) AbandonMemoryOperation(
 		return nil, apierror.New(http.StatusConflict, ReasonOperationInProgress,
 			"sent memory operation cannot be abandoned until a newer routing epoch is durably fenced")
 	}
-	lookup, err := authority.Adapter.LookupOperation(ctx, protocol.OperationLookupRequest{
-		ProtocolVersion: protocol.Version, Binding: binding, OperationID: operation.ID,
+	lookup, err := authority.Adapter.LookupOperation(ctx, memoryv1.OperationLookupRequest{
+		ProtocolVersion: memoryv1.Version, Binding: binding, OperationID: operation.ID,
 	})
 	if err != nil {
 		return nil, apierror.New(http.StatusServiceUnavailable, ReasonBackendUnavailable,
@@ -3236,9 +3236,9 @@ func (s *Service) AbandonMemoryOperation(
 }
 
 func providerOperationNeverApplied(
-	currentBinding protocol.Binding,
+	currentBinding memoryv1.Binding,
 	operation *store.MemoryOperation,
-	lookup *protocol.OperationLookupResponse,
+	lookup *memoryv1.OperationLookupResponse,
 ) (bool, error) {
 	if operation == nil || lookup == nil || lookup.Binding != currentBinding {
 		return false, apierror.New(http.StatusConflict, ReasonIdentityMismatch,
@@ -3253,17 +3253,17 @@ func providerOperationNeverApplied(
 	}
 	receipt := lookup.Receipt
 	if receipt == nil || receipt.OperationID != operation.ID || receipt.MutationDigest != operation.MutationDigest ||
-		protocol.AuthorityDigest(receipt.Binding) != protocol.AuthorityDigest(currentBinding) ||
+		memoryv1.AuthorityDigest(receipt.Binding) != memoryv1.AuthorityDigest(currentBinding) ||
 		int64(receipt.Binding.RoutingEpoch) != operation.RoutingEpoch {
 		return false, apierror.New(http.StatusConflict, ReasonIdentityMismatch,
 			"memory provider operation receipt did not correlate to the operation")
 	}
 	switch receipt.Result {
-	case protocol.ResultApplied, protocol.ResultNotFound:
+	case memoryv1.ResultApplied, memoryv1.ResultNotFound:
 		return false, apierror.New(http.StatusConflict, ReasonOperationInProgress,
 			"memory provider reports that the operation was applied")
-	case protocol.ResultPreconditionFailed, protocol.ResultIdempotencyConflict, protocol.ResultIdentityConflict,
-		protocol.ResultRetryableError, protocol.ResultNonRetryableError:
+	case memoryv1.ResultPreconditionFailed, memoryv1.ResultIdempotencyConflict, memoryv1.ResultIdentityConflict,
+		memoryv1.ResultRetryableError, memoryv1.ResultNonRetryableError:
 		return true, nil
 	default:
 		return false, apierror.New(http.StatusConflict, ReasonIdentityMismatch,

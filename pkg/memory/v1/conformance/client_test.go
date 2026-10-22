@@ -93,7 +93,7 @@ func TestContractClientPreservesAndValidatesClosedResponseHeaders(t *testing.T) 
 				if tc.cacheControl != "" {
 					writer.Header().Set("Cache-Control", tc.cacheControl)
 				}
-				_, _ = writer.Write([]byte(`{"protocolVersion":"orka.oms.v0alpha1","status":"ok"}`))
+				_, _ = writer.Write([]byte(`{"protocolVersion":"orka.memory.v1","status":"ok"}`))
 			}))
 			t.Cleanup(server.Close)
 			client, err := newContractClient(Target{

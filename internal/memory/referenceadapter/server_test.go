@@ -17,13 +17,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/orka-agents/orka/pkg/oms/conformance"
-	"github.com/orka-agents/orka/pkg/oms/protocol"
+	memoryv1 "github.com/orka-agents/orka/pkg/memory/v1"
+	"github.com/orka-agents/orka/pkg/memory/v1/conformance"
 )
 
 func TestReferenceAdapterPassesConformance(t *testing.T) {
 	t.Parallel()
-	server := openTestAdapter(t, filepath.Join(t.TempDir(), "oms.db"))
+	server := openTestAdapter(t, filepath.Join(t.TempDir(), "adapter.db"))
 	httpServer := httptest.NewServer(server.Handler())
 	t.Cleanup(httpServer.Close)
 
@@ -40,7 +40,7 @@ func TestReferenceAdapterPassesConformance(t *testing.T) {
 
 func TestReferenceAdapterStateSurvivesReopen(t *testing.T) {
 	t.Parallel()
-	path := filepath.Join(t.TempDir(), "oms.db")
+	path := filepath.Join(t.TempDir(), "adapter.db")
 	first := openTestAdapter(t, path)
 	firstHTTP := httptest.NewServer(first.Handler())
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -73,47 +73,47 @@ func TestReferenceAdapterStateSurvivesReopen(t *testing.T) {
 
 func TestReferenceAdapterAcceptsPlanMaximumContent(t *testing.T) {
 	t.Parallel()
-	adapter := openTestAdapter(t, filepath.Join(t.TempDir(), "oms.db"))
+	adapter := openTestAdapter(t, filepath.Join(t.TempDir(), "adapter.db"))
 	httpServer := httptest.NewServer(adapter.Handler())
 	t.Cleanup(httpServer.Close)
 	binding := conformance.DefaultBinding()
-	storeBinding := protocol.StoreResolutionBinding{
+	storeBinding := memoryv1.StoreResolutionBinding{
 		ClusterID: binding.ClusterID, NamespaceUID: binding.NamespaceUID,
 		BackendUID: binding.BackendUID, TenantID: binding.TenantID,
 	}
-	resolveBody := postTestJSON(t, httpServer.Client(), httpServer.URL+protocol.PathStoreResolve, protocol.StoreResolveRequest{
-		ProtocolVersion: protocol.Version, Binding: storeBinding, StoreName: "maximum-content",
+	resolveBody := postTestJSON(t, httpServer.Client(), httpServer.URL+memoryv1.PathStoreResolve, memoryv1.StoreResolveRequest{
+		ProtocolVersion: memoryv1.Version, Binding: storeBinding, StoreName: "maximum-content",
 	})
-	resolved, err := protocol.DecodeStoreResolveResponse(resolveBody)
+	resolved, err := memoryv1.DecodeStoreResolveResponse(resolveBody)
 	if err != nil {
 		t.Fatalf("decode store resolution: %v", err)
 	}
 	binding.StoreUUID = resolved.StoreUUID
-	claimBody := postTestJSON(t, httpServer.Client(), httpServer.URL+protocol.PathOwnershipClaim, protocol.OwnershipClaimRequest{
-		ProtocolVersion: protocol.Version, Binding: binding,
+	claimBody := postTestJSON(t, httpServer.Client(), httpServer.URL+memoryv1.PathOwnershipClaim, memoryv1.OwnershipClaimRequest{
+		ProtocolVersion: memoryv1.Version, Binding: binding,
 	})
-	claim, err := protocol.DecodeOwnershipClaimResponse(claimBody)
-	if err != nil || claim.Result != protocol.ResultApplied {
+	claim, err := memoryv1.DecodeOwnershipClaimResponse(claimBody)
+	if err != nil || claim.Result != memoryv1.ResultApplied {
 		t.Fatalf("ownership claim = %#v, err = %v", claim, err)
 	}
-	mutation := protocol.MutationEnvelope{
-		ProtocolVersion: protocol.Version, OperationID: "mop-maximum-content", Binding: binding,
-		MemoryID: "mem-maximum-content", Kind: protocol.MutationKindCreate, Generation: 1,
-		State: &protocol.MutationState{
-			Content: strings.Repeat("\n", protocol.MaxContentBytes), Tags: []string{"maximum"}, Metadata: map[string]string{},
+	mutation := memoryv1.MutationEnvelope{
+		ProtocolVersion: memoryv1.Version, OperationID: "mop-maximum-content", Binding: binding,
+		MemoryID: "mem-maximum-content", Kind: memoryv1.MutationKindCreate, Generation: 1,
+		State: &memoryv1.MutationState{
+			Content: strings.Repeat("\n", memoryv1.MaxContentBytes), Tags: []string{"maximum"}, Metadata: map[string]string{},
 		},
 	}
-	if err := protocol.PrepareMutation(&mutation); err != nil {
+	if err := memoryv1.PrepareMutation(&mutation); err != nil {
 		t.Fatalf("PrepareMutation(): %v", err)
 	}
-	receiptBody := postTestJSON(t, httpServer.Client(), httpServer.URL+protocol.PathMutations, mutation)
-	receipt, err := protocol.DecodeMutationReceipt(receiptBody)
-	if err != nil || receipt.Result != protocol.ResultApplied {
+	receiptBody := postTestJSON(t, httpServer.Client(), httpServer.URL+memoryv1.PathMutations, mutation)
+	receipt, err := memoryv1.DecodeMutationReceipt(receiptBody)
+	if err != nil || receipt.Result != memoryv1.ResultApplied {
 		t.Fatalf("maximum-content receipt = %#v, err = %v", receipt, err)
 	}
-	response, err := protocol.DecodeSearchResponse(postTestJSON(t, httpServer.Client(), httpServer.URL+protocol.PathSearch,
-		protocol.SearchRequest{
-			ProtocolVersion: protocol.Version, Binding: binding, Mode: protocol.SearchModeKeyword,
+	response, err := memoryv1.DecodeSearchResponse(postTestJSON(t, httpServer.Client(), httpServer.URL+memoryv1.PathSearch,
+		memoryv1.SearchRequest{
+			ProtocolVersion: memoryv1.Version, Binding: binding, Mode: memoryv1.SearchModeKeyword,
 			Query: "", PageSize: 1, PageToken: "",
 		}))
 	if err != nil || len(response.Records) != 1 || response.Records[0].Content != mutation.State.Content {
@@ -122,20 +122,20 @@ func TestReferenceAdapterAcceptsPlanMaximumContent(t *testing.T) {
 }
 
 func TestReferenceAdapterTerminalFirstPagesDoNotConsumeSnapshotQuota(t *testing.T) {
-	adapter := openTestAdapter(t, filepath.Join(t.TempDir(), "oms.db"))
+	adapter := openTestAdapter(t, filepath.Join(t.TempDir(), "adapter.db"))
 	httpServer := httptest.NewServer(adapter.Handler())
 	t.Cleanup(httpServer.Close)
 	binding := resolveAndClaimReferenceBinding(t, httpServer, "terminal-first-page")
-	search := protocol.SearchRequest{
-		ProtocolVersion: protocol.Version, Binding: binding, Mode: protocol.SearchModeKeyword,
+	search := memoryv1.SearchRequest{
+		ProtocolVersion: memoryv1.Version, Binding: binding, Mode: memoryv1.SearchModeKeyword,
 		Query: "", PageSize: 1, PageToken: "",
 	}
 
 	assertTerminalSearch := func(label string, wantRecords int) {
 		t.Helper()
 		for i := 0; i <= maxActiveSearchSnapshotsPerAuthority; i++ {
-			response, err := protocol.DecodeSearchResponse(postTestJSON(
-				t, httpServer.Client(), httpServer.URL+protocol.PathSearch, search,
+			response, err := memoryv1.DecodeSearchResponse(postTestJSON(
+				t, httpServer.Client(), httpServer.URL+memoryv1.PathSearch, search,
 			))
 			if err != nil {
 				t.Fatalf("%s search %d: %v", label, i, err)
@@ -161,7 +161,7 @@ func TestReferenceAdapterTerminalFirstPagesDoNotConsumeSnapshotQuota(t *testing.
 }
 
 func TestReferenceAdapterTerminalContinuationReleasesStableSnapshot(t *testing.T) {
-	adapter := openTestAdapter(t, filepath.Join(t.TempDir(), "oms.db"))
+	adapter := openTestAdapter(t, filepath.Join(t.TempDir(), "adapter.db"))
 	httpServer := httptest.NewServer(adapter.Handler())
 	t.Cleanup(httpServer.Close)
 	binding := resolveAndClaimReferenceBinding(t, httpServer, "terminal-continuation")
@@ -171,12 +171,12 @@ func TestReferenceAdapterTerminalContinuationReleasesStableSnapshot(t *testing.T
 			fmt.Sprintf("mem-terminal-continuation-%d", i),
 			fmt.Sprintf("original-%d", i))
 	}
-	search := protocol.SearchRequest{
-		ProtocolVersion: protocol.Version, Binding: binding, Mode: protocol.SearchModeKeyword,
+	search := memoryv1.SearchRequest{
+		ProtocolVersion: memoryv1.Version, Binding: binding, Mode: memoryv1.SearchModeKeyword,
 		Query: "", PageSize: 2, PageToken: "",
 	}
-	first, err := protocol.DecodeSearchResponse(postTestJSON(
-		t, httpServer.Client(), httpServer.URL+protocol.PathSearch, search,
+	first, err := memoryv1.DecodeSearchResponse(postTestJSON(
+		t, httpServer.Client(), httpServer.URL+memoryv1.PathSearch, search,
 	))
 	if err != nil {
 		t.Fatal(err)
@@ -192,26 +192,26 @@ func TestReferenceAdapterTerminalContinuationReleasesStableSnapshot(t *testing.T
 		t.Fatalf("active snapshots after first page = %d, want 1", active)
 	}
 
-	replacement := protocol.MutationEnvelope{
-		ProtocolVersion: protocol.Version, OperationID: "mop-terminal-continuation-replace", Binding: binding,
-		MemoryID: "mem-terminal-continuation-3", Kind: protocol.MutationKindReplace,
+	replacement := memoryv1.MutationEnvelope{
+		ProtocolVersion: memoryv1.Version, OperationID: "mop-terminal-continuation-replace", Binding: binding,
+		MemoryID: "mem-terminal-continuation-3", Kind: memoryv1.MutationKindReplace,
 		Generation: 2, ExpectedGeneration: 1, ExpectedBackendVersion: "ref-v1",
-		State: &protocol.MutationState{Content: "updated-3", Tags: []string{"snapshot"}, Metadata: map[string]string{}},
+		State: &memoryv1.MutationState{Content: "updated-3", Tags: []string{"snapshot"}, Metadata: map[string]string{}},
 	}
-	if err := protocol.PrepareMutation(&replacement); err != nil {
+	if err := memoryv1.PrepareMutation(&replacement); err != nil {
 		t.Fatal(err)
 	}
-	receipt, err := protocol.DecodeMutationReceipt(postTestJSON(
-		t, httpServer.Client(), httpServer.URL+protocol.PathMutations, replacement,
+	receipt, err := memoryv1.DecodeMutationReceipt(postTestJSON(
+		t, httpServer.Client(), httpServer.URL+memoryv1.PathMutations, replacement,
 	))
-	if err != nil || receipt.Result != protocol.ResultApplied {
+	if err != nil || receipt.Result != memoryv1.ResultApplied {
 		t.Fatalf("replacement receipt = %#v, err = %v", receipt, err)
 	}
 
 	nextPage := first.NextPageToken
 	search.PageToken = nextPage
-	terminalBody := postTestJSON(t, httpServer.Client(), httpServer.URL+protocol.PathSearch, search)
-	last, err := protocol.DecodeSearchResponse(terminalBody)
+	terminalBody := postTestJSON(t, httpServer.Client(), httpServer.URL+memoryv1.PathSearch, search)
+	last, err := memoryv1.DecodeSearchResponse(terminalBody)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,27 +237,27 @@ func TestReferenceAdapterTerminalContinuationReleasesStableSnapshot(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ensureSearchSnapshotCountCapacityInTx(t.Context(), tx, protocol.AuthorityDigest(binding)); err != nil {
+	if err := ensureSearchSnapshotCountCapacityInTx(t.Context(), tx, memoryv1.AuthorityDigest(binding)); err != nil {
 		_ = tx.Rollback()
 		t.Fatalf("terminal replay snapshot consumed active quota: %v", err)
 	}
 	if err := tx.Rollback(); err != nil {
 		t.Fatal(err)
 	}
-	if replay := postTestJSON(t, httpServer.Client(), httpServer.URL+protocol.PathSearch, search); !bytes.Equal(replay, terminalBody) {
+	if replay := postTestJSON(t, httpServer.Client(), httpServer.URL+memoryv1.PathSearch, search); !bytes.Equal(replay, terminalBody) {
 		t.Fatalf("terminal page replay changed response: got %s want %s", replay, terminalBody)
 	}
 }
 
 func TestReferenceAdapterUpgradesV1PaginationSchema(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "oms.db")
+	path := filepath.Join(t.TempDir(), "adapter.db")
 	legacy, err := sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, statement := range []string{
-		`CREATE TABLE oms_schema (id INTEGER PRIMARY KEY CHECK (id = 1), version INTEGER NOT NULL)`,
-		`INSERT INTO oms_schema(id, version) VALUES(1, 1)`,
+		`CREATE TABLE adapter_schema (id INTEGER PRIMARY KEY CHECK (id = 1), version INTEGER NOT NULL)`,
+		`INSERT INTO adapter_schema(id, version) VALUES(1, 1)`,
 		`CREATE TABLE pagination_snapshots (
 			snapshot_id TEXT PRIMARY KEY,
 			authority_digest TEXT NOT NULL,
@@ -285,7 +285,7 @@ func TestReferenceAdapterUpgradesV1PaginationSchema(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = db.close() })
 	var version int
-	if err := db.db.QueryRow(`SELECT version FROM oms_schema WHERE id = 1`).Scan(&version); err != nil {
+	if err := db.db.QueryRow(`SELECT version FROM adapter_schema WHERE id = 1`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
 	if version != schemaVersion {
@@ -296,7 +296,7 @@ func TestReferenceAdapterUpgradesV1PaginationSchema(t *testing.T) {
 		snapshot_id, authority_digest, request_fingerprint, requested_mode, actual_mode,
 		page_size, entry_count, created_at, expires_at
 	) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)`, "legacy-snapshot", "authority", "fingerprint",
-		protocol.SearchModeKeyword, protocol.SearchModeKeyword, 1, 0, formatTime(now), formatTime(now.Add(time.Hour))); err != nil {
+		memoryv1.SearchModeKeyword, memoryv1.SearchModeKeyword, 1, 0, formatTime(now), formatTime(now.Add(time.Hour))); err != nil {
 		t.Fatal(err)
 	}
 	var terminal int
@@ -309,44 +309,44 @@ func TestReferenceAdapterUpgradesV1PaginationSchema(t *testing.T) {
 }
 
 func TestReferenceAdapterRejectsOversizedSearchSnapshot(t *testing.T) {
-	adapter := openTestAdapter(t, filepath.Join(t.TempDir(), "oms.db"))
+	adapter := openTestAdapter(t, filepath.Join(t.TempDir(), "adapter.db"))
 	httpServer := httptest.NewServer(adapter.Handler())
 	t.Cleanup(httpServer.Close)
 	binding := resolveAndClaimReferenceBinding(t, httpServer, "snapshot-bytes")
-	content := strings.Repeat("\n", protocol.MaxContentBytes)
-	recordCount := maxSearchSnapshotBytes/(2*protocol.MaxContentBytes) + 1
+	content := strings.Repeat("\n", memoryv1.MaxContentBytes)
+	recordCount := maxSearchSnapshotBytes/(2*memoryv1.MaxContentBytes) + 1
 	for i := range recordCount {
-		mutation := protocol.MutationEnvelope{
-			ProtocolVersion: protocol.Version, OperationID: fmt.Sprintf("mop-snapshot-bytes-%d", i), Binding: binding,
-			MemoryID: fmt.Sprintf("mem-snapshot-bytes-%d", i), Kind: protocol.MutationKindCreate, Generation: 1,
-			State: &protocol.MutationState{Content: content, Tags: []string{}, Metadata: map[string]string{}},
+		mutation := memoryv1.MutationEnvelope{
+			ProtocolVersion: memoryv1.Version, OperationID: fmt.Sprintf("mop-snapshot-bytes-%d", i), Binding: binding,
+			MemoryID: fmt.Sprintf("mem-snapshot-bytes-%d", i), Kind: memoryv1.MutationKindCreate, Generation: 1,
+			State: &memoryv1.MutationState{Content: content, Tags: []string{}, Metadata: map[string]string{}},
 		}
-		if err := protocol.PrepareMutation(&mutation); err != nil {
+		if err := memoryv1.PrepareMutation(&mutation); err != nil {
 			t.Fatal(err)
 		}
-		postTestJSON(t, httpServer.Client(), httpServer.URL+protocol.PathMutations, mutation)
+		postTestJSON(t, httpServer.Client(), httpServer.URL+memoryv1.PathMutations, mutation)
 	}
-	body, status := postTestJSONStatus(t, httpServer.Client(), httpServer.URL+protocol.PathSearch, protocol.SearchRequest{
-		ProtocolVersion: protocol.Version, Binding: binding, Mode: protocol.SearchModeKeyword, Query: "", PageSize: 1,
+	body, status := postTestJSONStatus(t, httpServer.Client(), httpServer.URL+memoryv1.PathSearch, memoryv1.SearchRequest{
+		ProtocolVersion: memoryv1.Version, Binding: binding, Mode: memoryv1.SearchModeKeyword, Query: "", PageSize: 1,
 	})
 	if status != http.StatusServiceUnavailable {
 		t.Fatalf("oversized snapshot status = %d, want %d: %s", status, http.StatusServiceUnavailable, body)
 	}
-	response, err := protocol.DecodeErrorResponse(body)
-	if err != nil || response.Code != protocol.ErrorCodeSnapshotCapacity {
+	response, err := memoryv1.DecodeErrorResponse(body)
+	if err != nil || response.Code != memoryv1.ErrorCodeSnapshotCapacity {
 		t.Fatalf("oversized snapshot response = %#v, err = %v", response, err)
 	}
 }
 
 func TestReferenceAdapterGlobalSearchSnapshotQuota(t *testing.T) {
-	adapter := openTestAdapter(t, filepath.Join(t.TempDir(), "oms.db"))
+	adapter := openTestAdapter(t, filepath.Join(t.TempDir(), "adapter.db"))
 	now := time.Now().UTC()
 	for i := range maxActiveSearchSnapshotsGlobal {
 		_, err := adapter.db.db.Exec(`INSERT INTO pagination_snapshots(
 			snapshot_id, authority_digest, request_fingerprint, requested_mode, actual_mode,
 			page_size, entry_count, created_at, expires_at
 		) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)`, fmt.Sprintf("seed-%032d", i), fmt.Sprintf("authority-%d", i),
-			"fingerprint", protocol.SearchModeKeyword, protocol.SearchModeKeyword, 1, 0, formatTime(now), formatTime(now.Add(time.Hour)))
+			"fingerprint", memoryv1.SearchModeKeyword, memoryv1.SearchModeKeyword, 1, 0, formatTime(now), formatTime(now.Add(time.Hour)))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -362,7 +362,7 @@ func TestReferenceAdapterGlobalSearchSnapshotQuota(t *testing.T) {
 }
 
 func TestReferenceAdapterReplaySearchSnapshotQuota(t *testing.T) {
-	adapter := openTestAdapter(t, filepath.Join(t.TempDir(), "oms.db"))
+	adapter := openTestAdapter(t, filepath.Join(t.TempDir(), "adapter.db"))
 	now := time.Now().UTC()
 	insertSnapshot := func(id, authority string, terminal int) {
 		t.Helper()
@@ -370,7 +370,7 @@ func TestReferenceAdapterReplaySearchSnapshotQuota(t *testing.T) {
 			snapshot_id, authority_digest, request_fingerprint, requested_mode, actual_mode,
 			page_size, entry_count, created_at, expires_at, terminal
 		) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, authority, "fingerprint",
-			protocol.SearchModeKeyword, protocol.SearchModeKeyword, 1, 0, formatTime(now), formatTime(now.Add(time.Hour)), terminal)
+			memoryv1.SearchModeKeyword, memoryv1.SearchModeKeyword, 1, 0, formatTime(now), formatTime(now.Add(time.Hour)), terminal)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -404,31 +404,31 @@ func TestReferenceAdapterReplaySearchSnapshotQuota(t *testing.T) {
 	}
 }
 
-func createReferenceMemory(t *testing.T, server *httptest.Server, binding protocol.Binding, operationID, memoryID, content string) {
+func createReferenceMemory(t *testing.T, server *httptest.Server, binding memoryv1.Binding, operationID, memoryID, content string) {
 	t.Helper()
-	mutation := protocol.MutationEnvelope{
-		ProtocolVersion: protocol.Version, OperationID: operationID, Binding: binding,
-		MemoryID: memoryID, Kind: protocol.MutationKindCreate, Generation: 1,
-		State: &protocol.MutationState{Content: content, Tags: []string{"snapshot"}, Metadata: map[string]string{}},
+	mutation := memoryv1.MutationEnvelope{
+		ProtocolVersion: memoryv1.Version, OperationID: operationID, Binding: binding,
+		MemoryID: memoryID, Kind: memoryv1.MutationKindCreate, Generation: 1,
+		State: &memoryv1.MutationState{Content: content, Tags: []string{"snapshot"}, Metadata: map[string]string{}},
 	}
-	if err := protocol.PrepareMutation(&mutation); err != nil {
+	if err := memoryv1.PrepareMutation(&mutation); err != nil {
 		t.Fatal(err)
 	}
-	receipt, err := protocol.DecodeMutationReceipt(postTestJSON(
-		t, server.Client(), server.URL+protocol.PathMutations, mutation,
+	receipt, err := memoryv1.DecodeMutationReceipt(postTestJSON(
+		t, server.Client(), server.URL+memoryv1.PathMutations, mutation,
 	))
-	if err != nil || receipt.Result != protocol.ResultApplied {
+	if err != nil || receipt.Result != memoryv1.ResultApplied {
 		t.Fatalf("create memory receipt = %#v, err = %v", receipt, err)
 	}
 }
 
-func resolveAndClaimReferenceBinding(t *testing.T, server *httptest.Server, storeName string) protocol.Binding {
+func resolveAndClaimReferenceBinding(t *testing.T, server *httptest.Server, storeName string) memoryv1.Binding {
 	t.Helper()
 	binding := conformance.DefaultBinding()
-	resolved, err := protocol.DecodeStoreResolveResponse(postTestJSON(t, server.Client(), server.URL+protocol.PathStoreResolve,
-		protocol.StoreResolveRequest{
-			ProtocolVersion: protocol.Version,
-			Binding: protocol.StoreResolutionBinding{
+	resolved, err := memoryv1.DecodeStoreResolveResponse(postTestJSON(t, server.Client(), server.URL+memoryv1.PathStoreResolve,
+		memoryv1.StoreResolveRequest{
+			ProtocolVersion: memoryv1.Version,
+			Binding: memoryv1.StoreResolutionBinding{
 				ClusterID: binding.ClusterID, NamespaceUID: binding.NamespaceUID,
 				BackendUID: binding.BackendUID, TenantID: binding.TenantID,
 			},
@@ -438,9 +438,9 @@ func resolveAndClaimReferenceBinding(t *testing.T, server *httptest.Server, stor
 		t.Fatal(err)
 	}
 	binding.StoreUUID = resolved.StoreUUID
-	claim, err := protocol.DecodeOwnershipClaimResponse(postTestJSON(t, server.Client(), server.URL+protocol.PathOwnershipClaim,
-		protocol.OwnershipClaimRequest{ProtocolVersion: protocol.Version, Binding: binding}))
-	if err != nil || claim.Result != protocol.ResultApplied {
+	claim, err := memoryv1.DecodeOwnershipClaimResponse(postTestJSON(t, server.Client(), server.URL+memoryv1.PathOwnershipClaim,
+		memoryv1.OwnershipClaimRequest{ProtocolVersion: memoryv1.Version, Binding: binding}))
+	if err != nil || claim.Result != memoryv1.ResultApplied {
 		t.Fatalf("ownership claim = %#v, err = %v", claim, err)
 	}
 	return binding
@@ -498,7 +498,7 @@ func TestReferenceAdapterProcessLockRejectsFilesystemAliases(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	dir := t.TempDir()
-	path := filepath.Join(dir, "oms.db")
+	path := filepath.Join(dir, "adapter.db")
 	first, err := openDatabase(ctx, path)
 	if err != nil {
 		t.Fatalf("openDatabase(first): %v", err)
@@ -531,7 +531,7 @@ func TestReferenceAdapterProcessLockRejectsFilesystemAliases(t *testing.T) {
 
 func TestReferenceAdapterRejectsSecondActiveProcess(t *testing.T) {
 	t.Parallel()
-	path := filepath.Join(t.TempDir(), "oms.db")
+	path := filepath.Join(t.TempDir(), "adapter.db")
 	first := openTestAdapter(t, path)
 	if _, err := Open(context.Background(), Config{DatabasePath: path, BearerToken: testCredential() + "-other"}); err == nil {
 		t.Fatal("second Open() succeeded while the first process lock was active")
@@ -566,79 +566,79 @@ func openTestAdapter(t *testing.T, path string) *Server {
 }
 
 func TestReferenceAdapterMutationRequiresExactDurableRoutingFence(t *testing.T) {
-	adapter := openTestAdapter(t, filepath.Join(t.TempDir(), "oms.db"))
+	adapter := openTestAdapter(t, filepath.Join(t.TempDir(), "adapter.db"))
 	httpServer := httptest.NewServer(adapter.Handler())
 	t.Cleanup(httpServer.Close)
 	binding := conformance.DefaultBinding()
-	resolvedBody := postTestJSON(t, httpServer.Client(), httpServer.URL+protocol.PathStoreResolve, protocol.StoreResolveRequest{
-		ProtocolVersion: protocol.Version,
-		Binding: protocol.StoreResolutionBinding{
+	resolvedBody := postTestJSON(t, httpServer.Client(), httpServer.URL+memoryv1.PathStoreResolve, memoryv1.StoreResolveRequest{
+		ProtocolVersion: memoryv1.Version,
+		Binding: memoryv1.StoreResolutionBinding{
 			ClusterID: binding.ClusterID, NamespaceUID: binding.NamespaceUID, BackendUID: binding.BackendUID, TenantID: binding.TenantID,
 		},
 		StoreName: "exact-routing-fence",
 	})
-	resolved, err := protocol.DecodeStoreResolveResponse(resolvedBody)
+	resolved, err := memoryv1.DecodeStoreResolveResponse(resolvedBody)
 	if err != nil {
 		t.Fatal(err)
 	}
 	binding.StoreUUID = resolved.StoreUUID
-	postTestJSON(t, httpServer.Client(), httpServer.URL+protocol.PathOwnershipClaim, protocol.OwnershipClaimRequest{
-		ProtocolVersion: protocol.Version, Binding: binding,
+	postTestJSON(t, httpServer.Client(), httpServer.URL+memoryv1.PathOwnershipClaim, memoryv1.OwnershipClaimRequest{
+		ProtocolVersion: memoryv1.Version, Binding: binding,
 	})
 	fenced := binding
 	fenced.RoutingEpoch++
-	postTestJSON(t, httpServer.Client(), httpServer.URL+protocol.PathRoutingFence, protocol.RoutingFenceRequest{
-		ProtocolVersion: protocol.Version, Binding: fenced,
+	postTestJSON(t, httpServer.Client(), httpServer.URL+memoryv1.PathRoutingFence, memoryv1.RoutingFenceRequest{
+		ProtocolVersion: memoryv1.Version, Binding: fenced,
 	})
 
 	stale := fenced
 	stale.RoutingEpoch = binding.RoutingEpoch
-	staleMutation := protocol.MutationEnvelope{
-		ProtocolVersion: protocol.Version, OperationID: "mop-fence-stale", Binding: stale,
-		MemoryID: "mem-fence-stale", Kind: protocol.MutationKindCreate, Generation: 1,
-		State: &protocol.MutationState{Content: "must be fenced", Tags: []string{}, Metadata: map[string]string{}},
+	staleMutation := memoryv1.MutationEnvelope{
+		ProtocolVersion: memoryv1.Version, OperationID: "mop-fence-stale", Binding: stale,
+		MemoryID: "mem-fence-stale", Kind: memoryv1.MutationKindCreate, Generation: 1,
+		State: &memoryv1.MutationState{Content: "must be fenced", Tags: []string{}, Metadata: map[string]string{}},
 	}
-	if err := protocol.PrepareMutation(&staleMutation); err != nil {
+	if err := memoryv1.PrepareMutation(&staleMutation); err != nil {
 		t.Fatal(err)
 	}
-	staleBody, status := postTestJSONStatus(t, httpServer.Client(), httpServer.URL+protocol.PathMutations, staleMutation)
+	staleBody, status := postTestJSONStatus(t, httpServer.Client(), httpServer.URL+memoryv1.PathMutations, staleMutation)
 	if status != http.StatusConflict {
 		t.Fatalf("stale routing status = %d, want %d", status, http.StatusConflict)
 	}
-	staleReceipt, err := protocol.DecodeMutationReceipt(staleBody)
-	if err != nil || staleReceipt.Result != protocol.ResultIdentityConflict {
+	staleReceipt, err := memoryv1.DecodeMutationReceipt(staleBody)
+	if err != nil || staleReceipt.Result != memoryv1.ResultIdentityConflict {
 		t.Fatalf("stale routing receipt = %#v, err = %v", staleReceipt, err)
 	}
 
 	future := fenced
 	future.RoutingEpoch++
-	futureMutation := protocol.MutationEnvelope{
-		ProtocolVersion: protocol.Version, OperationID: "mop-fence-future", Binding: future,
-		MemoryID: "mem-fence-future", Kind: protocol.MutationKindCreate, Generation: 1,
-		State: &protocol.MutationState{Content: "future route", Tags: []string{}, Metadata: map[string]string{}},
+	futureMutation := memoryv1.MutationEnvelope{
+		ProtocolVersion: memoryv1.Version, OperationID: "mop-fence-future", Binding: future,
+		MemoryID: "mem-fence-future", Kind: memoryv1.MutationKindCreate, Generation: 1,
+		State: &memoryv1.MutationState{Content: "future route", Tags: []string{}, Metadata: map[string]string{}},
 	}
-	if err := protocol.PrepareMutation(&futureMutation); err != nil {
+	if err := memoryv1.PrepareMutation(&futureMutation); err != nil {
 		t.Fatal(err)
 	}
-	futureBody, status := postTestJSONStatus(t, httpServer.Client(), httpServer.URL+protocol.PathMutations, futureMutation)
+	futureBody, status := postTestJSONStatus(t, httpServer.Client(), httpServer.URL+memoryv1.PathMutations, futureMutation)
 	if status != http.StatusServiceUnavailable {
 		t.Fatalf("future routing status = %d, want %d", status, http.StatusServiceUnavailable)
 	}
-	futureReceipt, err := protocol.DecodeMutationReceipt(futureBody)
-	if err != nil || futureReceipt.Result != protocol.ResultRetryableError {
+	futureReceipt, err := memoryv1.DecodeMutationReceipt(futureBody)
+	if err != nil || futureReceipt.Result != memoryv1.ResultRetryableError {
 		t.Fatalf("future routing receipt = %#v, err = %v", futureReceipt, err)
 	}
 
-	exact := protocol.MutationEnvelope{
-		ProtocolVersion: protocol.Version, OperationID: "mop-fence-exact", Binding: fenced,
-		MemoryID: "mem-fence-exact", Kind: protocol.MutationKindCreate, Generation: 1,
-		State: &protocol.MutationState{Content: "exact fence", Tags: []string{}, Metadata: map[string]string{}},
+	exact := memoryv1.MutationEnvelope{
+		ProtocolVersion: memoryv1.Version, OperationID: "mop-fence-exact", Binding: fenced,
+		MemoryID: "mem-fence-exact", Kind: memoryv1.MutationKindCreate, Generation: 1,
+		State: &memoryv1.MutationState{Content: "exact fence", Tags: []string{}, Metadata: map[string]string{}},
 	}
-	if err := protocol.PrepareMutation(&exact); err != nil {
+	if err := memoryv1.PrepareMutation(&exact); err != nil {
 		t.Fatal(err)
 	}
-	receipt, err := protocol.DecodeMutationReceipt(postTestJSON(t, httpServer.Client(), httpServer.URL+protocol.PathMutations, exact))
-	if err != nil || receipt.Result != protocol.ResultApplied {
+	receipt, err := memoryv1.DecodeMutationReceipt(postTestJSON(t, httpServer.Client(), httpServer.URL+memoryv1.PathMutations, exact))
+	if err != nil || receipt.Result != memoryv1.ResultApplied {
 		t.Fatalf("exact-fence receipt = %#v, err = %v", receipt, err)
 	}
 }
@@ -649,9 +649,9 @@ func TestReferenceAdapterAuthenticatesBeforeClosedRouteDispatch(t *testing.T) {
 		name, method, path, authorization, code string
 		status                                  int
 	}{
-		{name: "wrong method unauthenticated", method: http.MethodGet, path: protocol.PathMutations, status: http.StatusUnauthorized, code: protocol.ErrorCodeUnauthorized},
-		{name: "wrong method authenticated", method: http.MethodGet, path: protocol.PathMutations, authorization: "Bearer " + testCredential(), status: http.StatusMethodNotAllowed, code: protocol.ErrorCodeMethodNotAllowed},
-		{name: "unknown path authenticated", method: http.MethodPost, path: "/v1/unknown", authorization: "Bearer " + testCredential(), status: http.StatusNotFound, code: protocol.ErrorCodeNotFound},
+		{name: "wrong method unauthenticated", method: http.MethodGet, path: memoryv1.PathMutations, status: http.StatusUnauthorized, code: memoryv1.ErrorCodeUnauthorized},
+		{name: "wrong method authenticated", method: http.MethodGet, path: memoryv1.PathMutations, authorization: "Bearer " + testCredential(), status: http.StatusMethodNotAllowed, code: memoryv1.ErrorCodeMethodNotAllowed},
+		{name: "unknown path authenticated", method: http.MethodPost, path: "/v1/unknown", authorization: "Bearer " + testCredential(), status: http.StatusNotFound, code: memoryv1.ErrorCodeNotFound},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			request := httptest.NewRequest(tc.method, tc.path, nil)
@@ -664,7 +664,7 @@ func TestReferenceAdapterAuthenticatesBeforeClosedRouteDispatch(t *testing.T) {
 			if response.Header().Get("Content-Type") != "application/json" || response.Header().Get("Cache-Control") != "no-store" {
 				t.Fatalf("closed headers = %#v", response.Header())
 			}
-			decoded, decodeErr := protocol.DecodeErrorResponse(response.Body.Bytes())
+			decoded, decodeErr := memoryv1.DecodeErrorResponse(response.Body.Bytes())
 			if decodeErr != nil || decoded.Code != tc.code {
 				t.Fatalf("error response = %#v, err = %v", decoded, decodeErr)
 			}
@@ -676,14 +676,14 @@ func TestReferenceAdapterAuthenticatesBeforeClosedRouteDispatch(t *testing.T) {
 }
 
 func TestReferenceAdapterPersistsOwnershipConflictReceipt(t *testing.T) {
-	adapter := openTestAdapter(t, filepath.Join(t.TempDir(), "oms.db"))
+	adapter := openTestAdapter(t, filepath.Join(t.TempDir(), "adapter.db"))
 	binding := conformance.DefaultBinding()
-	mutation := protocol.MutationEnvelope{
-		ProtocolVersion: protocol.Version, OperationID: "mop-unowned", Binding: binding,
-		MemoryID: "mem-unowned", Kind: protocol.MutationKindCreate, Generation: 1,
-		State: &protocol.MutationState{Content: "unowned", Tags: []string{}, Metadata: map[string]string{}},
+	mutation := memoryv1.MutationEnvelope{
+		ProtocolVersion: memoryv1.Version, OperationID: "mop-unowned", Binding: binding,
+		MemoryID: "mem-unowned", Kind: memoryv1.MutationKindCreate, Generation: 1,
+		State: &memoryv1.MutationState{Content: "unowned", Tags: []string{}, Metadata: map[string]string{}},
 	}
-	if err := protocol.PrepareMutation(&mutation); err != nil {
+	if err := memoryv1.PrepareMutation(&mutation); err != nil {
 		t.Fatal(err)
 	}
 	firstAt := time.Date(2026, 7, 30, 19, 0, 0, 0, time.UTC)
@@ -695,7 +695,7 @@ func TestReferenceAdapterPersistsOwnershipConflictReceipt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.Result != protocol.ResultIdentityConflict || second.Result != first.Result ||
+	if first.Result != memoryv1.ResultIdentityConflict || second.Result != first.Result ||
 		!second.CompletedAt.Equal(first.CompletedAt) {
 		t.Fatalf("ownership conflict replay first=%#v second=%#v", first, second)
 	}

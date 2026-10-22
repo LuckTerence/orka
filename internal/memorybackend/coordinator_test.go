@@ -28,7 +28,7 @@ func TestStoreCoordinatorActivationGateAndCutover(t *testing.T) {
 		SpecDigest: "sha256:spec", EndpointDigest: "sha256:endpoint",
 		ResolvedAddressDigest: "sha256:addresses", ServerCertificateDigest: "sha256:certificate",
 		SecretName: "memory-auth", SecretKey: "token",
-		SecretUID: "secret-a", SecretResourceVersion: "1", StoreName: "store-a", StoreUUID: "store-uuid-a", Protocol: "orka.oms.v0alpha1",
+		SecretUID: "secret-a", SecretResourceVersion: "1", StoreName: "store-a", StoreUUID: "store-uuid-a", Protocol: "orka.memory.v1",
 	}
 	coordinator := &StoreCoordinator{Store: governed, ActivationEnabled: false, Now: func() time.Time { return now }}
 	if _, err := coordinator.PrepareMemoryBackendValidation(context.Background(), validation); !errors.Is(err, store.ErrConflict) {
@@ -732,7 +732,7 @@ func coordinatorTestBinding() store.MemoryBackendBinding {
 		SecretName: "memory-auth", SecretKey: "token", SecretUID: "secret-a", SecretResourceVersion: "2",
 		TenantID: "tenant-a", StoreName: "store-a",
 		StoreUUID: "store-uuid-a", OwnershipClaim: "claim-a", CapabilityRevision: "cap-a",
-		Protocol: "orka.oms.v0alpha1", State: store.MemoryBackendBindingAccepting,
+		Protocol: "orka.memory.v1", State: store.MemoryBackendBindingAccepting,
 		ValidationExpiresAt: time.Date(2026, 7, 29, 13, 0, 0, 0, time.UTC),
 	}
 }
@@ -927,7 +927,7 @@ func TestStoreCoordinatorDeletionFencesClaimAttemptCrashWindow(t *testing.T) {
 				ClusterID: "cluster-a", TenantID: "tenant-a", RequestedLifecycle: lifecycle,
 				SpecDigest: "sha256:spec", EndpointDigest: "sha256:endpoint", SecretName: "memory-auth", SecretKey: "token",
 				SecretUID: "secret-a", SecretResourceVersion: "1", StoreName: "store-a",
-				StoreUUID: "store-uuid-a", Protocol: "orka.oms.v0alpha1",
+				StoreUUID: "store-uuid-a", Protocol: "orka.memory.v1",
 			}
 			authorizeValidationLifecycle(t, governed, &validation)
 			prepared, err := coordinator.PrepareMemoryBackendValidation(context.Background(), validation)
