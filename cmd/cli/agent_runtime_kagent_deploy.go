@@ -55,6 +55,7 @@ const (
 	kagentControllerEpoch  = "orka-controller"
 	kagentAdapterDigestEnv = "ORKA_ACP_KAGENT_ADAPTER_DIGEST"
 	kagentEpochEnv         = "ORKA_ACP_CONTROLLER_EPOCH"
+	kagentOrkaAPIEnv       = "ORKA_ACP_ARTIFACT_API_URL"
 	kagentRollbackTimeout  = time.Minute
 	kagentPatchTest        = "test"
 	kagentPatchReplace     = "replace"
@@ -484,8 +485,20 @@ func (k *kagentRuntimes) deploy(ctx context.Context, dir string) (err error) {
 		return err
 	}
 	if deployed {
+		if err := kagentOwned(bundle, "Deployment", deployment); err != nil {
+			return err
+		}
 		if options.Image, options.AdapterDigest, err = deployedKagentImage(deployment); err != nil {
 			return err
+		}
+		// The Orka API URL is in the pod template, which a change restarts
+		// without draining: an omitted flag keeps it, and another refuses.
+		deployedURL := deployedKagentEnv(deployment, kagentOrkaAPIEnv)
+		switch {
+		case options.OrkaAPIURL == "":
+			options.OrkaAPIURL = deployedURL
+		case options.OrkaAPIURL != deployedURL:
+			return fmt.Errorf("runtime %s calls the Orka API at %s; deploy under a new --runtime-revision to change --orka-api-url", bundle.Runtime, deployedURL)
 		}
 		k.logf("Runtime %s is already deployed; keeping its image.", bundle.Runtime)
 	} else if options.Image, options.AdapterDigest, err = k.resolve(ctx, k.options.Image); err != nil {
@@ -535,20 +548,27 @@ func (k *kagentRuntimes) deploy(ctx context.Context, dir string) (err error) {
 	return k.register(ctx, dir, bundle, config, options)
 }
 
-// deployedKagentEpoch reads the controller epoch a deployed runtime's
-// supervisor runs with.
-func deployedKagentEpoch(deployment *appsv1.Deployment) (int64, error) {
+// deployedKagentEnv reads a variable a deployed runtime's supervisor runs
+// with, empty when it has none.
+func deployedKagentEnv(deployment *appsv1.Deployment, name string) string {
 	for _, container := range deployment.Spec.Template.Spec.Containers {
 		if container.Name != kagentSupervisorContainer {
 			continue
 		}
 		for _, env := range container.Env {
-			if env.Name == kagentEpochEnv {
-				if epoch, err := strconv.ParseInt(env.Value, 10, 64); err == nil && epoch > 0 {
-					return epoch, nil
-				}
+			if env.Name == name {
+				return env.Value
 			}
 		}
+	}
+	return ""
+}
+
+// deployedKagentEpoch reads the controller epoch a deployed runtime's
+// supervisor runs with.
+func deployedKagentEpoch(deployment *appsv1.Deployment) (int64, error) {
+	if epoch, err := strconv.ParseInt(deployedKagentEnv(deployment, kagentEpochEnv), 10, 64); err == nil && epoch > 0 {
+		return epoch, nil
 	}
 	return 0, fmt.Errorf("deployment %s does not run a kagent runtime supervisor with a controller epoch", deployment.Name)
 }
@@ -667,12 +687,41 @@ func (k *kagentRuntimes) applyPart(ctx context.Context, bundle kagentBundle, con
 		if !ok {
 			return fmt.Errorf("rendered %T is not an object", item)
 		}
+		if err := k.requireOwned(ctx, bundle, obj); err != nil {
+			return err
+		}
 		if _, ok := obj.(*appsv1.Deployment); ok && deploymentVersion != "" {
 			obj.SetResourceVersion(deploymentVersion)
 		}
 		if err := k.c.Patch(ctx, obj, client.Apply, client.FieldOwner(kagentFieldOwner), client.ForceOwnership); err != nil { //nolint:staticcheck // typed objects apply as before
 			return fmt.Errorf("applying %s %s: %w", obj.GetObjectKind().GroupVersionKind().Kind, obj.GetName(), err)
 		}
+	}
+	return nil
+}
+
+// requireOwned refuses when a same-named object exists that is not this
+// runtime's, as rendered: one a failed deploy of another source or a person
+// made. Applying would take over its fields.
+func (k *kagentRuntimes) requireOwned(ctx context.Context, bundle kagentBundle, obj client.Object) error {
+	existing, ok := obj.DeepCopyObject().(client.Object)
+	if !ok {
+		return fmt.Errorf("rendered %T is not an object", obj)
+	}
+	switch err := k.c.Get(ctx, client.ObjectKeyFromObject(obj), existing); {
+	case apierrors.IsNotFound(err):
+		return nil
+	case err != nil:
+		return err
+	}
+	return kagentOwned(bundle, obj.GetObjectKind().GroupVersionKind().Kind, existing)
+}
+
+// kagentOwned refuses existing unless it is the bundle's runtime's.
+func kagentOwned(bundle kagentBundle, kind string, existing client.Object) error {
+	if existing.GetLabels()[kagentRuntimeLabel] != bundle.Runtime || existing.GetAnnotations()[kagentSourceAnnotation] != kagentSource(bundle) {
+		return fmt.Errorf("%s %s/%s exists but is not runtime %s's for kagent Agent %s; delete it, or deploy under a new --runtime-revision",
+			kind, existing.GetNamespace(), existing.GetName(), bundle.Runtime, kagentSource(bundle))
 	}
 	return nil
 }

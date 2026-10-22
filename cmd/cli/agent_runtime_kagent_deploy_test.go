@@ -310,6 +310,64 @@ func TestKagentDeployDoesNotOverwriteAnEpochRecoveryAdvanced(t *testing.T) {
 	}
 }
 
+// A redeploy keeps the Orka API URL the runtime was deployed with, since a
+// change restarts its pod without draining; another URL takes a new runtime.
+func TestKagentDeployKeepsTheDeployedOrkaAPIURL(t *testing.T) {
+	dir, bundle := writeTestKagentBundle(t)
+	c := kagentTestCluster(t)
+	k, _ := newTestKagentRuntimes(t, c)
+	ctx := context.Background()
+	k.options.OrkaAPIURL = "http://orka-api.custom.svc:8080"
+	if err := k.deploy(ctx, dir); err != nil {
+		t.Fatal(err)
+	}
+	k.unlock()
+	k.options.OrkaAPIURL = ""
+	if err := k.deploy(ctx, dir); err != nil {
+		t.Fatalf("deploying again without --orka-api-url: %v", err)
+	}
+	k.unlock()
+	deployment := &appsv1.Deployment{}
+	if err := c.Get(ctx, k.key(bundle.Runtime), deployment); err != nil {
+		t.Fatal(err)
+	}
+	if url := deployedKagentEnv(deployment, kagentOrkaAPIEnv); url != "http://orka-api.custom.svc:8080" {
+		t.Fatalf("Orka API URL after a redeploy = %q", url)
+	}
+	k.options.OrkaAPIURL = "http://orka-api.other.svc:8080"
+	if err := k.deploy(ctx, dir); err == nil || !strings.Contains(err.Error(), "--orka-api-url") {
+		t.Fatalf("redeploy with another URL = %v", err)
+	}
+}
+
+// A same-named object that is not this runtime's, such as one a person or
+// another source's failed deploy made, is never taken over.
+func TestKagentDeployRefusesAnUnownedRuntimeObject(t *testing.T) {
+	dir, bundle := writeTestKagentBundle(t)
+	foreign := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: bundle.Runtime + "-broker", Namespace: kagentTestNamespace,
+		Labels: map[string]string{"app": "someone-else"}}}
+	c := kagentTestCluster(t, foreign)
+	k, _ := newTestKagentRuntimes(t, c)
+	ctx := context.Background()
+	if err := k.deploy(ctx, dir); err == nil || !strings.Contains(err.Error(), "is not runtime") {
+		t.Fatalf("deploy over a foreign object = %v", err)
+	}
+	account := &corev1.ServiceAccount{}
+	if err := c.Get(ctx, k.key(bundle.Runtime+"-broker"), account); err != nil || account.Labels[kagentRuntimeLabel] != "" {
+		t.Fatalf("the foreign service account was changed: %v, %v", account.Labels, err)
+	}
+	if err := c.Get(ctx, k.key(bundle.Runtime), &appsv1.Deployment{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("a deployment was applied beside a foreign object: %v", err)
+	}
+	k.unlock()
+	// A foreign Deployment of the runtime's name is refused before anything.
+	c = kagentTestCluster(t, &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: bundle.Runtime, Namespace: kagentTestNamespace}})
+	k, _ = newTestKagentRuntimes(t, c)
+	if err := k.deploy(ctx, dir); err == nil || !strings.Contains(err.Error(), "is not runtime") {
+		t.Fatalf("deploy over a foreign deployment = %v", err)
+	}
+}
+
 // Until the runtime is Ready, a failure moves the relay, and its policy,
 // back to what they served before.
 func TestKagentDeployMovesTheRelayBackWhenItFails(t *testing.T) {
