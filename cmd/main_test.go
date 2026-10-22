@@ -753,6 +753,8 @@ func TestValidateAgentHostConfig(t *testing.T) {
 	}
 	for name, args := range map[string][2]string{
 		"no namespace":         {"", image},
+		"invalid namespace":    {"host_ns", image},
+		"namespace path":       {"hosts/one", image},
 		"watch namespace":      {"orka-system", image},
 		"runtime namespace":    {"orka-runtimes", image},
 		"controller namespace": {"orka-controller", image},

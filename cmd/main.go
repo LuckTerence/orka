@@ -39,6 +39,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/version"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/kubernetes"
@@ -2386,6 +2387,9 @@ func validateAgentHostConfig(enabled bool, hostNamespace, agentImage string, res
 	hostNamespace = strings.TrimSpace(hostNamespace)
 	if hostNamespace == "" {
 		return fmt.Errorf("--agent-host-namespace is required with --enable-agent-hosts")
+	}
+	if problems := validation.IsDNS1123Label(hostNamespace); len(problems) > 0 {
+		return fmt.Errorf("--agent-host-namespace %q is not a namespace name: %s", hostNamespace, strings.Join(problems, "; "))
 	}
 	for _, namespace := range reserved {
 		if hostNamespace == strings.TrimSpace(namespace) {

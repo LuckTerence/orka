@@ -212,6 +212,9 @@ type AgentHostIdleSuspend struct {
 // The daemon must serve the Agent Host Protocol on 127.0.0.1:listenPort, gated
 // by the connection token.
 // +kubebuilder:validation:XValidation:rule="self == oldSelf",message="AgentHostTemplate spec is immutable; create a new template"
+// +kubebuilder:validation:XValidation:rule="has(self.initContainers) == has(oldSelf.initContainers) && (!has(self.initContainers) || self.initContainers.map(c, c.name) == oldSelf.initContainers.map(c, c.name))",message="AgentHostTemplate spec is immutable; create a new template"
+// +kubebuilder:validation:XValidation:rule="self.containers.all(c, oldSelf.containers.exists(o, o.name == c.name && has(c.env) == has(o.env) && (!has(c.env) || c.env.map(e, e.name) == o.env.map(e, e.name))))",message="AgentHostTemplate spec is immutable; create a new template"
+// +kubebuilder:validation:XValidation:rule="!has(self.initContainers) || self.initContainers.all(c, has(oldSelf.initContainers) && oldSelf.initContainers.exists(o, o.name == c.name && has(c.env) == has(o.env) && (!has(c.env) || c.env.map(e, e.name) == o.env.map(e, e.name))))",message="AgentHostTemplate spec is immutable; create a new template"
 // +kubebuilder:validation:XValidation:rule="self.containers.exists_one(c, c.name == 'host')",message="exactly one container must be named host"
 // +kubebuilder:validation:XValidation:rule="self.containers.all(c, !has(c.volumeMounts) || c.volumeMounts.all(m, m.name == 'workspace' || (has(self.volumes) && self.volumes.exists(v, v.name == m.name))))",message="container volumeMounts must name workspace or a declared scratch volume"
 // +kubebuilder:validation:XValidation:rule="!has(self.initContainers) || self.initContainers.all(c, !has(c.volumeMounts) || c.volumeMounts.all(m, m.name == 'workspace' || (has(self.volumes) && self.volumes.exists(v, v.name == m.name))))",message="init container volumeMounts must name workspace or a declared scratch volume"

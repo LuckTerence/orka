@@ -77,3 +77,25 @@ func TestHostNetworkPolicyKeepsHTTPSToPublicAddresses(t *testing.T) {
 		t.Fatalf("private addresses are reachable over HTTPS: %+v", https.To[0].IPBlock)
 	}
 }
+
+// Node-local DNS caches listen on link-local addresses rather than in the
+// cluster DNS Pods, so DNS reaches both; link-local stays closed otherwise.
+func TestHostNetworkPolicyReachesNodeLocalDNS(t *testing.T) {
+	policy := HostNetworkPolicy(namedHost("alice", "uid-1"), ObjectNames(namedHost("alice", "uid-1"), "orka-agent-hosts"), "nonce",
+		validTemplate(), ControllerPeer{Namespace: "orka-system", PodLabels: map[string]string{"app": "orka"}})
+	for _, rule := range policy.Spec.Egress {
+		linkLocal := slices.ContainsFunc(rule.To, func(peer networkingv1.NetworkPolicyPeer) bool {
+			return peer.IPBlock != nil && peer.IPBlock.CIDR == "169.254.0.0/16"
+		})
+		dns := len(rule.Ports) > 0
+		for _, port := range rule.Ports {
+			dns = dns && port.Port != nil && port.Port.IntValue() == 53
+		}
+		switch {
+		case dns && !linkLocal:
+			t.Fatalf("DNS cannot reach node-local caches: %+v", rule.To)
+		case linkLocal && !dns:
+			t.Fatalf("link-local addresses are open beyond DNS: %+v", rule.Ports)
+		}
+	}
+}

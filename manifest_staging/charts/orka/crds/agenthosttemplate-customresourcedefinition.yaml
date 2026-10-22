@@ -579,6 +579,19 @@ spec:
             x-kubernetes-validations:
             - message: AgentHostTemplate spec is immutable; create a new template
               rule: self == oldSelf
+            - message: AgentHostTemplate spec is immutable; create a new template
+              rule: has(self.initContainers) == has(oldSelf.initContainers) && (!has(self.initContainers)
+                || self.initContainers.map(c, c.name) == oldSelf.initContainers.map(c,
+                c.name))
+            - message: AgentHostTemplate spec is immutable; create a new template
+              rule: self.containers.all(c, oldSelf.containers.exists(o, o.name ==
+                c.name && has(c.env) == has(o.env) && (!has(c.env) || c.env.map(e,
+                e.name) == o.env.map(e, e.name))))
+            - message: AgentHostTemplate spec is immutable; create a new template
+              rule: '!has(self.initContainers) || self.initContainers.all(c, has(oldSelf.initContainers)
+                && oldSelf.initContainers.exists(o, o.name == c.name && has(c.env)
+                == has(o.env) && (!has(c.env) || c.env.map(e, e.name) == o.env.map(e,
+                e.name))))'
             - message: exactly one container must be named host
               rule: self.containers.exists_one(c, c.name == 'host')
             - message: container volumeMounts must name workspace or a declared scratch
