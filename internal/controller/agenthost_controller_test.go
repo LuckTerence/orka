@@ -416,7 +416,7 @@ func TestAgentHostStandaloneConnectionSecret(t *testing.T) {
 		string(connection.Data["namespace"]) != testHostNamespace || len(connection.Data["token"]) != 2*agentHostTokenBytes {
 		t.Fatalf("connection Secret = %+v", connection)
 	}
-	if pod, ok := h.pod(); !ok || pod.Annotations[agenthost.AnnotationGitHubToken] != "false" {
+	if pod, ok := h.pod(); !ok || pod.Annotations[agenthost.AnnotationGitHubToken] != "" {
 		t.Fatal("standalone host without a token template must not mount a GitHub token")
 	}
 }
@@ -822,6 +822,45 @@ func TestAgentHostRotatesTheGitHubTokenCopy(t *testing.T) {
 	}
 	if after, _ := h.pod(); after.UID != pod.UID {
 		t.Fatal("rotating the token must not restart the host")
+	}
+}
+
+// The daemon reads its identity from the token once, at start, so a token from
+// another Secret or key needs a new Pod; a new value in the same one does not.
+func TestAgentHostReplacesItsPodForAnotherTokenSecretOrKey(t *testing.T) {
+	second := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "alice-github-2", Namespace: testUserNamespace},
+		Data:       map[string][]byte{"token": []byte("ghs_second"), "other": []byte("ghs_third")},
+	}
+	h := newAgentHostHarness(t, testTemplate(corev1alpha1.AgentHostAccessRelay, corev1alpha1.AgentHostCredentialRequired),
+		testHost(), userToken("ghs_first"), second)
+	h.settle()
+	first, _ := h.pod()
+	if got := first.Annotations[agenthost.AnnotationGitHubToken]; got != "alice-github/token" {
+		t.Fatalf("token source = %q", got)
+	}
+	previous := first
+	for _, ref := range []corev1alpha1.AgentHostSecretKeyReference{
+		{Name: "alice-github-2", Key: "token"},
+		{Name: "alice-github-2", Key: "other"},
+	} {
+		host := h.host()
+		host.Spec.GitHubTokenSecretRef = &ref
+		if err := h.client.Update(context.Background(), host); err != nil {
+			t.Fatal(err)
+		}
+		h.settle()
+		pod, ok := h.pod()
+		if !ok || pod.UID == previous.UID {
+			t.Fatalf("switching to %s/%s kept the Pod (ok=%v)", ref.Name, ref.Key, ok)
+		}
+		if got := pod.Annotations[agenthost.AnnotationGitHubToken]; got != ref.Name+"/"+ref.Key {
+			t.Fatalf("token source = %q, want %s/%s", got, ref.Name, ref.Key)
+		}
+		previous = pod
+	}
+	if got := h.host().Status.Restarts; got != 0 {
+		t.Fatalf("a credential change counted as %d restarts", got)
 	}
 }
 

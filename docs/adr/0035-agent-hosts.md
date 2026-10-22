@@ -177,7 +177,9 @@ image and pinned by digest (`--agent-host-agent-image`):
 - The connection token is minted by the controller per host and never leaves the
   cluster except to a client the user authorizes by RBAC.
 - The GitHub token is the user's own, supplied in a Secret in the AgentHost's namespace
-  and copied into the host namespace. It is not taken from Connections: ADR 0033 keeps
+  and copied into the host namespace. A new value in that Secret reaches the running host
+  through the copy; another Secret or key replaces the Pod, because copilotd fixes its
+  single-user identity when it starts. It is not taken from Connections: ADR 0033 keeps
   linked tokens out of every worker Pod, while an agent host is the user's own
   environment whose agent must hold that token by design.
 - Sealed authentication and connection binding stay required by the copilotd sample.

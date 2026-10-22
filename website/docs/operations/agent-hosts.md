@@ -132,7 +132,9 @@ kubectl get agenthost alice
 When the host is `Ready`, the environment `orka-alice` appears in the client's
 **Environments** list. The token's owner is the only GitHub user the host serves. Orka
 copies the token into the host namespace and keeps the copy current, so rotating the
-Secret reaches the running host without a restart.
+Secret reaches the running host without a restart. Pointing the host at another Secret or
+key replaces its Pod on the same volume, because the daemon reads its identity from the
+token when it starts.
 
 ### Standalone access
 

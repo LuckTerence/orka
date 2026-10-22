@@ -42,7 +42,10 @@ const (
 	AnnotationTemplateUID = "orka.ai/agent-host-template-uid"
 	// AnnotationHost names the owning AgentHost as namespace/name.
 	AnnotationHost = "orka.ai/agent-host"
-	// AnnotationGitHubToken records whether a Pod mounts the GitHub token.
+	// AnnotationGitHubToken records where a Pod's GitHub token comes from, as
+	// Secret name and key, and is empty when the Pod mounts none. A token from
+	// another Secret or key needs a new Pod: the daemon reads its identity
+	// from the token once, when it starts.
 	AnnotationGitHubToken = "orka.ai/agent-host-github-token"
 )
 
@@ -157,8 +160,10 @@ type ControllerPeer struct {
 type PodOptions struct {
 	// AgentImage is the digest-pinned image holding the Orka host agent.
 	AgentImage string
-	// GitHubToken mounts the copied GitHub token Secret into the host container.
-	GitHubToken bool
+	// GitHubTokenSource names where the user's GitHub token comes from, as
+	// Secret name and key. When set, the copied token Secret is mounted into
+	// the host container.
+	GitHubTokenSource string
 }
 
 func meta(host *corev1alpha1.AgentHost, n Names, name, nonce string) metav1.ObjectMeta {
@@ -328,7 +333,7 @@ func HostPod(
 			EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: new(resource.MustParse("64Mi"))},
 		}},
 	}
-	if opts.GitHubToken {
+	if opts.GitHubTokenSource != "" {
 		volumes = append(volumes, corev1.Volume{Name: githubTokenVolume, VolumeSource: corev1.VolumeSource{
 			Secret: &corev1.SecretVolumeSource{SecretName: n.GitHubTokenSecret, DefaultMode: new(secretFileMode)},
 		}})
@@ -343,7 +348,7 @@ func HostPod(
 
 	podMeta := meta(host, n, n.Pod, nonce)
 	podMeta.Annotations[AnnotationTemplateUID] = string(template.UID)
-	podMeta.Annotations[AnnotationGitHubToken] = fmt.Sprintf("%t", opts.GitHubToken)
+	podMeta.Annotations[AnnotationGitHubToken] = opts.GitHubTokenSource
 	return &corev1.Pod{
 		ObjectMeta: podMeta,
 		Spec: corev1.PodSpec{
@@ -496,7 +501,7 @@ func decorateHostContainer(container *corev1.Container, host *corev1alpha1.Agent
 		corev1.VolumeMount{Name: statusVolume, MountPath: statusDir},
 		corev1.VolumeMount{Name: hostAgentBinVolume, MountPath: hostAgentBinDir, ReadOnly: true},
 	)
-	if opts.GitHubToken {
+	if opts.GitHubTokenSource != "" {
 		container.Env = append(container.Env, corev1.EnvVar{Name: GitHubTokenFileEnv, Value: githubTokenDir + "/" + TokenKey})
 		container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
 			Name: githubTokenVolume, MountPath: githubTokenDir, ReadOnly: true,
