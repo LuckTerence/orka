@@ -477,47 +477,14 @@ func (k *kagentRuntimes) deploy(ctx context.Context, dir string) (err error) {
 	}
 	options := kagentRenderOptions{Namespace: k.namespace, StorageClass: k.options.StorageClass,
 		OrkaAPIURL: k.options.OrkaAPIURL, SubstrateNamespace: k.options.SubstrateNamespace}
-	// A claim's StorageClass cannot change: an omitted flag keeps the ledger's,
-	// and another refuses.
-	claim := &corev1.PersistentVolumeClaim{}
-	claimed, err := k.getOptional(ctx, bundle.Runtime+"-ledger", claim)
+	deployment, err := k.keepDeployed(ctx, bundle, &options)
 	if err != nil {
 		return err
 	}
-	if claimed && claim.Spec.StorageClassName != nil {
-		switch class := *claim.Spec.StorageClassName; {
-		case options.StorageClass == "":
-			options.StorageClass = class
-		case options.StorageClass != class:
-			return fmt.Errorf("runtime %s's ledger uses StorageClass %s; deploy under a new --runtime-revision to change --storage-class", bundle.Runtime, class)
-		}
-	}
-	// The image is part of the runtime's immutable profile: a deployed runtime
-	// keeps its image, and a new one runs under a new --runtime-revision.
-	deployment := &appsv1.Deployment{}
-	deployed, err := k.getOptional(ctx, bundle.Runtime, deployment)
-	if err != nil {
-		return err
-	}
-	if deployed {
-		if err := kagentOwned(bundle, "Deployment", deployment); err != nil {
+	if deployment == nil {
+		if options.Image, options.AdapterDigest, err = k.resolve(ctx, k.options.Image); err != nil {
 			return err
 		}
-		if options.Image, options.AdapterDigest, err = deployedKagentImage(deployment); err != nil {
-			return err
-		}
-		// The Orka API URL is in the pod template, which a change restarts
-		// without draining: an omitted flag keeps it, and another refuses.
-		deployedURL := deployedKagentEnv(deployment, kagentOrkaAPIEnv)
-		switch {
-		case options.OrkaAPIURL == "":
-			options.OrkaAPIURL = deployedURL
-		case options.OrkaAPIURL != deployedURL:
-			return fmt.Errorf("runtime %s calls the Orka API at %s; deploy under a new --runtime-revision to change --orka-api-url", bundle.Runtime, deployedURL)
-		}
-		k.logf("Runtime %s is already deployed; keeping its image.", bundle.Runtime)
-	} else if options.Image, options.AdapterDigest, err = k.resolve(ctx, k.options.Image); err != nil {
-		return err
 	}
 	if err := k.ensureAuthSecret(ctx, bundle); err != nil {
 		return err
@@ -528,7 +495,7 @@ func (k *kagentRuntimes) deploy(ctx context.Context, dir string) (err error) {
 	// The apply then holds only while the Deployment is as read, so it never
 	// writes back an epoch recovery advanced meanwhile.
 	deploymentVersion := ""
-	if deployed && deployment.Annotations[kagentRecoveryAnnotation] != "" {
+	if deployment != nil && deployment.Annotations[kagentRecoveryAnnotation] != "" {
 		options.ControllerEpoch, err = deployedKagentEpoch(deployment)
 		deploymentVersion = deployment.ResourceVersion
 	} else {
@@ -561,6 +528,45 @@ func (k *kagentRuntimes) deploy(ctx context.Context, dir string) (err error) {
 		}
 	}
 	return k.register(ctx, dir, bundle, config, options)
+}
+
+// keepDeployed sets in options what a runtime deployed before keeps, since
+// changing it restarts the runtime without draining or fails: its ledger's
+// StorageClass, and its image and Orka API URL. An omitted flag keeps each;
+// another refuses. It returns the runtime's Deployment, or nil for none.
+func (k *kagentRuntimes) keepDeployed(ctx context.Context, bundle kagentBundle, options *kagentRenderOptions) (*appsv1.Deployment, error) {
+	claim := &corev1.PersistentVolumeClaim{}
+	claimed, err := k.getOptional(ctx, bundle.Runtime+"-ledger", claim)
+	if err != nil {
+		return nil, err
+	}
+	if claimed && claim.Spec.StorageClassName != nil {
+		switch class := *claim.Spec.StorageClassName; {
+		case options.StorageClass == "":
+			options.StorageClass = class
+		case options.StorageClass != class:
+			return nil, fmt.Errorf("runtime %s's ledger uses StorageClass %s; deploy under a new --runtime-revision to change --storage-class", bundle.Runtime, class)
+		}
+	}
+	deployment := &appsv1.Deployment{}
+	if deployed, err := k.getOptional(ctx, bundle.Runtime, deployment); err != nil || !deployed {
+		return nil, err
+	}
+	if err := kagentOwned(bundle, "Deployment", deployment); err != nil {
+		return nil, err
+	}
+	// The image is part of the runtime's immutable profile.
+	if options.Image, options.AdapterDigest, err = deployedKagentImage(deployment); err != nil {
+		return nil, err
+	}
+	switch deployedURL := deployedKagentEnv(deployment, kagentOrkaAPIEnv); {
+	case options.OrkaAPIURL == "":
+		options.OrkaAPIURL = deployedURL
+	case options.OrkaAPIURL != deployedURL:
+		return nil, fmt.Errorf("runtime %s calls the Orka API at %s; deploy under a new --runtime-revision to change --orka-api-url", bundle.Runtime, deployedURL)
+	}
+	k.logf("Runtime %s is already deployed; keeping its image.", bundle.Runtime)
+	return deployment, nil
 }
 
 // deployedKagentEnv reads a variable a deployed runtime's supervisor runs
