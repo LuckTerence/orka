@@ -204,7 +204,7 @@ func renderKagentRuntime(dir string, options kagentRenderOptions) (map[string]an
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"apiVersion": "v1", "kind": "List", "items": items}, nil //nolint:goconst // a List envelope
+	return map[string]any{kagentFieldAPIVersion: "v1", kagentFieldKind: "List", "items": items}, nil
 }
 
 // renderKagentPart renders one part of a bundle's runtime as typed objects.

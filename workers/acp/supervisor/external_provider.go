@@ -13,6 +13,12 @@ import (
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
 
+// The flags of every external adapter's frozen command line.
+const (
+	adapterConfigFlag   = "--config"
+	adapterProtocolFlag = "--protocol"
+)
+
 const (
 	providerKindFoundry       = "foundry"
 	EnvFoundryAdapterDigest   = "ORKA_ACP_FOUNDRY_ADAPTER_DIGEST"
@@ -66,7 +72,7 @@ var (
 	foundryAdapter = externalACPAdapter{
 		kind: providerKindFoundry, digestEnv: EnvFoundryAdapterDigest, adapterName: foundryAdapterName,
 		command:    "/agent-runtime-foundry",
-		args:       []string{"--protocol", acpCommandProtocol, "--config", foundryConfigPath},
+		args:       []string{adapterProtocolFlag, acpCommandProtocol, adapterConfigFlag, foundryConfigPath},
 		label:      "external Foundry",
 		baseURLEnv: foundryProviderBaseURLEnv, tokenEnv: foundryProviderTokenEnv,
 		modelEnv: foundryModelEnv, configDigestEnv: foundryConfigDigestEnv,
@@ -74,7 +80,7 @@ var (
 	kagentAdapter = externalACPAdapter{
 		kind: providerKindKagent, digestEnv: EnvKagentAdapterDigest, adapterName: kagentAdapterName,
 		command:    "/orka-runtime-kagent",
-		args:       []string{"--protocol", acpCommandProtocol, "--config", kagentConfigPath},
+		args:       []string{adapterProtocolFlag, acpCommandProtocol, adapterConfigFlag, kagentConfigPath},
 		label:      "external kagent",
 		baseURLEnv: kagentProviderBaseURLEnv, tokenEnv: kagentProviderTokenEnv,
 		modelEnv: kagentModelEnv, configDigestEnv: kagentConfigDigestEnv,
@@ -82,7 +88,7 @@ var (
 	agentKitAdapter = externalACPAdapter{
 		kind: providerKindAgentKit, digestEnv: EnvAgentKitAdapterDigest, adapterName: agentKitAdapterName,
 		command:    "/opt/agentkit/bin/agentkit-serve",
-		args:       []string{"--config", agentKitConfigPath, "--protocol", acpCommandProtocol},
+		args:       []string{adapterConfigFlag, agentKitConfigPath, adapterProtocolFlag, acpCommandProtocol},
 		label:      "AgentKit",
 		baseURLEnv: agentKitProviderBaseURLEnv, tokenEnv: agentKitProviderTokenEnv,
 		modelEnv: agentKitModelEnv, configDigestEnv: agentKitConfigDigestEnv,
