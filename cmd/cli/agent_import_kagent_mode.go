@@ -233,7 +233,7 @@ func templateProblems(agent map[string]any, related *kagentInputs, namespace str
 	switch model := related.lookup("ModelConfig", namespace, modelName); {
 	case model == nil:
 		problems = append(problems, fmt.Sprintf("model config %q is not in the input", modelName))
-	case kagentString(model, "spec", "provider") != "OpenAI":
+	case kagentModelProvider(model) != kagentModelProviderOpenAI:
 		problems = append(problems, fmt.Sprintf("model config %q does not use the OpenAI provider", modelName))
 	case !kagentBool(model, "spec", "apiKeyPassthrough"):
 		problems = append(problems, fmt.Sprintf("model config %q does not pass the caller's bearer through", modelName))
@@ -610,6 +610,16 @@ func kagentMap(obj map[string]any, path ...string) map[string]any {
 		current = next
 	}
 	return current
+}
+
+// kagentModelProvider is a ModelConfig's provider. Both kagent versions
+// default an omitted one to OpenAI, which a local manifest has not had
+// applied.
+func kagentModelProvider(model map[string]any) string {
+	if provider := kagentString(model, kagentFieldSpec, "provider"); provider != "" {
+		return provider
+	}
+	return kagentModelProviderOpenAI
 }
 
 func kagentString(obj map[string]any, path ...string) string {

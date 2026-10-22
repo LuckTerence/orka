@@ -695,6 +695,11 @@ func TestClassifyKagentAgentRequiresEveryEndpointOnOneRelay(t *testing.T) {
 	if wrapped, _, _ := wrapKagentAgents([]byte(override), governedRelay, governedEvidence); !strings.Contains(strings.Join(wrapped[0].Mode.Reasons, ";"), "overrides the workload image") {
 		t.Fatalf("a workload override was governed: %+v", wrapped[0].Mode)
 	}
+	// kagent defaults an omitted provider to OpenAI.
+	omitted := strings.Replace(governedKagentFixture, "  provider: OpenAI\n", "", 1)
+	if wrapped, _, _ := wrapKagentAgents([]byte(omitted), governedRelay, governedEvidence); omitted == governedKagentFixture || wrapped[0].Mode.Mode != kagentModeGoverned {
+		t.Fatalf("kagent's default OpenAI provider was not governed: %+v", wrapped[0].Mode)
+	}
 	explicit := strings.Replace(governedKagentFixture, "8092/v1\"}", "8092/v1\", apiFormat: chatCompletions}", 1)
 	if wrapped, _, _ := wrapKagentAgents([]byte(explicit), governedRelay, governedEvidence); wrapped[0].Mode.Mode != kagentModeGoverned {
 		t.Fatalf("kagent's default chat completions format was not governed: %+v", wrapped[0].Mode)
