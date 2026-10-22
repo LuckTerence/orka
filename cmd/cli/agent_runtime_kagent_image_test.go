@@ -21,9 +21,9 @@ import (
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
-// kagentTestRegistry serves one multi-platform image, tagged 0.4.0, whose
-// linux/amd64 image carries labels.
-func kagentTestRegistry(t *testing.T, labels map[string]string) (*httptest.Server, string) {
+// kagentTestRegistry serves one image index, tagged 0.4.0, holding an
+// attestation and a linux image of architecture, which carries labels.
+func kagentTestRegistry(t *testing.T, architecture string, labels map[string]string) (*httptest.Server, string) {
 	t.Helper()
 	blobs := map[string][]byte{}
 	put := func(value any) ocispec.Descriptor {
@@ -40,8 +40,11 @@ func kagentTestRegistry(t *testing.T, labels map[string]string) (*httptest.Serve
 	config.MediaType = ocispec.MediaTypeImageConfig
 	manifest := put(ocispec.Manifest{MediaType: ocispec.MediaTypeImageManifest, Config: config, Layers: []ocispec.Descriptor{}})
 	manifest.MediaType = ocispec.MediaTypeImageManifest
-	manifest.Platform = &ocispec.Platform{OS: "linux", Architecture: "amd64"}
-	index := put(ocispec.Index{MediaType: ocispec.MediaTypeImageIndex, Manifests: []ocispec.Descriptor{manifest}})
+	manifest.Platform = &ocispec.Platform{OS: "linux", Architecture: architecture}
+	// Buildx lists provenance attestations as unknown/unknown images.
+	attestation := manifest
+	attestation.Platform = &ocispec.Platform{OS: "unknown", Architecture: "unknown"}
+	index := put(ocispec.Index{MediaType: ocispec.MediaTypeImageIndex, Manifests: []ocispec.Descriptor{attestation, manifest}})
 	mediaTypes := map[string]string{index.Digest.String(): ocispec.MediaTypeImageIndex, manifest.Digest.String(): ocispec.MediaTypeImageManifest}
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := strings.TrimPrefix(r.URL.Path, "/v2/orka/acp-kagent-runtime/")
@@ -75,7 +78,7 @@ func kagentTestRegistry(t *testing.T, labels map[string]string) (*httptest.Serve
 func TestResolveKagentRuntimeImagePinsTheIndexAndReadsTheAdapter(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("DOCKER_CONFIG", t.TempDir())
-	server, index := kagentTestRegistry(t, map[string]string{kagentAdapterDigestLabel: testAdapterDigest})
+	server, index := kagentTestRegistry(t, "amd64", map[string]string{kagentAdapterDigestLabel: testAdapterDigest})
 	repository := strings.TrimPrefix(server.URL, "https://") + "/orka/acp-kagent-runtime"
 	pinned, adapter, err := resolveKagentRuntimeImage(context.Background(), repository+":0.4.0", server.Client())
 	if err != nil || pinned != repository+"@"+index || adapter != testAdapterDigest {
@@ -90,10 +93,22 @@ func TestResolveKagentRuntimeImagePinsTheIndexAndReadsTheAdapter(t *testing.T) {
 	}
 }
 
+// An image built for arm64 alone carries the same label.
+func TestResolveKagentRuntimeImageReadsAnArm64OnlyImage(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DOCKER_CONFIG", t.TempDir())
+	server, index := kagentTestRegistry(t, "arm64", map[string]string{kagentAdapterDigestLabel: testAdapterDigest})
+	repository := strings.TrimPrefix(server.URL, "https://") + "/orka/acp-kagent-runtime"
+	if pinned, adapter, err := resolveKagentRuntimeImage(context.Background(), repository+":0.4.0", server.Client()); err != nil ||
+		pinned != repository+"@"+index || adapter != testAdapterDigest {
+		t.Fatalf("resolve = %q, %q, %v", pinned, adapter, err)
+	}
+}
+
 func TestResolveKagentRuntimeImageRefusesAnImageWithoutTheAdapterLabel(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("DOCKER_CONFIG", t.TempDir())
-	server, _ := kagentTestRegistry(t, map[string]string{"org.opencontainers.image.title": "something else"})
+	server, _ := kagentTestRegistry(t, "amd64", map[string]string{"org.opencontainers.image.title": "something else"})
 	image := strings.TrimPrefix(server.URL, "https://") + "/orka/acp-kagent-runtime:0.4.0"
 	if _, _, err := resolveKagentRuntimeImage(context.Background(), image, server.Client()); err == nil || !strings.Contains(err.Error(), "is not an Orka kagent runtime image") {
 		t.Fatalf("resolve = %v", err)

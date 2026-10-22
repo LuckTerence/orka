@@ -47,7 +47,8 @@ func kagentDefaultImage(cliVersion string) (string, error) {
 // resolveKagentRuntimeImage pins image to its digest, and reads the digest of
 // the adapter image it was built on from its kagentAdapterDigestLabel label.
 // A multi-platform image is pinned by its index; the label is read from its
-// linux/amd64 image, which every platform's build shares.
+// linux/amd64 image, or else its linux/arm64 one: every platform's build
+// shares it.
 func resolveKagentRuntimeImage(ctx context.Context, image string, client *http.Client) (pinned, adapter string, err error) {
 	ctx, cancel := context.WithTimeout(ctx, kagentImageTimeout)
 	defer cancel()
@@ -84,14 +85,19 @@ func resolveKagentRuntimeImage(ctx context.Context, image string, client *http.C
 			return "", "", fmt.Errorf("reading %s: %w", image, err)
 		}
 		found := false
-		for _, candidate := range index.Manifests {
-			if candidate.Platform != nil && candidate.Platform.OS == "linux" && candidate.Platform.Architecture == "amd64" {
-				manifest, found = candidate, true
+		for _, architecture := range []string{"amd64", "arm64"} {
+			for _, candidate := range index.Manifests {
+				if candidate.Platform != nil && candidate.Platform.OS == "linux" && candidate.Platform.Architecture == architecture {
+					manifest, found = candidate, true
+					break
+				}
+			}
+			if found {
 				break
 			}
 		}
 		if !found {
-			return "", "", fmt.Errorf("%s has no linux/amd64 image", image)
+			return "", "", fmt.Errorf("%s has no linux/amd64 or linux/arm64 image", image)
 		}
 	}
 	var imageManifest ocispec.Manifest
