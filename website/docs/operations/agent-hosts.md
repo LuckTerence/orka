@@ -91,7 +91,7 @@ rules:
     verbs: ["use"]
   - apiGroups: ["core.orka.ai"]
     resources: ["agenthosts"]
-    verbs: ["create", "list", "watch"]
+    verbs: ["create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -110,7 +110,9 @@ rules:
 
 `create` cannot be limited by name, so agree on host names before hosts are created, and
 let an operator create each person's token Secret, or grant `create` on Secrets only where
-that is acceptable in the watch namespace.
+that is acceptable in the watch namespace. The shared Role grants no `list` or `watch`,
+which would show everyone's hosts; `kubectl get agenthost alice` and `kubectl apply` need
+only `get` on the named host.
 
 Creating an `AgentHost` requires `use` on its template, and naming a token Secret requires
 `get` on that Secret, both checked against the caller by an admission policy.
