@@ -366,6 +366,45 @@ func TestKagentDeployRefusesAnUnownedRuntimeObject(t *testing.T) {
 	if err := k.deploy(ctx, dir); err == nil || !strings.Contains(err.Error(), "is not runtime") {
 		t.Fatalf("deploy over a foreign deployment = %v", err)
 	}
+	k.unlock()
+	// So is a foreign auth Secret, whose credentials the runtime would mount.
+	c = kagentTestCluster(t, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: bundle.Runtime + "-auth", Namespace: kagentTestNamespace},
+		Data: map[string][]byte{"controller-token": []byte("someone-else")}})
+	k, _ = newTestKagentRuntimes(t, c)
+	if err := k.deploy(ctx, dir); err == nil || !strings.Contains(err.Error(), "is not runtime") {
+		t.Fatalf("deploy over a foreign secret = %v", err)
+	}
+	secret := &corev1.Secret{}
+	if err := c.Get(ctx, k.key(bundle.Runtime+"-auth"), secret); err != nil || len(secret.Labels) != 0 {
+		t.Fatalf("the foreign secret was relabeled: %v, %v", secret.Labels, err)
+	}
+}
+
+// A claim's StorageClass cannot change, so a redeploy keeps the ledger's
+// class when --storage-class is omitted and refuses another.
+func TestKagentDeployKeepsTheLedgerStorageClass(t *testing.T) {
+	dir, bundle := writeTestKagentBundle(t)
+	c := kagentTestCluster(t)
+	k, _ := newTestKagentRuntimes(t, c)
+	ctx := context.Background()
+	k.options.StorageClass = "fast"
+	if err := k.deploy(ctx, dir); err != nil {
+		t.Fatal(err)
+	}
+	k.unlock()
+	k.options.StorageClass = ""
+	if err := k.deploy(ctx, dir); err != nil {
+		t.Fatalf("deploying again without --storage-class: %v", err)
+	}
+	k.unlock()
+	claim := &corev1.PersistentVolumeClaim{}
+	if err := c.Get(ctx, k.key(bundle.Runtime+"-ledger"), claim); err != nil || claim.Spec.StorageClassName == nil || *claim.Spec.StorageClassName != "fast" {
+		t.Fatalf("ledger class after a redeploy = %v, %v", claim.Spec.StorageClassName, err)
+	}
+	k.options.StorageClass = "slow"
+	if err := k.deploy(ctx, dir); err == nil || !strings.Contains(err.Error(), "--storage-class") {
+		t.Fatalf("redeploy with another class = %v", err)
+	}
 }
 
 // Until the runtime is Ready, a failure moves the relay, and its policy,

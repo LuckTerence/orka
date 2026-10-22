@@ -477,6 +477,21 @@ func (k *kagentRuntimes) deploy(ctx context.Context, dir string) (err error) {
 	}
 	options := kagentRenderOptions{Namespace: k.namespace, StorageClass: k.options.StorageClass,
 		OrkaAPIURL: k.options.OrkaAPIURL, SubstrateNamespace: k.options.SubstrateNamespace}
+	// A claim's StorageClass cannot change: an omitted flag keeps the ledger's,
+	// and another refuses.
+	claim := &corev1.PersistentVolumeClaim{}
+	claimed, err := k.getOptional(ctx, bundle.Runtime+"-ledger", claim)
+	if err != nil {
+		return err
+	}
+	if claimed && claim.Spec.StorageClassName != nil {
+		switch class := *claim.Spec.StorageClassName; {
+		case options.StorageClass == "":
+			options.StorageClass = class
+		case options.StorageClass != class:
+			return fmt.Errorf("runtime %s's ledger uses StorageClass %s; deploy under a new --runtime-revision to change --storage-class", bundle.Runtime, class)
+		}
+	}
 	// The image is part of the runtime's immutable profile: a deployed runtime
 	// keeps its image, and a new one runs under a new --runtime-revision.
 	deployment := &appsv1.Deployment{}
@@ -641,6 +656,11 @@ func (k *kagentRuntimes) ensureAuthSecret(ctx context.Context, bundle kagentBund
 		secret = &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: k.namespace, Labels: labels, Annotations: annotations}, Data: data}
 		return k.c.Create(ctx, secret)
 	}
+	// A same-named Secret another owner made holds credentials this runtime
+	// must not mount, and its metadata is not this deploy's to change.
+	if err := kagentOwned(bundle, "Secret", secret); err != nil {
+		return err
+	}
 	if len(upstream) != 0 {
 		// The broker reads the credential once, at start, so a runtime keeps it.
 		stored, given := sha256.Sum256(secret.Data["model-upstream-token"]), sha256.Sum256(upstream)
@@ -648,8 +668,7 @@ func (k *kagentRuntimes) ensureAuthSecret(ctx context.Context, bundle kagentBund
 			return fmt.Errorf("runtime %s holds another upstream credential than --model-upstream-token-file; rotate it by deploying under a new --runtime-revision", bundle.Runtime)
 		}
 	}
-	// Orka uses the Secret only with this metadata, which a deploy that stopped
-	// after creating it did not set.
+	// Orka uses the Secret only with this metadata, so a redeploy reasserts it.
 	patch, _ := json.Marshal(map[string]any{kagentFieldMetadata: map[string]any{"labels": labels, kagentFieldAnnotations: annotations}})
 	return k.c.Patch(ctx, secret, client.RawPatch(types.MergePatchType, patch))
 }
