@@ -780,19 +780,15 @@ func kagentNonce() (string, error) {
 	return hex.EncodeToString(nonce), nil
 }
 
-// deleteCreated deletes the object named name that this deploy created, while
-// it still is that object: the one with the created UID, or before the
-// create's answer arrived, the one carrying the deploy's nonce.
-func (k *kagentRuntimes) deleteCreated(ctx context.Context, name string, obj client.Object, created types.UID, nonce string) error {
-	found, err := k.getOptional(ctx, name, obj)
-	if err != nil || !found {
-		return err
-	}
+// deleteCreated deletes obj, as read, if this deploy created it: it has the
+// created UID, or before the create's answer arrived, carries the deploy's
+// nonce. The delete holds only while obj is unchanged since the read.
+func (k *kagentRuntimes) deleteCreated(ctx context.Context, obj client.Object, created types.UID, nonce string) error {
 	if obj.GetUID() != created && (created != "" || obj.GetAnnotations()[kagentDeployAnnotation] != nonce) {
 		return nil
 	}
-	uid := obj.GetUID()
-	if err := k.c.Delete(ctx, obj, client.Preconditions{UID: &uid}); err != nil && !apierrors.IsNotFound(err) {
+	uid, version := obj.GetUID(), obj.GetResourceVersion()
+	if err := k.c.Delete(ctx, obj, client.Preconditions{UID: &uid, ResourceVersion: &version}); err != nil && !apierrors.IsNotFound(err) {
 		return err
 	}
 	return nil
@@ -841,9 +837,17 @@ func (k *kagentRuntimes) jsonPatch(ctx context.Context, obj client.Object, ops [
 func (k *kagentRuntimes) restoreRelay(bundle kagentBundle, rollback *kagentRelayRollback) {
 	ctx, cancel := context.WithTimeout(context.Background(), kagentRollbackTimeout)
 	defer cancel()
-	if rollback.serviceNonce != "" {
+	// A deploy that took the relay since relies on what this one created, so
+	// that is deleted only while the relay still selects this runtime.
+	relay := &corev1.Service{}
+	found, err := k.getOptional(ctx, rollback.service, relay)
+	if err != nil {
+		k.logf("kagent-runtime: could not read relay %s: %v", rollback.service, err)
+	}
+	serving := found && maps.Equal(relay.Spec.Selector, map[string]string{kagentRuntimeLabel: bundle.Runtime})
+	if rollback.serviceNonce != "" && serving {
 		k.logf("Runtime %s is not Ready; deleting relay %s, which this deploy created.", bundle.Runtime, rollback.service)
-		if err := k.deleteCreated(ctx, rollback.service, &corev1.Service{}, rollback.createdService, rollback.serviceNonce); err != nil {
+		if err := k.deleteCreated(ctx, relay, rollback.createdService, rollback.serviceNonce); err != nil {
 			k.logf("kagent-runtime: could not delete relay %s, which this deploy created: %v", rollback.service, err)
 		}
 	}
@@ -861,8 +865,12 @@ func (k *kagentRuntimes) restoreRelay(bundle kagentBundle, rollback *kagentRelay
 	}
 	policy := &networkingv1.NetworkPolicy{}
 	switch {
-	case rollback.policyNonce != "":
-		if err := k.deleteCreated(ctx, rollback.service, policy, rollback.createdPolicy, rollback.policyNonce); err != nil {
+	case rollback.policyNonce != "" && serving:
+		found, err := k.getOptional(ctx, rollback.service, policy)
+		if err == nil && found {
+			err = k.deleteCreated(ctx, policy, rollback.createdPolicy, rollback.policyNonce)
+		}
+		if err != nil {
 			k.logf("kagent-runtime: could not delete relay policy %s, which this deploy created: %v", rollback.service, err)
 		}
 	case rollback.policy != nil && rollback.applied != nil:

@@ -292,6 +292,35 @@ func TestKagentDeployDeletesARelayWhoseCreateAnswerWasLost(t *testing.T) {
 	}
 }
 
+// A deploy that took the relay since a failed one created it relies on the
+// relay and its policy, so the failed deploy's rollback leaves both.
+func TestKagentDeployLeavesARelayAnotherDeployTookOver(t *testing.T) {
+	dir, _ := writeTestKagentBundle(t)
+	c := kagentTestCluster(t)
+	k, _ := newTestKagentRuntimes(t, c)
+	k.capabilities = func(ctx context.Context, _, _ string) ([]byte, error) {
+		relay := &corev1.Service{}
+		if err := c.Get(ctx, k.key("probe-gov-relay"), relay); err != nil {
+			return nil, err
+		}
+		relay.Spec.Selector = map[string]string{kagentRuntimeLabel: "probe-gov-kagent-next"}
+		if err := c.Update(ctx, relay); err != nil {
+			return nil, err
+		}
+		return nil, errors.New("the runtime does not answer")
+	}
+	if err := k.deploy(context.Background(), dir); err == nil || !strings.Contains(err.Error(), "does not answer") {
+		t.Fatalf("deploy = %v", err)
+	}
+	relay := &corev1.Service{}
+	if err := c.Get(context.Background(), k.key("probe-gov-relay"), relay); err != nil || relay.Spec.Selector[kagentRuntimeLabel] != "probe-gov-kagent-next" {
+		t.Fatalf("the relay another deploy took = %v, %v", relay.Spec.Selector, err)
+	}
+	if err := c.Get(context.Background(), k.key("probe-gov-relay"), &networkingv1.NetworkPolicy{}); err != nil {
+		t.Fatalf("the policy the other deploy relies on was deleted: %v", err)
+	}
+}
+
 // A policy patch whose answer was lost may still have committed, so the
 // rollback stays armed and restores the policy.
 func TestKagentDeployRestoresAPolicyWhosePatchAnswerWasLost(t *testing.T) {
