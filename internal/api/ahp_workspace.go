@@ -94,6 +94,9 @@ type ahpWorkspaces struct {
 	provided map[string]ahpProvidedCredential
 	// refreshing are the users whose token a terminal's input is renewing.
 	refreshing map[string]bool
+	// tokens are the git tokens each user's workspace was last given, newest
+	// first, which terminal output never carries.
+	tokens map[string][]string
 	// providing are the users whose token is being installed; it closes when
 	// the installation ends.
 	providing map[string]chan struct{}

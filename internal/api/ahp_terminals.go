@@ -7,9 +7,11 @@ MIT License - see LICENSE file for details.
 package api
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -21,6 +23,7 @@ import (
 	"k8s.io/client-go/tools/remotecommand"
 
 	"github.com/orka-agents/orka/internal/ahphost"
+	executionevents "github.com/orka-agents/orka/internal/events"
 )
 
 const (
@@ -169,7 +172,7 @@ func (b *ahpBackend) CreateTerminal(ctx context.Context, principal ahphost.Princ
 			}
 		}
 	}()
-	output := newAHPTerminalOutput(termCtx, emit, params.Channel)
+	output := newAHPTerminalOutput(termCtx, emit, params.Channel, func() []string { return b.workspaces.tokensFor(principal.UserKey) })
 	go func() {
 		// The shell leads its own session; its PID names that session, so
 		// ending the terminal can stop everything started in it.
@@ -313,6 +316,9 @@ func (b *ahpBackend) authorizeTerminalAction(principal ahphost.Principal, channe
 		}
 		return nil
 	case *ahptypes.TerminalTitleChangedAction:
+		if len(a.Title) > ahpTerminalTitleMax {
+			return &ahphost.Rejection{Reason: "the title is too long"}
+		}
 		return nil
 	default:
 		return &ahphost.Rejection{Reason: "not supported on this host"}
@@ -338,24 +344,80 @@ func (b *ahpBackend) handleTerminalAction(principal ahphost.Principal, channel s
 		case term.sizes <- remotecommand.TerminalSize{Width: uint16(a.Cols), Height: uint16(a.Rows)}: //nolint:gosec // validated at admission
 		default:
 		}
+	case *ahptypes.TerminalTitleChangedAction:
+		// The terminal list is built from the backend's terminals, so a
+		// renamed terminal keeps its name there too.
+		b.mu.Lock()
+		term.title = a.Title
+		b.mu.Unlock()
+		if b.updateTerminals != nil {
+			_ = b.updateTerminals(term.ctx, principal)
+		}
 	}
 }
 
 // ahpTerminalOutput turns a shell's output into terminal/data actions,
-// coalesced and cut on UTF-8 boundaries.
+// coalesced and cut on UTF-8 boundaries. Terminal data is journaled, so the
+// workspace's own git tokens are replaced before it leaves.
 type ahpTerminalOutput struct {
 	ctx     context.Context
 	emit    ahphost.Emitter
 	channel string
+	// credentials returns the tokens the workspace holds.
+	credentials func() []string
 
 	mu      sync.Mutex
 	pending []byte
 	timer   *time.Timer
 	closed  bool
+	// heldAt is when pending started to end in what could begin a token. It is
+	// held back until more output arrives, or ahpTerminalTokenHold passes.
+	heldAt time.Time
 }
 
-func newAHPTerminalOutput(ctx context.Context, emit ahphost.Emitter, channel string) *ahpTerminalOutput {
-	return &ahpTerminalOutput{ctx: ctx, emit: emit, channel: channel}
+func newAHPTerminalOutput(ctx context.Context, emit ahphost.Emitter, channel string, credentials func() []string) *ahpTerminalOutput {
+	return &ahpTerminalOutput{ctx: ctx, emit: emit, channel: channel, credentials: credentials}
+}
+
+// ahpTerminalTokenHold is how long terminal output that could begin a token
+// waits for the rest of it.
+const ahpTerminalTokenHold = 250 * time.Millisecond
+
+// ahpTerminalTitleMax bounds a terminal's title.
+const ahpTerminalTitleMax = 256
+
+// ahpMinRedactedToken ignores values too short to be a token: replacing them
+// would mangle ordinary output.
+const ahpMinRedactedToken = 8
+
+// ahpRedactTokens replaces every token in data, longest first.
+func ahpRedactTokens(data []byte, tokens []string) []byte {
+	sorted := slices.Clone(tokens)
+	slices.SortFunc(sorted, func(a, b string) int { return len(b) - len(a) })
+	for _, token := range sorted {
+		if len(token) >= ahpMinRedactedToken {
+			data = bytes.ReplaceAll(data, []byte(token), []byte(executionevents.ExecutionEventRedactedValue))
+		}
+	}
+	return data
+}
+
+// ahpTokenPrefixAtEnd is the length of the longest suffix of data that could
+// begin a token.
+func ahpTokenPrefixAtEnd(data []byte, tokens []string) int {
+	held := 0
+	for _, token := range tokens {
+		if len(token) < ahpMinRedactedToken {
+			continue
+		}
+		for k := min(len(token)-1, len(data)); k > held; k-- {
+			if bytes.HasSuffix(data, []byte(token[:k])) {
+				held = k
+				break
+			}
+		}
+	}
+	return held
 }
 
 func (o *ahpTerminalOutput) Write(p []byte) (int, error) {
@@ -365,6 +427,7 @@ func (o *ahpTerminalOutput) Write(p []byte) (int, error) {
 		return 0, io.ErrClosedPipe
 	}
 	o.pending = append(o.pending, p...)
+	o.heldAt = time.Time{}
 	if len(o.pending) >= ahpTerminalChunkMax {
 		o.flushLocked()
 	} else if o.timer == nil {
@@ -379,9 +442,34 @@ func (o *ahpTerminalOutput) Write(p []byte) (int, error) {
 }
 
 func (o *ahpTerminalOutput) flushLocked() {
-	for len(o.pending) > 0 {
-		cut := min(len(o.pending), ahpTerminalChunkMax)
-		if cut < len(o.pending) {
+	ready := len(o.pending)
+	if o.credentials != nil {
+		if tokens := o.credentials(); len(tokens) > 0 {
+			o.pending = ahpRedactTokens(o.pending, tokens)
+			ready = len(o.pending)
+			// A token may be split across writes: keep back a suffix that
+			// could begin one, until more output comes or the hold ends.
+			if hold := ahpTokenPrefixAtEnd(o.pending, tokens); hold > 0 && !o.closed {
+				if o.heldAt.IsZero() {
+					o.heldAt = time.Now()
+				}
+				if wait := ahpTerminalTokenHold - time.Since(o.heldAt); wait > 0 {
+					ready -= hold
+					if o.timer == nil {
+						o.timer = time.AfterFunc(wait, func() {
+							o.mu.Lock()
+							defer o.mu.Unlock()
+							o.timer = nil
+							o.flushLocked()
+						})
+					}
+				}
+			}
+		}
+	}
+	for ready > 0 {
+		cut := min(ready, ahpTerminalChunkMax)
+		if cut < ready {
 			// Move the cut back to the start of a character, but never past
 			// what one character spans: malformed bytes are passed on.
 			at := cut
@@ -408,6 +496,7 @@ func (o *ahpTerminalOutput) flushLocked() {
 		}
 		data := strings.ToValidUTF8(string(o.pending[:cut]), "\uFFFD")
 		o.pending = o.pending[cut:]
+		ready -= cut
 		_ = o.emit.Emit(o.ctx, o.channel, ahptypes.StateAction{Value: &ahptypes.TerminalDataAction{Type: ahptypes.ActionTypeTerminalData, Data: data}})
 	}
 }

@@ -8,6 +8,7 @@ package api
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"time"
 
@@ -109,7 +110,30 @@ func (w *ahpWorkspaces) installCredential(ctx context.Context, principal ahphost
 	if err := write(writeCtx, pod, token); err != nil {
 		return time.Time{}, false
 	}
+	w.rememberToken(principal.UserKey, token)
 	return now, true
+}
+
+// ahpTokensRemembered is how many of a workspace's tokens terminal output is
+// redacted for: the current one, and the one it replaced, which a shell may
+// still hold.
+const ahpTokensRemembered = 2
+
+func (w *ahpWorkspaces) rememberToken(userKey, token string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.tokens == nil {
+		w.tokens = map[string][]string{}
+	}
+	kept := append([]string{token}, slices.DeleteFunc(slices.Clone(w.tokens[userKey]), func(t string) bool { return t == token })...)
+	w.tokens[userKey] = kept[:min(len(kept), ahpTokensRemembered)]
+}
+
+// tokensFor returns the git tokens a user's workspace holds or held last.
+func (w *ahpWorkspaces) tokensFor(userKey string) []string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return slices.Clone(w.tokens[userKey])
 }
 
 // execWriteToken writes a token to the workspace. It travels on standard

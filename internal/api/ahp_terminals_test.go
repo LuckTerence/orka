@@ -39,7 +39,7 @@ func (e *ahpRecordingEmitter) Emit(_ context.Context, _ string, actions ...ahpty
 
 func TestAHPTerminalOutputNeverSplitsACharacter(t *testing.T) {
 	emit := &ahpRecordingEmitter{}
-	out := newAHPTerminalOutput(context.Background(), emit, "ahp-terminal:/t")
+	out := newAHPTerminalOutput(context.Background(), emit, "ahp-terminal:/t", nil)
 	text := strings.Repeat("héllo wörld ✓ ", 5000) // larger than one chunk
 	raw := []byte(text)
 	// Write in awkward pieces that cut characters in half.
@@ -61,13 +61,51 @@ func TestAHPTerminalOutputNeverSplitsACharacter(t *testing.T) {
 
 func TestAHPTerminalOutputFlushesQuietOutput(t *testing.T) {
 	emit := &ahpRecordingEmitter{}
-	out := newAHPTerminalOutput(context.Background(), emit, "ahp-terminal:/t")
+	out := newAHPTerminalOutput(context.Background(), emit, "ahp-terminal:/t", nil)
 	_, _ = out.Write([]byte("$ "))
 	require.Eventually(t, func() bool {
 		emit.mu.Lock()
 		defer emit.mu.Unlock()
 		return len(emit.data) == 1 && emit.data[0] == "$ "
 	}, time.Second, 5*time.Millisecond, "a prompt without a newline still reaches the client")
+}
+
+// Terminal data is journaled, so the workspace's git token never leaves in it,
+// even split across writes; a held prefix that never completes a token is
+// released on the next tick.
+func TestAHPTerminalOutputRedactsTheWorkspaceToken(t *testing.T) {
+	const token = "ghu_0123456789abcdefghijklmnopqrstuvwx"
+	emit := &ahpRecordingEmitter{}
+	out := newAHPTerminalOutput(context.Background(), emit, "ahp-terminal:/t", func() []string { return []string{token} })
+	joined := func() string {
+		emit.mu.Lock()
+		defer emit.mu.Unlock()
+		return strings.Join(emit.data, "")
+	}
+	_, _ = out.Write([]byte("$ cat token\r\n" + token[:10]))
+	time.Sleep(3 * ahpTerminalFlushEvery)
+	require.NotContains(t, joined(), token[:10], "a possible token prefix is held while more may follow")
+	_, _ = out.Write([]byte(token[10:] + "\r\n$ gh"))
+	require.Eventually(t, func() bool { return strings.HasSuffix(joined(), "$ gh") }, time.Second, 5*time.Millisecond,
+		"a prefix that never becomes a token is released on the next tick")
+	require.Equal(t, "$ cat token\r\n[REDACTED]\r\n$ gh", joined())
+}
+
+// The terminal list comes from the backend's terminals, so a renamed terminal
+// keeps its new name there.
+func TestAHPTerminalTitleChangesReachTheTerminalList(t *testing.T) {
+	principal := ahphost.Principal{UserKey: "alice"}
+	b := &ahpBackend{shells: map[string]*ahpTerminal{}}
+	b.shells[ahpTerminalKey(principal.UserKey, "ahp-terminal:/t")] = &ahpTerminal{
+		ctx: context.Background(), channel: "ahp-terminal:/t", title: "Terminal",
+	}
+	b.handleTerminalAction(principal, "ahp-terminal:/t", ahptypes.StateAction{Value: &ahptypes.TerminalTitleChangedAction{
+		Type: ahptypes.ActionTypeTerminalTitleChanged, Title: "build",
+	}})
+	terminals, err := b.Terminals(context.Background(), principal)
+	require.NoError(t, err)
+	require.Len(t, terminals, 1)
+	require.Equal(t, "build", terminals[0].Title)
 }
 
 func TestAHPValidBranch(t *testing.T) {
@@ -105,7 +143,7 @@ func TestAHPTerminalsAreTheirOwnersOnly(t *testing.T) {
 
 func TestAHPTerminalOutputPassesMalformedBytesOn(t *testing.T) {
 	emit := &ahpRecordingEmitter{}
-	out := newAHPTerminalOutput(context.Background(), emit, "ahp-terminal:/t")
+	out := newAHPTerminalOutput(context.Background(), emit, "ahp-terminal:/t", nil)
 	garbage := make([]byte, 2*ahpTerminalChunkMax+5)
 	for i := range garbage {
 		garbage[i] = 0x80 // continuation bytes with no start byte
