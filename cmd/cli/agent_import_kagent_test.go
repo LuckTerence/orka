@@ -928,6 +928,23 @@ func TestTranslateKagentAgentsNeedsAProviderForCustomEndpoints(t *testing.T) {
 	}
 }
 
+// kagent defaults an omitted ModelConfig provider to OpenAI, so a manifest
+// without one translates as OpenAI, with its openAI settings.
+func TestTranslateKagentAgentsDefaultsTheProviderToOpenAI(t *testing.T) {
+	omitted := strings.Replace(translatableKagentFixture, "  provider: OpenAI\n", "", 1)
+	if omitted == translatableKagentFixture {
+		t.Fatal("fixture names no OpenAI provider to omit")
+	}
+	translated, _, err := translateKagentAgents([]byte(omitted), kagentTranslateOptions{Tools: map[string]string{"k8s/list_pods": "k8s-list-pods"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if agent := decodeWrappedAgent(t, translated[0].Manifest); agent.Spec.Model == nil || agent.Spec.Model.Provider != "openai" ||
+		agent.Spec.Model.MaxTokens == nil || *agent.Spec.Model.MaxTokens != 1024 {
+		t.Fatalf("model = %+v", agent.Spec.Model)
+	}
+}
+
 // Translation names no AgentRuntime, so a name too long for one translates;
 // wrapping it still fails on the runtime's name.
 func TestTranslateKagentAgentsAcceptsANameTooLongForARuntime(t *testing.T) {

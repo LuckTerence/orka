@@ -186,10 +186,16 @@ func translateKagentAgent(agent map[string]any, related kagentObjects, options k
 func translateKagentModel(model map[string]any, providerRef string) (map[string]any, string, []string) {
 	var problems []string
 	spec := kagentMap(model, kagentFieldSpec)
-	provider := map[string]string{"OpenAI": kagentProviderOpenAI, "Anthropic": kagentProviderAnthropic}[kagentString(model, kagentFieldSpec, "provider")]
+	// Both kagent versions default an omitted provider to OpenAI, which a
+	// local manifest has not had applied.
+	kagentProvider := kagentString(model, kagentFieldSpec, "provider")
+	if kagentProvider == "" {
+		kagentProvider = "OpenAI"
+	}
+	provider := map[string]string{"OpenAI": kagentProviderOpenAI, "Anthropic": kagentProviderAnthropic}[kagentProvider]
 	settingsField := map[string]string{kagentProviderOpenAI: "openAI", kagentProviderAnthropic: "anthropic"}[provider]
 	if provider == "" {
-		problems = append(problems, fmt.Sprintf("uses provider %q; only OpenAI and Anthropic translate", kagentString(model, kagentFieldSpec, "provider")))
+		problems = append(problems, fmt.Sprintf("uses provider %q; only OpenAI and Anthropic translate", kagentProvider))
 	}
 	for field := range spec {
 		switch field {
