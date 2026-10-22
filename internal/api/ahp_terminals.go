@@ -477,9 +477,16 @@ func (o *ahpTerminalOutput) flushLocked() {
 			// waits for more output, however long; a token's public start,
 			// such as "gh", waits only ahpTerminalTokenHold, because what
 			// follows it is redacted on its own.
-			if long, short := ahpTokenHeld(o.pending, tokens); !o.closed && long > 0 {
+			long, short := ahpTokenHeld(o.pending, tokens)
+			switch {
+			case long > 0 && o.closed:
+				// The output ended inside a token: what arrived of it is
+				// still secret.
+				o.pending = append(o.pending[:len(o.pending)-long], executionevents.ExecutionEventRedactedValue...)
+				ready = len(o.pending)
+			case long > 0:
 				ready -= long
-			} else if !o.closed && short > 0 {
+			case !o.closed && short > 0:
 				if o.heldAt.IsZero() {
 					o.heldAt = time.Now()
 				}

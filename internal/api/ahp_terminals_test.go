@@ -76,8 +76,14 @@ func TestAHPTerminalOutputRedactsTheWorkspaceToken(t *testing.T) {
 	const token = "ghu_0123456789abcdefghijklmnopqrstuvwx"
 	for name, tc := range map[string]struct {
 		writes []string
+		close  bool
 		want   string
 	}{
+		"closed in the middle of the token": {
+			writes: []string{"ghu_", token[4 : len(token)-1]},
+			close:  true,
+			want:   "ghu_[REDACTED]",
+		},
 		"split inside the secret, slowly": {
 			writes: []string{"$ cat token\r\n" + token[:10], token[10:] + "\r\n$ "},
 			want:   "$ cat token\r\n[REDACTED]\r\n$ ",
@@ -104,6 +110,9 @@ func TestAHPTerminalOutputRedactsTheWorkspaceToken(t *testing.T) {
 				// Longer than the hold, so a slow split is covered.
 				time.Sleep(2 * ahpTerminalTokenHold)
 				require.NotContains(t, joined(), token[4:14], "part of the token's secret was emitted")
+			}
+			if tc.close {
+				out.close()
 			}
 			require.Eventually(t, func() bool { return joined() == tc.want }, time.Second, 5*time.Millisecond,
 				"got %q", joined())

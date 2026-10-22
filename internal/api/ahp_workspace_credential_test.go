@@ -56,6 +56,31 @@ func TestAHPWorkspaceAsksGitHubOnlyThroughTheHelper(t *testing.T) {
 
 // A second workspace request that arrives while the person's token is being
 // installed waits for that installation, and the token is fetched once.
+// Terminal output is redacted for a token before the workspace can read it,
+// and for the token it replaced.
+func TestAHPWorkspaceTokenIsKnownBeforeItIsWritten(t *testing.T) {
+	token := "first-token-0123456789"
+	b := &ahpBackend{now: time.Now, cfg: AHPBackendConfig{
+		RepositoryCredential: func(context.Context, string, string, string) (string, error) { return token, nil },
+	}}
+	principal := ahphost.Principal{UserKey: ahphost.UserKey("https://issuer.example", "alice")}
+	var known []string
+	w := &ahpWorkspaces{
+		b: b, namespace: "orka-ahp-workspaces", image: "example.com/git@sha256:" + ahpHash("x"),
+		rest: &rest.Config{}, clientset: k8sfake.NewClientset(),
+	}
+	w.writeToken = func(context.Context, *corev1.Pod, string) error {
+		known = w.tokensFor(principal.UserKey)
+		return nil
+	}
+	w.provideCredential(context.Background(), principal, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{UID: "pod-1"}})
+	require.Equal(t, []string{"first-token-0123456789"}, known)
+
+	token = "second-token-0123456789"
+	w.provideCredential(context.Background(), principal, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{UID: "pod-2"}})
+	require.Equal(t, []string{"second-token-0123456789", "first-token-0123456789"}, known)
+}
+
 func TestAHPWorkspaceCredentialInstallsOnceWhileRequestsOverlap(t *testing.T) {
 	var fetches atomic.Int32
 	b := &ahpBackend{now: time.Now, cfg: AHPBackendConfig{

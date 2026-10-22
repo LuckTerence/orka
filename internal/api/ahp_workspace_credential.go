@@ -107,10 +107,12 @@ func (w *ahpWorkspaces) installCredential(ctx context.Context, principal ahphost
 	if write == nil {
 		write = w.execWriteToken
 	}
+	// Terminal output is redacted for the token before it can be read in
+	// the workspace.
+	w.rememberToken(principal.UserKey, token)
 	if err := write(writeCtx, pod, token); err != nil {
 		return time.Time{}, false
 	}
-	w.rememberToken(principal.UserKey, token)
 	return now, true
 }
 
