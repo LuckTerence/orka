@@ -917,6 +917,32 @@ func TestTranslateKagentAgentsNeedsAProviderForCustomEndpoints(t *testing.T) {
 	if agent := decodeWrappedAgent(t, translated[0].Manifest); agent.Spec.ProviderRef == nil || agent.Spec.ProviderRef.Name != "vekil" {
 		t.Fatalf("providerRef = %+v", agent.Spec.ProviderRef)
 	}
+	// An empty baseUrl is kagent's default endpoint, not a custom one.
+	empty := strings.Replace(custom, `baseUrl: "http://vekil:8080/v1"`, `baseUrl: ""`, 1)
+	translated, _, err = translateKagentAgents([]byte(empty), kagentTranslateOptions{Tools: tools})
+	if err != nil {
+		t.Fatalf("an empty baseUrl needed a provider: %v", err)
+	}
+	if agent := decodeWrappedAgent(t, translated[0].Manifest); agent.Spec.ProviderRef != nil {
+		t.Fatalf("providerRef = %+v", agent.Spec.ProviderRef)
+	}
+}
+
+// Translation names no AgentRuntime, so a name too long for one translates;
+// wrapping it still fails on the runtime's name.
+func TestTranslateKagentAgentsAcceptsANameTooLongForARuntime(t *testing.T) {
+	long := strings.Repeat("a", 240)
+	input := strings.Replace(translatableKagentFixture, "name: k8s-agent", "name: "+long, 1)
+	if input == translatableKagentFixture {
+		t.Fatal("fixture has no Agent name to replace")
+	}
+	translated, _, err := translateKagentAgents([]byte(input), kagentTranslateOptions{Tools: map[string]string{"k8s/list_pods": "k8s-list-pods"}})
+	if err != nil || len(translated) != 1 || metadataName(translated[0].Manifest) != long {
+		t.Fatalf("translate = %v, %v", translated, err)
+	}
+	if _, _, err := wrapKagentAgents([]byte(input), "", kagentRevisionEvidence{}); err == nil || !strings.Contains(err.Error(), "is not a valid Orka resource name") {
+		t.Fatalf("wrap = %v", err)
+	}
 }
 
 func TestAgentImportKagentCmdTranslateRemovesDroppedSettings(t *testing.T) {

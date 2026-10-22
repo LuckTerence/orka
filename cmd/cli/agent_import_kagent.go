@@ -284,6 +284,10 @@ func wrapKagentAgents(data []byte, relayURL string, evidence kagentRevisionEvide
 	wrapped := make([]kagentWrappedAgent, 0, len(agents))
 	for _, source := range agents {
 		agent := source.Wrapped
+		// Only a wrapped Agent needs its runtime; translation names none.
+		if problems := utilvalidation.IsDNS1123Subdomain(agent.RuntimeName); len(problems) > 0 {
+			return nil, "", fmt.Errorf("kagent Agent %s: %q is not a valid Orka resource name: %s", agent.Source, agent.RuntimeName, strings.Join(problems, "; "))
+		}
 		relay, err := kagentRelayOrigin(relayURL, metadataName(agent.Manifest))
 		if err != nil {
 			return nil, "", err
@@ -352,10 +356,8 @@ func wrapKagentAgent(apiVersion string, obj map[string]any) (kagentWrappedAgent,
 		source = namespace + "/" + name
 	}
 	runtimeName := name + kagentRuntimeSuffix
-	for _, candidate := range []string{name, runtimeName} {
-		if problems := utilvalidation.IsDNS1123Subdomain(candidate); len(problems) > 0 {
-			return kagentWrappedAgent{}, fmt.Errorf("kagent Agent %s: %q is not a valid Orka resource name: %s", source, candidate, strings.Join(problems, "; "))
-		}
+	if problems := utilvalidation.IsDNS1123Subdomain(name); len(problems) > 0 {
+		return kagentWrappedAgent{}, fmt.Errorf("kagent Agent %s: %q is not a valid Orka resource name: %s", source, name, strings.Join(problems, "; "))
 	}
 	return kagentWrappedAgent{
 		Source:          source,
