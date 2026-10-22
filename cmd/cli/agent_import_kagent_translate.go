@@ -82,6 +82,13 @@ func translateKagentAgent(agent map[string]any, related kagentObjects, options k
 	namespace := kagentString(agent, kagentFieldMetadata, cliNamespaceQuery)
 	var problems []string
 	refuse := func(format string, args ...any) { problems = append(problems, fmt.Sprintf(format, args...)) }
+	// A kagent v1 Agent names only its harness and template; any other field
+	// would be dropped, so it is refused.
+	for field := range kagentMap(agent, kagentFieldSpec) {
+		if field != "harnessRef" && field != "template" {
+			refuse("spec.%s has no Orka equivalent", field)
+		}
+	}
 
 	harnessName := kagentString(agent, kagentFieldSpec, "harnessRef", cliNameKey)
 	if harness := related.lookup("Harness", namespace, harnessName); harness == nil {
