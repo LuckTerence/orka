@@ -70,8 +70,9 @@ model-routing sidecar did not hold up in review.
 - Creating an AgentHost requires `use` on the template, checked against the live
   admission caller, as classes are for Tasks and Tools. RBAC on `agenthosts` decides who
   may create one at all, and who controls it afterwards: anyone who may update a host can
-  point it at a Secret they can read and restart it on its volume. People who share a
-  namespace therefore need Roles scoped to their own hosts.
+  point it at a Secret they can read and restart it on its volume. AgentHosts live in the
+  watch namespace, which the controller reconciles, so everyone's hosts share it and each
+  person needs a Role scoped to their own host.
 - Naming a GitHub token Secret, on creation or by changing the reference, requires `get`
   on that Secret for the same caller. The controller reads Secrets with its own
   credentials, so without this check anyone allowed to create a host could mount someone
@@ -177,7 +178,9 @@ image and pinned by digest (`--agent-host-agent-image`):
 - The connection token is minted by the controller per host and never leaves the
   cluster except to a client the user authorizes by RBAC.
 - The GitHub token is the user's own, supplied in a Secret in the AgentHost's namespace
-  and copied into the host namespace. It is not taken from Connections: ADR 0033 keeps
+  and copied into the host namespace. A new value in that Secret reaches the running host
+  through the copy; another Secret or key replaces the Pod, because copilotd fixes its
+  single-user identity when it starts. It is not taken from Connections: ADR 0033 keeps
   linked tokens out of every worker Pod, while an agent host is the user's own
   environment whose agent must hold that token by design.
 - Sealed authentication and connection binding stay required by the copilotd sample.

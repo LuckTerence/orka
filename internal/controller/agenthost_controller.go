@@ -247,7 +247,7 @@ func (r *AgentHostReconciler) reconcileHost(
 		return ctrl.Result{}, agentHostFailed(agentHostReasonHostAgentUnavailable,
 			"the controller has no host agent image; set --agent-host-agent-image")
 	}
-	githubToken, err := r.githubToken(ctx, host, template)
+	githubToken, tokenSource, err := r.githubToken(ctx, host, template)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -292,27 +292,28 @@ func (r *AgentHostReconciler) reconcileHost(
 	if err := r.reconcileConnectionSecret(ctx, host, names, template, connectionToken); err != nil {
 		return ctrl.Result{}, err
 	}
-	return r.reconcilePod(ctx, host, names, template, githubToken != nil)
+	return r.reconcilePod(ctx, host, names, template, tokenSource)
 }
 
-// githubToken returns the user's token when the template uses one, or nil.
-// Admission checks that whoever set githubTokenSecretRef may read that Secret.
+// githubToken returns the user's token when the template uses one, or nil,
+// and where it comes from as Secret name and key. Admission checks that
+// whoever set githubTokenSecretRef may read that Secret.
 func (r *AgentHostReconciler) githubToken(
 	ctx context.Context,
 	host *corev1alpha1.AgentHost,
 	template *corev1alpha1.AgentHostTemplate,
-) ([]byte, error) {
+) ([]byte, string, error) {
 	policy := template.Spec.GitHubToken
 	if policy == "" || policy == corev1alpha1.AgentHostCredentialNone {
-		return nil, nil
+		return nil, "", nil
 	}
 	ref := host.Spec.GitHubTokenSecretRef
 	if ref == nil {
 		if policy == corev1alpha1.AgentHostCredentialRequired {
-			return nil, agentHostFailed(agentHostReasonGitHubTokenRequired,
+			return nil, "", agentHostFailed(agentHostReasonGitHubTokenRequired,
 				"template %q requires spec.githubTokenSecretRef", template.Name)
 		}
-		return nil, nil
+		return nil, "", nil
 	}
 	key := ref.Key
 	if key == "" {
@@ -321,15 +322,15 @@ func (r *AgentHostReconciler) githubToken(
 	secret := &corev1.Secret{}
 	if err := r.Get(ctx, types.NamespacedName{Namespace: host.Namespace, Name: ref.Name}, secret); err != nil {
 		if apierrors.IsNotFound(err) {
-			return nil, agentHostFailed(agentHostReasonGitHubTokenUnavailable, "Secret %q does not exist", ref.Name)
+			return nil, "", agentHostFailed(agentHostReasonGitHubTokenUnavailable, "Secret %q does not exist", ref.Name)
 		}
-		return nil, err
+		return nil, "", err
 	}
 	token := bytes.TrimSpace(secret.Data[key])
 	if len(token) == 0 {
-		return nil, agentHostFailed(agentHostReasonGitHubTokenUnavailable, "Secret %q has no data at key %q", ref.Name, key)
+		return nil, "", agentHostFailed(agentHostReasonGitHubTokenUnavailable, "Secret %q has no data at key %q", ref.Name, key)
 	}
-	return token, nil
+	return token, ref.Name + "/" + key, nil
 }
 
 // ensureConnectionToken creates the host's connection token once and returns it.
@@ -680,7 +681,7 @@ func (r *AgentHostReconciler) reconcilePod(
 	host *corev1alpha1.AgentHost,
 	names agenthost.Names,
 	template *corev1alpha1.AgentHostTemplate,
-	githubToken bool,
+	tokenSource string,
 ) (ctrl.Result, error) {
 	if findAgentHostReceipt(host, agentHostKindPod, "", names.Pod) == nil {
 		if wait := r.restartWait(host); wait > 0 {
@@ -692,7 +693,7 @@ func (r *AgentHostReconciler) reconcilePod(
 	pod := &corev1.Pod{}
 	err := r.ensureObject(ctx, host, agentHostKindPod, "", names.Pod, pod, func(nonce string) client.Object {
 		return agenthost.HostPod(host, names, nonce, template, agenthost.PodOptions{
-			AgentImage: r.AgentImage, GitHubToken: githubToken,
+			AgentImage: r.AgentImage, GitHubTokenSource: tokenSource,
 		})
 	})
 	if errors.Is(err, errAgentHostObjectGone) {
@@ -722,7 +723,7 @@ func (r *AgentHostReconciler) reconcilePod(
 			agentHostReasonRestarting, "the host's Pod stopped; replacing it", "")
 		return ctrl.Result{RequeueAfter: agentHostCleanupRequeue}, nil
 	}
-	if message := staleAgentHostPod(pod, template, githubToken); message != "" {
+	if message := staleAgentHostPod(pod, template, tokenSource); message != "" {
 		if err := r.deletePod(ctx, host, names); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -877,9 +878,9 @@ func newAgentHostObject(kind string) client.Object {
 }
 
 // staleAgentHostPod says why a running Pod must be replaced, or returns "".
-func staleAgentHostPod(pod *corev1.Pod, template *corev1alpha1.AgentHostTemplate, githubToken bool) string {
+func staleAgentHostPod(pod *corev1.Pod, template *corev1alpha1.AgentHostTemplate, tokenSource string) string {
 	switch {
-	case pod.Annotations[agenthost.AnnotationGitHubToken] != fmt.Sprintf("%t", githubToken):
+	case pod.Annotations[agenthost.AnnotationGitHubToken] != tokenSource:
 		return "replacing the host's Pod to change its credentials"
 	case pod.Annotations[agenthost.AnnotationTemplateUID] != string(template.UID):
 		// Recreating a template under its name is how an operator changes

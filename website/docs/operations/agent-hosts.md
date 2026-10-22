@@ -71,16 +71,19 @@ With either install, create an `AgentHostTemplate` (see
 and grant `use` on it to the people who may run hosts. Write the Role as a manifest:
 `kubectl create role` refuses `use` because the API does not list that verb.
 
-Whoever may update an AgentHost controls it. They can suspend or delete it, and deleting
-it deletes its volume. They can also point it at a token Secret they can read, which
-restarts it on its volume as them. So give each person their own namespace for hosts,
-and bind this Role to that person there:
+AgentHosts, their templates and their token Secrets live in the namespace Orka watches
+(`--watch-namespace`), because the controller reconciles AgentHosts only there. Everyone's
+hosts therefore share that namespace, and whoever may update an AgentHost controls it:
+they can suspend or delete it, and deleting it deletes its volume. They can also point it
+at a token Secret they can read, which restarts it on its volume as them. So give everyone
+one shared Role to create hosts, and each person a Role that names only their own host and
+token Secret:
 
 ```yaml
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: agent-host-user
+  name: agent-host-creator
 rules:
   - apiGroups: ["core.orka.ai"]
     resources: ["agenthosttemplates"]
@@ -88,13 +91,26 @@ rules:
     verbs: ["use"]
   - apiGroups: ["core.orka.ai"]
     resources: ["agenthosts"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+    verbs: ["create", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: agent-host-alice
+rules:
+  - apiGroups: ["core.orka.ai"]
+    resources: ["agenthosts"]
+    resourceNames: ["alice"]
+    verbs: ["get", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["alice-github-token"]
+    verbs: ["get", "update", "patch"]
 ```
 
-If people must share a namespace, keep `create` and the template's `use` in a shared
-Role, and give each person a Role of their own for `get`, `update`, `patch` and `delete`,
-with `resourceNames` naming only their host. `create` cannot be limited by name, so
-agree on names before hosts are created.
+`create` cannot be limited by name, so agree on host names before hosts are created, and
+let an operator create each person's token Secret, or grant `create` on Secrets only where
+that is acceptable in the watch namespace.
 
 Creating an `AgentHost` requires `use` on its template, and naming a token Secret requires
 `get` on that Secret, both checked against the caller by an admission policy.
@@ -105,6 +121,8 @@ The sample template runs `copilotd` in relay mode: it registers the host as an e
 on the user's GitHub account and accepts clients through GitHub's relay. The cluster needs
 no inbound path.
 
+In the namespace Orka watches:
+
 ```bash
 kubectl create secret generic alice-github-token --from-literal=token=<GitHub token>
 kubectl apply -f config/samples/core_v1alpha1_agenthost.yaml
@@ -114,7 +132,9 @@ kubectl get agenthost alice
 When the host is `Ready`, the environment `orka-alice` appears in the client's
 **Environments** list. The token's owner is the only GitHub user the host serves. Orka
 copies the token into the host namespace and keeps the copy current, so rotating the
-Secret reaches the running host without a restart.
+Secret reaches the running host without a restart. Pointing the host at another Secret or
+key replaces its Pod on the same volume, because the daemon reads its identity from the
+token when it starts.
 
 ### Standalone access
 
