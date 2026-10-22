@@ -8,6 +8,8 @@ package api
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,6 +21,7 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/rest"
 
@@ -79,6 +82,15 @@ func TestAHPWorkspaceTokenIsKnownBeforeItIsWritten(t *testing.T) {
 	token = "second-token-0123456789"
 	w.provideCredential(context.Background(), principal, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{UID: "pod-2"}})
 	require.Equal(t, []string{"second-token-0123456789", "first-token-0123456789"}, known)
+
+	// Writes that fail never make output forget the token still installed.
+	w.writeToken = func(context.Context, *corev1.Pod, string) error { return errors.New("exec failed") }
+	for i, next := range []string{"third-token-0123456789", "fourth-token-0123456789"} {
+		token = next
+		w.provideCredential(context.Background(), principal, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{UID: types.UID(fmt.Sprintf("pod-%d", 3+i))}})
+	}
+	require.Equal(t, []string{"fourth-token-0123456789", "third-token-0123456789", "second-token-0123456789", "first-token-0123456789"},
+		w.tokensFor(principal.UserKey))
 }
 
 func TestAHPWorkspaceCredentialInstallsOnceWhileRequestsOverlap(t *testing.T) {

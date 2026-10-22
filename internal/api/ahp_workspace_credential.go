@@ -8,7 +8,6 @@ package api
 
 import (
 	"context"
-	"slices"
 	"strings"
 	"time"
 
@@ -116,26 +115,46 @@ func (w *ahpWorkspaces) installCredential(ctx context.Context, principal ahphost
 	return now, true
 }
 
-// ahpTokensRemembered is how many of a workspace's tokens terminal output is
-// redacted for: the current one, and the one it replaced, which a shell may
-// still hold.
-const ahpTokensRemembered = 2
+// ahpTokenMemory is how long terminal output stays redacted for a token given
+// to a workspace: longer than any token the workspace gets stays valid, so a
+// token is never forgotten while a shell can still hold it, whether its write
+// succeeded or newer ones followed.
+const ahpTokenMemory = 24 * time.Hour
+
+type ahpRememberedToken struct {
+	value string
+	at    time.Time
+}
 
 func (w *ahpWorkspaces) rememberToken(userKey, token string) {
+	now := w.b.now()
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.tokens == nil {
-		w.tokens = map[string][]string{}
+		w.tokens = map[string][]ahpRememberedToken{}
 	}
-	kept := append([]string{token}, slices.DeleteFunc(slices.Clone(w.tokens[userKey]), func(t string) bool { return t == token })...)
-	w.tokens[userKey] = kept[:min(len(kept), ahpTokensRemembered)]
+	kept := []ahpRememberedToken{{value: token, at: now}}
+	for _, held := range w.tokens[userKey] {
+		if held.value != token && now.Sub(held.at) < ahpTokenMemory {
+			kept = append(kept, held)
+		}
+	}
+	w.tokens[userKey] = kept
 }
 
-// tokensFor returns the git tokens a user's workspace holds or held last.
+// tokensFor returns the git tokens a user's workspace was given recently,
+// newest first.
 func (w *ahpWorkspaces) tokensFor(userKey string) []string {
+	now := w.b.now()
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return slices.Clone(w.tokens[userKey])
+	var tokens []string
+	for _, held := range w.tokens[userKey] {
+		if now.Sub(held.at) < ahpTokenMemory {
+			tokens = append(tokens, held.value)
+		}
+	}
+	return tokens
 }
 
 // execWriteToken writes a token to the workspace. It travels on standard
