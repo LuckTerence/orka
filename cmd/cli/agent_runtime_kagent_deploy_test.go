@@ -205,6 +205,63 @@ func TestKagentDeployRegistersAGovernedRuntime(t *testing.T) {
 	}
 }
 
+// Once a runtime is registered, Orka's recovery owns its controller epoch and
+// advances it only after draining; deploying again keeps the epoch the pod
+// runs with. A runtime never registered takes the current epoch.
+func TestKagentDeployKeepsTheEpochRecoveryOwns(t *testing.T) {
+	dir, bundle := writeTestKagentBundle(t)
+	c := kagentTestCluster(t)
+	k, _ := newTestKagentRuntimes(t, c)
+	ctx := context.Background()
+	if err := k.deploy(ctx, dir); err != nil {
+		t.Fatal(err)
+	}
+	k.unlock()
+	epochs := &corev1alpha1.ControllerEpochList{}
+	if err := c.List(ctx, epochs); err != nil || len(epochs.Items) != 1 {
+		t.Fatalf("controller epochs = %v, %v", epochs.Items, err)
+	}
+	epochs.Items[0].Status.Epoch = 4
+	if err := c.Status().Update(ctx, &epochs.Items[0]); err != nil {
+		t.Fatal(err)
+	}
+	epoch := func() int64 {
+		deployment := &appsv1.Deployment{}
+		if err := c.Get(ctx, k.key(bundle.Runtime), deployment); err != nil {
+			t.Fatal(err)
+		}
+		value, err := deployedKagentEpoch(deployment)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return value
+	}
+	if err := k.deploy(ctx, dir); err != nil {
+		t.Fatalf("deploying again: %v", err)
+	}
+	k.unlock()
+	if got := epoch(); got != 3 {
+		t.Fatalf("a registered runtime's epoch = %d, want the 3 recovery set", got)
+	}
+	deployment := &appsv1.Deployment{}
+	if err := c.Get(ctx, k.key(bundle.Runtime), deployment); err != nil {
+		t.Fatal(err)
+	}
+	delete(deployment.Annotations, kagentRecoveryAnnotation)
+	if err := c.Update(ctx, deployment); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Delete(ctx, &corev1alpha1.AgentRuntime{ObjectMeta: metav1.ObjectMeta{Name: bundle.Runtime, Namespace: kagentTestNamespace}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := k.deploy(ctx, dir); err != nil {
+		t.Fatalf("deploying an unregistered runtime again: %v", err)
+	}
+	if got := epoch(); got != 4 {
+		t.Fatalf("an unregistered runtime's epoch = %d, want the current 4", got)
+	}
+}
+
 // Until the runtime is Ready, a failure moves the relay, and its policy,
 // back to what they served before.
 func TestKagentDeployMovesTheRelayBackWhenItFails(t *testing.T) {
@@ -681,6 +738,20 @@ func TestKagentActivateRefusesANamespaceAmongTheImportFlags(t *testing.T) {
 	}
 }
 
+// Activate reads standard input once, into a file both of its imports read,
+// in each form the import accepts.
+func TestKagentActivateCachesStandardInput(t *testing.T) {
+	for _, flags := range [][]string{{"-f", "-"}, {"-f-"}, {"-f=-"}, {"--file=-"}, {"--file", "-"}} {
+		args, err := kagentActivateArgs(flags, t.TempDir(), t.TempDir(), strings.NewReader("export"))
+		if err != nil || len(args) != 2 || (args[0] != "-f" && args[0] != "--file") {
+			t.Fatalf("%v: args = %v, %v", flags, args, err)
+		}
+		if data, err := os.ReadFile(args[1]); err != nil || string(data) != "export" {
+			t.Errorf("%v: cached input = %q, %v", flags, data, err)
+		}
+	}
+}
+
 // After --, an Orka API flag would replace the one activate checked against
 // --context. The refusal names only the flag: its value may be a token.
 func TestKagentActivateRefusesAnOrkaAPIAmongTheImportFlags(t *testing.T) {
@@ -766,7 +837,8 @@ func TestKagentActivateReadsTheTransactionTokenFirst(t *testing.T) {
 	if token, err := kagentTxnToken(root); err != nil || token != "txn-value" {
 		t.Fatalf("token = %q, %v", token, err)
 	}
-	if !kagentReadsStdin([]string{"-f", "-"}) || !kagentReadsStdin([]string{"--file=-"}) || kagentReadsStdin([]string{"-f", "x.yaml"}) {
+	if !kagentReadsStdin([]string{"-f", "-"}) || !kagentReadsStdin([]string{"--file=-"}) || !kagentReadsStdin([]string{"-f-"}) ||
+		kagentReadsStdin([]string{"-f", "x.yaml"}) {
 		t.Fatal("standard input use was misread")
 	}
 	// Given after --, the file would be read inside the import, with the locks held.

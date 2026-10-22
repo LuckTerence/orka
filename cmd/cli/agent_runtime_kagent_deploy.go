@@ -23,6 +23,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -53,6 +54,7 @@ const (
 	kagentFieldOwner       = "orka-agent-runtime-kagent"
 	kagentControllerEpoch  = "orka-controller"
 	kagentAdapterDigestEnv = "ORKA_ACP_KAGENT_ADAPTER_DIGEST"
+	kagentEpochEnv         = "ORKA_ACP_CONTROLLER_EPOCH"
 	kagentRollbackTimeout  = time.Minute
 	kagentPatchTest        = "test"
 	kagentPatchReplace     = "replace"
@@ -492,7 +494,15 @@ func (k *kagentRuntimes) deploy(ctx context.Context, dir string) (err error) {
 	if err := k.ensureAuthSecret(ctx, bundle); err != nil {
 		return err
 	}
-	if options.ControllerEpoch, err = k.controllerEpoch(ctx); err != nil {
+	// Once the Deployment names its AgentRuntime, Orka's recovery owns its
+	// epoch, which it advances only after draining the runtime's sessions:
+	// applying a newer one here would restart the pod before that.
+	if deployed && deployment.Annotations[kagentRecoveryAnnotation] != "" {
+		options.ControllerEpoch, err = deployedKagentEpoch(deployment)
+	} else {
+		options.ControllerEpoch, err = k.controllerEpoch(ctx)
+	}
+	if err != nil {
 		return err
 	}
 	options.Part = kagentPartWorkload
@@ -516,6 +526,24 @@ func (k *kagentRuntimes) deploy(ctx context.Context, dir string) (err error) {
 		}
 	}
 	return k.register(ctx, dir, bundle, config, options)
+}
+
+// deployedKagentEpoch reads the controller epoch a deployed runtime's
+// supervisor runs with.
+func deployedKagentEpoch(deployment *appsv1.Deployment) (int64, error) {
+	for _, container := range deployment.Spec.Template.Spec.Containers {
+		if container.Name != kagentSupervisorContainer {
+			continue
+		}
+		for _, env := range container.Env {
+			if env.Name == kagentEpochEnv {
+				if epoch, err := strconv.ParseInt(env.Value, 10, 64); err == nil && epoch > 0 {
+					return epoch, nil
+				}
+			}
+		}
+	}
+	return 0, fmt.Errorf("deployment %s does not run a kagent runtime supervisor with a controller epoch", deployment.Name)
 }
 
 // deployedKagentImage reads the image and adapter digest a deployed runtime
@@ -1112,12 +1140,12 @@ func kagentActivateArgs(flags []string, bundleDir, work string, stdin io.Reader)
 				}
 			}
 			args = append(args, flag, file)
-		case flag == "-f=-" || flag == "--file=-":
+		case flag == "-f-" || flag == "-f=-" || flag == "--file=-":
 			file, err := readStdin()
 			if err != nil {
 				return nil, err
 			}
-			args = append(args, strings.SplitN(flag, "=", 2)[0]+"="+file)
+			args = append(args, strings.TrimSuffix(strings.TrimSuffix(flag, "-"), "="), file)
 		default:
 			args = append(args, flag)
 		}
@@ -1142,7 +1170,7 @@ func kagentAPIFlag(flag string) string {
 // standard input.
 func kagentReadsStdin(flags []string) bool {
 	for i, flag := range flags {
-		if flag == "-f=-" || flag == "--file=-" || ((flag == "-f" || flag == "--file") && i+1 < len(flags) && flags[i+1] == "-") {
+		if flag == "-f-" || flag == "-f=-" || flag == "--file=-" || ((flag == "-f" || flag == "--file") && i+1 < len(flags) && flags[i+1] == "-") {
 			return true
 		}
 	}
