@@ -175,11 +175,17 @@ func TestAHPTokensRefuseContextTokens(t *testing.T) {
 }
 
 func TestAHPTokenOwnerCheckFollowsTheCurrentSignInPolicy(t *testing.T) {
-	oidc := OIDCConfig{Issuer: ahpTestIssuer, Audience: "orka", AllowedSubjects: []string{"alice", "team-*"}}
+	oidc := OIDCConfig{Issuer: ahpTestIssuer, Audience: "orka", AllowedSubjects: []string{"alice", "team-*"}, Namespace: "team"}
 	check := AHPTokenOwnerCheck(oidc)
 	oidcOwner := func(issuer, subject string) ahphost.Principal {
-		return ahphost.Principal{Issuer: issuer, Subject: subject}
+		return ahphost.Principal{Issuer: issuer, Subject: subject, Namespace: "team"}
 	}
+	moved := oidcOwner(ahpTestIssuer, "alice")
+	moved.Namespace = "old-team"
+	require.Error(t, check(moved), "a token minted before the OIDC namespace moved")
+	require.NoError(t, AHPTokenOwnerCheck(OIDCConfig{Issuer: ahpTestIssuer, Audience: "orka", AllowedSubjects: []string{"*"}})(
+		ahphost.Principal{Issuer: ahpTestIssuer, Subject: "alice", Namespace: defaultNamespace}),
+		"without --oidc-namespace, sign-ins get the default namespace")
 
 	require.NoError(t, check(oidcOwner(ahpTestIssuer, "alice")))
 	require.NoError(t, check(oidcOwner(ahpTestIssuer, "team-bob")), "allowlist patterns apply")

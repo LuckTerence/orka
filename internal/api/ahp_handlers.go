@@ -101,12 +101,17 @@ func (h *Handlers) CreateAHPToken(c fiber.Ctx) error {
 var errAHPTokenOwnerNotAdmitted = errors.New("the AHP token's owner can no longer sign in")
 
 // AHPTokenOwnerCheck refuses the AHP tokens of owners the API would no longer
-// sign in: a token needs the configured OIDC issuer and a subject the
-// allowlist still admits. The configuration is the controller's current one,
-// so narrowing the allowlist cuts off tokens minted before.
+// sign in: a token needs the configured OIDC issuer, a subject the allowlist
+// still admits, and the namespace a sign-in gets now. The configuration is the
+// controller's current one, so narrowing the allowlist or moving the OIDC
+// namespace cuts off tokens minted before.
 func AHPTokenOwnerCheck(oidc OIDCConfig) func(ahphost.Principal) error {
+	namespace := oidc.Namespace
+	if namespace == "" {
+		namespace = defaultNamespace
+	}
 	return func(p ahphost.Principal) error {
-		if !oidc.Enabled() || p.Issuer != oidc.Issuer {
+		if !oidc.Enabled() || p.Issuer != oidc.Issuer || p.Namespace != namespace {
 			return errAHPTokenOwnerNotAdmitted
 		}
 		if err := authorizeOIDCClaims(oidcClaims{Issuer: p.Issuer, Subject: p.Subject}, oidc); err != nil {
