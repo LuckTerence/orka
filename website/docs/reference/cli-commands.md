@@ -509,7 +509,8 @@ passes --bundle-dir, the directory of <bundle>, itself. It switches every Agent
 in the import's input, and only if all of their runtimes are Ready, so deploy
 them all first. It refuses while the relay of a governed Agent bundled beside
 <bundle> selects another runtime. The import creates the Agents in the runtimes'
-namespace, so pass -n before --.
+namespace, so pass -n before --, and the Orka API and token flags too, which
+activate checks before running the import.
 
 Usage:
   orka agent-runtime kagent activate <bundle> -- <import flags> [flags]

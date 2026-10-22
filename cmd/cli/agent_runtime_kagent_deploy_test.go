@@ -22,6 +22,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -399,6 +400,44 @@ func TestKagentRetireDeletesTheAgentsOtherRuntimes(t *testing.T) {
 	}
 }
 
+// A v0 runtime's pod reader lives in the kagent Agent's namespace, so retire
+// lists it there: an operator may hold RBAC in only that namespace and the
+// runtimes'.
+func TestKagentRetireListsPodReadersInTheKagentNamespace(t *testing.T) {
+	dir, bundle := writeTestKagentBundle(t)
+	service, _ := relayObjectsFor(bundle, bundle.Runtime)
+	reader := metav1.ObjectMeta{Name: "probe-gov-kagent-old-pods", Namespace: bundle.KagentNamespace,
+		Labels: map[string]string{kagentRuntimeLabel: "probe-gov-kagent-old", kagentRuntimeNamespaceLabel: kagentTestNamespace}}
+	objects := append([]client.Object{agentUsing(bundle, bundle.Runtime), service,
+		&rbacv1.Role{ObjectMeta: reader}, &rbacv1.RoleBinding{ObjectMeta: *reader.DeepCopy()}},
+		runtimeObjects(bundle, "probe-gov-kagent-old", kagentSource(bundle))...)
+	base := kagentTestCluster(t, objects...)
+	c := interceptor.NewClient(base.(client.WithWatch), interceptor.Funcs{
+		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			listOptions := (&client.ListOptions{}).ApplyOptions(opts)
+			switch list.(type) {
+			case *rbacv1.RoleList, *rbacv1.RoleBindingList:
+				if listOptions.Namespace != bundle.KagentNamespace {
+					return apierrors.NewForbidden(rbacv1.Resource("roles"), "", errors.New("namespace-scoped RBAC"))
+				}
+			}
+			return c.List(ctx, list, opts...)
+		},
+	})
+	k, _ := newTestKagentRuntimes(t, c)
+	ctx := context.Background()
+	if err := k.retire(ctx, dir); err != nil {
+		t.Fatal(err)
+	}
+	key := client.ObjectKeyFromObject(&rbacv1.Role{ObjectMeta: reader})
+	if err := c.Get(ctx, key, &rbacv1.Role{}); !apierrors.IsNotFound(err) {
+		t.Errorf("the pod reader Role stayed: %v", err)
+	}
+	if err := c.Get(ctx, key, &rbacv1.RoleBinding{}); !apierrors.IsNotFound(err) {
+		t.Errorf("the pod reader RoleBinding stayed: %v", err)
+	}
+}
+
 func TestKagentRetireRefusesBeforeActivation(t *testing.T) {
 	dir, bundle := writeTestKagentBundle(t)
 	k, _ := newTestKagentRuntimes(t, kagentTestCluster(t, agentUsing(bundle, "probe-gov-kagent-old")))
@@ -530,6 +569,21 @@ func TestKagentActivateAcceptsTheBundleDirectoryAsWritten(t *testing.T) {
 func TestKagentActivateRefusesANamespaceAmongTheImportFlags(t *testing.T) {
 	for _, flags := range [][]string{{"-f", "x.yaml", "-n", "team-a"}, {"-nteam-a"}, {"--namespace", "team-a"}, {"--namespace=team-a"}} {
 		if _, err := kagentActivateArgs(flags, t.TempDir(), t.TempDir(), nil); err == nil || !strings.Contains(err.Error(), "before --") {
+			t.Errorf("%v: err = %v", flags, err)
+		}
+	}
+}
+
+// After --, an Orka API flag would replace the one activate checked against
+// --context. The refusal names only the flag: its value may be a token.
+func TestKagentActivateRefusesAnOrkaAPIAmongTheImportFlags(t *testing.T) {
+	for _, flags := range [][]string{
+		{"-f", "x.yaml", "-s", "https://other"}, {"-shttps://other"}, {"--server=https://other"},
+		{"-t", "secret-value"}, {"-tsecret-value"}, {"-t=secret-value"}, {"--token", "secret-value"},
+		{"--txn-token=secret-value"}, {"--kubeconfig", "other"},
+	} {
+		_, err := kagentActivateArgs(flags, t.TempDir(), t.TempDir(), nil)
+		if err == nil || !strings.Contains(err.Error(), "before --") || strings.Contains(err.Error(), "secret-value") {
 			t.Errorf("%v: err = %v", flags, err)
 		}
 	}

@@ -141,7 +141,8 @@ each pin gets its own runtime, named `<agent>-kagent-<digest>`:
    Orka Agents in the runtimes' namespace. It reaches the Orka API like the
    import does, through kubeconfig's current context, so when `--context`
    names another one, also pass that cluster's Orka API with `--server` and
-   `--token`. The import switches every Agent
+   `--token`. Pass the Orka API and token flags before `--`, where the
+   command checks them. The import switches every Agent
    in the export, and refuses unless all of their runtimes are Ready, and
    unless these flags pin exactly the bundles you deployed. `deploy` records
    each runtime's AgentRuntime UID in its bundle (`registration.uid`), and the

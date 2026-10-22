@@ -168,7 +168,8 @@ passes --bundle-dir, the directory of <bundle>, itself. It switches every Agent
 in the import's input, and only if all of their runtimes are Ready, so deploy
 them all first. It refuses while the relay of a governed Agent bundled beside
 <bundle> selects another runtime. The import creates the Agents in the runtimes'
-namespace, so pass -n before --.`,
+namespace, so pass -n before --, and the Orka API and token flags too, which
+activate checks before running the import.`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if dash := cmd.ArgsLenAtDash(); dash != 1 {
@@ -1037,6 +1038,11 @@ func kagentActivateArgs(flags []string, bundleDir, work string, stdin io.Reader)
 		case flag == "--namespace" || strings.HasPrefix(flag, "--namespace=") || (strings.HasPrefix(flag, "-n") && !strings.HasPrefix(flag, "--")):
 			// The runtimes' namespace would silently replace it.
 			return nil, fmt.Errorf("pass -n before --, where it names the namespace of the runtimes and the Agents")
+		case kagentAPIFlag(flag) != "":
+			// The last value wins, so it would replace the Orka API activate
+			// checked against --context. The value may be a token: name only
+			// the flag.
+			return nil, fmt.Errorf("pass %s before --, where activate checks the Orka API against --context", kagentAPIFlag(flag))
 		case flag == "--bundle-dir":
 			if i+1 == len(flags) {
 				return nil, fmt.Errorf("--bundle-dir needs a directory")
@@ -1073,6 +1079,19 @@ func kagentActivateArgs(flags []string, bundleDir, work string, stdin io.Reader)
 		}
 	}
 	return args, nil
+}
+
+// kagentAPIFlag names the flag that flag sets when it selects the Orka API
+// or the credentials the import sends it, and is empty otherwise.
+func kagentAPIFlag(flag string) string {
+	name, _, _ := strings.Cut(flag, "=")
+	switch {
+	case name == "--server" || name == "--token" || name == "--txn-token" || name == "--kubeconfig":
+		return name
+	case !strings.HasPrefix(flag, "--") && (strings.HasPrefix(flag, "-s") || strings.HasPrefix(flag, "-t")):
+		return flag[:2]
+	}
+	return ""
 }
 
 // kagentReadsStdin reports whether the import flags read their input from
@@ -1139,7 +1158,7 @@ func (k *kagentRuntimes) retire(ctx context.Context, dir string) error {
 	}
 	delete(olds, bundle.Runtime)
 	for _, old := range slices.Sorted(maps.Keys(olds)) {
-		if err := k.retireRuntime(ctx, old); err != nil {
+		if err := k.retireRuntime(ctx, old, bundle.KagentNamespace); err != nil {
 			return err
 		}
 	}
@@ -1164,7 +1183,7 @@ func metaItems(list client.ObjectList) ([]metav1.Object, error) {
 	return out, nil
 }
 
-func (k *kagentRuntimes) retireRuntime(ctx context.Context, old string) error {
+func (k *kagentRuntimes) retireRuntime(ctx context.Context, old, kagentNamespace string) error {
 	registration := &corev1alpha1.AgentRuntime{}
 	found, err := k.getOptional(ctx, old, registration)
 	if err != nil {
@@ -1207,10 +1226,10 @@ func (k *kagentRuntimes) retireRuntime(ctx context.Context, old string) error {
 	reader := client.MatchingLabels{kagentRuntimeLabel: old, kagentRuntimeNamespaceLabel: k.namespace}
 	var roles rbacv1.RoleList
 	var bindings rbacv1.RoleBindingList
-	if err := k.c.List(ctx, &roles, reader); err != nil {
+	if err := k.c.List(ctx, &roles, client.InNamespace(kagentNamespace), reader); err != nil {
 		return err
 	}
-	if err := k.c.List(ctx, &bindings, reader); err != nil {
+	if err := k.c.List(ctx, &bindings, client.InNamespace(kagentNamespace), reader); err != nil {
 		return err
 	}
 	for i := range roles.Items {
