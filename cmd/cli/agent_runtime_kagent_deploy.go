@@ -48,7 +48,7 @@ const (
 	kagentLockSuffix         = "-kagent-lock"
 	kagentRecoveryAnnotation = "orka.ai/agent-runtime-recovery-uid"
 	// kagentDeployAnnotation carries the nonce of the deploy that created a
-	// relay policy.
+	// relay Service or policy.
 	kagentDeployAnnotation = "orka.ai/kagent-deploy"
 	kagentFieldOwner       = "orka-agent-runtime-kagent"
 	kagentControllerEpoch  = "orka-controller"
@@ -422,12 +422,15 @@ type kagentRelayRollback struct {
 	service  string
 	selector map[string]string
 	ports    []corev1.ServicePort
-	// createdPolicy marks the policy this deploy creates, by its UID once
-	// the answer arrives and by the nonce annotation it carries before.
-	createdPolicy types.UID
-	policyNonce   string
-	policy        *networkingv1.NetworkPolicySpec
-	applied       *networkingv1.NetworkPolicySpec
+	// createdService and createdPolicy mark the relay Service and policy
+	// this deploy creates, by their UID once the answer arrives and by the
+	// nonce annotation they carry before.
+	createdService types.UID
+	serviceNonce   string
+	createdPolicy  types.UID
+	policyNonce    string
+	policy         *networkingv1.NetworkPolicySpec
+	applied        *networkingv1.NetworkPolicySpec
 }
 
 func (k *kagentRuntimes) deploy(ctx context.Context, dir string) (err error) {
@@ -699,10 +702,17 @@ func (k *kagentRuntimes) handOffRelay(ctx context.Context, bundle kagentBundle, 
 		return err
 	}
 	if !found {
-		// Create, not apply: a deploy that created it meanwhile makes this fail.
+		// Create, not apply: a deploy that created it meanwhile makes this
+		// fail. A rollback deletes it, as it does a policy this deploy creates.
+		if rollback.serviceNonce, err = kagentNonce(); err != nil {
+			return err
+		}
+		service.Annotations = maps.Clone(service.Annotations)
+		service.Annotations[kagentDeployAnnotation] = rollback.serviceNonce
 		if err := k.c.Create(ctx, service); err != nil {
 			return fmt.Errorf("creating relay %s: %w", rollback.service, err)
 		}
+		rollback.createdService = service.UID
 	} else if !maps.Equal(current.Spec.Selector, want) {
 		// One patch that holds only while the Service still selects what it
 		// did and is labeled for this Agent, so it never writes back a
@@ -732,11 +742,9 @@ func (k *kagentRuntimes) handOffRelay(ctx context.Context, bundle kagentBundle, 
 		// A rollback deletes a policy this deploy created. Armed before the
 		// create, since an error may follow a committed one: until the answer
 		// names its UID, the policy is the one carrying this deploy's nonce.
-		nonce := make([]byte, 16)
-		if _, err := rand.Read(nonce); err != nil {
+		if rollback.policyNonce, err = kagentNonce(); err != nil {
 			return err
 		}
-		rollback.policyNonce = hex.EncodeToString(nonce)
 		policy.Annotations = maps.Clone(policy.Annotations)
 		policy.Annotations[kagentDeployAnnotation] = rollback.policyNonce
 		if err := k.c.Create(ctx, policy); err != nil {
@@ -759,6 +767,34 @@ func (k *kagentRuntimes) handOffRelay(ctx context.Context, bundle kagentBundle, 
 	}
 	// Once the answer arrives, the fence is the spec the API server stored.
 	rollback.applied = existing.Spec.DeepCopy()
+	return nil
+}
+
+// kagentNonce marks an object a deploy creates until the create's answer
+// names its UID.
+func kagentNonce() (string, error) {
+	nonce := make([]byte, 16)
+	if _, err := rand.Read(nonce); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(nonce), nil
+}
+
+// deleteCreated deletes the object named name that this deploy created, while
+// it still is that object: the one with the created UID, or before the
+// create's answer arrived, the one carrying the deploy's nonce.
+func (k *kagentRuntimes) deleteCreated(ctx context.Context, name string, obj client.Object, created types.UID, nonce string) error {
+	found, err := k.getOptional(ctx, name, obj)
+	if err != nil || !found {
+		return err
+	}
+	if obj.GetUID() != created && (created != "" || obj.GetAnnotations()[kagentDeployAnnotation] != nonce) {
+		return nil
+	}
+	uid := obj.GetUID()
+	if err := k.c.Delete(ctx, obj, client.Preconditions{UID: &uid}); err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
 	return nil
 }
 
@@ -805,6 +841,12 @@ func (k *kagentRuntimes) jsonPatch(ctx context.Context, obj client.Object, ops [
 func (k *kagentRuntimes) restoreRelay(bundle kagentBundle, rollback *kagentRelayRollback) {
 	ctx, cancel := context.WithTimeout(context.Background(), kagentRollbackTimeout)
 	defer cancel()
+	if rollback.serviceNonce != "" {
+		k.logf("Runtime %s is not Ready; deleting relay %s, which this deploy created.", bundle.Runtime, rollback.service)
+		if err := k.deleteCreated(ctx, rollback.service, &corev1.Service{}, rollback.createdService, rollback.serviceNonce); err != nil {
+			k.logf("kagent-runtime: could not delete relay %s, which this deploy created: %v", rollback.service, err)
+		}
+	}
 	if rollback.selector != nil {
 		k.logf("Runtime %s is not Ready; moving relay %s back.", bundle.Runtime, rollback.service)
 		service := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: rollback.service, Namespace: k.namespace}}
@@ -820,13 +862,7 @@ func (k *kagentRuntimes) restoreRelay(bundle kagentBundle, rollback *kagentRelay
 	policy := &networkingv1.NetworkPolicy{}
 	switch {
 	case rollback.policyNonce != "":
-		found, err := k.getOptional(ctx, rollback.service, policy)
-		if err == nil && found && (policy.UID == rollback.createdPolicy ||
-			(rollback.createdPolicy == "" && policy.Annotations[kagentDeployAnnotation] == rollback.policyNonce)) {
-			uid := policy.UID
-			err = k.c.Delete(ctx, policy, client.Preconditions{UID: &uid})
-		}
-		if err != nil && !apierrors.IsNotFound(err) {
+		if err := k.deleteCreated(ctx, rollback.service, policy, rollback.createdPolicy, rollback.policyNonce); err != nil {
 			k.logf("kagent-runtime: could not delete relay policy %s, which this deploy created: %v", rollback.service, err)
 		}
 	case rollback.policy != nil && rollback.applied != nil:
@@ -1142,8 +1178,23 @@ func (k *kagentRuntimes) retire(ctx context.Context, dir string) error {
 			olds[item.Name] = true
 		}
 	}
+	type search struct {
+		list client.ObjectList
+		opts []client.ListOption
+	}
+	var searches []search
 	for _, list := range kagentRuntimeKinds() {
-		if err := k.c.List(ctx, list, client.InNamespace(k.namespace), ofAgent); err != nil {
+		searches = append(searches, search{list, []client.ListOption{client.InNamespace(k.namespace), ofAgent}})
+	}
+	// A retire interrupted before it deleted a v0 runtime's pod reader leaves
+	// only that, in the kagent Agent's namespace, labeled with this one.
+	readers := client.MatchingLabels{kagentAgentLabel: bundle.Agent, kagentRuntimeNamespaceLabel: k.namespace}
+	for _, list := range []client.ObjectList{&rbacv1.RoleList{}, &rbacv1.RoleBindingList{}} {
+		searches = append(searches, search{list, []client.ListOption{client.InNamespace(bundle.KagentNamespace), readers}})
+	}
+	for _, search := range searches {
+		list := search.list
+		if err := k.c.List(ctx, list, search.opts...); err != nil {
 			return err
 		}
 		items, err := metaItems(list)

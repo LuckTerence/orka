@@ -72,7 +72,10 @@ only the controller and the adapter to Agent pods. List those components with
 
 ## Deploy and re-pin
 
-You need the `orka` CLI and access to the cluster; nothing is built. Each
+You need the `orka` CLI and access to the cluster; nothing is built.
+`activate` reaches the Orka API like other `orka` commands: through the
+server you configure or pass with `--server`, or else by port-forwarding
+the API Service with `kubectl`. Each
 runtime runs Orka's kagent runtime image, by default the one released with
 your CLI (`ghcr.io/orka-agents/orka/acp-kagent-runtime:<version>`), and
 mounts its Agent's `kagent.json` from a ConfigMap. The adapter refuses a

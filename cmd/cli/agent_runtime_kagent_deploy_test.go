@@ -247,6 +247,51 @@ func TestKagentDeployDeletesARelayPolicyItCreated(t *testing.T) {
 	}
 }
 
+// A first deploy creates the relay; a failed one deletes it again, with the
+// policy it created, so no relay selects a runtime Orka never admitted.
+func TestKagentDeployDeletesARelayItCreated(t *testing.T) {
+	dir, _ := writeTestKagentBundle(t)
+	c := kagentTestCluster(t)
+	k, _ := newTestKagentRuntimes(t, c)
+	k.capabilities = func(context.Context, string, string) ([]byte, error) {
+		return nil, errors.New("the runtime does not answer")
+	}
+	if err := k.deploy(context.Background(), dir); err == nil {
+		t.Fatal("deploy succeeded without capabilities")
+	}
+	if err := c.Get(context.Background(), k.key("probe-gov-relay"), &corev1.Service{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("the created relay stayed: %v", err)
+	}
+	if err := c.Get(context.Background(), k.key("probe-gov-relay"), &networkingv1.NetworkPolicy{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("the created policy stayed: %v", err)
+	}
+}
+
+// A relay created by a request whose answer was lost is the deploy's own too:
+// the rollback finds it by the deploy's nonce and deletes it.
+func TestKagentDeployDeletesARelayWhoseCreateAnswerWasLost(t *testing.T) {
+	dir, _ := writeTestKagentBundle(t)
+	base := kagentTestCluster(t)
+	c := interceptor.NewClient(base.(client.WithWatch), interceptor.Funcs{
+		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			if err := c.Create(ctx, obj, opts...); err != nil {
+				return err
+			}
+			if _, ok := obj.(*corev1.Service); ok {
+				return errors.New("the connection was reset")
+			}
+			return nil
+		},
+	})
+	k, _ := newTestKagentRuntimes(t, c)
+	if err := k.deploy(context.Background(), dir); err == nil || !strings.Contains(err.Error(), "connection was reset") {
+		t.Fatalf("deploy = %v", err)
+	}
+	if err := c.Get(context.Background(), k.key("probe-gov-relay"), &corev1.Service{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("the relay whose create answer was lost stayed: %v", err)
+	}
+}
+
 // A policy patch whose answer was lost may still have committed, so the
 // rollback stays armed and restores the policy.
 func TestKagentDeployRestoresAPolicyWhosePatchAnswerWasLost(t *testing.T) {
@@ -435,6 +480,39 @@ func TestKagentRetireListsPodReadersInTheKagentNamespace(t *testing.T) {
 	}
 	if err := c.Get(ctx, key, &rbacv1.RoleBinding{}); !apierrors.IsNotFound(err) {
 		t.Errorf("the pod reader RoleBinding stayed: %v", err)
+	}
+}
+
+// A retire interrupted after it deleted an old v0 runtime's own objects
+// leaves only its pod reader; the next retire still finds and deletes it, but
+// not the reader of a runtime in another Orka namespace.
+func TestKagentRetireFindsAnOrphanedPodReader(t *testing.T) {
+	dir, bundle := writeTestKagentBundle(t)
+	service, _ := relayObjectsFor(bundle, bundle.Runtime)
+	reader := func(runtimeNamespace string) metav1.ObjectMeta {
+		return metav1.ObjectMeta{Name: "probe-gov-kagent-old." + runtimeNamespace + ".agent-pods", Namespace: bundle.KagentNamespace,
+			Labels: map[string]string{kagentRuntimeLabel: "probe-gov-kagent-old", kagentAgentLabel: bundle.Agent,
+				kagentRuntimeNamespaceLabel: runtimeNamespace},
+			Annotations: map[string]string{kagentSourceAnnotation: kagentSource(bundle)}}
+	}
+	orphan, other := reader(kagentTestNamespace), reader("team-b")
+	c := kagentTestCluster(t, agentUsing(bundle, bundle.Runtime), service,
+		&rbacv1.Role{ObjectMeta: orphan}, &rbacv1.RoleBinding{ObjectMeta: *orphan.DeepCopy()},
+		&rbacv1.Role{ObjectMeta: other}, &rbacv1.RoleBinding{ObjectMeta: *other.DeepCopy()})
+	k, _ := newTestKagentRuntimes(t, c)
+	ctx := context.Background()
+	if err := k.retire(ctx, dir); err != nil {
+		t.Fatal(err)
+	}
+	key := client.ObjectKeyFromObject(&rbacv1.Role{ObjectMeta: orphan})
+	if err := c.Get(ctx, key, &rbacv1.Role{}); !apierrors.IsNotFound(err) {
+		t.Errorf("the orphaned pod reader Role stayed: %v", err)
+	}
+	if err := c.Get(ctx, key, &rbacv1.RoleBinding{}); !apierrors.IsNotFound(err) {
+		t.Errorf("the orphaned pod reader RoleBinding stayed: %v", err)
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(&rbacv1.RoleBinding{ObjectMeta: other}), &rbacv1.RoleBinding{}); err != nil {
+		t.Errorf("another Orka namespace's pod reader was deleted: %v", err)
 	}
 }
 
