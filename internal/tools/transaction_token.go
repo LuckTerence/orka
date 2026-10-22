@@ -47,6 +47,8 @@ type childTransactionTokenPreparation struct {
 	placeholderUID   types.UID
 }
 
+const childTransactionTokenCleanupTimeout = 5 * time.Second
+
 type childTransactionTokenSettings struct {
 	subjectToken     string
 	subjectTokenType string
@@ -407,6 +409,17 @@ func cleanupChildTransactionTokenSecret(
 	childTask *corev1alpha1.Task,
 	preparation *childTransactionTokenPreparation,
 ) {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), childTransactionTokenCleanupTimeout)
+	defer cancel()
+	cleanupChildTransactionTokenSecretWithContext(cleanupCtx, k8sClient, childTask, preparation)
+}
+
+func cleanupChildTransactionTokenSecretWithContext(
+	ctx context.Context,
+	k8sClient client.Client,
+	childTask *corev1alpha1.Task,
+	preparation *childTransactionTokenPreparation,
+) {
 	if childTask == nil || childTask.Annotations == nil || preparation == nil {
 		return
 	}
@@ -421,37 +434,23 @@ func cleanupChildTransactionTokenSecret(
 		}
 		return
 	}
-	if !validChildTransactionTokenPlaceholder(secret, preparation) && !childOwnsTransactionTokenWorkload(childTask, secret) {
+	// Once the Secret is adopted, its owner reference is the authoritative
+	// cleanup mechanism. Delete only the exact ownerless placeholder. UID and
+	// resource-version preconditions close the read/delete race with adoption.
+	if !validChildTransactionTokenPlaceholder(secret, preparation) {
 		log.FromContext(ctx).Info("refusing to cleanup child transaction token Secret with mismatched identity", "secret", secretName, "namespace", childTask.Namespace)
 		return
 	}
-	preconditions := client.Preconditions{}
-	if secret.UID != "" {
-		uid := secret.UID
-		preconditions.UID = &uid
+	if secret.ResourceVersion == "" {
+		log.FromContext(ctx).Info("refusing to cleanup child transaction token placeholder without resource version", "secret", secretName, "namespace", childTask.Namespace)
+		return
 	}
-	if secret.ResourceVersion != "" {
-		resourceVersion := secret.ResourceVersion
-		preconditions.ResourceVersion = &resourceVersion
-	}
+	uid := secret.UID
+	resourceVersion := secret.ResourceVersion
+	preconditions := client.Preconditions{UID: &uid, ResourceVersion: &resourceVersion}
 	if err := k8sClient.Delete(ctx, secret, preconditions); err != nil && !apierrors.IsNotFound(err) && !apierrors.IsConflict(err) {
 		log.FromContext(ctx).Error(err, "failed to cleanup child transaction token Secret", "secret", secretName, "namespace", childTask.Namespace)
 	}
-}
-
-func childOwnsTransactionTokenWorkload(childTask *corev1alpha1.Task, secret *corev1.Secret) bool {
-	if childTask == nil || childTask.UID == "" || secret == nil || secret.Type != corev1.SecretTypeOpaque ||
-		secret.Labels[labels.LabelPurpose] != transactiontoken.WorkloadSecretPurpose ||
-		secret.Labels[labels.LabelTaskUID] != labels.SelectorValue(string(childTask.UID)) {
-		return false
-	}
-	for _, owner := range secret.OwnerReferences {
-		if owner.APIVersion == corev1alpha1.GroupVersion.String() && owner.Kind == "Task" &&
-			owner.Name == childTask.Name && owner.UID == childTask.UID {
-			return true
-		}
-	}
-	return false
 }
 
 func cleanupChildTaskAfterTokenAdoptionFailure(
@@ -460,21 +459,23 @@ func cleanupChildTaskAfterTokenAdoptionFailure(
 	childTask *corev1alpha1.Task,
 	preparation *childTransactionTokenPreparation,
 ) {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), childTransactionTokenCleanupTimeout)
+	defer cancel()
 	if childTask == nil || childTask.Name == "" {
-		cleanupChildTransactionTokenSecret(ctx, k8sClient, childTask, preparation)
+		cleanupChildTransactionTokenSecretWithContext(cleanupCtx, k8sClient, childTask, preparation)
 		return
 	}
 	if childTask.UID == "" {
-		log.FromContext(ctx).Info("refusing to cleanup child task without UID", "task", childTask.Name, "namespace", childTask.Namespace)
-		cleanupChildTransactionTokenSecret(ctx, k8sClient, childTask, preparation)
+		log.FromContext(cleanupCtx).Info("refusing to cleanup child task without UID", "task", childTask.Name, "namespace", childTask.Namespace)
+		cleanupChildTransactionTokenSecretWithContext(cleanupCtx, k8sClient, childTask, preparation)
 		return
 	}
 	uid := childTask.UID
-	err := k8sClient.Delete(ctx, &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: childTask.Name, Namespace: childTask.Namespace}}, client.Preconditions{UID: &uid})
+	err := k8sClient.Delete(cleanupCtx, &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: childTask.Name, Namespace: childTask.Namespace}}, client.Preconditions{UID: &uid})
 	if err != nil && !apierrors.IsNotFound(err) && !apierrors.IsConflict(err) {
-		log.FromContext(ctx).Error(err, "failed to cleanup child task after transaction token secret adoption failure", "task", childTask.Name, "namespace", childTask.Namespace)
+		log.FromContext(cleanupCtx).Error(err, "failed to cleanup child task after transaction token secret adoption failure", "task", childTask.Name, "namespace", childTask.Namespace)
 	}
-	cleanupChildTransactionTokenSecret(ctx, k8sClient, childTask, preparation)
+	cleanupChildTransactionTokenSecretWithContext(cleanupCtx, k8sClient, childTask, preparation)
 }
 
 func childTransactionTokenSecretName(parentName string) (string, error) {

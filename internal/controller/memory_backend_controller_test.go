@@ -1191,6 +1191,42 @@ func TestProtocolHTTPProberPerformsExactProtocolSequence(t *testing.T) {
 	}
 }
 
+func TestProtocolHTTPProberRejectsOwnershipRequestAboveAdvertisedMaxRequestBytes(t *testing.T) {
+	limits := validProtocolProtocolCapabilityLimits()
+	limits.MaxRequestBytes = 1
+	prober, target, ownershipRequests := newProtocolHTTPProberForOwnershipLimitTest(t, limits, nil)
+
+	_, err := prober.ProbeBinding(context.Background(), target)
+	var probeErr *adapterProbeError
+	if !errors.As(err, &probeErr) || probeErr.reason != "ProtocolOwnershipRequestOversized" {
+		t.Fatalf("ProbeBinding() error = %v, want ProtocolOwnershipRequestOversized", err)
+	}
+	if *ownershipRequests != 0 {
+		t.Fatalf("ownership requests = %d, want 0", *ownershipRequests)
+	}
+}
+
+func TestProtocolHTTPProberRejectsOwnershipResponseAboveAdvertisedMaxResponseBytes(t *testing.T) {
+	const advertisedMaxResponseBytes = 8 << 10
+	limits := validProtocolProtocolCapabilityLimits()
+	limits.MaxResponseBytes = advertisedMaxResponseBytes
+	prober, target, ownershipRequests := newProtocolHTTPProberForOwnershipLimitTest(t, limits, func(body []byte) []byte {
+		if len(body) > advertisedMaxResponseBytes {
+			t.Fatalf("ownership response fixture = %d bytes, want <= %d", len(body), advertisedMaxResponseBytes)
+		}
+		return append(body, bytes.Repeat([]byte(" "), advertisedMaxResponseBytes+1-len(body))...)
+	})
+
+	_, err := prober.ProbeBinding(context.Background(), target)
+	var probeErr *adapterProbeError
+	if !errors.As(err, &probeErr) || probeErr.reason != "ProtocolOwnershipResponseOversized" {
+		t.Fatalf("ProbeBinding() error = %v, want ProtocolOwnershipResponseOversized", err)
+	}
+	if *ownershipRequests != 1 {
+		t.Fatalf("ownership requests = %d, want 1", *ownershipRequests)
+	}
+}
+
 func TestProtocolHTTPProberActualAdapterFenceRejectsStaleMutation(t *testing.T) {
 	const token = "adapter-test-token"
 	adapter, err := referenceadapter.Open(context.Background(), referenceadapter.Config{
@@ -1331,6 +1367,67 @@ func TestProtocolHTTPProberRejectsNonProtocolStoreResponses(t *testing.T) {
 			}
 		})
 	}
+}
+
+func newProtocolHTTPProberForOwnershipLimitTest(
+	t *testing.T,
+	limits memoryv1.CapabilityLimits,
+	transformOwnershipResponse func([]byte) []byte,
+) (*ProtocolHTTPProber, MemoryBackendProbeTarget, *int) {
+	t.Helper()
+	now := time.Now().UTC()
+	ownershipRequests := new(int)
+	transport := roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		requestBody, err := io.ReadAll(request.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var response any
+		switch request.URL.Path {
+		case memoryv1.PathCapabilities:
+			decoded, err := memoryv1.DecodeCapabilitiesRequest(requestBody)
+			if err != nil {
+				t.Fatal(err)
+			}
+			response = memoryv1.CapabilitiesResponse{
+				ProtocolVersion: memoryv1.Version, Binding: decoded.Binding,
+				AdapterName: "adapter", AdapterVersion: "v1", Revision: "revision-1",
+				ExpiresAt: now.Add(time.Minute), Capabilities: validProtocolProtocolCapabilities(), Limits: limits,
+			}
+		case memoryv1.PathOwnershipClaim:
+			*ownershipRequests++
+			decoded, err := memoryv1.DecodeOwnershipClaimRequest(requestBody)
+			if err != nil {
+				t.Fatal(err)
+			}
+			response = memoryv1.OwnershipClaimResponse{
+				ProtocolVersion: memoryv1.Version, Binding: decoded.Binding, Result: memoryv1.ResultApplied,
+				BindingDigest: memoryv1.BindingDigest(decoded.Binding), ClaimIdentity: memoryv1.AuthorityDigest(decoded.Binding),
+				MaximumRoutingEpoch: decoded.Binding.RoutingEpoch, ClaimedAt: now,
+			}
+		default:
+			t.Fatalf("unexpected probe path %q", request.URL.Path)
+		}
+		body, err := json.Marshal(response)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if request.URL.Path == memoryv1.PathOwnershipClaim && transformOwnershipResponse != nil {
+			body = transformOwnershipResponse(body)
+		}
+		return adapterTestHTTPResponse(request, http.StatusOK, body), nil
+	})
+	prober := &ProtocolHTTPProber{newClient: func(*http.Client, time.Duration, endpointpolicy.Resolution) (*http.Client, error) {
+		return &http.Client{Transport: transport}, nil
+	}}
+	target := MemoryBackendProbeTarget{
+		Endpoint: "https://memory.example.com", EndpointIdentity: "https://memory.example.com",
+		BearerToken: testProbeToken, Profile: corev1alpha1.MemoryBackendContractMemoryV1,
+		ClusterID: testMemoryClusterID, NamespaceUID: string(testMemoryNamespaceUID), BackendUID: string(testMemoryBackendUID),
+		TenantID: deriveMemoryBackendTenantID(testMemoryClusterID, testMemoryNamespaceUID), StoreUUID: testMemoryStoreUUID,
+		AuthorityEpoch: 3, RoutingEpoch: 7, Timeout: time.Second,
+	}
+	return prober, target, ownershipRequests
 }
 
 func adapterTestHTTPResponse(request *http.Request, status int, body []byte) *http.Response {

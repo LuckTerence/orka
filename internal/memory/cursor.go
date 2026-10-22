@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"math"
 	"strings"
 	"time"
 
@@ -338,6 +339,16 @@ type remoteSearchCursorRecord struct {
 	Score           float64 `json:"s,omitempty"`
 }
 
+// remoteSearchCursorMatch preserves verified results withheld by strict mode.
+// Live records retain only a bounded ID, score, and complete canonical record
+// digest before exact re-fetch; tombstones are revalidated from the local catalog.
+type remoteSearchCursorMatch struct {
+	MemoryID     string  `json:"m"`
+	RecordDigest string  `json:"d,omitempty"`
+	Score        float64 `json:"s,omitempty"`
+	Tombstone    bool    `json:"t,omitempty"`
+}
+
 type remoteSearchCursor struct {
 	ProviderToken     string                     `json:"p"`
 	ProviderExhausted bool                       `json:"x,omitempty"`
@@ -345,7 +356,85 @@ type remoteSearchCursor struct {
 	ActualMode        string                     `json:"m,omitempty"`
 	Pending           []remoteSearchCursorRecord `json:"n,omitempty"`
 	ReplayPrefix      []remoteSearchCursorRecord `json:"f,omitempty"`
+	PendingMatches    []remoteSearchCursorMatch  `json:"h,omitempty"`
 	SeenRecordState   []byte                     `json:"s,omitempty"`
+}
+
+func remoteSearchCursorRecordForRecord(record *memoryv1.MemoryRecord) remoteSearchCursorRecord {
+	if record == nil {
+		return remoteSearchCursorRecord{}
+	}
+	return remoteSearchCursorRecord{
+		MemoryID: record.MemoryID, UpsertKey: record.UpsertKey, Generation: record.Generation,
+		BackendVersion: record.BackendVersion, BackendMemoryID: record.BackendMemoryID,
+		ContentDigest: record.ContentDigest, Score: record.Score,
+	}
+}
+
+func remoteSearchRecordMaterializationDigest(record *memoryv1.MemoryRecord, binding memoryv1.Binding) (string, error) {
+	if err := memoryv1.ValidateMemoryRecord(record, binding); err != nil {
+		return "", err
+	}
+	copy := *record
+	copy.Score = 0
+	return memoryv1.MemoryRecordDigest(&copy, binding)
+}
+
+func remoteSearchCursorMatchForRecord(
+	record *memoryv1.MemoryRecord,
+	binding memoryv1.Binding,
+) (remoteSearchCursorMatch, error) {
+	digest, err := remoteSearchRecordMaterializationDigest(record, binding)
+	if err != nil {
+		return remoteSearchCursorMatch{}, err
+	}
+	return remoteSearchCursorMatch{MemoryID: record.MemoryID, RecordDigest: digest, Score: record.Score}, nil
+}
+
+func cloneRemoteSearchCursorMatches(matches []remoteSearchCursorMatch) []remoteSearchCursorMatch {
+	return append([]remoteSearchCursorMatch(nil), matches...)
+}
+
+func remoteSearchCursorMatchesRequireSnapshot(matches []remoteSearchCursorMatch) bool {
+	for i := range matches {
+		if !matches[i].Tombstone {
+			return true
+		}
+	}
+	return false
+}
+
+func validRemoteSearchDigest(value string) bool {
+	if len(value) != len("sha256:")+sha256.Size*2 || !strings.HasPrefix(value, "sha256:") {
+		return false
+	}
+	for _, value := range value[len("sha256:"):] {
+		if (value < '0' || value > '9') && (value < 'a' || value > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func validRemoteSearchCursorMatches(matches []remoteSearchCursorMatch, _ memoryv1.Binding) bool {
+	if len(matches) > maxRemoteCatalogLimit {
+		return false
+	}
+	seen := make(map[string]struct{}, len(matches))
+	for i := range matches {
+		match := &matches[i]
+		if strings.TrimSpace(match.MemoryID) != match.MemoryID || match.MemoryID == "" ||
+			len(match.MemoryID) > memoryv1.MaxIdentityBytes || math.IsNaN(match.Score) || math.IsInf(match.Score, 0) || match.Score < 0 ||
+			match.Tombstone && (match.RecordDigest != "" || match.Score != 0) ||
+			!match.Tombstone && !validRemoteSearchDigest(match.RecordDigest) {
+			return false
+		}
+		if _, duplicate := seen[match.MemoryID]; duplicate {
+			return false
+		}
+		seen[match.MemoryID] = struct{}{}
+	}
+	return true
 }
 
 func newRemoteSearchSeenRecordState() []byte {
@@ -424,6 +513,9 @@ func saveRemoteSearchCursor(
 	if err != nil {
 		return "", err
 	}
+	if !validRemoteSearchCursorMatches(state.PendingMatches, identity) {
+		return "", errors.New("memory search cursor matches are invalid")
+	}
 	payload, err := json.Marshal(state)
 	if err != nil || len(payload) == 0 || len(payload) > maxRemoteSearchCursorBytes {
 		return "", errors.New("memory search cursor state is invalid")
@@ -475,6 +567,7 @@ func loadRemoteSearchCursor(
 		(cursor.ActualMode != memoryv1.SearchModeKeyword && cursor.ActualMode != memoryv1.SearchModeSemantic &&
 			cursor.ActualMode != memoryv1.SearchModeHybrid) ||
 		(cursor.ProviderToken == "" && len(cursor.Pending) == 0) || len(cursor.Pending) > memoryv1.MaxPageSize ||
+		!validRemoteSearchCursorMatches(cursor.PendingMatches, identity) ||
 		!validRemoteSearchSeenRecordState(cursor.SeenRecordState) ||
 		!remoteSearchSeenRecordStatePresent(cursor.SeenRecordState) {
 		return remoteSearchCursor{}, errors.New("invalid memory search cursor state")

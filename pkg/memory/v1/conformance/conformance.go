@@ -31,7 +31,7 @@ import (
 )
 
 const (
-	checkpointVersion                 = "orka.memory.v1.conformance.checkpoint.v2"
+	checkpointVersion                 = "orka.memory.v1.conformance.checkpoint.v3"
 	conformanceFailpointHeader        = "X-Orka-Memory-Conformance-Failpoint"
 	conformanceProviderCommitGapValue = "provider-commit-before-receipt-v1"
 	conformanceTag                    = "conformance"
@@ -58,25 +58,28 @@ const (
 // Checkpoint contains no credentials. It is safe to persist between prepare
 // and post-restart verification phases.
 type Checkpoint struct {
-	CheckpointVersion         string                     `json:"checkpointVersion"`
-	ProtocolVersion           string                     `json:"protocolVersion"`
-	RunID                     string                     `json:"runId"`
-	StoreName                 string                     `json:"storeName"`
-	Binding                   memoryv1.Binding           `json:"binding"`
-	CapabilitiesRevision      string                     `json:"capabilitiesRevision"`
-	ReplayMutation            memoryv1.MutationEnvelope  `json:"replayMutation"`
-	ReplayReceipt             memoryv1.MutationReceipt   `json:"replayReceipt"`
-	LiveRecord                memoryv1.MemoryRecord      `json:"liveRecord"`
-	TombstoneRecord           memoryv1.MemoryRecord      `json:"tombstoneRecord"`
-	PaginationRequest         memoryv1.SearchRequest     `json:"paginationRequest"`
-	PaginationExpectedKeys    []string                   `json:"paginationExpectedKeys"`
-	PaginationExpectedDigests []string                   `json:"paginationExpectedDigests"`
-	PaginationActualMode      string                     `json:"paginationActualMode"`
-	PaginationSnapshotExpiry  time.Time                  `json:"paginationSnapshotExpiry"`
-	SnapshotExcludedKey       string                     `json:"snapshotExcludedKey"`
-	StaleMutation             memoryv1.MutationEnvelope  `json:"staleMutation"`
-	StaleReceipt              memoryv1.MutationReceipt   `json:"staleReceipt"`
-	ProviderCommitGapMutation *memoryv1.MutationEnvelope `json:"providerCommitGapMutation,omitempty"`
+	CheckpointVersion                   string                     `json:"checkpointVersion"`
+	ProtocolVersion                     string                     `json:"protocolVersion"`
+	RunID                               string                     `json:"runId"`
+	StoreName                           string                     `json:"storeName"`
+	Binding                             memoryv1.Binding           `json:"binding"`
+	CapabilitiesRevision                string                     `json:"capabilitiesRevision"`
+	Capabilities                        memoryv1.Capabilities      `json:"capabilities"`
+	CapabilityLimits                    memoryv1.CapabilityLimits  `json:"capabilityLimits"`
+	ReplayMutation                      memoryv1.MutationEnvelope  `json:"replayMutation"`
+	ReplayReceipt                       memoryv1.MutationReceipt   `json:"replayReceipt"`
+	LiveRecord                          memoryv1.MemoryRecord      `json:"liveRecord"`
+	TombstoneRecord                     memoryv1.MemoryRecord      `json:"tombstoneRecord"`
+	PaginationRequest                   memoryv1.SearchRequest     `json:"paginationRequest"`
+	PaginationExpectedKeys              []string                   `json:"paginationExpectedKeys"`
+	PaginationExpectedDigests           []string                   `json:"paginationExpectedDigests"`
+	PaginationActualMode                string                     `json:"paginationActualMode"`
+	PaginationRecordsBeforeContinuation int                        `json:"paginationRecordsBeforeContinuation"`
+	PaginationSnapshotExpiry            time.Time                  `json:"paginationSnapshotExpiry"`
+	SnapshotExcludedKey                 string                     `json:"snapshotExcludedKey"`
+	StaleMutation                       memoryv1.MutationEnvelope  `json:"staleMutation"`
+	StaleReceipt                        memoryv1.MutationReceipt   `json:"staleReceipt"`
+	ProviderCommitGapMutation           *memoryv1.MutationEnvelope `json:"providerCommitGapMutation,omitempty"`
 }
 
 // CheckResult is the sanitized outcome of one conformance phase.
@@ -734,12 +737,15 @@ func Prepare(ctx context.Context, target Target) (checkpoint Checkpoint, result 
 	checkpoint = Checkpoint{
 		CheckpointVersion: checkpointVersion, ProtocolVersion: memoryv1.Version, RunID: runID,
 		StoreName: storeName, Binding: binding, CapabilitiesRevision: caps.Revision,
+		Capabilities: caps.Capabilities, CapabilityLimits: caps.Limits,
 		ReplayMutation: mainMutation, ReplayReceipt: createReceipt, LiveRecord: *currentLive,
 		TombstoneRecord: *tombstoneRecord, PaginationRequest: searchRequest,
 		PaginationExpectedKeys: remainingKeys, PaginationExpectedDigests: remainingDigests,
-		PaginationActualMode: firstPage.ActualMode, PaginationSnapshotExpiry: firstPage.SnapshotExpiresAt,
-		SnapshotExcludedKey: postSnapshot.UpsertKey,
-		StaleMutation:       staleMutation, StaleReceipt: staleReceipt,
+		PaginationActualMode:                firstPage.ActualMode,
+		PaginationRecordsBeforeContinuation: len(firstPage.Records),
+		PaginationSnapshotExpiry:            firstPage.SnapshotExpiresAt,
+		SnapshotExcludedKey:                 postSnapshot.UpsertKey,
+		StaleMutation:                       staleMutation, StaleReceipt: staleReceipt,
 		ProviderCommitGapMutation: providerCommitGapMutation,
 	}
 	if err := ValidateCheckpoint(checkpoint); err != nil {
@@ -761,11 +767,47 @@ func VerifyAfterRestart(ctx context.Context, target Target, checkpoint Checkpoin
 		result.Message = safeError("checkpoint is invalid", err)
 		return result
 	}
+	if err := ensureRestartContinuationUnexpired(checkpoint.PaginationSnapshotExpiry, time.Now().UTC()); err != nil {
+		result.Message = err.Error()
+		return result
+	}
 	client, err := newContractClient(target)
 	if err != nil {
 		result.Message = err.Error()
 		return result
 	}
+	caps, err := probe(ctx, client, checkpoint.Binding)
+	if err != nil {
+		result.Message = err.Error()
+		return result
+	}
+	result.Capabilities = caps
+	if err := verifyRestartCapabilities(caps, checkpoint); err != nil {
+		result.Message = err.Error()
+		return result
+	}
+	fixtures, err := newFixturePlan(checkpoint.RunID, caps.Limits)
+	if err != nil {
+		result.Message = err.Error()
+		return result
+	}
+	continuation, err := collectContinuation(
+		ctx, client, checkpoint.PaginationRequest, checkpoint.PaginationSnapshotExpiry,
+		checkpoint.PaginationRecordsBeforeContinuation,
+	)
+	if err != nil {
+		result.Message = err.Error()
+		return result
+	}
+	if err := verifyContinuationProof(checkpoint.Binding, continuation, checkpoint); err != nil {
+		result.Message = err.Error()
+		return result
+	}
+	if slices.Contains(checkpoint.PaginationExpectedKeys, checkpoint.SnapshotExcludedKey) {
+		result.Message = "stable snapshot included a record created after the snapshot"
+		return result
+	}
+
 	storeBinding := memoryv1.StoreResolutionBinding{
 		ClusterID: checkpoint.Binding.ClusterID, NamespaceUID: checkpoint.Binding.NamespaceUID,
 		BackendUID: checkpoint.Binding.BackendUID, TenantID: checkpoint.Binding.TenantID,
@@ -775,21 +817,7 @@ func VerifyAfterRestart(ctx context.Context, target Target, checkpoint Checkpoin
 		result.Message = "stable store resolution did not survive restart"
 		return result
 	}
-	caps, err := probe(ctx, client, checkpoint.Binding)
-	if err != nil {
-		result.Message = err.Error()
-		return result
-	}
-	result.Capabilities = caps
-	if caps.Revision != checkpoint.CapabilitiesRevision {
-		result.Message = "capability revision changed between prepare and verify"
-		return result
-	}
-	fixtures, err := newFixturePlan(checkpoint.RunID, caps.Limits)
-	if err != nil {
-		result.Message = err.Error()
-		return result
-	}
+
 	claim, err := claimOwnership(ctx, client, checkpoint.Binding)
 	if err != nil ||
 		claim.Result != memoryv1.ResultApplied ||
@@ -867,20 +895,6 @@ func VerifyAfterRestart(ctx context.Context, target Target, checkpoint Checkpoin
 		return result
 	}
 
-	continuation, err := collectContinuation(ctx, client, checkpoint.PaginationRequest)
-	if err != nil {
-		result.Message = err.Error()
-		return result
-	}
-	if err := verifyContinuationProof(checkpoint.Binding, continuation, checkpoint); err != nil {
-		result.Message = err.Error()
-		return result
-	}
-	if slices.Contains(checkpoint.PaginationExpectedKeys, checkpoint.SnapshotExcludedKey) {
-		result.Message = "stable snapshot included a record created after the snapshot"
-		return result
-	}
-
 	staleReplay, _, err := mutation(ctx, client, checkpoint.StaleMutation, memoryv1.ResultIdentityConflict)
 	if err != nil || !reflect.DeepEqual(staleReplay, checkpoint.StaleReceipt) {
 		result.Message = "stale routing-fence receipt did not survive restart"
@@ -939,6 +953,9 @@ func ValidateCheckpoint(checkpoint Checkpoint) error {
 	if checkpoint.CapabilitiesRevision == "" {
 		return errors.New("capabilitiesRevision is required")
 	}
+	if err := validateCheckpointCapabilities(checkpoint); err != nil {
+		return err
+	}
 	if err := memoryv1.ValidateMutationEnvelope(&checkpoint.ReplayMutation); err != nil {
 		return err
 	}
@@ -987,6 +1004,39 @@ func ValidateCheckpoint(checkpoint Checkpoint) error {
 	return nil
 }
 
+func validateCheckpointCapabilities(checkpoint Checkpoint) error {
+	capabilities := memoryv1.CapabilitiesResponse{
+		ProtocolVersion: memoryv1.Version,
+		Binding:         checkpoint.Binding,
+		AdapterName:     "conformance-checkpoint",
+		AdapterVersion:  "conformance-checkpoint",
+		Revision:        checkpoint.CapabilitiesRevision,
+		ExpiresAt:       time.Unix(1, 0).UTC(),
+		Capabilities:    checkpoint.Capabilities,
+		Limits:          checkpoint.CapabilityLimits,
+	}
+	if err := memoryv1.ValidateCapabilitiesResponse(&capabilities, time.Time{}); err != nil {
+		return fmt.Errorf("checkpoint capabilities are invalid: %w", err)
+	}
+	return nil
+}
+
+func verifyRestartCapabilities(caps *memoryv1.CapabilitiesResponse, checkpoint Checkpoint) error {
+	if caps == nil {
+		return errors.New("capability probe returned no response")
+	}
+	if caps.Revision != checkpoint.CapabilitiesRevision {
+		return errors.New("capability revision changed between prepare and verify")
+	}
+	if caps.Capabilities != checkpoint.Capabilities {
+		return errors.New("capability flags changed between prepare and verify")
+	}
+	if caps.Limits != checkpoint.CapabilityLimits {
+		return errors.New("capability limits changed between prepare and verify")
+	}
+	return nil
+}
+
 func validateCheckpointPagination(checkpoint Checkpoint) error {
 	if err := memoryv1.ValidateSearchRequest(&checkpoint.PaginationRequest); err != nil {
 		return err
@@ -1002,9 +1052,14 @@ func validateCheckpointPagination(checkpoint Checkpoint) error {
 	if checkpoint.PaginationSnapshotExpiry.IsZero() {
 		return errors.New("paginationSnapshotExpiry is required")
 	}
+	if checkpoint.PaginationRecordsBeforeContinuation < 0 ||
+		checkpoint.PaginationRecordsBeforeContinuation > checkpoint.PaginationRequest.PageSize {
+		return errors.New("pagination records before continuation are invalid")
+	}
 	if len(checkpoint.PaginationExpectedKeys) == 0 ||
 		len(checkpoint.PaginationExpectedKeys) != len(checkpoint.PaginationExpectedDigests) ||
-		len(checkpoint.PaginationExpectedKeys) > memoryv1.MaxSnapshotRecords {
+		checkpoint.PaginationRecordsBeforeContinuation+len(checkpoint.PaginationExpectedKeys) >
+			checkpoint.CapabilityLimits.MaxSnapshotRecords {
 		return errors.New("pagination record proofs are missing or inconsistent")
 	}
 	seenKeys := make(map[string]struct{}, len(checkpoint.PaginationExpectedKeys))
@@ -1812,9 +1867,6 @@ func consumeSearchProbe(
 	if err != nil {
 		return nil, err
 	}
-	if first.Exhausted {
-		return first, nil
-	}
 	if _, err := collectSnapshot(ctx, client, request, first); err != nil {
 		return nil, err
 	}
@@ -1834,6 +1886,23 @@ func searchModeAdvertised(capabilities memoryv1.Capabilities, mode string) bool 
 	}
 }
 
+func snapshotRecordLimit(client *contractClient) int {
+	if client != nil && client.limitsConfigured {
+		return client.limits.MaxSnapshotRecords
+	}
+	return memoryv1.MaxSnapshotRecords
+}
+
+func ensureRestartContinuationUnexpired(expiresAt, now time.Time) error {
+	if expiresAt.IsZero() || !now.Before(expiresAt) {
+		return errors.New(
+			"restart pagination checkpoint expired before continuation verification; " +
+				"rerun prepare and verify within the adapter's advertised snapshot TTL",
+		)
+	}
+	return nil
+}
+
 func collectSnapshot(
 	ctx context.Context,
 	client *contractClient,
@@ -1842,7 +1911,8 @@ func collectSnapshot(
 ) ([]memoryv1.MemoryRecord, error) {
 	result := make([]memoryv1.MemoryRecord, 0, len(first.Records))
 	seenRecords := make(map[string]struct{}, len(first.Records))
-	if err := appendUniqueSnapshotRecords(&result, seenRecords, first.Records); err != nil {
+	maxRecords := snapshotRecordLimit(client)
+	if err := appendUniqueSnapshotRecords(&result, seenRecords, first.Records, 0, maxRecords); err != nil {
 		return nil, err
 	}
 	response := first
@@ -1863,7 +1933,7 @@ func collectSnapshot(
 		if next.ActualMode != first.ActualMode || !next.SnapshotExpiresAt.Equal(first.SnapshotExpiresAt) {
 			return nil, errors.New("pagination continuation changed snapshot mode or expiry")
 		}
-		if err := appendUniqueSnapshotRecords(&result, seenRecords, next.Records); err != nil {
+		if err := appendUniqueSnapshotRecords(&result, seenRecords, next.Records, 0, maxRecords); err != nil {
 			return nil, err
 		}
 		response = next
@@ -1881,18 +1951,35 @@ func collectContinuation(
 	ctx context.Context,
 	client *contractClient,
 	request memoryv1.SearchRequest,
+	expiresAt time.Time,
+	recordsBeforeContinuation int,
 ) (snapshotContinuation, error) {
 	result := make([]memoryv1.MemoryRecord, 0)
 	seenTokens := map[string]struct{}{request.PageToken: {}}
 	seenRecords := make(map[string]struct{})
+	maxRecords := snapshotRecordLimit(client)
+	if recordsBeforeContinuation < 0 || recordsBeforeContinuation > maxRecords {
+		return snapshotContinuation{}, errors.New("pagination continuation record offset exceeds maxSnapshotRecords")
+	}
 	var snapshotExpiry time.Time
 	var actualMode string
+	continuationCtx, cancel := context.WithDeadline(ctx, expiresAt)
+	defer cancel()
 	for pages := 0; ; pages++ {
 		if pages > memoryv1.MaxSnapshotRecords {
 			return snapshotContinuation{}, errors.New("pagination continuation did not exhaust")
 		}
-		response, err := search(ctx, client, request)
+		if err := ensureRestartContinuationUnexpired(expiresAt, time.Now().UTC()); err != nil {
+			return snapshotContinuation{}, err
+		}
+		response, err := search(continuationCtx, client, request)
 		if err != nil {
+			if expiryErr := ensureRestartContinuationUnexpired(expiresAt, time.Now().UTC()); expiryErr != nil {
+				return snapshotContinuation{}, expiryErr
+			}
+			return snapshotContinuation{}, err
+		}
+		if err := ensureRestartContinuationUnexpired(expiresAt, time.Now().UTC()); err != nil {
 			return snapshotContinuation{}, err
 		}
 		if snapshotExpiry.IsZero() {
@@ -1900,7 +1987,9 @@ func collectContinuation(
 		} else if !response.SnapshotExpiresAt.Equal(snapshotExpiry) || response.ActualMode != actualMode {
 			return snapshotContinuation{}, errors.New("pagination continuation changed snapshot mode or expiry")
 		}
-		if err := appendUniqueSnapshotRecords(&result, seenRecords, response.Records); err != nil {
+		if err := appendUniqueSnapshotRecords(
+			&result, seenRecords, response.Records, recordsBeforeContinuation, maxRecords,
+		); err != nil {
 			return snapshotContinuation{}, err
 		}
 		if response.Exhausted {
@@ -1923,8 +2012,13 @@ func appendUniqueSnapshotRecords(
 	destination *[]memoryv1.MemoryRecord,
 	seen map[string]struct{},
 	records []memoryv1.MemoryRecord,
+	recordsBefore int,
+	maxRecords int,
 ) error {
 	for _, record := range records {
+		if recordsBefore+len(*destination) >= maxRecords {
+			return fmt.Errorf("search snapshot exceeded advertised maxSnapshotRecords=%d", maxRecords)
+		}
 		if _, duplicate := seen[record.UpsertKey]; duplicate {
 			return errors.New("pagination repeated a memory record")
 		}

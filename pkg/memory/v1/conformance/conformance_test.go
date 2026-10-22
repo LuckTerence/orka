@@ -156,6 +156,37 @@ func TestContractClientEnforcesAdvertisedMaxRequestBytesBeforeSending(t *testing
 	}
 }
 
+func TestVerifyRestartCapabilitiesComparesFlagsAndLimitsButIgnoresExpiry(t *testing.T) {
+	prepared := testCapabilitiesResponse(DefaultBinding())
+	checkpoint := Checkpoint{
+		CapabilitiesRevision: prepared.Revision,
+		Capabilities:         prepared.Capabilities,
+		CapabilityLimits:     prepared.Limits,
+	}
+
+	renewed := prepared
+	renewed.ExpiresAt = prepared.ExpiresAt.Add(time.Hour)
+	if err := verifyRestartCapabilities(&renewed, checkpoint); err != nil {
+		t.Fatalf("verifyRestartCapabilities(renewed expiry): %v", err)
+	}
+
+	changedFlags := renewed
+	changedFlags.Capabilities.SemanticSearch = !changedFlags.Capabilities.SemanticSearch
+	if err := verifyRestartCapabilities(&changedFlags, checkpoint); err == nil {
+		t.Fatal("verifyRestartCapabilities() accepted changed capability flags")
+	} else if !strings.Contains(err.Error(), "flags changed") {
+		t.Fatalf("capability flag error = %q, want flags changed context", err)
+	}
+
+	changedLimits := renewed
+	changedLimits.Limits.MaxSnapshotRecords--
+	if err := verifyRestartCapabilities(&changedLimits, checkpoint); err == nil {
+		t.Fatal("verifyRestartCapabilities() accepted changed capability limits")
+	} else if !strings.Contains(err.Error(), "limits changed") {
+		t.Fatalf("capability limit error = %q, want limits changed context", err)
+	}
+}
+
 func TestSanitizeCheckResultRedactsConfiguredValue(t *testing.T) {
 	sensitiveValue := "marker-" + "value"
 	result := CheckResult{
@@ -558,6 +589,181 @@ func TestVerifySearchModeCapabilitiesConsumesEveryContinuation(t *testing.T) {
 	}
 }
 
+func TestConsumeSearchProbeEnforcesAdvertisedMaxSnapshotRecords(t *testing.T) {
+	binding := DefaultBinding()
+	expiresAt := time.Now().UTC().Add(time.Minute)
+	records := []memoryv1.MemoryRecord{
+		conformanceRecord(binding, "mem-limit-a", "limit a", 1),
+		conformanceRecord(binding, "mem-limit-b", "limit b", 2),
+		conformanceRecord(binding, "mem-limit-c", "limit c", 3),
+	}
+	var mutex sync.Mutex
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		mutex.Lock()
+		requests++
+		mutex.Unlock()
+		var searchRequest memoryv1.SearchRequest
+		if err := json.NewDecoder(request.Body).Decode(&searchRequest); err != nil {
+			writeConformanceJSON(writer, http.StatusBadRequest, memoryv1.ErrorResponse{
+				ProtocolVersion: memoryv1.Version, Code: memoryv1.ErrorCodeInvalidRequest,
+				Message: "invalid", Retryable: false, RetryAfterSeconds: 0,
+			})
+			return
+		}
+		response := memoryv1.SearchResponse{
+			ProtocolVersion: memoryv1.Version, Binding: binding,
+			RequestedMode: searchRequest.Mode, ActualMode: memoryv1.SearchModeKeyword,
+			SnapshotExpiresAt: expiresAt,
+		}
+		switch searchRequest.PageToken {
+		case "":
+			response.Records = []memoryv1.MemoryRecord{records[0]}
+			response.NextPageToken = conformancePageCursor("0", "1")
+		case conformancePageCursor("0", "1"):
+			response.Records = []memoryv1.MemoryRecord{records[1]}
+			response.NextPageToken = conformancePageCursor("0", "2")
+		case conformancePageCursor("0", "2"):
+			response.Records = []memoryv1.MemoryRecord{records[2]}
+			response.Exhausted = true
+		default:
+			writeConformanceJSON(writer, http.StatusBadRequest, memoryv1.ErrorResponse{
+				ProtocolVersion: memoryv1.Version, Code: memoryv1.ErrorCodeInvalidRequest,
+				Message: "unexpected page token", Retryable: false, RetryAfterSeconds: 0,
+			})
+			return
+		}
+		writeConformanceJSON(writer, http.StatusOK, response)
+	}))
+	t.Cleanup(server.Close)
+	client, err := newContractClient(Target{
+		BaseURL: server.URL, AuthorizationValue: testAuthorizationToken,
+		HTTPClient: server.Client(), InsecureLoopbackOnly: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	limits := testCapabilityLimits()
+	limits.MaxPageSize = 1
+	limits.MaxSnapshotRecords = 2
+	client.configureLimits(limits)
+	request, err := requireFixturePlan(t, "snapshot-limit", limits).searchRequest(binding, memoryv1.SearchModeAuto)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := consumeSearchProbe(context.Background(), client, request); err == nil {
+		t.Fatal("consumeSearchProbe() accepted more than advertised maxSnapshotRecords")
+	} else if !strings.Contains(err.Error(), "maxSnapshotRecords=2") {
+		t.Fatalf("consumeSearchProbe() error = %q, want advertised maxSnapshotRecords context", err)
+	}
+	mutex.Lock()
+	defer mutex.Unlock()
+	if requests != 3 {
+		t.Fatalf("search request count = %d, want 3", requests)
+	}
+}
+
+func TestCollectContinuationEnforcesAdvertisedMaxSnapshotRecords(t *testing.T) {
+	binding := DefaultBinding()
+	expiresAt := time.Now().UTC().Add(time.Minute)
+	records := []memoryv1.MemoryRecord{
+		conformanceRecord(binding, "mem-continuation-a", "continuation a", 1),
+		conformanceRecord(binding, "mem-continuation-b", "continuation b", 2),
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var searchRequest memoryv1.SearchRequest
+		if err := json.NewDecoder(request.Body).Decode(&searchRequest); err != nil {
+			writeConformanceJSON(writer, http.StatusBadRequest, memoryv1.ErrorResponse{
+				ProtocolVersion: memoryv1.Version, Code: memoryv1.ErrorCodeInvalidRequest,
+				Message: "invalid", Retryable: false, RetryAfterSeconds: 0,
+			})
+			return
+		}
+		response := memoryv1.SearchResponse{
+			ProtocolVersion: memoryv1.Version, Binding: binding,
+			RequestedMode: memoryv1.SearchModeKeyword, ActualMode: memoryv1.SearchModeKeyword,
+			SnapshotExpiresAt: expiresAt,
+		}
+		switch searchRequest.PageToken {
+		case conformancePageCursor("1", "1"):
+			response.Records = []memoryv1.MemoryRecord{records[0]}
+			response.NextPageToken = conformancePageCursor("1", "2")
+		case conformancePageCursor("1", "2"):
+			response.Records = []memoryv1.MemoryRecord{records[1]}
+			response.Exhausted = true
+		default:
+			writeConformanceJSON(writer, http.StatusBadRequest, memoryv1.ErrorResponse{
+				ProtocolVersion: memoryv1.Version, Code: memoryv1.ErrorCodeInvalidRequest,
+				Message: "unexpected page token", Retryable: false, RetryAfterSeconds: 0,
+			})
+			return
+		}
+		writeConformanceJSON(writer, http.StatusOK, response)
+	}))
+	t.Cleanup(server.Close)
+	client, err := newContractClient(Target{
+		BaseURL: server.URL, AuthorizationValue: testAuthorizationToken,
+		HTTPClient: server.Client(), InsecureLoopbackOnly: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	limits := testCapabilityLimits()
+	limits.MaxPageSize = 1
+	limits.MaxSnapshotRecords = 2
+	client.configureLimits(limits)
+	request := memoryv1.SearchRequest{
+		ProtocolVersion: memoryv1.Version, Binding: binding, Mode: memoryv1.SearchModeKeyword,
+		Query: "continuation", PageSize: 1, PageToken: conformancePageCursor("1", "1"),
+	}
+	if _, err := collectContinuation(context.Background(), client, request, expiresAt, 1); err == nil {
+		t.Fatal("collectContinuation() accepted more than advertised maxSnapshotRecords")
+	} else if !strings.Contains(err.Error(), "maxSnapshotRecords=2") {
+		t.Fatalf("collectContinuation() error = %q, want advertised maxSnapshotRecords context", err)
+	}
+}
+
+func TestCollectContinuationDoesNotRequestExpiredSnapshot(t *testing.T) {
+	var mutex sync.Mutex
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		mutex.Lock()
+		requests++
+		mutex.Unlock()
+		writeConformanceJSON(writer, http.StatusInternalServerError, memoryv1.ErrorResponse{
+			ProtocolVersion: memoryv1.Version, Code: memoryv1.ErrorCodeInternal,
+			Message: "continuation should not be requested", Retryable: false, RetryAfterSeconds: 0,
+		})
+	}))
+	t.Cleanup(server.Close)
+	client, err := newContractClient(Target{
+		BaseURL: server.URL, AuthorizationValue: testAuthorizationToken,
+		HTTPClient: server.Client(), InsecureLoopbackOnly: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := memoryv1.SearchRequest{
+		ProtocolVersion: memoryv1.Version, Binding: DefaultBinding(), Mode: memoryv1.SearchModeKeyword,
+		Query: "expired", PageSize: 1,
+		PageToken: conformancePageCursor("2", "1"),
+	}
+	_, err = collectContinuation(
+		context.Background(), client, request, time.Now().UTC().Add(-time.Second), 1,
+	)
+	if err == nil {
+		t.Fatal("collectContinuation() requested an expired restart continuation")
+	}
+	if !strings.Contains(err.Error(), "expired before continuation verification") {
+		t.Fatalf("collectContinuation() error = %q, want local expiry context", err)
+	}
+	mutex.Lock()
+	defer mutex.Unlock()
+	if requests != 0 {
+		t.Fatalf("expired continuation request count = %d, want 0", requests)
+	}
+}
+
 func TestPaginationFixtureSupportsAdvertisedTwoRecordSnapshotAcrossPages(t *testing.T) {
 	binding := DefaultBinding()
 	expiresAt := time.Now().UTC().Add(time.Minute)
@@ -748,6 +954,10 @@ func TestCollectSnapshotRejectsDuplicateRecordsAcrossPages(t *testing.T) {
 	if _, err := collectSnapshot(context.Background(), client, request, first); err == nil {
 		t.Fatal("collectSnapshot() accepted a duplicate record across pages")
 	}
+}
+
+func conformancePageCursor(snapshotDigit, offset string) string {
+	return "memory-page-v1." + strings.Repeat(snapshotDigit, 32) + "." + offset
 }
 
 func conformanceRecord(binding memoryv1.Binding, memoryID, content string, minute int) memoryv1.MemoryRecord {

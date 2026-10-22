@@ -340,6 +340,86 @@ func TestCleanupChildTransactionTokenSecretOnlyDeletesValidatedPlaceholder(t *te
 	}
 }
 
+func TestCleanupChildTransactionTokenSecretWithCancelledContext(t *testing.T) {
+	parent := parentTask()
+	preparation := &childTransactionTokenPreparation{
+		parentName: parent.Name, parentNamespace: parent.Namespace, parentUID: string(parent.UID),
+		placeholderUID: apitypes.UID("secret-uid"),
+	}
+	placeholderLabels, placeholderAnnotations := childTransactionTokenPlaceholderMetadata(parent)
+	child := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{
+		Name: "child-task", Namespace: defaultNamespace, UID: apitypes.UID("child-uid"),
+		Annotations: map[string]string{labels.AnnotationTransactionTokenSecret: "child-token-secret"},
+	}}
+	cancelledContext := func() context.Context {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		return ctx
+	}
+
+	t.Run("deletes ownerless placeholder with bounded detached context", func(t *testing.T) {
+		placeholder := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+			Name: "child-token-secret", Namespace: defaultNamespace, UID: apitypes.UID("secret-uid"),
+			Labels: placeholderLabels, Annotations: placeholderAnnotations,
+		}, Type: corev1.SecretTypeOpaque, Data: map[string][]byte{}}
+		validateCleanupContext := func(ctx context.Context) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			deadline, ok := ctx.Deadline()
+			if !ok {
+				return errors.New("cleanup context is unbounded")
+			}
+			if time.Until(deadline) > childTransactionTokenCleanupTimeout {
+				return errors.New("cleanup context exceeds configured timeout")
+			}
+			return nil
+		}
+		fc := newFakeClientWithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if err := validateCleanupContext(ctx); err != nil {
+					return err
+				}
+				return c.Get(ctx, key, obj, opts...)
+			},
+			Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+				if err := validateCleanupContext(ctx); err != nil {
+					return err
+				}
+				return c.Delete(ctx, obj, opts...)
+			},
+		}, placeholder)
+
+		cleanupChildTransactionTokenSecret(cancelledContext(), fc, child, preparation)
+
+		secrets := &corev1.SecretList{}
+		if err := fc.List(context.Background(), secrets, client.InNamespace(defaultNamespace)); err != nil {
+			t.Fatalf("list Secrets after cleanup: %v", err)
+		}
+		if len(secrets.Items) != 0 {
+			t.Fatalf("validated placeholder still exists: %#v", secrets.Items)
+		}
+	})
+
+	t.Run("preserves adopted Secret", func(t *testing.T) {
+		adopted := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+			Name: "child-token-secret", Namespace: defaultNamespace, UID: apitypes.UID("secret-uid"),
+			OwnerReferences: childOwnerReference(child),
+			Labels: map[string]string{
+				labels.LabelPurpose: transactiontoken.WorkloadSecretPurpose,
+				labels.LabelTaskUID: labels.SelectorValue(string(child.UID)),
+			},
+		}, Type: corev1.SecretTypeOpaque, Data: map[string][]byte{}}
+		fc := newFakeClient(adopted)
+
+		cleanupChildTransactionTokenSecret(cancelledContext(), fc, child, preparation)
+
+		if err := fc.Get(context.Background(), client.ObjectKeyFromObject(adopted), &corev1.Secret{}); err != nil {
+			t.Fatalf("adopted Secret was deleted: %v", err)
+		}
+	})
+}
+
 func TestCleanupChildTaskAfterTokenAdoptionFailureAttemptsSecretCleanupWhenTaskDeleteFails(t *testing.T) {
 	parent := parentTask()
 	prep := &childTransactionTokenPreparation{

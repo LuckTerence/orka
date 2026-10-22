@@ -153,7 +153,7 @@ Explicit search accepts `query`, `tags`, `ids`, provenance filters, `trust`, `li
 }
 ```
 
-`semantic` and `hybrid` fail with `422 MEMORY_SEARCH_MODE_UNSUPPORTED` when the active backend lacks the capability. Only `auto` may downgrade. Strict mode is the default; callers must opt into partial results with `allowIncomplete: true`.
+`semantic` and `hybrid` fail with `422 MEMORY_SEARCH_MODE_UNSUPPORTED` when the active backend lacks the capability. Only `auto` may downgrade. Strict mode is the default; callers must opt into partial results with `allowIncomplete: true`. When a strict search fails with `503 MEMORY_RESULT_SET_INCOMPLETE`, its cursor keeps the verified results that page had already found, and continuing with it returns them (re-verified) before scanning further.
 
 ### Mutation status and idempotency
 

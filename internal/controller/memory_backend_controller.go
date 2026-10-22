@@ -2357,12 +2357,22 @@ func (p *ProtocolHTTPProber) ProbeBinding(
 	if err := memoryv1.ValidateOwnershipClaimRequest(&ownershipRequest); err != nil {
 		return MemoryBackendProbeResult{}, newProtocolProbeError("ProtocolOwnershipRequestInvalid", "memory adapter ownership claim binding was invalid")
 	}
+	ownershipRequestPayload, err := json.Marshal(ownershipRequest)
+	if err != nil || len(ownershipRequestPayload) > memoryv1.MaxHTTPBodyBytes {
+		return MemoryBackendProbeResult{}, newProtocolProbeError("ProtocolOwnershipRequestInvalid", "memory adapter ownership claim request was invalid or oversized")
+	}
+	if len(ownershipRequestPayload) > capabilities.Limits.MaxRequestBytes {
+		return MemoryBackendProbeResult{}, newProtocolProbeError("ProtocolOwnershipRequestOversized", "memory adapter ownership claim request exceeded the advertised maxRequestBytes")
+	}
 	payload, ownershipCertificate, statusCode, err := doProtocolProbeRaw(
 		ctx, httpClient, target.Endpoint, memoryv1.PathOwnershipClaim, target.BearerToken, ownershipRequest,
 		http.StatusOK, http.StatusConflict,
 	)
 	if err != nil {
 		return MemoryBackendProbeResult{}, err
+	}
+	if len(payload) > capabilities.Limits.MaxResponseBytes {
+		return MemoryBackendProbeResult{}, newProtocolProbeError("ProtocolOwnershipResponseOversized", "memory adapter ownership claim response exceeded the advertised maxResponseBytes")
 	}
 	ownership, err := memoryv1.DecodeOwnershipClaimResponse(payload)
 	if err != nil {

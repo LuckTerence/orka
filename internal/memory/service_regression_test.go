@@ -2070,6 +2070,94 @@ func TestRemoteSearchNormalPageBoundaryIsCompleteAndBudgetExhaustionReturnsCurso
 	}
 }
 
+func TestRemoteSearchStrictContinuationPreservesProtocolMaxPartialMatchWithinCursorBound(t *testing.T) {
+	now := time.Date(2026, time.August, 3, 12, 0, 0, 0, time.UTC)
+	binding := store.MemoryBackendBinding{
+		Namespace: "team-remote", NamespaceUID: "11111111-1111-4111-8111-111111111111",
+		ClusterID: "cluster-a", BackendUID: "22222222-2222-4222-8222-222222222222",
+		AuthorityEpoch: 1, RoutingEpoch: 1,
+		TenantID:  memoryv1.DeriveTenantID("cluster-a", "11111111-1111-4111-8111-111111111111"),
+		StoreUUID: "44444444-4444-4444-8444-444444444444",
+	}
+	const total = maxRemoteSearchPages + 5
+	entries := make([]store.RemoteMemoryCatalogEntry, 0, total)
+	records := make([]memoryv1.MemoryRecord, 0, total)
+	want := make([]string, 0, total)
+	for i := range total {
+		id := fmt.Sprintf("mem-partial-%02d", i)
+		content := "needle"
+		if i == 0 {
+			content += strings.Repeat("x", memoryv1.MaxContentBytes-len(content))
+		}
+		entry, record := remoteSearchFixture(
+			binding, id, now.Add(-time.Duration(i)*time.Second), content, store.MemoryTrustReviewed,
+		)
+		entries = append(entries, entry)
+		records = append(records, record)
+		want = append(want, id)
+	}
+	service, adapter, activeBinding, governed := remoteSearchService(t, entries, records)
+	service.Now = func() time.Time { return now }
+	adapter.snapshotExpiresAt = now.Add(time.Minute)
+	service.Resolver.(staticAuthorityResolver).authority.Backend.Status.ObservedCapabilities.Limits.MaxPageSize = 1
+
+	request := SearchRequest{Query: "needle", Limit: total}
+	_, err := service.Search(t.Context(), activeBinding.Namespace, request, SearchContext{RemoteAuthorized: true})
+	var incomplete *IncompleteSearchError
+	if !errors.As(err, &incomplete) || incomplete.Cursor == "" {
+		t.Fatalf("first Search() error = %#v, want partial-match continuation", err)
+	}
+	if adapter.searchCalls != maxRemoteSearchPages {
+		t.Fatalf("first search calls = %d, want bounded %d", adapter.searchCalls, maxRemoteSearchPages)
+	}
+	stored := governed.cursors[incomplete.Cursor]
+	var persisted persistedRemoteSearchCursor
+	if err := json.Unmarshal(stored.State, &persisted); err != nil || len(persisted.PendingMatches) != maxRemoteSearchPages {
+		t.Fatalf("persisted partial matches = %d, err=%v; want %d", len(persisted.PendingMatches), err, maxRemoteSearchPages)
+	}
+	if len(stored.State) > store.MaxMemorySearchCursorStateBytes || persisted.PendingMatches[0].MemoryID == "" ||
+		persisted.PendingMatches[0].RecordDigest == "" || persisted.PendingMatches[0].Tombstone {
+		t.Fatalf("bounded partial-match cursor bytes=%d first=%#v", len(stored.State), persisted.PendingMatches[0])
+	}
+	if !stored.ExpiresAt.Equal(adapter.snapshotExpiresAt) {
+		t.Fatalf("partial-match cursor expiry = %v, want snapshot expiry %v", stored.ExpiresAt, adapter.snapshotExpiresAt)
+	}
+
+	request.Cursor = incomplete.Cursor
+	continued, err := service.Search(t.Context(), activeBinding.Namespace, request, SearchContext{RemoteAuthorized: true})
+	if err != nil || continued == nil || len(continued.Items) != total || !continued.Complete || !continued.Exhausted {
+		t.Fatalf("continued response=%#v err=%v", continued, err)
+	}
+	got := make([]string, 0, len(continued.Items))
+	for _, item := range continued.Items {
+		got = append(got, item.Memory.ID)
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("continued ids = %v, want %v", got, want)
+	}
+	if len(continued.Items[0].Memory.Content) != memoryv1.MaxContentBytes {
+		t.Fatalf("continued protocol-max content bytes = %d, want %d", len(continued.Items[0].Memory.Content), memoryv1.MaxContentBytes)
+	}
+	if adapter.searchCalls != total || adapter.getCalls != maxRemoteSearchPages {
+		t.Fatalf("provider search/get calls = %d/%d, want %d/%d", adapter.searchCalls, adapter.getCalls, total, maxRemoteSearchPages)
+	}
+	if !governed.retired[incomplete.Cursor] {
+		t.Fatal("consumed partial-match cursor was not retired")
+	}
+
+	adapter.getMu.Lock()
+	changed := adapter.byUpsertKey[records[0].UpsertKey]
+	changed.UpdatedAt = changed.UpdatedAt.Add(time.Nanosecond)
+	adapter.byUpsertKey[records[0].UpsertKey] = changed
+	adapter.getMu.Unlock()
+	replayed, err := service.Search(t.Context(), activeBinding.Namespace, request, SearchContext{RemoteAuthorized: true})
+	var structured *apierror.Error
+	if replayed != nil || !errors.As(err, &structured) || structured.Status != http.StatusConflict ||
+		structured.Reason != ReasonDiverged {
+		t.Fatalf("changed buffered replay = %#v, %#v; want fail-closed snapshot divergence", replayed, err)
+	}
+}
+
 type cappedLegacyMemoryStore struct {
 	store.MemoryStore
 	memories []store.Memory
