@@ -214,7 +214,7 @@ func renderKagentRuntime(dir string, options kagentRenderOptions) (map[string]an
 	default:
 		return nil, fmt.Errorf("--part must be workload, relay, or registration")
 	}
-	return map[string]any{"apiVersion": "v1", "kind": "List", "items": items}, nil //nolint:goconst // a List envelope
+	return map[string]any{kagentFieldAPIVersion: "v1", kagentFieldKind: "List", "items": items}, nil
 }
 
 // kagentRuntimeProfileFor computes the v2 profile, its MCP policy, and the

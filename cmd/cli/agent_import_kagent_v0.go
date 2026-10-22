@@ -41,6 +41,7 @@ const (
 	kagentFieldAnnotations     = "annotations"
 	kagentFieldRuntime         = "runtime"
 	kagentFieldKind            = "kind"
+	kagentFieldAPIVersion      = "apiVersion"
 	kagentFieldInline          = "inline"
 	kagentFieldMemory          = "memory"
 	kagentFieldModelConfig     = "modelConfig"
