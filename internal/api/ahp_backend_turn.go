@@ -118,16 +118,25 @@ func (b *ahpBackend) startTurn(ctx context.Context, principal ahphost.Principal,
 	started := b.now().UTC()
 	// The slot reserved when the message was admitted passes to the running
 	// turn, or is freed if the turn never starts; then a waiting message may
-	// start instead.
-	failed := false
+	// start instead. It is freed once: a turn that fails frees it before the
+	// person sees the error, so a message sent straight back is admitted, and
+	// a later release can never free that message's slot.
+	failed, released := false, false
+	release := func() {
+		if !released {
+			released = true
+			b.releaseTurn(principal.UserKey, record.Session)
+		}
+	}
 	defer func() {
-		b.releaseTurn(principal.UserKey, record.Session)
+		release()
 		if failed {
 			b.runPending(context.WithoutCancel(ctx), principal.UserKey, record.Session, emit)
 		}
 	}()
 	fail := func(message string) {
 		failed = true
+		release()
 		b.emitTurnError(ctx, emit, record, action.TurnId, started, "TurnNotStarted", message)
 	}
 	// Start from the session as stored now: a change accepted since the
