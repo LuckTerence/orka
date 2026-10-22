@@ -9,13 +9,16 @@ hosts. A person who connects it gets an `AgentHost` from the provider's template
 supplies the host's GitHub token from the Connection, instead of a Secret the person
 creates. This amends [ADR 0033](0033-user-connectors.md) with one narrow exception to its
 custody rule, and [ADR 0035](0035-agent-hosts.md) with a second token source. It depends on
-0035. Accepting it waits on the live check under **Acceptance**.
+0035. With [ADR 0037](0037-github-sign-in.md), signing in with `orka login` creates the
+Connection, so a person's first command gives them a host. Accepting it waits on the live
+check under **Acceptance**.
 
 ## Context
 
-- The day-0 path we want is: install Orka, sign in to the dashboard, connect GitHub, then
-  pick the environment in the Copilot desktop app. With 0035 alone, a person needs
-  `kubectl`, RBAC in a namespace, and a raw GitHub token pasted into a Secret.
+- The day-0 path we want: an operator runs `helm install`; then each of N people runs
+  `orka login`, and picks their environment in the Copilot desktop app. With 0035 alone, a
+  person needs `kubectl`, RBAC in the watch namespace, and a raw GitHub token pasted into a
+  Secret.
 - 0033 already gives each person a consented, sealed and refreshed GitHub link, owned by
   their verified identity (issuer and subject). Its rule is that linked tokens never enter
   a Pod.
@@ -54,11 +57,11 @@ custody rule, and [ADR 0035](0035-agent-hosts.md) with a second token source. It
 - The field is part of the provider's consent authority digest. Links consented before
   the field was set stop matching and show "Reconnect needed", so every exported token
   comes from a consent that disclosed the export.
-- On the Connectors page, that provider says that connecting it creates a Copilot
-  environment on Orka, and that code running there can read this GitHub credential. Once
-  the host exists, the page shows the environment name and the host's phase. It says
-  "Host ready", never "Registered": Pod Ready proves the AHP listener answers, not that
-  GitHub has registered the environment.
+- Before linking that provider, `orka login`, `orka connect` and the Connectors page say
+  that linking creates a Copilot environment on Orka, and that code running there can read
+  this GitHub credential. Once the host exists, they show the environment name and the
+  host's phase. They say "Host ready", never "Registered": Pod Ready proves the AHP
+  listener answers, not that GitHub has registered the environment.
 - The provider declares no OAuth scopes, because GitHub App user tokens carry none.
 - A dedicated GitHub App, with no tools on its provider and only the repository
   permissions the host's own calls need, is recommended but not required. A provider that
@@ -70,7 +73,8 @@ custody rule, and [ADR 0035](0035-agent-hosts.md) with a second token source. It
 - A Connection to that provider gets a host once it is linked:
   - it is Ready and its consent matches the provider's current digest;
   - its grant is committed;
-  - it is the only link its subject has to that provider.
+  - it is the only link its subject has to that provider;
+  - its owner has not declined a host (`orka login --no-host`).
 - The controller then creates one AgentHost in the Connection's namespace, named `gh-` plus
   the lowercased GitHub login. The client shows it as `orka-gh-<login>`. The login comes
   from `GET /user` with the first token.
@@ -96,6 +100,16 @@ custody rule, and [ADR 0035](0035-agent-hosts.md) with a second token source. It
   under its name moves them to it on their volumes (0035). Pointing the provider at a
   different template affects only hosts created afterwards, because `templateRef` is
   immutable.
+
+### People manage their host through Orka, not Kubernetes
+
+- The API serves the signed-in person's own host: `GET /api/v1/agent-hosts/me` returns
+  its environment name, phase and reason; `POST /api/v1/agent-hosts/me/wake` wakes it;
+  `DELETE /api/v1/agent-hosts/me` deletes it and its volume. The CLI wraps these as
+  `orka host status`, `orka host wake` and `orka host delete`. The controller acts with its
+  own identity, scoped to the host linked to the caller's subject.
+- `orka login` and `orka connect` wait for the host to be ready and print its environment
+  name. People need no Kubernetes access at all.
 
 ### Orka hands the host access tokens only, and keeps them fresh
 
@@ -131,28 +145,30 @@ custody rule, and [ADR 0035](0035-agent-hosts.md) with a second token source. It
   administrator's action.
 - Disconnecting deletes Orka's copy of the token, as in 0033. Revoking the grant through
   GitHub's app-authenticated endpoints is a follow-up.
-- Removing a person from the identity provider does not delete their Connection. To
-  offboard someone, an administrator deletes the Connection or the host.
+- With GitHub sign-in (0037), the host's token refresh also checks that the person is
+  still in an allowed org or team, and handles a lost membership as a disconnect. With
+  OIDC sign-in, removing a person from the identity provider does not delete their
+  Connection; an administrator deletes the Connection or the host.
 
 ### What a cluster needs
 
-- The existing Connectors install (OIDC sign-in, a callback URL, a durable store and its
-  key), plus `agentHosts.enabled`.
-- A GitHub App with expiring user tokens and Orka's callback URL.
-- A sample provider and template that the operator applies once. Rendering them from Helm
-  values is a follow-up.
+- The existing Connectors install (a durable store and its key), with GitHub sign-in
+  (0037) or OIDC sign-in and a callback URL, plus `agentHosts.enabled`.
+- A GitHub App with expiring user tokens, and the device flow for `orka login`.
+- The chart renders the agent-host `ConnectorProvider` and the copilotd template, its image
+  pinned by digest, from Helm values. The operator applies nothing by hand.
+- Capacity: each sample host requests 250m CPU and 1 GiB of memory, with a 20 GiB volume.
 
 ### Not in this record
 
-- Waking a suspended host from the client, and a per-person choice of whether to have a
-  host.
+- Waking a suspended host from the Copilot app; `orka host wake` does it from the CLI.
 - More than one host provider or template per namespace.
 
 ## Acceptance
 
 Before this is accepted, one live run must pass:
-1. Install with Helm on a fresh cluster, sign in to the dashboard and connect GitHub.
-2. `orka-gh-<login>` appears in the Copilot app.
+1. Install with Helm on a fresh cluster. Two people each run `orka login`.
+2. Each sees `orka-gh-<login>` in their own Copilot app.
 3. A turn that clones a private repository completes.
 4. Force a token refresh, then complete another turn.
 5. Disconnect: the host stops and its token copy is gone.
@@ -180,8 +196,9 @@ That run also settles which token copilotd uses to clone: the host's, or the cli
 
 - **Secrets only (0035).** This is proven and needs no exception, but it costs `kubectl` and
   a pasted long-lived token. It stays as the escape hatch.
-- **A "Create agent host" button or API.** It adds an action, and authorization for its
-  lifecycle, without changing what runs. Deferred.
+- **A separate "Create agent host" step.** It adds an action, and authorization for its
+  lifecycle, without changing what runs. Signing in creates the host instead, and
+  `--no-host` opts out.
 - **A person's own YAML naming their Connection.** Admission would have to map a
   Kubernetes caller to an identity subject. It adds nothing on day 0.
 - **Keeping the token out of the Pod with an injecting proxy.** copilotd needs a real token
