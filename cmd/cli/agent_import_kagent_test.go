@@ -704,6 +704,11 @@ func TestClassifyKagentAgentRequiresEveryEndpointOnOneRelay(t *testing.T) {
 	if wrapped, _, _ := wrapKagentAgents([]byte(override), governedRelay, governedEvidence); !strings.Contains(strings.Join(wrapped[0].Mode.Reasons, ";"), "overrides the workload image") {
 		t.Fatalf("a workload override was governed: %+v", wrapped[0].Mode)
 	}
+	// kagent defaults an omitted provider to OpenAI.
+	omitted := strings.Replace(governedKagentFixture, "  provider: OpenAI\n", "", 1)
+	if wrapped, _, _ := wrapKagentAgents([]byte(omitted), governedRelay, governedEvidence); omitted == governedKagentFixture || wrapped[0].Mode.Mode != kagentModeGoverned {
+		t.Fatalf("kagent's default OpenAI provider was not governed: %+v", wrapped[0].Mode)
+	}
 	explicit := strings.Replace(governedKagentFixture, "8092/v1\"}", "8092/v1\", apiFormat: chatCompletions}", 1)
 	if wrapped, _, _ := wrapKagentAgents([]byte(explicit), governedRelay, governedEvidence); wrapped[0].Mode.Mode != kagentModeGoverned {
 		t.Fatalf("kagent's default chat completions format was not governed: %+v", wrapped[0].Mode)
@@ -934,6 +939,23 @@ func TestTranslateKagentAgentsNeedsAProviderForCustomEndpoints(t *testing.T) {
 	}
 	if agent := decodeWrappedAgent(t, translated[0].Manifest); agent.Spec.ProviderRef != nil {
 		t.Fatalf("providerRef = %+v", agent.Spec.ProviderRef)
+	}
+}
+
+// kagent defaults an omitted ModelConfig provider to OpenAI, so a manifest
+// without one translates as OpenAI, with its openAI settings.
+func TestTranslateKagentAgentsDefaultsTheProviderToOpenAI(t *testing.T) {
+	omitted := strings.Replace(translatableKagentFixture, "  provider: OpenAI\n", "", 1)
+	if omitted == translatableKagentFixture {
+		t.Fatal("fixture names no OpenAI provider to omit")
+	}
+	translated, _, err := translateKagentAgents([]byte(omitted), kagentTranslateOptions{Tools: map[string]string{"k8s/list_pods": "k8s-list-pods"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if agent := decodeWrappedAgent(t, translated[0].Manifest); agent.Spec.Model == nil || agent.Spec.Model.Provider != "openai" ||
+		agent.Spec.Model.MaxTokens == nil || *agent.Spec.Model.MaxTokens != 1024 {
+		t.Fatalf("model = %+v", agent.Spec.Model)
 	}
 }
 

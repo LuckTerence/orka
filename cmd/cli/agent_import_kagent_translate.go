@@ -50,6 +50,9 @@ const (
 	kagentKindAgent         = "Agent"
 	kagentProviderAnthropic = "anthropic"
 	kagentProviderOpenAI    = "openai"
+	// kagentModelProviderOpenAI is kagent's name for OpenAI, the provider of a
+	// ModelConfig that names none.
+	kagentModelProviderOpenAI = "OpenAI"
 )
 
 // kagentTranslateOptions map what translation cannot infer.
@@ -186,10 +189,11 @@ func translateKagentAgent(agent map[string]any, related kagentObjects, options k
 func translateKagentModel(model map[string]any, providerRef string) (map[string]any, string, []string) {
 	var problems []string
 	spec := kagentMap(model, kagentFieldSpec)
-	provider := map[string]string{"OpenAI": kagentProviderOpenAI, "Anthropic": kagentProviderAnthropic}[kagentString(model, kagentFieldSpec, "provider")]
+	kagentProvider := kagentModelProvider(model)
+	provider := map[string]string{kagentModelProviderOpenAI: kagentProviderOpenAI, "Anthropic": kagentProviderAnthropic}[kagentProvider]
 	settingsField := map[string]string{kagentProviderOpenAI: "openAI", kagentProviderAnthropic: "anthropic"}[provider]
 	if provider == "" {
-		problems = append(problems, fmt.Sprintf("uses provider %q; only OpenAI and Anthropic translate", kagentString(model, kagentFieldSpec, "provider")))
+		problems = append(problems, fmt.Sprintf("uses provider %q; only OpenAI and Anthropic translate", kagentProvider))
 	}
 	for field := range spec {
 		switch field {
