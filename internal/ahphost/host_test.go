@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -122,6 +123,50 @@ func newTestEnv(t *testing.T, limits store.AHPJournalLimits) *testEnv {
 	server := httptest.NewServer(host)
 	t.Cleanup(server.Close)
 	return &testEnv{t: t, host: host, tokens: tokens, store: s, backend: backend, server: server}
+}
+
+// failingSessionStore refuses session catalog writes while fail is set.
+type failingSessionStore struct {
+	store.AHPStore
+	fail atomic.Bool
+}
+
+func (s *failingSessionStore) PutAHPSession(ctx context.Context, session store.AHPSession) error {
+	if s.fail.Load() {
+		return errors.New("the store refused the write")
+	}
+	return s.AHPStore.PutAHPSession(ctx, session)
+}
+
+// A session whose catalog record cannot be written is taken back, channels and
+// backend session both, so the URI can be created again once the store works.
+func TestASessionThatCannotBeCataloguedIsTakenBack(t *testing.T) {
+	s, err := sqlite.OpenLockedStore(filepath.Join(t.TempDir(), "orka.db"))
+	require.NoError(t, err)
+	failing := &failingSessionStore{AHPStore: s}
+	tokens := &TokenService{Store: s}
+	backend := &fakeBackend{}
+	registry, err := NewRegistry(backend)
+	require.NoError(t, err)
+	host, err := New(Config{Store: failing, Tokens: tokens, Backends: registry, Logger: logr.Discard()})
+	require.NoError(t, err)
+	server := httptest.NewServer(host)
+	t.Cleanup(server.Close)
+	env := &testEnv{t: t, host: host, tokens: tokens, store: s, backend: backend, server: server}
+	client := env.connect(env.mint("alice").Token)
+	_, err = client.Initialize(ctx5(t), "client-a", ahptypes.SupportedProtocolVersions(), nil)
+	require.NoError(t, err)
+
+	failing.fail.Store(true)
+	provider := "fake"
+	err = client.Request(ctx5(t), "createSession", ahptypes.CreateSessionParams{Channel: "ahp-session:/one", Provider: &provider}, nil)
+	require.Error(t, err)
+	backend.mu.Lock()
+	require.Equal(t, []string{"ahp-session:/one"}, backend.disposed, "the backend's session is disposed of")
+	backend.mu.Unlock()
+
+	failing.fail.Store(false)
+	createSession(t, client, "ahp-session:/one")
 }
 
 func (e *testEnv) mint(subject string) MintedToken {

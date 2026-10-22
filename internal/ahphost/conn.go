@@ -13,6 +13,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -816,6 +818,21 @@ func (c *conn) createSession(ctx context.Context, raw json.RawMessage) (err erro
 		}
 		return err
 	}
+	// Until the session's catalog record is written, a failure takes back
+	// what was created, so the URI can be created or disposed of again: the
+	// stored channels and the backend's session.
+	var stored []string
+	committed := false
+	defer func() {
+		if err == nil || committed {
+			return
+		}
+		cleanup := context.WithoutCancel(ctx)
+		if len(stored) > 0 {
+			_ = c.host.cfg.Store.DeleteAHPChannelStates(cleanup, c.principal.UserKey, stored)
+		}
+		_ = backend.DisposeSession(cleanup, c.principal, session)
+	}()
 	state := created.State
 	state.Provider = provider
 	state.Lifecycle = ahptypes.SessionLifecycleCreating
@@ -854,6 +871,7 @@ func (c *conn) createSession(ctx context.Context, raw json.RawMessage) (err erro
 	if err := c.host.storeChannels(ctx, c.principal.UserKey, channels); err != nil {
 		return err
 	}
+	stored = slices.Sorted(maps.Keys(channels))
 	now := c.host.cfg.Now().UTC()
 	summary := ahptypes.SessionSummary{
 		Resource: session, Provider: provider, Title: state.Title, Status: state.Status,
@@ -870,6 +888,7 @@ func (c *conn) createSession(ctx context.Context, raw json.RawMessage) (err erro
 	}); err != nil {
 		return err
 	}
+	committed = true
 	ready := ahptypes.StateAction{Value: &ahptypes.SessionReadyAction{Type: ahptypes.ActionTypeSessionReady}}
 	if err := c.host.apply(ctx, c.principal, session, []ahptypes.StateAction{ready}, nil); err != nil {
 		return err
