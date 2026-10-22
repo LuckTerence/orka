@@ -497,8 +497,12 @@ func (k *kagentRuntimes) deploy(ctx context.Context, dir string) (err error) {
 	// Once the Deployment names its AgentRuntime, Orka's recovery owns its
 	// epoch, which it advances only after draining the runtime's sessions:
 	// applying a newer one here would restart the pod before that.
+	// The apply then holds only while the Deployment is as read, so it never
+	// writes back an epoch recovery advanced meanwhile.
+	deploymentVersion := ""
 	if deployed && deployment.Annotations[kagentRecoveryAnnotation] != "" {
 		options.ControllerEpoch, err = deployedKagentEpoch(deployment)
+		deploymentVersion = deployment.ResourceVersion
 	} else {
 		options.ControllerEpoch, err = k.controllerEpoch(ctx)
 	}
@@ -506,7 +510,10 @@ func (k *kagentRuntimes) deploy(ctx context.Context, dir string) (err error) {
 		return err
 	}
 	options.Part = kagentPartWorkload
-	if err := k.applyPart(ctx, bundle, config, options); err != nil {
+	if err := k.applyPart(ctx, bundle, config, options, deploymentVersion); err != nil {
+		if apierrors.IsConflict(err) {
+			return fmt.Errorf("deployment %s changed since this deploy read it, as when Orka's recovery advances its epoch; deploy again: %w", bundle.Runtime, err)
+		}
 		return err
 	}
 	if err := k.waitRollout(ctx, bundle.Runtime); err != nil {
@@ -648,8 +655,9 @@ func (k *kagentRuntimes) controllerEpoch(ctx context.Context) (int64, error) {
 
 // applyPart renders one part and applies it server-side, which keeps the
 // fields others set, such as the recovery annotation and the epoch Orka's
-// recovery writes.
-func (k *kagentRuntimes) applyPart(ctx context.Context, bundle kagentBundle, config []byte, options kagentRenderOptions) error {
+// recovery writes. A deploymentVersion makes the runtime Deployment's apply
+// hold only while it has that resourceVersion.
+func (k *kagentRuntimes) applyPart(ctx context.Context, bundle kagentBundle, config []byte, options kagentRenderOptions, deploymentVersion string) error {
 	items, err := renderKagentPart(bundle, config, options)
 	if err != nil {
 		return err
@@ -658,6 +666,9 @@ func (k *kagentRuntimes) applyPart(ctx context.Context, bundle kagentBundle, con
 		obj, ok := item.(client.Object)
 		if !ok {
 			return fmt.Errorf("rendered %T is not an object", item)
+		}
+		if _, ok := obj.(*appsv1.Deployment); ok && deploymentVersion != "" {
+			obj.SetResourceVersion(deploymentVersion)
 		}
 		if err := k.c.Patch(ctx, obj, client.Apply, client.FieldOwner(kagentFieldOwner), client.ForceOwnership); err != nil { //nolint:staticcheck // typed objects apply as before
 			return fmt.Errorf("applying %s %s: %w", obj.GetObjectKind().GroupVersionKind().Kind, obj.GetName(), err)
@@ -865,8 +876,9 @@ func (k *kagentRuntimes) jsonPatch(ctx context.Context, obj client.Object, ops [
 func (k *kagentRuntimes) restoreRelay(bundle kagentBundle, rollback *kagentRelayRollback) {
 	ctx, cancel := context.WithTimeout(context.Background(), kagentRollbackTimeout)
 	defer cancel()
-	// A deploy that took the relay since relies on what this one created, so
-	// that is deleted only while the relay still selects this runtime.
+	// A deploy that took the relay since relies on its policy and on what this
+	// one created, so those are deleted or restored only while the relay
+	// still selects this runtime.
 	relay := &corev1.Service{}
 	found, err := k.getOptional(ctx, rollback.service, relay)
 	if err != nil {
@@ -901,7 +913,7 @@ func (k *kagentRuntimes) restoreRelay(bundle kagentBundle, rollback *kagentRelay
 		if err != nil {
 			k.logf("kagent-runtime: could not delete relay policy %s, which this deploy created: %v", rollback.service, err)
 		}
-	case rollback.policy != nil && rollback.applied != nil:
+	case rollback.policy != nil && rollback.applied != nil && serving:
 		// A patch that failed before it committed left the policy as it was.
 		if found, err := k.getOptional(ctx, rollback.service, policy); err == nil && found && equalJSON(policy.Spec, *rollback.policy) {
 			break
@@ -917,7 +929,11 @@ func (k *kagentRuntimes) restoreRelay(bundle kagentBundle, rollback *kagentRelay
 
 // register registers the runtime and waits until Orka admits Tasks to it.
 func (k *kagentRuntimes) register(ctx context.Context, dir string, bundle kagentBundle, config []byte, options kagentRenderOptions) error {
-	capabilities, err := k.capabilities(ctx, k.namespace, bundle.Runtime)
+	// The relay already serves this runtime, so a read that never answers
+	// must still reach the rollback.
+	capabilitiesCtx, cancel := context.WithTimeout(ctx, k.options.ReadyTimeout)
+	capabilities, err := k.capabilities(capabilitiesCtx, k.namespace, bundle.Runtime)
+	cancel()
 	if err != nil {
 		return fmt.Errorf("reading runtime %s's capabilities: %w", bundle.Runtime, err)
 	}
@@ -926,7 +942,7 @@ func (k *kagentRuntimes) register(ctx context.Context, dir string, bundle kagent
 		return err
 	}
 	options.Part, options.CapabilitiesJSON, options.DeploymentUID = kagentPartRegistration, capabilities, string(deployment.UID)
-	if err := k.applyPart(ctx, bundle, config, options); err != nil {
+	if err := k.applyPart(ctx, bundle, config, options, ""); err != nil {
 		return err
 	}
 	registration := &corev1alpha1.AgentRuntime{}
@@ -1091,6 +1107,9 @@ func kagentActivateArgs(flags []string, bundleDir, work string, stdin io.Reader)
 	}
 	readStdin := func() (string, error) {
 		path := filepath.Join(work, "input")
+		if _, err := os.Stat(path); err == nil {
+			return "", fmt.Errorf("only one import flag can read standard input")
+		}
 		raw, err := io.ReadAll(stdin)
 		if err != nil {
 			return "", err
@@ -1127,7 +1146,7 @@ func kagentActivateArgs(flags []string, bundleDir, work string, stdin io.Reader)
 			if err := sameDir(strings.TrimPrefix(flag, "--bundle-dir=")); err != nil {
 				return nil, err
 			}
-		case flag == "-f" || flag == "--file":
+		case slices.Contains(kagentInputFlags, flag):
 			if i+1 == len(flags) {
 				return nil, fmt.Errorf("%s needs a file", flag)
 			}
@@ -1140,12 +1159,12 @@ func kagentActivateArgs(flags []string, bundleDir, work string, stdin io.Reader)
 				}
 			}
 			args = append(args, flag, file)
-		case flag == "-f-" || flag == "-f=-" || flag == "--file=-":
+		case kagentStdinFlag(flag) != "":
 			file, err := readStdin()
 			if err != nil {
 				return nil, err
 			}
-			args = append(args, strings.TrimSuffix(strings.TrimSuffix(flag, "-"), "="), file)
+			args = append(args, kagentStdinFlag(flag), file)
 		default:
 			args = append(args, flag)
 		}
@@ -1166,11 +1185,27 @@ func kagentAPIFlag(flag string) string {
 	return ""
 }
 
+// kagentInputFlags are the import flags that read a file, or standard input
+// for -. Activate runs the import twice, so it reads standard input once.
+var kagentInputFlags = []string{"-f", "--file", "--revision-egress", "--revision-sources"}
+
+// kagentStdinFlag names the input flag that flag reads standard input with
+// in one argument, -f- or <flag>=-, and is empty otherwise.
+func kagentStdinFlag(flag string) string {
+	if flag == "-f-" {
+		return "-f"
+	}
+	if name, value, ok := strings.Cut(flag, "="); ok && value == "-" && slices.Contains(kagentInputFlags, name) {
+		return name
+	}
+	return ""
+}
+
 // kagentReadsStdin reports whether the import flags read their input from
 // standard input.
 func kagentReadsStdin(flags []string) bool {
 	for i, flag := range flags {
-		if flag == "-f-" || flag == "-f=-" || flag == "--file=-" || ((flag == "-f" || flag == "--file") && i+1 < len(flags) && flags[i+1] == "-") {
+		if kagentStdinFlag(flag) != "" || (slices.Contains(kagentInputFlags, flag) && i+1 < len(flags) && flags[i+1] == "-") {
 			return true
 		}
 	}
@@ -1223,10 +1258,15 @@ func (k *kagentRuntimes) retire(ctx context.Context, dir string) error {
 		searches = append(searches, search{list, []client.ListOption{client.InNamespace(k.namespace), ofAgent}})
 	}
 	// A retire interrupted before it deleted a v0 runtime's pod reader leaves
-	// only that, in the kagent Agent's namespace, labeled with this one.
-	readers := client.MatchingLabels{kagentAgentLabel: bundle.Agent, kagentRuntimeNamespaceLabel: k.namespace}
-	for _, list := range []client.ObjectList{&rbacv1.RoleList{}, &rbacv1.RoleBindingList{}} {
-		searches = append(searches, search{list, []client.ListOption{client.InNamespace(bundle.KagentNamespace), readers}})
+	// only that, in the kagent Agent's namespace, labeled with this one. Only
+	// v0 runtimes have one, so a v1 retire reads nothing there.
+	readerNamespace := ""
+	if bundle.KagentVersion == kagentVersionV0 {
+		readerNamespace = bundle.KagentNamespace
+		readers := client.MatchingLabels{kagentAgentLabel: bundle.Agent, kagentRuntimeNamespaceLabel: k.namespace}
+		for _, list := range []client.ObjectList{&rbacv1.RoleList{}, &rbacv1.RoleBindingList{}} {
+			searches = append(searches, search{list, []client.ListOption{client.InNamespace(readerNamespace), readers}})
+		}
 	}
 	for _, search := range searches {
 		list := search.list
@@ -1245,7 +1285,7 @@ func (k *kagentRuntimes) retire(ctx context.Context, dir string) error {
 	}
 	delete(olds, bundle.Runtime)
 	for _, old := range slices.Sorted(maps.Keys(olds)) {
-		if err := k.retireRuntime(ctx, old, bundle.KagentNamespace); err != nil {
+		if err := k.retireRuntime(ctx, old, readerNamespace); err != nil {
 			return err
 		}
 	}
@@ -1270,7 +1310,9 @@ func metaItems(list client.ObjectList) ([]metav1.Object, error) {
 	return out, nil
 }
 
-func (k *kagentRuntimes) retireRuntime(ctx context.Context, old, kagentNamespace string) error {
+// retireRuntime deletes the registration old and then its objects, including
+// a v0 runtime's pod reader in readerNamespace; a v1 runtime passes none.
+func (k *kagentRuntimes) retireRuntime(ctx context.Context, old, readerNamespace string) error {
 	registration := &corev1alpha1.AgentRuntime{}
 	found, err := k.getOptional(ctx, old, registration)
 	if err != nil {
@@ -1310,13 +1352,16 @@ func (k *kagentRuntimes) retireRuntime(ctx context.Context, old, kagentNamespace
 		}
 	}
 	// A v0 runtime's pod reader lives in the kagent Agent's namespace.
+	if readerNamespace == "" {
+		return nil
+	}
 	reader := client.MatchingLabels{kagentRuntimeLabel: old, kagentRuntimeNamespaceLabel: k.namespace}
 	var roles rbacv1.RoleList
 	var bindings rbacv1.RoleBindingList
-	if err := k.c.List(ctx, &roles, client.InNamespace(kagentNamespace), reader); err != nil {
+	if err := k.c.List(ctx, &roles, client.InNamespace(readerNamespace), reader); err != nil {
 		return err
 	}
-	if err := k.c.List(ctx, &bindings, client.InNamespace(kagentNamespace), reader); err != nil {
+	if err := k.c.List(ctx, &bindings, client.InNamespace(readerNamespace), reader); err != nil {
 		return err
 	}
 	for i := range roles.Items {

@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -262,6 +263,53 @@ func TestKagentDeployKeepsTheEpochRecoveryOwns(t *testing.T) {
 	}
 }
 
+// Recovery may advance the epoch between deploy's read and its apply; the
+// apply then fails instead of writing the old epoch back.
+func TestKagentDeployDoesNotOverwriteAnEpochRecoveryAdvanced(t *testing.T) {
+	dir, bundle := writeTestKagentBundle(t)
+	base := kagentTestCluster(t)
+	k, _ := newTestKagentRuntimes(t, base)
+	ctx := context.Background()
+	if err := k.deploy(ctx, dir); err != nil {
+		t.Fatal(err)
+	}
+	k.unlock()
+	recovered := false
+	c := interceptor.NewClient(base.(client.WithWatch), interceptor.Funcs{
+		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			if _, ok := obj.(*appsv1.Deployment); ok && patch.Type() == types.ApplyPatchType && !recovered {
+				recovered = true
+				current := &appsv1.Deployment{}
+				if err := c.Get(ctx, client.ObjectKeyFromObject(obj), current); err != nil {
+					return err
+				}
+				for i := range current.Spec.Template.Spec.Containers {
+					for j, env := range current.Spec.Template.Spec.Containers[i].Env {
+						if env.Name == kagentEpochEnv {
+							current.Spec.Template.Spec.Containers[i].Env[j].Value = "4"
+						}
+					}
+				}
+				if err := c.Update(ctx, current); err != nil {
+					return err
+				}
+			}
+			return c.Patch(ctx, obj, patch, opts...)
+		},
+	})
+	k.c = c
+	if err := k.deploy(ctx, dir); err == nil || !strings.Contains(err.Error(), "deploy again") {
+		t.Fatalf("deploy over a recovered epoch = %v", err)
+	}
+	deployment := &appsv1.Deployment{}
+	if err := c.Get(ctx, k.key(bundle.Runtime), deployment); err != nil {
+		t.Fatal(err)
+	}
+	if epoch, err := deployedKagentEpoch(deployment); err != nil || epoch != 4 {
+		t.Fatalf("epoch after the failed apply = %d, %v", epoch, err)
+	}
+}
+
 // Until the runtime is Ready, a failure moves the relay, and its policy,
 // back to what they served before.
 func TestKagentDeployMovesTheRelayBackWhenItFails(t *testing.T) {
@@ -375,6 +423,53 @@ func TestKagentDeployLeavesARelayAnotherDeployTookOver(t *testing.T) {
 	}
 	if err := c.Get(context.Background(), k.key("probe-gov-relay"), &networkingv1.NetworkPolicy{}); err != nil {
 		t.Fatalf("the policy the other deploy relies on was deleted: %v", err)
+	}
+}
+
+// The same holds for an existing policy this deploy changed: the deploy that
+// took the relay relies on it as it is.
+func TestKagentDeployLeavesAPolicyAnotherDeployTookOver(t *testing.T) {
+	dir, bundle := writeTestKagentBundle(t)
+	service, policy := relayObjectsFor(bundle, "probe-gov-kagent-old")
+	c := kagentTestCluster(t, service, policy)
+	k, _ := newTestKagentRuntimes(t, c)
+	k.capabilities = func(ctx context.Context, _, _ string) ([]byte, error) {
+		relay := &corev1.Service{}
+		if err := c.Get(ctx, k.key("probe-gov-relay"), relay); err != nil {
+			return nil, err
+		}
+		relay.Spec.Selector = map[string]string{kagentRuntimeLabel: "probe-gov-kagent-next"}
+		if err := c.Update(ctx, relay); err != nil {
+			return nil, err
+		}
+		return nil, errors.New("the runtime does not answer")
+	}
+	if err := k.deploy(context.Background(), dir); err == nil || !strings.Contains(err.Error(), "does not answer") {
+		t.Fatalf("deploy = %v", err)
+	}
+	current := &networkingv1.NetworkPolicy{}
+	if err := c.Get(context.Background(), k.key("probe-gov-relay"), current); err != nil || current.Spec.PodSelector.MatchLabels["old"] == "policy" {
+		t.Fatalf("the policy the other deploy relies on was restored: %v, %v", current.Spec, err)
+	}
+}
+
+// A capabilities read that never answers still ends the deploy within the
+// ready timeout and moves the relay back.
+func TestKagentDeployBoundsTheCapabilitiesRead(t *testing.T) {
+	dir, bundle := writeTestKagentBundle(t)
+	service, policy := relayObjectsFor(bundle, "probe-gov-kagent-old")
+	c := kagentTestCluster(t, service, policy)
+	k, _ := newTestKagentRuntimes(t, c)
+	k.capabilities = func(ctx context.Context, _, _ string) ([]byte, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	if err := k.deploy(context.Background(), dir); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("deploy = %v", err)
+	}
+	relay := &corev1.Service{}
+	if err := c.Get(context.Background(), k.key("probe-gov-relay"), relay); err != nil || relay.Spec.Selector[kagentRuntimeLabel] != "probe-gov-kagent-old" {
+		t.Fatalf("relay after a stalled read = %v, %v", relay.Spec.Selector, err)
 	}
 }
 
@@ -602,6 +697,48 @@ func TestKagentRetireFindsAnOrphanedPodReader(t *testing.T) {
 	}
 }
 
+// Only v0 runtimes have pod readers, so a v1 retire reads nothing in the
+// kagent Agent's namespace, where its operator may hold no RBAC.
+func TestKagentRetireOfV1ReadsNoPodReaders(t *testing.T) {
+	dir, bundle := writeTestKagentBundle(t)
+	path := filepath.Join(dir, kagentBundleRuntimeFile)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		t.Fatal(err)
+	}
+	fields["kagentVersion"] = "v1"
+	if raw, err = json.Marshal(fields); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service, _ := relayObjectsFor(bundle, bundle.Runtime)
+	objects := append([]client.Object{agentUsing(bundle, bundle.Runtime), service},
+		runtimeObjects(bundle, "probe-gov-kagent-old", kagentSource(bundle))...)
+	base := kagentTestCluster(t, objects...)
+	c := interceptor.NewClient(base.(client.WithWatch), interceptor.Funcs{
+		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			switch list.(type) {
+			case *rbacv1.RoleList, *rbacv1.RoleBindingList:
+				return apierrors.NewForbidden(rbacv1.Resource("roles"), "", errors.New("no RBAC in the kagent namespace"))
+			}
+			return c.List(ctx, list, opts...)
+		},
+	})
+	k, _ := newTestKagentRuntimes(t, c)
+	if err := k.retire(context.Background(), dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Get(context.Background(), k.key("probe-gov-kagent-old"), &appsv1.Deployment{}); !apierrors.IsNotFound(err) {
+		t.Errorf("the old v1 runtime was not retired: %v", err)
+	}
+}
+
 func TestKagentRetireRefusesBeforeActivation(t *testing.T) {
 	dir, bundle := writeTestKagentBundle(t)
 	k, _ := newTestKagentRuntimes(t, kagentTestCluster(t, agentUsing(bundle, "probe-gov-kagent-old")))
@@ -741,14 +878,20 @@ func TestKagentActivateRefusesANamespaceAmongTheImportFlags(t *testing.T) {
 // Activate reads standard input once, into a file both of its imports read,
 // in each form the import accepts.
 func TestKagentActivateCachesStandardInput(t *testing.T) {
-	for _, flags := range [][]string{{"-f", "-"}, {"-f-"}, {"-f=-"}, {"--file=-"}, {"--file", "-"}} {
+	for _, flags := range [][]string{{"-f", "-"}, {"-f-"}, {"-f=-"}, {"--file=-"}, {"--file", "-"},
+		{"--revision-egress", "-"}, {"--revision-egress=-"}, {"--revision-sources", "-"}, {"--revision-sources=-"}} {
 		args, err := kagentActivateArgs(flags, t.TempDir(), t.TempDir(), strings.NewReader("export"))
-		if err != nil || len(args) != 2 || (args[0] != "-f" && args[0] != "--file") {
+		if err != nil || len(args) != 2 || !slices.Contains(kagentInputFlags, args[0]) || !kagentReadsStdin(flags) {
 			t.Fatalf("%v: args = %v, %v", flags, args, err)
 		}
 		if data, err := os.ReadFile(args[1]); err != nil || string(data) != "export" {
 			t.Errorf("%v: cached input = %q, %v", flags, data, err)
 		}
+	}
+	// Standard input has one reader.
+	if _, err := kagentActivateArgs([]string{"-f", "-", "--revision-egress=-"}, t.TempDir(), t.TempDir(), strings.NewReader("export")); err == nil ||
+		!strings.Contains(err.Error(), "only one import flag") {
+		t.Fatalf("two standard input readers = %v", err)
 	}
 }
 
