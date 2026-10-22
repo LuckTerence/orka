@@ -74,14 +74,24 @@ func (w *ahpWorkspaces) output(ctx context.Context, pod *corev1.Pod, limit int, 
 	return out.buf.Bytes(), nil
 }
 
+// ahpInWorkspace resolves $1 with every symlink followed into $p, and stops
+// the script as not found unless $p is still under the workspace. A path that
+// is inside the workspace by its text alone can still be a link out of it,
+// such as one a cloned repository carries to the workspace's git token.
+var ahpInWorkspace = ahpInWorkspaceUnder(ahpWorkspaceRoot)
+
+func ahpInWorkspaceUnder(root string) string {
+	return `p=$(readlink -f "$1") || exit 3; case "$p" in ` + root + `|` + root + `/*) ;; *) exit 3 ;; esac; `
+}
+
 // readFile reads a regular file from the workspace.
 func (w *ahpWorkspaces) readFile(ctx context.Context, pod *corev1.Pod, file string) ([]byte, error) {
-	return w.output(ctx, pod, ahpFileReadMax, ahpShell, "-c", `[ -f "$1" ] || exit 3; exec cat -- "$1"`, "sh", file)
+	return w.output(ctx, pod, ahpFileReadMax, ahpShell, "-c", ahpInWorkspace+`[ -f "$p" ] || exit 3; exec cat -- "$p"`, "sh", file)
 }
 
 // list lists a directory in the workspace, directories marked with a slash.
 func (w *ahpWorkspaces) list(ctx context.Context, pod *corev1.Pod, dir string) ([]ahptypes.DirectoryEntry, error) {
-	raw, err := w.output(ctx, pod, 1<<20, ahpShell, "-c", `[ -d "$1" ] || exit 3; cd "$1" && ls -1Ap`, "sh", dir)
+	raw, err := w.output(ctx, pod, 1<<20, ahpShell, "-c", ahpInWorkspace+`[ -d "$p" ] || exit 3; cd "$p" && ls -1Ap`, "sh", dir)
 	if err != nil {
 		return nil, err
 	}
@@ -107,7 +117,7 @@ func (w *ahpWorkspaces) stamps(ctx context.Context, pod *corev1.Pod, root string
 		depth = "64"
 	}
 	raw, err := w.output(ctx, pod, 4<<20, ahpShell, "-c",
-		`[ -e "$1" ] || exit 3; find "$1" -maxdepth "$2" -name .git -prune -o -type f -print | head -n "$3" | while IFS= read -r f; do stat -c '%Y %s %n' -- "$f"; done`,
+		ahpInWorkspace+`[ -e "$p" ] || exit 3; find "$1" -maxdepth "$2" -name .git -prune -o -type f -print | head -n "$3" | while IFS= read -r f; do stat -c '%Y %s %n' -- "$f"; done`,
 		"sh", root, depth, strconv.Itoa(ahpWatchFilesMax))
 	if err != nil {
 		return nil, err

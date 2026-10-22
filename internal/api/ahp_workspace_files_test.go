@@ -8,6 +8,9 @@ package api
 
 import (
 	"encoding/json"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"testing"
 
 	"github.com/microsoft/agent-host-protocol/clients/go/ahptypes"
@@ -29,6 +32,37 @@ func TestAHPWorkspacePath(t *testing.T) {
 	for _, uri := range []string{"file:///etc/passwd", "file:///workspace/../etc/passwd", "file:///workspacex/a", "https://example.com/a", "file://", "file:///workspace/a\nb"} {
 		_, ok := ahpWorkspacePath(uri)
 		require.False(t, ok, uri)
+	}
+}
+
+// A workspace path can be a symlink out of the workspace, such as one a cloned
+// repository carries to the workspace's git token: reads refuse it as not
+// found, and still follow links that stay inside.
+func TestAHPWorkspaceReadsStayInTheWorkspace(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	root, outside := filepath.Join(base, "workspace"), filepath.Join(base, "tmp")
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "repo"), 0o755))
+	require.NoError(t, os.MkdirAll(outside, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(outside, "github-token"), []byte("secret"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "repo", "README"), []byte("hello"), 0o600))
+	require.NoError(t, os.Symlink(filepath.Join(outside, "github-token"), filepath.Join(root, "repo", "token")))
+	require.NoError(t, os.Symlink(outside, filepath.Join(root, "repo", "out")))
+	require.NoError(t, os.Symlink("README", filepath.Join(root, "repo", "readme-link")))
+	read := ahpInWorkspaceUnder(root) + `[ -f "$p" ] || exit 3; exec cat -- "$p"`
+	for name, want := range map[string]string{
+		"repo/README": "hello", "repo/readme-link": "hello", "repo/token": "", "repo/out/github-token": "",
+	} {
+		out, err := exec.Command("/bin/sh", "-c", read, "sh", filepath.Join(root, name)).Output()
+		if want == "" {
+			var exit *exec.ExitError
+			require.ErrorAs(t, err, &exit, name)
+			require.Equal(t, 3, exit.ExitCode(), name)
+			require.Empty(t, out, name)
+			continue
+		}
+		require.NoError(t, err, name)
+		require.Equal(t, want, string(out), name)
 	}
 }
 
